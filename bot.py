@@ -1150,7 +1150,8 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # wallet e' troppo piccolo per rispettare il cap, l'admin deve
             # saperlo SUBITO (altrimenti sembra che il bot non funzioni).
             from auto_bet import (MIN_STAKE_EUR, cap_hard_active,
-                                   _live_wallet_snapshot, daily_stop_status)
+                                   _live_wallet_snapshot, daily_stop_status,
+                                   weekly_stop_status)
             cap_line = ("✅ attivo (il floor exchange non alza lo stake)"
                         if cap_hard_active() else
                         "❌ disattivato (vale il floor exchange)")
@@ -1159,6 +1160,14 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                          f"(perdita ≥ {_ds['loss_pct']:.0f}% giornaliera)"
                          if _ds.get("stopped") else
                          f"🟢 non attivo (soglia -{_ds['loss_pct']:.0f}%)")
+            _ws = weekly_stop_status()
+            weekly_line = (
+                f"🛑 *ATTIVO* fino a {str(_ws.get('until'))[:16]} "
+                f"(drawdown -{(_ws.get('drawdown_pct') or 0):.1f}% "
+                f"rolling {_ws['window_h']:.0f}h, soglia -{_ws['loss_pct']:.0f}%)"
+                if _ws.get("stopped") else
+                f"🟢 non attivo (soglia -{_ws['loss_pct']:.0f}% "
+                f"rolling {_ws['window_h']:.0f}h)")
             # Il cap si misura sull'EQUITY (disponibile + in gioco): e' lo
             # stesso valore che usa lo staking, cosi' l'operatore non legge
             # due bankroll diversi (fix 15/09).
@@ -1194,6 +1203,7 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f"• Cap per bet: 1% value/moderate · 2% strong_value\n"
                 f"• Cap severo: {cap_line}\n"
                 f"• Stop-loss giornaliero: {stop_line}\n"
+                f"• Circuit breaker settimanale: {weekly_line}\n"
                 f"{wallet_warn}\n"
                 "Comandi:\n"
                 "`/autobet off` – stop totale\n"
@@ -1470,6 +1480,20 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🔄 Sincronizzazione risultati storici... (può richiedere qualche minuto per via del rate limit)", parse_mode="Markdown")
     text = run_sync()
     await update.message.reply_text(text, parse_mode="Markdown")
+
+async def cmd_hedge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/hedge — stato della copertura intelligente (solo admin)."""
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text(
+            "⛔ Comando riservato agli admin.")
+        return
+    try:
+        from smart_hedging import format_report
+        await update.message.reply_text(format_report())
+    except Exception as e:
+        logger.error("cmd_hedge: %s", e)
+        await update.message.reply_text(f"❌ Errore hedge: {e}")
 
 def format_bet_verdicts(settlements: list) -> str:
     """Formatta i verdetti delle puntate appena saldate (fine partita)."""
@@ -1991,6 +2015,40 @@ async def book_flow_job(context: ContextTypes.DEFAULT_TYPE = None):
         logger.warning("book_flow_job fallito: %s", e)
 
 
+async def hedge_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Smart hedging pre-match, ogni 15' (26/09/2026).
+
+    Valuta le posizioni LIVE aperte (finestra HEDGE_MIN_MINUTES..HORIZON_h
+    dal kickoff) e copre quelle la cui quota si e' ACCORCIATA di almeno
+    HEDGE_MIN_MOVE_PCT: due gambe complementari (hedge_plan) bloccano il
+    profitto qualunque sia l'esito. L'esecuzione DELEGA a `auto_bet._live_fill`
+    (stessi guardrail: floor EV, liquidita', T-60, blocchi) e le gambe sono
+    registrate sul ledger `bets` (mode='live', mercato='1X2') cosi' il
+    settlement esistente le salda da solo.
+
+    Notifica: UN messaggio per hedge PIAZZATO (e' un ordine reale, come le
+    notifiche FULLY_FILLED — niente anti-spam sugli ordini); gli scarti
+    restano su log + JSONL (telemetria, non rumore in chat). Gated da
+    SMART_HEDGING=0 per spegnerlo.
+    """
+    try:
+        from smart_hedging import run_hedge_cycle, format_alert
+        res = run_hedge_cycle()
+        logger.info("hedge: valutate %d, opportunita' %d, piazzate %d, "
+                    "scartate %d%s", res["evaluated"], res["opportunities"],
+                    len(res["placed"]), len(res["skipped"]),
+                    f", bloccato ({res['blocked']})" if res.get("blocked")
+                    else "")
+        for entry in res["placed"]:
+            text = format_alert(entry)
+            if context is not None:
+                await _send_report_to_recipients(context, text)
+            else:
+                logger.warning("hedge alert: %s", text.replace("\n", " | "))
+    except Exception as e:
+        logger.warning("hedge_job fallito: %s", e)
+
+
 async def decision_compare_job(context: ContextTypes.DEFAULT_TYPE = None):
     """Confronto shadow catena ↔ corsia, ogni 6h (16/09/2026).
 
@@ -2222,7 +2280,8 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
         # tutto); altrimenti silenzio. Anti-spam: max 1 alert/giorno per
         # causa (il giro gira ogni minuto).
         try:
-            from auto_bet import kill_switch_status, daily_stop_status
+            from auto_bet import (kill_switch_status, daily_stop_status,
+                                   weekly_stop_status)
             from tracker import is_notified, mark_notified
             from datetime import timezone as _tz, timedelta as _td
             today = (datetime.now(_tz.utc) + _td(hours=2)).strftime("%Y-%m-%d")
@@ -2246,6 +2305,21 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
                             "prima rimuovi `data/execution/daily_stop.json`.")
                     await _send_report_to_recipients(context, text)
                     mark_notified("DAILY_STOP", today)
+                return
+            _ws = weekly_stop_status()
+            if _ws.get("stopped"):
+                if not is_notified("WEEKLY_STOP", today):
+                    text = ("📉 *CIRCUIT BREAKER SETTIMANALE ATTIVO*\n\n"
+                            f"Drawdown rolling {_ws['window_h']:.0f}h: "
+                            f"-{(_ws.get('drawdown_pct') or 0):.1f}% "
+                            f"(soglia -{_ws['loss_pct']:.0f}%)\n"
+                            f"{_ws.get('reason') or ''}\n"
+                            f"Puntate bloccate fino a {_ws.get('until')}.\n"
+                            "Si riarma da solo quando il picco esce dalla "
+                            "finestra; per farlo prima rimuovi "
+                            "`data/execution/weekly_stop.json`.")
+                    await _send_report_to_recipients(context, text)
+                    mark_notified("WEEKLY_STOP", today)
                 return
             # Gate di mercato: il giro non parte senza un feed fresco,
             # conforme e VALIDATO (sorgente primaria SX Bet). Lo stop resta
@@ -2619,6 +2693,7 @@ def main() -> None:
     application.add_handler(CommandHandler("backtest_mc", cmd_backtest_mc))
     application.add_handler(CommandHandler("backup", cmd_backup))
     application.add_handler(CommandHandler("autobet", cmd_autobet))
+    application.add_handler(CommandHandler("hedge", cmd_hedge))
     application.add_handler(CommandHandler("t60reset", cmd_t60reset))
     application.add_handler(CommandHandler("settlement", cmd_settlement))
     application.add_handler(CommandHandler("revisioni", cmd_revisioni))
@@ -2704,6 +2779,12 @@ def main() -> None:
         # shadow. MM_ENABLED=0 per spegnerla senza toccare il 1X2.
         job_queue.run_repeating(multi_market_job, interval=_sx_min * 60,
                                 first=150,
+                                job_kwargs={"max_instances": 1})
+        # Copertura intelligente (26/09): ogni 15' (stesso intervallo dello
+        # scan multi-mercato) valuta le posizioni LIVE aperte e piazza le
+        # coperture a profitto bloccato. SMART_HEDGING=0 per spegnerlo.
+        job_queue.run_repeating(hedge_job, interval=_sx_min * 60,
+                                first=210,
                                 job_kwargs={"max_instances": 1})
         # Sorveglianza BTTS (25/09): il type 17 non e' pubblicato sul calcio
         # (0 mercati), il backlog BTTS e' congelato. Una lettura pubblica al

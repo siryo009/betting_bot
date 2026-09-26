@@ -5848,3 +5848,91 @@ metadati esclusi da EV/true-odd, canonical_book, `load_oracle` dal consenso) +
 `test_top_down.TestConsensoNelGateEv` (l'EV usa il consenso e differisce dalla
 Pinnacle secca; fallback pinnacle_only). Tripwire del modulo intatti (nessun
 Poisson, nessuna scrittura, nessun ordine, nessuna rete all'import).
+
+### Quattro moduli avanzati: CB settimanale, adaptive weighting per lega, smart hedging (26/09/2026)
+
+Direttiva del proprietario (4 moduli collegati a DB/Telegram). Il modulo 2
+(riconciliazione risultati/P&L) esisteva gia' completo (`settle_bets`/
+`settle_predictions`/`settle_cassa` + `bot._update_results` + watchdog 4h):
+nessun codice richiesto. Gli altri tre, tutti con env in `preserve()` IaC:
+
+**MODULO 1 — RISK MANAGEMENT: circuit breaker SETTIMANALE (`auto_bet.py`,
+`decision/`).** Drawdown ROLLING 7gg (168h) su `BANKROLL_HISTORY_FILE`
+(campioni max 1/h da `record_bankroll_sample`, chiamato nei giri dove il
+bankroll e' determinato): oltre `WEEKLY_STOP_DRAWDOWN` (default 12%) le
+puntate sono bloccate 24h (`WEEKLY_STOP_BLOCK_HOURS`, stato persistente
+`WEEKLY_STOP_FILE`, re-arm AUTOMATICO a scadenza). `check_weekly_stop` in
+`run_today_bets` SUBITO DOPO il daily stop; notifica Telegram anti-spam
+1/giorno (chiave `WEEKLY_STOP`) + riga di stato in `/autobet`. Catena
+`decision/`: nuovo `ReasonCode.WEEKLY_STOP_LOSS`, precedenza blocchi
+manual > daily > weekly > settlement_pause (guard precedence 3, probe
+kill_switch). Isolati in `conftest.py` (WEEKLY_STOP_FILE,
+BANKROLL_HISTORY_FILE in tmp). Test: `test_weekly_stop.py` (~30 verdi).
+
+**MODULO 3 — ADAPTIVE WEIGHTING per campionato (`adaptive_weighting.py`,
+riscritto; default OFF).** Moltiplicatore di stake per lega dal CLV ROLLING
+30gg (`clv_history` JOIN `predictions` JOIN `matches`; league =
+COALESCE(NULLIF(TRIM(p.league),''), NULLIF(TRIM(m.league),'')); confronti
+SQL su date AVVOLTI in `datetime(col)`; CLV grezzo sig/clos-1, quote <= 1
+scartate; campione minimo 8). Env lette A RUNTIME (`adaptive_weighting.*`):
+`ADAPTIVE_WEIGHTING_ENABLED` (default **0**), window 30, min_samples 8,
+`ADAPTIVE_WEIGHTING_FLOOR` 0.5, restrict_threshold -0.04, ttl 300s
+(+ `reset_cache`). SOLO riduzione (`_multiplier_from_clv` lineare fino al
+FLOOR, mai > 1), `league_multiplier()` fail-open 1.0. Wiring:
+`auto_bet._league_multiplier(league)` (import pigro, fail-open) nel ramo
+adaptive staking DOPO il movement bonus e PRIMA del check stake <= 0 —
+non applicato alla corsia flat. Test: `test_adaptive_weighting.py` (35 verdi,
+tripwire IaC + sorgente inclusi).
+
+**MODULO 4 — SMART HEDGING pre-match (`smart_hedging.py`, nuovo; default ON).**
+Quando la quota di una posizione LIVE aperta si ACCORCIA di >=
+`HEDGE_MIN_MOVE_PCT` (5%) entro la finestra `HEDGE_MIN_MINUTES` (10)..`HEDGE_HORIZON_H`
+(24) dal kickoff, contropunta i DUE complementari: gambe
+`H_i = f x S x Oe / O_i` (`HEDGE_FRACTION` 1.0), payout uguale su TUTTI gli
+esiti, `locked_profit = min(payouts)` (peggiore onesto: con f<1 puo' essere
+negativo -> `no_lock`), richiede `locked_roi >= HEDGE_MIN_LOCK_PCT` (1%).
+- **Detection** (`find_opportunities`): solo 1X2 canonico (altrimenti
+  `not_1x2`), solo bet `mode='live'` aperte, trigger = move_pct <= -soglia
+  (mai contro di noi). **Guardia `already_open` ANCHE in detection** (non
+  solo al fill): se sul ledger esiste una gamba aperta sul complementare la
+  posizione NON viene riproposta — senza, il job ogni 15' ri-coprirebbe la
+  stessa bet all'infinito e le gambe hedge stesse (bet live X/2) verrebbero
+  valutate come posizioni (hedge dell'hedge). `complement_of()` e' la mappa
+  1<->2 usata dalla guardia. Fail-closed su lettura fallita (il fill
+  ri-controlla).
+- **Esecuzione** (`place_hedge`): DELEGA a `auto_bet._live_fill` (tripwire:
+  niente place_limit_order/OrderResult/EIP-712 nel sorgente), gambe NON
+  atomiche (una puo' andare e l'altra no: JSONL lo dice), guardia
+  `_bet_row_exists` fail-closed (riga aperta O chiusa blocca — `save_bet`
+  e' UNIQUE(match_id, esito) con UPDATE solo su riga aperta), registrazione
+  ledger DENTRO place_hedge (`save_bet` mercato='1X2', mode='live') e
+  SOLO se >= 1 gamba e' ok. Le gambe si saldano col settlement esistente
+  (`_prediction_outcome` gestisce esiti canonici). Blocchi via
+  `_blocked_reason()`: kill_switch != live / daily / weekly stop /
+  `stato_non_leggibile` (fail-closed). DRY-RUN rispettato (skip + log).
+- **Telemetria**: JSONL `HEDGE_LOG` (eventi opportunity/placed/skip con
+  reason machine-readable), `summary`, `format_alert`, `format_report`, CLI
+  `--opportunities|--run|--report|--json`. Isolato in `conftest.py`.
+- **Wiring bot.py** (26/09): job `hedge_job` ogni 15' (primo giro 210s,
+  max_instances=1, `SMART_HEDGING=0` per spegnerlo) che chiama
+  `run_hedge_cycle()` e invia `format_alert(entry)` a iscritti+admin PER OGNI
+  hedge PIAZZATO (ordine reale = come le notifiche FULLY_FILLED, niente
+  anti-spam sugli ordini; gli scarti restano su log/JSONL) + comando admin
+  **`/hedge`** (stato via `format_report`).
+- Env (tutte preserve()): SMART_HEDGING ("1"), HEDGE_MIN_MOVE_PCT (0.05),
+  HEDGE_MIN_LOCK_PCT (0.01), HEDGE_FRACTION (1.0), HEDGE_MIN_STAKE_USDC (1.0),
+  HEDGE_MAX_STAKE_USDC (5.0), HEDGE_MIN_MINUTES (10), HEDGE_HORIZON_H (24),
+  HEDGE_LOG (default data/execution/hedge_events.jsonl).
+- Test: `test_smart_hedging.py` (57 verdi, offline: fill/price_lookup
+  iniettati, DB temporaneo).
+
+**MIGRAZIONE REPO (26/09/2026, direttiva del proprietario).** Remote origin
+spostato su `https://github.com/siryo009/bot_bet` (nuovo account GitHub
+`siryo009`; il vecchio era `Siryochy/quotaverace`) e push `git push -u origin
+main` con commit unico "Update: Full market coverage & Repo migration". ⚠️ Il
+token nel vault (`GITHUB_TOKEN`) appartiene al VECCHIO account: su 403 va
+FERMATO e ruotato (nuovo PAT fine-grained del nuovo account -> vault con MERGE
+esplicito, mai `vault --commit`, MAI token in chat — regola 7). ⚠️ Push sulla
+nuova repo NON triggera deploy: `.railway/railway.ts` punta ancora a
+`github("Siryochy/quotaverace")` — Railway continua a deployare dalla vecchia
+finche' non si ripunta (riptipunto da fare in dashboard Railway o nel file IaC).

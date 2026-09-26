@@ -92,6 +92,35 @@ export default defineRailway(() => {
     PINNACLE_CONSENSUS_METHOD: preserve(),
     PINNACLE_VALIDATOR_TOLERANCE: preserve(),
     PINNACLE_DEVIG_METHOD: preserve(),
+    // Ponderazione dinamica per campionato (26/09/2026): il moltiplicatore di
+    // Kelly viene RIDOTTO (mai alzato) sulle leghe con CLV sistematicamente
+    // negativo nella finestra. ⚠️ DEFAULT 0 (SPENTO): con l'env a 0 il modulo
+    // e' sola telemetria (`league_multiplier` -> 1.0) e il percorso di
+    // staking resta IDENTICO al congelamento del 22/09. `preserve()` la
+    // protegge da `config apply`, non la accende.
+    ADAPTIVE_WEIGHTING: preserve(),
+    ADAPTIVE_WEIGHTING_WINDOW_DAYS: preserve(),
+    ADAPTIVE_WEIGHTING_MIN_SAMPLES: preserve(),
+    ADAPTIVE_WEIGHTING_FLOOR: preserve(),
+    ADAPTIVE_WEIGHTING_CLV_FLOOR_THRESHOLD: preserve(),
+    ADAPTIVE_WEIGHTING_RESTRICT_THRESHOLD: preserve(),
+    ADAPTIVE_WEIGHTING_TTL: preserve(),
+    // Copertura intelligente pre-match (26/09/2026): se il mercato si muove
+    // DRASTICAMENTE verso una posizione aperta, il bot piazza contropuntate
+    // parziali (ordini reali) per bloccare il profitto. Scelta esplicita del
+    // proprietario: LIVE con soglia -> default di codice ON. Le soglie
+    // (`HEDGE_MIN_MOVE_PCT`, `HEDGE_MIN_LOCK_PCT`, `HEDGE_FRACTION`,
+    // `HEDGE_MIN/MAX_STAKE_USDC`, finestra) e il log sono tarabili senza
+    // redeploy; `SMART_HEDGING=0` spegne gli ordini (telemetria resta).
+    SMART_HEDGING: preserve(),
+    HEDGE_MIN_MOVE_PCT: preserve(),
+    HEDGE_MIN_LOCK_PCT: preserve(),
+    HEDGE_FRACTION: preserve(),
+    HEDGE_MIN_STAKE_USDC: preserve(),
+    HEDGE_MAX_STAKE_USDC: preserve(),
+    HEDGE_MIN_MINUTES: preserve(),
+    HEDGE_HORIZON_H: preserve(),
+    HEDGE_LOG: preserve(),
     // Corsia top-down (25/09, direttiva "bypass del filtro quote"): la corsia
     // LIVE pesca da ogni riga 1X2 (qualsiasi quota/status) e l'unico giudice
     // del prezzo e' l'oracolo Pinnacle (fail-closed senza oracolo).

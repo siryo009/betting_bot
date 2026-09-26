@@ -35,8 +35,8 @@ def live(**kwargs):
 class TestCatena:
     def test_ordine_dichiarato(self):
         assert [rule.name for rule in SAFETY_CHAIN] == [
-            "manual", "daily_stop", "settlement_pause"]
-        assert [rule.precedence for rule in SAFETY_CHAIN] == [1, 2, 3]
+            "manual", "daily_stop", "weekly_stop", "settlement_pause"]
+        assert [rule.precedence for rule in SAFETY_CHAIN] == [1, 2, 3, 4]
 
     def test_motivi_machine_readable(self):
         assert RULES_BY_NAME["manual"].reason == ReasonCode.KILL_SWITCH_OFF
@@ -138,7 +138,8 @@ class TestFailFast:
 class TestSonde:
     def test_istantanea_completa(self):
         data = snapshot(live(settlement_paused=True))
-        assert data["chain"] == ["manual", "daily_stop", "settlement_pause"]
+        assert data["chain"] == ["manual", "daily_stop", "weekly_stop",
+                                 "settlement_pause"]
         assert data["betting_allowed"] is True
         assert data["settlement_allowed"] is False
         assert data["stages"][STAGE_SETTLEMENT][0]["name"] == "settlement_pause"

@@ -79,8 +79,13 @@ SAFETY_CHAIN: tuple[SafetyRule, ...] = (
         hint="scade da solo (DAILY_STOP_HOURS) o si azzera con clear_daily_stop()",
     ),
     SafetyRule(
+        name="weekly_stop", reason=ReasonCode.WEEKLY_STOP_LOSS, stages=(STAGE_BETTING,),
+        label="circuit breaker settimanale", precedence=3,
+        hint="si riarma da solo quando il picco esce dalla finestra (o clear_weekly_stop())",
+    ),
+    SafetyRule(
         name="settlement_pause", reason=ReasonCode.SETTLEMENT_PAUSED,
-        stages=(STAGE_SETTLEMENT,), label="pausa settlement", precedence=3,
+        stages=(STAGE_SETTLEMENT,), label="pausa settlement", precedence=4,
         hint="riattiva con `/settlement on`",
     ),
 )
@@ -122,6 +127,8 @@ def _is_active(name: str, kills: KillSwitchStatus) -> bool:
         return kills.mode == "off"
     if name == "daily_stop":
         return bool(kills.daily_stop_active)
+    if name == "weekly_stop":
+        return bool(kills.weekly_stop_active)
     if name == "settlement_pause":
         return bool(kills.settlement_paused)
     return False
@@ -135,6 +142,9 @@ def _detail(rule: SafetyRule, kills: KillSwitchStatus) -> str:
     if rule.name == "daily_stop":
         return ("stop-loss giornaliero attivo"
                 + (f": {kills.daily_stop_detail}" if kills.daily_stop_detail else ""))
+    if rule.name == "weekly_stop":
+        return ("circuit breaker settimanale attivo"
+                + (f": {kills.weekly_stop_detail}" if kills.weekly_stop_detail else ""))
     if rule.name == "settlement_pause":
         return "settlement in pausa: referto e feedback engine fermi"
     return rule.label

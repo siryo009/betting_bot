@@ -49,6 +49,15 @@ def _isolated_decision_io(tmp_path, monkeypatch):
                         tmp_path / "t60_kill.json")
     monkeypatch.setattr("auto_bet.DAILY_STOP_FILE",
                         tmp_path / "daily_stop.json")
+    # Circuit breaker settimanale (26/09): stato e storico del bankroll sono
+    # persistenti sul volume e li scrive ogni giro `check_weekly_stop`.
+    # Senza isolamento un test che simula un drawdown armerebbe il blocco sul
+    # percorso REALE e tutti i test successivi (stesso processo) troverebbero
+    # le puntate ferme.
+    monkeypatch.setattr("auto_bet.WEEKLY_STOP_FILE",
+                        tmp_path / "weekly_stop.json")
+    monkeypatch.setattr("auto_bet.BANKROLL_HISTORY_FILE",
+                        tmp_path / "bankroll_history.json")
     # Il gate della FINESTRA T-60 e' OFF nei test: la maggior parte semina
     # partite a +3h e verifica la semantica di staking/cap/esposizione, non
     # il timing (in produzione vale il default ON). I test della strategia
@@ -64,6 +73,10 @@ def _isolated_decision_io(tmp_path, monkeypatch):
                         tmp_path / "book_flow_state.json")
     monkeypatch.setattr("book_flow.LOG_PATH",
                         tmp_path / "book_flow_events.jsonl")
+    # Copertura intelligente (26/09): anche il suo JSONL vive sul volume. I
+    # test iniettano `price_lookup`/`fill`, quindi non toccano l'exchange, ma
+    # senza isolamento lascerebbero `data/execution/hedge_events.jsonl` reale.
+    monkeypatch.setenv("HEDGE_LOG", str(tmp_path / "hedge_events.jsonl"))
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di
     # MODULO e sopravvive fra i test dello stesso processo, mentre il ledger
     # no (ogni test ha il suo DB temporaneo). Senza reset un caso che semina

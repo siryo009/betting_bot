@@ -89,6 +89,22 @@ DAILY_STOP_LOSS_PCT = float(os.getenv("DAILY_STOP_LOSS_PCT", "0.05"))
 DAILY_STOP_HOURS = float(os.getenv("DAILY_STOP_HOURS", "24"))
 DAILY_STOP_FILE = DATA_DIR / "execution" / "daily_stop.json"
 
+# --- Risk Management & Circuit Breaker SETTIMANALE (26/09/2026) ---
+# Direttiva: drawdown ROLLING su 7 giorni (168h). Se l'equity scende di
+# WEEKLY_STOP_LOSS_PCT (default 12%) rispetto al PICCO delle ultime
+# WEEKLY_STOP_WINDOW_H ore, le puntate si bloccano per WEEKLY_STOP_HOURS
+# (default 24h) e si ri-armano da sole quando il drawdown rientra (il picco
+# vecchio esce dalla finestra). Lo storico e' compattato su volume (un
+# campione/ora, `WEEKLY_SAMPLE_MIN_SECONDS`) e sopravvive ai redeploy; come lo
+# stop giornaliero si misura sull'EQUITY (disponibile + in gioco) in LIVE e
+# sulla cassa in SIM, senza mai confrontare basi diverse.
+WEEKLY_STOP_LOSS_PCT = float(os.getenv("WEEKLY_STOP_LOSS_PCT", "0.12"))
+WEEKLY_STOP_HOURS = float(os.getenv("WEEKLY_STOP_HOURS", "24"))
+WEEKLY_STOP_WINDOW_H = float(os.getenv("WEEKLY_STOP_WINDOW_H", "168"))
+WEEKLY_STOP_FILE = DATA_DIR / "execution" / "weekly_stop.json"
+BANKROLL_HISTORY_FILE = DATA_DIR / "execution" / "bankroll_history.json"
+WEEKLY_SAMPLE_MIN_SECONDS = float(os.getenv("WEEKLY_SAMPLE_MIN_SECONDS", "3600"))
+
 # --- Correlation risk cap ---
 # Kelly assume indipendenza tra le puntate: due o piu' esiti correlati nello
 # stesso blocco temporale (stessa partita, stessa lega con kickoff ravvicinati)
@@ -1524,6 +1540,192 @@ def check_daily_stop(bankroll: float | None,
         return {"stopped": False, "loss_pct": None, "just_triggered": False}
 
 
+# ---------------------------------------------------------------------------
+# CIRCUIT BREAKER SETTIMANALE (26/09/2026) — drawdown ROLLING 7 giorni
+# ---------------------------------------------------------------------------
+
+def _load_json_dict(path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_json_dict(path, data: dict) -> None:
+    """Scrittura ATOMICA (tmp + os.replace) di un file JSON sul volume."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _load_history() -> dict:
+    return _load_json_dict(BANKROLL_HISTORY_FILE)
+
+
+def _prune_history(samples, now, window_h) -> list:
+    """Tiene solo i campioni dentro la finestra (ts ISO -> datetime UTC)."""
+    cutoff = now - timedelta(hours=float(window_h))
+    out: list = []
+    for item in samples or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        ts = _parse_iso_utc(item[0])
+        try:
+            val = float(item[1])
+        except (TypeError, ValueError):
+            continue
+        if ts is None or ts < cutoff or val <= 0:
+            continue
+        out.append([ts.isoformat(), val])
+    return out
+
+
+def record_bankroll_sample(bankroll, basis_key=None, now=None) -> dict:
+    """Aggiunge un campione di equity allo storico rolling (max 1/ora).
+
+    La scrittura e' FAIL-SAFE: un errore non ferma il giro (lo storico e' una
+    telemetria di sicurezza, non deve bloccare le puntate). Una base MENO
+    autorevole (cassa dopo un errore di lettura del wallet) NON viene
+    registrata: mischiare equity e cassa avrebbe prodotto un falso drawdown
+    (stessa classe di bug del 21/09/2026 sullo stop giornaliero).
+    """
+    out = {"recorded": False, "samples": 0}
+    try:
+        now = now or datetime.now(timezone.utc)
+        if not bankroll or float(bankroll) <= 0 or WEEKLY_STOP_WINDOW_H <= 0:
+            return out
+        data = _load_history()
+        key = data.get("basis_key")
+        if basis_key and key and key != basis_key:
+            if _basis_priority(basis_key) < _basis_priority(key):
+                return {"recorded": False, "samples": 0,
+                        "basis_mismatch": True}
+            data = {"basis_key": basis_key, "samples": []}
+        elif basis_key and not key:
+            data["basis_key"] = basis_key
+        samples = _prune_history(data.get("samples"), now, WEEKLY_STOP_WINDOW_H)
+        last_ts = _parse_iso_utc(samples[-1][0]) if samples else None
+        if last_ts is None or \
+                (now - last_ts).total_seconds() >= WEEKLY_SAMPLE_MIN_SECONDS:
+            samples.append([now.isoformat(), float(bankroll)])
+        data["samples"] = samples
+        _save_json_dict(BANKROLL_HISTORY_FILE, data)
+        out = {"recorded": True, "samples": len(samples)}
+    except Exception as e:
+        logger.debug("auto_bet: record_bankroll_sample fallito (%s)", e)
+    return out
+
+
+def weekly_drawdown(bankroll=None, now=None) -> dict:
+    """Drawdown ROLLING dal picco delle ultime WEEKLY_STOP_WINDOW_H ore.
+
+    `drawdown_pct` e' una percentuale (0-100). Il valore corrente partecipa al
+    picco, cosi' non e' mai inferiore all'ultima lettura.
+    """
+    now = now or datetime.now(timezone.utc)
+    data = _load_history()
+    samples = _prune_history(data.get("samples"), now, WEEKLY_STOP_WINDOW_H)
+    values = [v for _, v in samples]
+    if bankroll and float(bankroll) > 0:
+        values.append(float(bankroll))
+    peak = max(values) if values else None
+    current = float(bankroll) if bankroll else (values[-1] if values else None)
+    dd = 0.0
+    if peak and peak > 0 and current is not None:
+        dd = max(0.0, (peak - current) / peak)
+    return {"drawdown_pct": round(dd * 100.0, 2), "peak": peak,
+            "current": current, "n_samples": len(values),
+            "window_h": WEEKLY_STOP_WINDOW_H,
+            "basis_key": data.get("basis_key")}
+
+
+def weekly_stop_status() -> dict:
+    """Stato del circuit breaker settimanale (per /autobet e i report)."""
+    now = datetime.now(timezone.utc)
+    data = _load_json_dict(WEEKLY_STOP_FILE)
+    until = _parse_iso_utc(data.get("stopped_until"))
+    stopped = bool(until and now < until)
+    return {
+        "stopped": stopped,
+        "until": until.isoformat() if until else None,
+        "stopped_at": data.get("stopped_at"),
+        "reason": data.get("reason"),
+        "peak": data.get("peak"),
+        "drawdown_pct": data.get("drawdown_pct"),
+        "basis_key": data.get("basis_key"),
+        "loss_pct": WEEKLY_STOP_LOSS_PCT * 100,
+        "hours": WEEKLY_STOP_HOURS,
+        "window_h": WEEKLY_STOP_WINDOW_H,
+        "file": str(WEEKLY_STOP_FILE),
+    }
+
+
+def clear_weekly_stop() -> None:
+    """Azzera il blocco settimanale (riattiva le puntate)."""
+    try:
+        WEEKLY_STOP_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def check_weekly_stop(bankroll, basis: str = "bankroll",
+                      basis_key: "str | None" = None,
+                      now=None) -> dict:
+    """Registra il campione e blocca se il drawdown rolling >= soglia.
+
+    Ritorna {stopped, drawdown_pct, peak, just_triggered, until}
+    (+ `basis_mismatch` quando applica). Fail-open su errore (come il daily):
+    un file corrotto non deve fermare il portafoglio, ma un blocco attivo
+    resta rispettato.
+    """
+    now = now or datetime.now(timezone.utc)
+    try:
+        data = _load_json_dict(WEEKLY_STOP_FILE)
+        until = _parse_iso_utc(data.get("stopped_until"))
+        if until is not None and now < until:
+            return {"stopped": True, "until": until.isoformat(),
+                    "drawdown_pct": data.get("drawdown_pct"),
+                    "peak": data.get("peak"), "just_triggered": False,
+                    "basis_key": data.get("basis_key")}
+        if WEEKLY_STOP_LOSS_PCT <= 0 or not bankroll or float(bankroll) <= 0:
+            return {"stopped": False, "just_triggered": False,
+                    "drawdown_pct": None}
+        rec = record_bankroll_sample(bankroll, basis_key=basis_key, now=now)
+        if rec.get("basis_mismatch"):
+            logger.warning("auto_bet: stop settimanale NON valutato — lettura "
+                           "su base '%s' meno autorevole dello storico", basis_key)
+            return {"stopped": False, "just_triggered": False,
+                    "drawdown_pct": None, "basis_mismatch": True}
+        dd = weekly_drawdown(bankroll, now=now)
+        if dd["drawdown_pct"] / 100.0 >= WEEKLY_STOP_LOSS_PCT:
+            until = now + timedelta(hours=WEEKLY_STOP_HOURS)
+            _save_json_dict(WEEKLY_STOP_FILE, {
+                "stopped_until": until.isoformat(),
+                "stopped_at": now.isoformat(),
+                "peak": dd["peak"], "drawdown_pct": dd["drawdown_pct"],
+                "basis_key": basis_key or dd.get("basis_key"),
+                "reason": f"{basis} -{dd['drawdown_pct']:.1f}% dal picco "
+                          f"rolling {WEEKLY_STOP_WINDOW_H:.0f}h "
+                          f"(picco {dd['peak']:.2f}, ora {dd['current']:.2f})",
+            })
+            logger.error("auto_bet: STOP-LOSS SETTIMANALE — drawdown %.1f%% "
+                         "(>= %.0f%%): puntate bloccate fino a %s",
+                         dd["drawdown_pct"], WEEKLY_STOP_LOSS_PCT * 100,
+                         until.isoformat())
+            return {"stopped": True, "until": until.isoformat(),
+                    "drawdown_pct": dd["drawdown_pct"], "peak": dd["peak"],
+                    "just_triggered": True,
+                    "basis_key": basis_key or dd.get("basis_key")}
+        return {"stopped": False, "drawdown_pct": dd["drawdown_pct"],
+                "peak": dd["peak"], "just_triggered": False,
+                "basis_key": basis_key or dd.get("basis_key")}
+    except Exception as e:
+        logger.warning("auto_bet: check_weekly_stop fallito (%s), fail-open", e)
+        return {"stopped": False, "just_triggered": False, "drawdown_pct": None}
+
+
 def _provider_ready() -> bool:
     """True se execution_engine puo' piazzare ordini REALI (provider
     selezionato da EXECUTION_PROVIDER + credenziali, nessun DryRun)."""
@@ -1836,6 +2038,24 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
             "price": matched_price, "stake": matched_stake}
 
 
+def _league_multiplier(league: str | None) -> float:
+    """Moltiplicatore di Kelly per la lega (ponderazione CLV, default OFF).
+
+    Delega a `adaptive_weighting.league_multiplier` (import pigro): l'env
+    `ADAPTIVE_WEIGHTING` decide se ha effetto, e il modulo ritorna 1.0 quando
+    e' spenta o quando il campione della lega e' insufficiente. **Va solo
+    verso il basso**: non esiste un percorso che alzi lo stake. Fail-open:
+    qualunque errore vale 1.0 — una telemetria rotta non deve cambiare lo
+    stake (e un drawdown non deve mai essere inventato).
+    """
+    try:
+        import adaptive_weighting
+        return float(adaptive_weighting.league_multiplier(league))
+    except Exception as e:
+        logger.debug("auto_bet: ponderazione per lega non disponibile (%s)", e)
+        return 1.0
+
+
 def run_today_bets(stake_eur: float | None = None,
                    allow_sim: bool = True) -> list[dict]:
     """Piazza le puntate del giorno (SIM di default, LIVE con
@@ -1934,6 +2154,17 @@ def run_today_bets(stake_eur: float | None = None,
         logger.error("auto_bet: STOP-LOSS GIORNALIERO attivo fino a %s "
                      "(%s) — nessuna puntata", stop.get("until"),
                      stop.get("reason") or "perdita giornaliera")
+        return []
+
+    # --- CIRCUIT BREAKER SETTIMANALE (26/09): drawdown ROLLING 7g >= 12%.
+    # Stessa base del daily (EQUITY in LIVE): un blocco qui ferma il giro.
+    weekly = check_weekly_stop(_bankroll, basis=_stop_basis,
+                               basis_key=_stop_basis_key)
+    if weekly.get("stopped"):
+        logger.error("auto_bet: STOP-LOSS SETTIMANALE attivo fino a %s "
+                     "(drawdown %.1f%% dal picco %s) — nessuna puntata",
+                     weekly.get("until"), weekly.get("drawdown_pct") or 0.0,
+                     weekly.get("peak"))
         return []
 
     # --- CB2: KILL SWITCH PATRIMONIALE T-60 (17/09) — autorita' SUPERIORE a
@@ -2133,6 +2364,17 @@ def run_today_bets(stake_eur: float | None = None,
                 pick_stake *= MOVEMENT_BONUS_MULTIPLIER
                 logger.info("auto_bet: %s odds MOVEMENT %.1f%% (sharp money) "
                             "+20%% stake", pick["match_id"], odds_move * 100)
+            # Ponderazione dinamica per campionato (26/09/2026, default OFF):
+            # se la lega ha CLV sistematicamente negativo nella finestra
+            # (30gg) il moltiplicatore di Kelly viene RIDOTTO. Con l'env
+            # spenta ritorna 1.0 e il percorso resta identico al 22/09.
+            _lm = _league_multiplier(pick.get("league"))
+            if _lm < 1.0:
+                _before = pick_stake
+                pick_stake *= _lm
+                logger.info("auto_bet: %s lega '%s' CLV negativo -> stake "
+                            "x%.2f (€%.2f -> €%.2f)", pick["match_id"],
+                            pick.get("league") or "?", _lm, _before, pick_stake)
             if pick_stake <= 0:
                 logger.info("auto_bet: stake adaptive = 0 per %s (EV negativo), salto",
                             pick["match_id"])

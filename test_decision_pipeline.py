@@ -105,7 +105,8 @@ class TestContratti:
             make_signal(confidence=1.4)
 
     def test_precedenza_dichiarata(self):
-        assert decision_precedence() == ["manual", "daily_stop", "settlement_pause"]
+        assert decision_precedence() == ["manual", "daily_stop",
+                                         "weekly_stop", "settlement_pause"]
 
 
 def decision_precedence():

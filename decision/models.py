@@ -48,6 +48,7 @@ class ReasonCode(str, Enum):
     # --- kill switch (in ordine di precedenza) ---
     KILL_SWITCH_OFF = "kill_switch_off"          # /autobet off: stop totale
     DAILY_STOP_LOSS = "daily_stop_loss"          # -5% in 24h: puntate bloccate
+    WEEKLY_STOP_LOSS = "weekly_stop_loss"        # -12% rolling 7g: puntate bloccate
     SETTLEMENT_PAUSED = "settlement_paused"      # non blocca la bet, blocca il referto
     # --- gate di mercato (feed): fail-closed PRIMA del Risk Engine ---
     FEED_MISSING = "feed_missing"                  # nessun refresh in questo giro
@@ -189,11 +190,13 @@ def make_signal_id(match_id: str, market: str, outcome: str) -> str:
 #   kill switch manuale > stop-loss giornaliero > pausa settlement.
 # Il primo blocco in quest'ordine e' il motivo riportato (e cio' che va
 # rimosso per ripartire); gli altri restano visibili come avvisi.
-KILL_SWITCH_PRECEDENCE = ("manual", "daily_stop", "settlement_pause")
+KILL_SWITCH_PRECEDENCE = ("manual", "daily_stop", "weekly_stop",
+                          "settlement_pause")
 
 _BLOCK_REASONS = {
     "manual": ReasonCode.KILL_SWITCH_OFF,
     "daily_stop": ReasonCode.DAILY_STOP_LOSS,
+    "weekly_stop": ReasonCode.WEEKLY_STOP_LOSS,
 }
 
 
@@ -206,6 +209,8 @@ class KillSwitchStatus(BaseModel):
     provider_ready: bool = False
     daily_stop_active: bool = False
     daily_stop_detail: str = ""
+    weekly_stop_active: bool = False
+    weekly_stop_detail: str = ""
     settlement_paused: bool = False
 
     def betting_blocks(self) -> list[str]:
@@ -215,6 +220,8 @@ class KillSwitchStatus(BaseModel):
             blocks.append("manual")
         if self.daily_stop_active:
             blocks.append("daily_stop")
+        if self.weekly_stop_active:
+            blocks.append("weekly_stop")
         return [name for name in KILL_SWITCH_PRECEDENCE if name in blocks]
 
     def advisories(self) -> list[str]:

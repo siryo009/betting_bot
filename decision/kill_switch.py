@@ -4,7 +4,8 @@ Precedenza (deciso dal proprietario il 14/09/2026):
 
     1. **kill switch manuale** (`/autobet off`, file `auto_bet_mode.json`)
     2. **stop-loss giornaliero** (`daily_stop.json`, -5% in 24h)
-    3. **pausa settlement** (opzionale, non blocca la bet: blocca il REFERTO)
+    3. **circuit breaker settimanale** (`weekly_stop.json`, -12% rolling 7g)
+    4. **pausa settlement** (opzionale, non blocca la bet: blocca il REFERTO)
 
 La precedenza serve a una cosa concreta: dire **cosa rimuovere per ripartire**.
 Se sono attivi sia il kill switch sia lo stop-loss, il motivo riportato e' il
@@ -41,6 +42,10 @@ def _default_probes() -> dict[str, Probe]:
         import auto_bet
         return auto_bet.daily_stop_status()
 
+    def weekly_stop() -> dict:
+        import auto_bet
+        return auto_bet.weekly_stop_status()
+
     def settlement_paused() -> bool:
         import tracker
         return bool(tracker.settlement_paused())
@@ -48,6 +53,7 @@ def _default_probes() -> dict[str, Probe]:
     return {
         "kill_switch": kill_switch,
         "daily_stop": daily_stop,
+        "weekly_stop": weekly_stop,
         "settlement_paused": settlement_paused,
     }
 
@@ -84,6 +90,20 @@ def status(probes: Optional[dict[str, Probe]] = None) -> KillSwitchStatus:
     except Exception:
         # fail-open: un file illeggibile non blocca il portafoglio per 24h
         out.daily_stop_active = False
+
+    try:
+        weekly = active["weekly_stop"]() or {}
+        # `auto_bet.weekly_stop_status()` espone `stopped`: si accettano
+        # entrambe le chiavi (i probe dei test possono usare `active`).
+        out.weekly_stop_active = bool(weekly.get("stopped", weekly.get("active")))
+        if out.weekly_stop_active:
+            out.weekly_stop_detail = str(
+                weekly.get("reason")
+                or f"drawdown rolling {weekly.get('drawdown_pct')}%")
+    except Exception:
+        # fail-open come il daily: nessuna certezza sul file non deve
+        # bloccare il portafoglio
+        out.weekly_stop_active = False
 
     try:
         out.settlement_paused = bool(active["settlement_paused"]())
