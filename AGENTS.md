@@ -5926,13 +5926,20 @@ negativo -> `no_lock`), richiede `locked_roi >= HEDGE_MIN_LOCK_PCT` (1%).
 - Test: `test_smart_hedging.py` (57 verdi, offline: fill/price_lookup
   iniettati, DB temporaneo).
 
-**MIGRAZIONE REPO (26/09/2026, direttiva del proprietario).** Remote origin
-spostato su `https://github.com/siryo009/bot_bet` (nuovo account GitHub
+**MIGRAZIONE REPO COMPLETATA (26/09/2026, direttiva del proprietario).** Remote origin
+spostato su `https://github.com/siryo009/betting_bot` (nuovo account GitHub
 `siryo009`; il vecchio era `Siryochy/quotaverace`) e push `git push -u origin
-main` con commit unico "Update: Full market coverage & Repo migration". ⚠️ Il
-token nel vault (`GITHUB_TOKEN`) appartiene al VECCHIO account: su 403 va
-FERMATO e ruotato (nuovo PAT fine-grained del nuovo account -> vault con MERGE
-esplicito, mai `vault --commit`, MAI token in chat — regola 7). ⚠️ Push sulla
-nuova repo NON triggera deploy: `.railway/railway.ts` punta ancora a
-`github("Siryochy/quotaverace")` — Railway continua a deployare dalla vecchia
-finche' non si ripunta (riptipunto da fare in dashboard Railway o nel file IaC).
+main` RIUSCITO: commit `efe5d79` ("Update: Full market coverage & Repo
+migration", 15 file, i 4 moduli avanzati) e intera storia su origin/main. Percorso
+dell'autenticazione: la repo `bot_bet` (URL iniziale indicata dal proprietario) non
+esisteva; la repo reale e' `betting_bot` (PUBBLICA); il primo push e' fallito due
+volte (404 con il token del vecchio account sulla repo inesistente; 403 "Permission
+denied to Siryochy" sulla repo nuova) finche' il proprietario ha creato un
+fine-grained PAT del nuovo account. Il token e' entrato nel vault con MERGE
+esplicito (load_vault -> sostituzione GITHUB_TOKEN -> riscrittura atomica chmod 600,
+5/5 segreti preservati, MAI `vault --commit`) e il plaintext e' stato distrutto con
+`shred -u`. L'askpass passa il token nuovo: nessun credential helper di sistema
+(check pulito), `gh` NON installata. ⚠️ Il push sulla nuova repo NON triggera
+deploy: `.railway/railway.ts` punta ancora a `github("Siryochy/quotaverace")` —
+Railway continua a deployare dalla vecchia finche' non si ripunta (dashboard
+Railway → Settings → Repository → `siryo009/betting_bot`).
