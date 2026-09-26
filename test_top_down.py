@@ -90,7 +90,11 @@ class TestLoadOracle:
         _write_cache(cache_dir, "soccer_epl", [_match()])
         probs = po.load_oracle("Arsenal", "Everton", cache_dir=cache_dir)
         assert probs is not None
-        assert set(probs) == {"1", "X", "2", "overround"}
+        # Esiti + metadati del consenso (26/09): con la sola Pinnacle in cache
+        # il consenso ripiega su quella fonte.
+        assert {"1", "X", "2", "overround"} <= set(probs)
+        assert probs["sources"] == ["pinnacle"]
+        assert probs["fallback"] == "pinnacle_only"
         # Fair: somma 1
         assert abs(probs["1"] + probs["X"] + probs["2"] - 1.0) < 1e-9
         # Favorite-longshot: power alza il favorito sopra il proporzionale
@@ -567,6 +571,61 @@ class TestProbationExtra:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Consenso multi-oracolo nel gate EV (26/09/2026)
+# ---------------------------------------------------------------------------
+
+class TestConsensoNelGateEv:
+    """Il gate EV legge la p_true di CONSENSO, non il prezzo secco di una
+    sola fonte. La struttura della cache e' quella di produzione."""
+
+    def _match_multi(self, betfair=True):
+        def bk(key, title, p):
+            return {"key": key, "title": title,
+                    "markets": [{"key": "h2h", "outcomes": [
+                        {"name": "Arsenal", "price": p[0]},
+                        {"name": "Draw", "price": p[1]},
+                        {"name": "Everton", "price": p[2]}]}]}
+        books = [bk("pinnacle", "Pinnacle", (1.85, 3.60, 4.50))]
+        if betfair:
+            books.append(bk("betfair_ex_eu", "Betfair Exchange",
+                            (1.80, 3.70, 4.60)))
+        return {"id": "evt1", "sport_key": "soccer_epl",
+                "home_team": "Arsenal", "away_team": "Everton",
+                "commence_time": (datetime.now(timezone.utc)
+                                  + timedelta(hours=5))
+                                 .isoformat().replace("+00:00", "Z"),
+                "bookmakers": books}
+
+    def test_ev_sul_consenso_non_sulla_sola_pinnacle(self, monkeypatch,
+                                                     cache_dir):
+        _isolate_oracle(monkeypatch, cache_dir)
+        _write_cache(cache_dir, "soccer_epl", [self._match_multi()])
+        pick = {"match_id": "m1", "home": "Arsenal", "away": "Everton",
+                "esito_key": "1", "quota": 1.90}
+        v = auto_bet._top_down_eval(pick)
+        assert v["ok"] is True
+        c = po.load_oracle("Arsenal", "Everton", cache_dir=cache_dir)
+        assert v["p_true"] == pytest.approx(c["1"], abs=1e-6)
+        assert v["oracle_sources"] == ["pinnacle", "betfair_ex_eu"]
+        # e DIFFERISCE dalla Pinnacle secca (altrimenti non serve il consenso)
+        pin = po.true_probabilities({"1": 1.85, "X": 3.60, "2": 4.50})
+        assert v["p_true"] != pytest.approx(pin["1"], abs=1e-4)
+
+    def test_fallback_pinnacle_only_se_senza_betfair(self, monkeypatch,
+                                                     cache_dir):
+        _isolate_oracle(monkeypatch, cache_dir)
+        _write_cache(cache_dir, "soccer_epl",
+                     [self._match_multi(betfair=False)])
+        v = auto_bet._top_down_eval({"match_id": "m1", "home": "Arsenal",
+                                     "away": "Everton", "esito_key": "1",
+                                     "quota": 1.90})
+        assert v["ok"] is True
+        assert v["oracle_fallback"] == "pinnacle_only"
+        pin = po.true_probabilities({"1": 1.85, "X": 3.60, "2": 4.50})
+        assert v["p_true"] == pytest.approx(pin["1"], abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # 3. Tripwire: la pipeline resta ecolgicamente coerente
 # ---------------------------------------------------------------------------
 
@@ -584,7 +643,9 @@ class TestTripwire:
 
     def test_flag_documentati_nella_iac(self):
         src = Path(".railway/railway.ts").read_text(encoding="utf-8")
-        for env in ("TOP_DOWN_EV", "TOP_DOWN_MARGIN", "AUTO_BET_DRY_RUN"):
+        for env in ("TOP_DOWN_EV", "TOP_DOWN_MARGIN", "AUTO_BET_DRY_RUN",
+                    "PINNACLE_CONSENSUS", "PINNACLE_CONSENSUS_METHOD",
+                    "PINNACLE_VALIDATOR_TOLERANCE"):
             assert env in src, f"{env} non dichiarata in .railway/railway.ts"
 
     def test_pinnacle_oracle_senza_riferimenti_al_percorso_ordini(self):

@@ -168,11 +168,13 @@ T60_EXECUTION_ONLY = os.getenv("T60_EXECUTION_ONLY", "1").strip().lower() \
 # 25/09/2026) -------------------------------------------------------------
 # Il modello bottom-up (Poisson) resta a monte di tutto (genera i candidati
 # e popola il ledger), ma la VALUTAZIONE EV del giro ordini passa
-# all'ORACOLO: Pinnacle (sharp) de-vigato e' la probabilita' "vera", la
-# quota del segnale (SX) e' il prezzo, e si compra solo il ritardo fra i
-# due. Lettura DALLE CACHE che la rotazione quote scarica gia': ZERO
-# crediti. Con TOP_DOWN_EV attivo, un segnale senza oracolo e' "no_oracle"
-# e NON viene ordinato (fail-closed: senza verita' non si decide).
+# all'ORACOLO: dal 26/09 non il prezzo secco di UNA fonte, ma il CONSENSO
+# de-vigato multi-fonte (Pinnacle + Betfair Exchange come benchmark,
+# Matchbook come validatore; fallback automatico alle fonti presenti, fino
+# alla sola Pinnacle). La quota del segnale (SX) e' il prezzo, e si compra
+# solo il ritardo fra i due. Lettura DALLE CACHE che la rotazione quote
+# scarica gia': ZERO crediti. Con TOP_DOWN_EV attivo, un segnale senza
+# oracolo e' "no_oracle" e NON viene ordinato (fail-closed).
 TOP_DOWN_EV = os.getenv("TOP_DOWN_EV", "1").strip().lower() \
     in ("1", "true", "yes", "on")
 #: Moltiplicatore della quota equa di Pinnacle ("true odd + margine"): la
@@ -336,7 +338,13 @@ def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
                 "true_odd": round(true_odd, 4),
                 "required_price": round(required, 4),
                 "ev_min": ev_min_eff, "trigger": bool(ev >= ev_min_eff),
-                "overround": probs.get("overround")}
+                "overround": probs.get("overround"),
+                # Consenso multi-oracolo (26/09): quali fonti hanno formato la
+                # p_true, se il validatore ha confermato e se si e' ripiegati
+                # su una sola fonte. E' telemetria del gate, non una soglia.
+                "oracle_sources": probs.get("sources"),
+                "oracle_validated": probs.get("validated"),
+                "oracle_fallback": probs.get("fallback")}
     except Exception as e:
         return {"ok": False, "reason": f"errore valutazione ({e})"}
 

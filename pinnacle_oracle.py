@@ -27,6 +27,22 @@ quanto vale un esito, SX dice quanto lo pagano, e si compra solo il ritardo.
    il budget. Da qui i DUE percorsi espliciti: `--from-cache` (0 crediti,
    quello che gira nella pipeline) e `--live` (1 credito, SOLO diagnostica).
 
+CONSENSO MULTI-ORACOLO (26/09/2026): la probabilita' "vera" non e' piu' il
+prezzo secco di UNA sola fonte. Ogni fonte sharp disponibile (Pinnacle,
+Betfair Exchange EU, Matchbook) viene de-vigata con la stessa formula e le
+probabilita' fair vengono aggregate in un CONSENSO:
+  - **benchmark primario** = Pinnacle + Betfair Exchange (media o mediana per
+    esito);
+  - **validatore secondario** = Matchbook: entra nell'aggregato SOLO se la sua
+    probabilita' fair resta entro tolleranza dal benchmark, altrimenti viene
+    escluso e il disallineamento viene registrato (un controllo di coerenza,
+    non una terza voce che guida il consenso).
+Il **fallback e' robusto**: se una fonte non ha il 1X2 completo per quella
+partita, il consenso ripiega su quelle presenti — con la sola Pinnacle il
+risultato COINCIDE col comportamento storico, e la pipeline non si blocca mai.
+Env: `PINNACLE_CONSENSUS` (default 1), `PINNACLE_CONSENSUS_METHOD`
+(mean|median, default mean), `PINNACLE_VALIDATOR_TOLERANCE` (default 0.05).
+
 Questo modulo e' la FASE 1 (probe): dimostra che estrazione, de-vig e gate
 funzionano. NON scrive sul ledger, NON piazza ordini, NON consulta Poisson:
 `bypass` del motore statistico e' una decisione di pipeline (fase 2), non un
@@ -51,6 +67,7 @@ import argparse
 import json
 import logging
 import os
+import statistics
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -61,15 +78,61 @@ load_dotenv()
 
 logger = logging.getLogger("pinnacle_oracle")
 
-#: Il book sharp di riferimento (chiave the-odds-api). Il confronto e' per
-#: SOTTOSTRINGA su chiave o titolo: l'API espone `key` = "pinnacle".
-SHARP_BOOKS: Tuple[str, ...] = ("pinnacle",)
+#: --- FONTI DEL CONSENSO MULTI-ORACOLO (26/09/2026) -------------------------
+#: Ruoli ESPLICITI (tabelle, mai fuzzy):
+#: - PRIMARIA  = Pinnacle (lo sharp di riferimento storico del progetto);
+#: - BENCHMARK = Betfair Exchange EU (exchange, stessa natura di SX Bet);
+#: - VALIDATORE = Matchbook (verifica il consenso, non lo guida).
+#: Il match e' per SOTTOSTRINGA su chiave/titolo: "betfair" copre anche la
+#: variante `betfair_ex_uk`.
+PRIMARY_BOOK = "pinnacle"
+BENCHMARK_BOOK = "betfair_ex_eu"
+VALIDATOR_BOOK = "matchbook"
+
+BOOK_PATTERNS: Dict[str, Tuple[str, ...]] = {
+    PRIMARY_BOOK: ("pinnacle",),
+    BENCHMARK_BOOK: ("betfair",),
+    VALIDATOR_BOOK: ("matchbook",),
+}
+
+#: Ordine di priorita' delle fonti: benchmark PRIMA, validatore dopo.
+CONSENSUS_BOOKS: Tuple[str, ...] = (PRIMARY_BOOK, BENCHMARK_BOOK, VALIDATOR_BOOK)
+
+#: Array multi-bookmaker per la chiamata the-odds-api (percorso `--live`).
+#: Il costo the-odds-api e' `markets x regions`: filtrare i bookmaker NON
+#: costa di piu' e riduce il payload.
+MULTI_BOOKMAKERS = ",".join(CONSENSUS_BOOKS)
+
+#: Esiti 1X2 (ordine canonico).
+OUTCOMES: Tuple[str, ...] = ("1", "X", "2")
+
+#: Book sharp riconosciuti da `is_sharp` (vitello per compatibilita': un
+#: book che non e' nel consenso non e' per forza "soft").
+SHARP_BOOKS: Tuple[str, ...] = ("pinnacle", "betfair", "matchbook")
+
+#: Chiavi di SERVIZIO: non sono esiti e non devono mai entrare in un calcolo
+#: di EV/true-odd (una lista o un booleano non hanno un inverso).
+_META_KEYS = frozenset({"overround", "sources", "n_sources",
+                        "consensus_method", "validated", "fallback",
+                        "agreement_pp"})
 
 #: Metodo di de-vig. Default = quello del progetto (`market_calib.devig`), per
 #: non introdurre una seconda convenzione: "power" corregge il
 #: favourite-longshot bias. "shin" e "multiplicative" restano disponibili
 #: (override con `PINNACLE_DEVIG_METHOD` o per chiamata).
 DEVIG_METHOD: str = os.getenv("PINNACLE_DEVIG_METHOD", "power")
+
+#: --- CONFIGURAZIONE DEL CONSENSO -----------------------------------------
+#: `PINNACLE_CONSENSUS=0` ripristina la Pinnacle-secca (rollback a una env).
+CONSENSUS_ENABLED: bool = os.getenv("PINNACLE_CONSENSUS", "1").strip().lower() \
+    in ("1", "true", "yes", "on")
+#: "mean" (media) o "median" (mediana): la mediana e' piu' robusta a una
+#: fonte anomala, la media sfrutta tutta l'informazione. Default = media.
+CONSENSUS_METHOD: str = (os.getenv("PINNACLE_CONSENSUS_METHOD", "mean")
+                         .strip().lower() or "mean")
+#: Scostamento massimo (prob.) entro cui il validatore conferma il benchmark.
+VALIDATOR_TOLERANCE: float = float(
+    os.getenv("PINNACLE_VALIDATOR_TOLERANCE", "0.05"))
 
 try:                        # stessa soglia del gate di produzione, mai copiata
     from value_filter import EV_MIN as DEFAULT_EV_MIN
@@ -130,27 +193,101 @@ def h2h_odds_of(bookmaker: Dict[str, Any], home: str, away: str
     return out if len(out) == 3 else None
 
 
+def _find_match(payload: Sequence[Dict[str, Any]], home: str, away: str
+                ) -> Optional[Dict[str, Any]]:
+    """La partita del payload con ENTRAMBE le squadre (case-fold, spazi)."""
+    h, a = _cf(home), _cf(away)
+    for match in payload or []:
+        if not isinstance(match, dict):
+            continue
+        if _cf(match.get("home_team")) == h and _cf(match.get("away_team")) == a:
+            return match
+    return None
+
+
+def canonical_book(bookmaker: Any) -> Optional[str]:
+    """Chiave canonica della fonte (pinnacle / betfair_ex_eu / matchbook).
+
+    Matching per SOTTOSTRINGA su `key` quando presente (quindi
+    `betfair_ex_eu` e `betfair_ex_uk` cadono nella stessa fonte benchmark),
+    sul `title` solo se la `key` manca: una chiave nota e non-sharp non
+    diventa sharp per via di un titolo fuorviante.
+    """
+    if not isinstance(bookmaker, dict):
+        return None
+    key = _cf(bookmaker.get("key"))
+    title = _cf(bookmaker.get("title"))
+    if key:
+        # Chiave PRESENTE: e' lei ad avere l'ultima parola. Una chiave nota e
+        # non-sharp non diventa sharp per via di un titolo fuorviante (era il
+        # comportamento di `is_sharp(key or title)`, che qui resta invariato).
+        for canon, patterns in BOOK_PATTERNS.items():
+            for pat in patterns:
+                if pat in key:
+                    return canon
+        return None
+    for canon, patterns in BOOK_PATTERNS.items():
+        for pat in patterns:
+            if pat in title:
+                return canon
+    return None
+
+
+def book_quotes(match: Dict[str, Any], home: str, away: str,
+                book: str = PRIMARY_BOOK) -> Optional[Dict[str, float]]:
+    """Quote 1X2 di UNA fonte specifica per la partita. None se incomplete.
+
+    Fail-closed su tre esiti (vedi `h2h_odds_of`). Funzione PURA: nessuna
+    rete, nessun credito, nessuna scrittura.
+    """
+    if not isinstance(match, dict):
+        return None
+    for bm in match.get("bookmakers") or []:
+        if not isinstance(bm, dict):
+            continue
+        if canonical_book(bm) != book:
+            continue
+        got = h2h_odds_of(bm, home, away)
+        if got:
+            return got
+    return None
+
+
 def pinnacle_quotes(payload: Sequence[Dict[str, Any]], home: str, away: str
                     ) -> Optional[Dict[str, float]]:
     """Quote 1X2 di Pinnacle per UNA partita del payload. None se assenti.
 
-    Funzione PURA: nessuna rete, nessun credito, nessuna scrittura.
+    Resta **specifica su Pinnacle** (la fonte primaria): le altre fonti del
+    consenso si estraggono con `oracle_quotes`/`book_quotes`.
     """
-    for match in payload or []:
-        if not isinstance(match, dict):
+    match = _find_match(payload, home, away)
+    if match is None:
+        return None
+    return book_quotes(match, home, away, PRIMARY_BOOK)
+
+
+def oracle_quotes(payload: Sequence[Dict[str, Any]], home: str, away: str
+                  ) -> Dict[str, Dict[str, float]]:
+    """{fonte: quote 1X2} per OGNI fonte sharp completa sulla partita.
+
+    Chiavi in `CONSENSUS_BOOKS`. Solo le fonti con TUTTI E TRE gli esiti
+    (fail-closed come `h2h_odds_of`): una fonte parziale non entra nel
+    consenso. `{}` se la partita non c'e' o nessuna fonte sharp e' completa.
+    """
+    match = _find_match(payload, home, away)
+    if match is None:
+        return {}
+    out: Dict[str, Dict[str, float]] = {}
+    for bm in match.get("bookmakers") or []:
+        if not isinstance(bm, dict):
             continue
-        if _cf(match.get("home_team")) != _cf(home) \
-                or _cf(match.get("away_team")) != _cf(away):
+        book = canonical_book(bm)
+        if not book or book in out:
             continue
-        for bm in match.get("bookmakers") or []:
-            if not isinstance(bm, dict):
-                continue
-            if not is_sharp(bm.get("key") or bm.get("title")):
-                continue
-            got = h2h_odds_of(bm, home, away)
-            if got:
-                return got
-    return None
+        got = h2h_odds_of(bm, home, away)
+        if got:
+            out[book] = got
+    return out
 
 
 def iter_pinnacle_markets(payload: Sequence[Dict[str, Any]]
@@ -205,7 +342,7 @@ def fair_odds(true_probs: Dict[str, Any]) -> Dict[str, float]:
     """
     out: Dict[str, float] = {}
     for key, value in (true_probs or {}).items():
-        if key == "overround":
+        if key in _META_KEYS:
             continue
         try:
             p = float(value)
@@ -214,6 +351,155 @@ def fair_odds(true_probs: Dict[str, Any]) -> Dict[str, float]:
         if 0.0 < p <= 1.0:
             out[str(key)] = 1.0 / p
     return out
+
+
+# ---------------------------------------------------------------------------
+# 2b. CONSENSO MULTI-ORACOLO (26/09/2026)
+# ---------------------------------------------------------------------------
+
+def _aggregate(fairs: Sequence[Dict[str, float]], method: str
+               ) -> Dict[str, float]:
+    """Media (o mediana) per esito delle probabilita' fair, RINORMALIZZATA.
+
+    Ogni fonte somma gia' 1 per costruzione (de-vig); l'aggregato di piu'
+    fonti somma ancora 1 con la media, ma la rinormalizzazione e' una difesa
+    a costo zero contro arrotondamenti e fonti parziali.
+    """
+    out: Dict[str, float] = {}
+    for esito in OUTCOMES:
+        vals = [float(f[esito]) for f in fairs if esito in f]
+        if not vals:
+            continue
+        out[esito] = (statistics.median(vals) if method == "median"
+                      else sum(vals) / len(vals))
+    total = sum(out.values())
+    if total <= 0:
+        return {}
+    return {k: v / total for k, v in out.items()}
+
+
+def _consensus_result(fair: Dict[str, float], *, sources: Sequence[str],
+                      method: str, validated: Optional[bool],
+                      fallback: Optional[str],
+                      agreement_pp: Optional[float] = None,
+                      overrounds: Optional[Sequence[float]] = None
+                      ) -> Dict[str, Any]:
+    """Struttura del consenso: esiti numerici + METADATI di servizio.
+
+    I metadati stanno nelle stesse chiavi ma sono dichiarati in `_META_KEYS`,
+    quindi `fair_odds`/`ev_gate` li saltano e non possono mai finire in un
+    calcolo di EV o di true-odd.
+    """
+    out: Dict[str, Any] = {e: round(float(fair[e]), 6)
+                           for e in OUTCOMES if e in fair}
+    ov = [float(x) for x in (overrounds or [])]
+    out["overround"] = round(sum(ov) / len(ov), 5) if ov else None
+    out["sources"] = list(sources)
+    out["n_sources"] = len(sources)
+    out["consensus_method"] = method
+    out["validated"] = validated
+    out["fallback"] = fallback
+    out["agreement_pp"] = agreement_pp
+    return out
+
+
+def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
+                            method: Optional[str] = None,
+                            devig_method: Optional[str] = None,
+                            validator_tolerance: Optional[float] = None,
+                            enabled: Optional[bool] = None
+                            ) -> Optional[Dict[str, Any]]:
+    """Probabilita' "vera" di CONSENSO dalle fonti sharp disponibili.
+
+    Ogni fonte con 1X2 completo viene de-vigata (`true_probabilities`, stessa
+    formula del progetto: nessun doppio standard) e le probabilita' fair
+    vengono aggregate:
+      - benchmark = Pinnacle + Betfair Exchange (aggregato per esito);
+      - Matchbook = validatore: entra nell'aggregato SOLO se la sua fair resta
+        entro `validator_tolerance` dal benchmark; se diverge troppo viene
+        ESCLUSO e il disallineamento e' registrato (`validated=False`).
+    **Fallback robusto**: con una sola fonte il consenso E' quella fonte
+    (Pinnacle-only = comportamento storico, identico bit per bit).
+
+    Ritorna None solo se NESSUNA fonte ha un 1X2 completo (nessuna verita' =
+    nessun oracolo). Mai eccezioni. Override `enabled=False` (env
+    `PINNACLE_CONSENSUS=0`) per ripristinare la Pinnacle-secca.
+    """
+    if not quotes_by_book:
+        return None
+    if enabled is None:
+        enabled = CONSENSUS_ENABLED
+    devig = devig_method or DEVIG_METHOD
+    m = (method or CONSENSUS_METHOD or "mean").strip().lower()
+    if m not in ("mean", "median"):
+        logger.warning("pinnacle_oracle: metodo consenso '%s' ignoto — uso mean", m)
+        m = "mean"
+    tol = (VALIDATOR_TOLERANCE if validator_tolerance is None
+           else float(validator_tolerance))
+
+    fairs: Dict[str, Dict[str, float]] = {}
+    overrounds: List[float] = []
+    for book in CONSENSUS_BOOKS:
+        odds = quotes_by_book.get(book)
+        if not odds:
+            continue
+        probs = true_probabilities(odds, method=devig)
+        if not probs:
+            continue
+        fair = {e: float(probs[e]) for e in OUTCOMES if e in probs}
+        total = sum(fair.values())
+        if len(fair) != 3 or total <= 0:
+            continue
+        fairs[book] = {k: v / total for k, v in fair.items()}
+        if probs.get("overround") is not None:
+            overrounds.append(float(probs["overround"]))
+    if not fairs:
+        return None
+
+    if not enabled:
+        only = PRIMARY_BOOK if PRIMARY_BOOK in fairs else next(iter(fairs))
+        return _consensus_result(fairs[only], sources=[only], method="single",
+                                 validated=None, fallback="consensus_disabled",
+                                 overrounds=overrounds)
+
+    base_books = [b for b in (PRIMARY_BOOK, BENCHMARK_BOOK) if b in fairs]
+    used = list(base_books)
+    fallback: Optional[str] = None
+    validated: Optional[bool] = None
+    agreement_pp: Optional[float] = None
+    if not base_books:
+        # Nessuna fonte "base": si degrada con grazia sul validatore, poi
+        # sull'unica fonte disponibile. Mai un blocco della pipeline.
+        if VALIDATOR_BOOK in fairs:
+            used = [VALIDATOR_BOOK]
+            fallback = "validator_only"
+        else:
+            only = next(iter(fairs))
+            used = [only]
+            fallback = f"single_source:{only}"
+    base = _aggregate([fairs[b] for b in base_books or used], m)
+    if VALIDATOR_BOOK in fairs and VALIDATOR_BOOK not in used and base:
+        val = fairs[VALIDATOR_BOOK]
+        dev = max(abs(val[e] - base.get(e, 0.0)) for e in OUTCOMES)
+        agreement_pp = round(dev * 100.0, 2)
+        if dev <= tol:
+            used.append(VALIDATOR_BOOK)
+            validated = True           # conferma il consenso
+        else:
+            validated = False          # escluso: disallineamento registrato
+            logger.warning(
+                "pinnacle_oracle: validatore %s in disaccordo (%.1fpp > "
+                "%.1fpp) — ESCLUSO dal consenso", VALIDATOR_BOOK,
+                dev * 100.0, tol * 100.0)
+    final = _aggregate([fairs[b] for b in used], m)
+    if not final:
+        return None
+    if fallback is None and len(used) == 1:
+        fallback = ("pinnacle_only" if used[0] == PRIMARY_BOOK
+                    else f"single_source:{used[0]}")
+    return _consensus_result(final, sources=used, method=m, validated=validated,
+                             fallback=fallback, agreement_pp=agreement_pp,
+                             overrounds=overrounds)
 
 
 # ---------------------------------------------------------------------------
@@ -282,11 +568,14 @@ def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
                 cache_dir: Optional[Path] = None,
                 devig_method: Optional[str] = None,
                 now: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    """Probabilita' "vera" per esito per UNA partita, letta DALLE CACHE.
+    """Probabilita' "vera" (di CONSENSO) per esito per UNA partita, dalle cache.
 
     E' il punto di aggancio della fase 2: il giro ordini chiede QUI la
-    p_true di Pinnacle e calcola l'EV del segnale sull'oracolo invece che
-    sul modello.
+    p_true e calcola l'EV del segnale sull'oracolo invece che sul modello.
+    Dal 26/09 la p_true e' il CONSENSO delle fonti sharp disponibili
+    (`consensus_probabilities`): Pinnacle + Betfair sono il benchmark,
+    Matchbook un validatore. Con la sola Pinnacle il valore coincide col
+    comportamento storico (fallback automatico, mai un blocco).
 
     **Costo: 0 crediti** — legge i file `toa_<sport>.json` che la rotazione
     quote scarica gia' (nessuna chiamata HTTP in questo percorso; il percorso
@@ -296,9 +585,10 @@ def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
     Due partite diverse non si confondono: `home` e `away` devono combaciare
     ENTRAMBE nella stessa riga del payload.
 
-    Fail-closed: None se la partita non e' nel payload, se Pinnacle non ha i
-    TRE esiti (de-vig su 2 su 3 distorcerrebbe l'oracolo) o se la cache e' piu'
-    vecchia di `CACHE_MAX_AGE_H` — un oracolo stantio non e' il mercato.
+    Fail-closed: None se la partita non e' nel payload, se NESSUNA fonte
+    sharp ha i TRE esiti (de-vig su 2 su 3 distorcerrebbe l'oracolo) o se la
+    cache e' piu' vecchia di `CACHE_MAX_AGE_H` — un oracolo stantio non e' il
+    mercato.
 
     Args:
         home, away: nomi squadre del segnale (the-odds-api).
@@ -334,12 +624,12 @@ def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
             if (not mh or not ma) or (h not in mh and mh not in h) \
                     or (a not in ma and ma not in a):
                 continue
-            quotes = pinnacle_quotes([match],
-                                     match.get("home_team") or "",
-                                     match.get("away_team") or "")
-            if not quotes:
-                continue                       # fail-closed: servono 3 su 3
-            probs = true_probabilities(quotes, method=devig_method)
+            by_book = oracle_quotes([match],
+                                    match.get("home_team") or "",
+                                    match.get("away_team") or "")
+            if not by_book:
+                continue               # fail-closed: nessuna fonte completa
+            probs = consensus_probabilities(by_book, devig_method=devig_method)
             if probs:
                 return probs
     return None
@@ -364,7 +654,7 @@ def ev_gate(true_probs: Dict[str, Any], prices: Dict[str, float], *,
     th = DEFAULT_EV_MIN if ev_min is None else float(ev_min)
     rows: List[Dict[str, Any]] = []
     for esito, prob in (true_probs or {}).items():
-        if esito == "overround":
+        if esito in _META_KEYS:
             continue
         try:
             p = float(prob)
@@ -418,12 +708,15 @@ def scan_cache(cache_dir: Optional[Path] = None, *,
     """Copertura dell'oracolo sulle cache GIA' scaricate. **Zero crediti.**
 
     `price_lookup(partita, esito) -> quota SX | None` e' iniettabile: senza di
-    esso si misura solo la COPERTURA (quante partite hanno un 1X2 Pinnacle
-    completo e con che margine). Il collegamento a SX Bet e' fase 2.
+    esso si misura solo la COPERTURA. Tre livelli: partite con Pinnacle
+    completo, con un CONSENSO disponibile (`with_consensus`) e con PIU' fonti
+    (`with_multi`, il consenso multi-oracolo vero e proprio). Il collegamento
+    a SX Bet e' fase 2.
     """
     folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
     leagues: List[Dict[str, Any]] = []
     totals = {"leagues": 0, "matches": 0, "with_pinnacle": 0,
+              "with_consensus": 0, "with_multi": 0,
               "candidates": 0, "price_errors": 0}
     candidates: List[Dict[str, Any]] = []
     for path in _cache_files(folder):
@@ -437,13 +730,28 @@ def scan_cache(cache_dir: Optional[Path] = None, *,
         payload = (data or {}).get("payload") or []
         if not payload:
             continue
-        with_pin = 0
+        with_pin = with_cons = with_multi = 0
         overrounds: List[float] = []
-        for match, quotes in iter_pinnacle_markets(payload):
-            probs = true_probabilities(quotes)
+        for match in payload:
+            if not isinstance(match, dict):
+                continue
+            home = match.get("home_team") or ""
+            away = match.get("away_team") or ""
+            if not home or not away:
+                continue
+            by_book = oracle_quotes([match], home, away)
+            if not by_book:
+                continue
+            if PRIMARY_BOOK in by_book:
+                with_pin += 1
+            if len(by_book) >= 2:
+                with_multi += 1
+            # La p_true e' il CONSENSO (fallback automatico alla sola fonte
+            # disponibile: con la sola Pinnacle = comportamento storico).
+            probs = consensus_probabilities(by_book)
             if not probs:
                 continue
-            with_pin += 1
+            with_cons += 1
             if probs.get("overround") is not None:
                 overrounds.append(float(probs["overround"]))
             if price_lookup is None:
@@ -468,16 +776,22 @@ def scan_cache(cache_dir: Optional[Path] = None, *,
                     "sport": path.stem.replace("toa_", ""),
                     "event": f"{match.get('home_team')} vs {match.get('away_team')}",
                     "commence": match.get("commence_time"),
+                    "sources": probs.get("sources"),
+                    "validated": probs.get("validated"),
                     **cand,
                 })
         totals["leagues"] += 1
         totals["matches"] += len(payload)
         totals["with_pinnacle"] += with_pin
+        totals["with_consensus"] += with_cons
+        totals["with_multi"] += with_multi
         leagues.append({
             "sport": path.stem.replace("toa_", ""),
             "file": path.name,
             "matches": len(payload),
             "with_pinnacle": with_pin,
+            "with_consensus": with_cons,
+            "with_multi": with_multi,
             "avg_overround": (round(sum(overrounds) / len(overrounds), 5)
                               if overrounds else None),
         })
@@ -489,7 +803,11 @@ def scan_cache(cache_dir: Optional[Path] = None, *,
     return {"cache_dir": str(folder), "leagues": leagues, "totals": totals,
             "candidates": candidates,
             "gate": {"ev_min": DEFAULT_EV_MIN if ev_min is None else ev_min,
-                     "devig_method": DEVIG_METHOD, "sharp_book": SHARP_BOOKS[0]}}
+                     "devig_method": DEVIG_METHOD,
+                     "sharp_book": SHARP_BOOKS[0],
+                     "consensus_books": list(CONSENSUS_BOOKS),
+                     "consensus_method": CONSENSUS_METHOD,
+                     "validator_tolerance": VALIDATOR_TOLERANCE}}
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +815,8 @@ def scan_cache(cache_dir: Optional[Path] = None, *,
 # ---------------------------------------------------------------------------
 
 def fetch_pinnacle_payload(sport_key: str, *, days_ahead: int = 7,
-                           bookmakers: str = "pinnacle", regions: str = "eu",
+                           bookmakers: str = MULTI_BOOKMAKERS,
+                           regions: str = "eu",
                            timeout: int = 30) -> Dict[str, Any]:
     """UNA chiamata `/odds` con il filtro `bookmakers` — e misura il costo.
 
@@ -564,11 +883,18 @@ def _print_scan(res: Dict[str, Any]) -> None:
     print(f"Cache in {res['cache_dir']} | devig: {gate['devig_method']} | "
           f"EV_MIN {gate['ev_min'] * 100:.1f}%")
     print(f"Leghe con quote: {t['leagues']} | partite: {t['matches']} | "
-          f"con 1X2 Pinnacle completo: {t['with_pinnacle']}")
+          f"con 1X2 Pinnacle completo: {t['with_pinnacle']} | "
+          f"consenso: {t.get('with_consensus', 0)} "
+          f"(multi-fonte: {t.get('with_multi', 0)})")
+    print(f"Fonti del consenso: {' + '.join(gate.get('consensus_books') or [])} "
+          f"| metodo: {gate.get('consensus_method')} | validatore tol. "
+          f"{gate.get('validator_tolerance', 0.0) * 100:.1f}pp")
     for lg in res["leagues"]:
         ov = lg["avg_overround"]
         print(f"  {lg['sport']:<46} partite={lg['matches']:<3} "
               f"pinnacle={lg['with_pinnacle']:<3} "
+              f"consenso={lg.get('with_consensus', 0):<3} "
+              f"multi={lg.get('with_multi', 0):<3} "
               f"overround={'-' if ov is None else f'{ov:.3%}'}")
     if t.get("price_errors"):
         print(f"⚠️ lettura prezzi fallita in {t['price_errors']} casi: "
@@ -589,7 +915,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--from-cache", action="store_true",
                     help="scansiona le cache gia' scaricate (0 crediti)")
     ap.add_argument("--live", metavar="SPORT_KEY", default=None,
-                    help="UNA chiamata /odds con bookmakers=pinnacle (1 credito)")
+                    help="UNA chiamata /odds con bookmakers="
+                         f"{MULTI_BOOKMAKERS} (1 credito)")
     ap.add_argument("--ev-min", type=float, default=None,
                     help=f"margine EV del trigger (default {DEFAULT_EV_MIN})")
     ap.add_argument("--json", action="store_true")
@@ -608,7 +935,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if res["error"]:
                 print(f"errore: {res['error']}")
             hits = iter_pinnacle_markets(res["payload"])
-            print(f"partite con 1X2 Pinnacle completo: {len(hits)}")
+            multi = 0
+            for m in res["payload"]:
+                if not isinstance(m, dict):
+                    continue
+                if len(oracle_quotes([m], m.get("home_team") or "",
+                                     m.get("away_team") or "")) >= 2:
+                    multi += 1
+            print(f"partite con 1X2 Pinnacle completo: {len(hits)} "
+                  f"| con consenso multi-fonte: {multi}")
         return 0 if not res["error"] else 1
 
     res = scan_cache(ev_min=args.ev_min)

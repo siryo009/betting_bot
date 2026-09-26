@@ -84,6 +84,14 @@ export default defineRailway(() => {
     // modello; DRY-RUN intercetta l'ordine prima del POST a SX Bet.
     TOP_DOWN_EV: preserve(),
     TOP_DOWN_MARGIN: preserve(),
+    // Consenso multi-oracolo (26/09/2026): la p_true del gate top-down non e'
+    // piu' il prezzo secco di una sola fonte. PINNACLE_CONSENSUS=0 ripristina
+    // la Pinnacle-secca; il metodo (mean|median) e la tolleranza del
+    // validatore Matchbook sono tarabili senza redeploy di codice.
+    PINNACLE_CONSENSUS: preserve(),
+    PINNACLE_CONSENSUS_METHOD: preserve(),
+    PINNACLE_VALIDATOR_TOLERANCE: preserve(),
+    PINNACLE_DEVIG_METHOD: preserve(),
     // Corsia top-down (25/09, direttiva "bypass del filtro quote"): la corsia
     // LIVE pesca da ogni riga 1X2 (qualsiasi quota/status) e l'unico giudice
     // del prezzo e' l'oracolo Pinnacle (fail-closed senza oracolo).

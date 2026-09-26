@@ -140,6 +140,219 @@ class TestEstrazione:
 
 
 # ---------------------------------------------------------------------------
+# 1b. CONSENSO MULTI-ORACOLO (26/09/2026)
+# ---------------------------------------------------------------------------
+
+def _sharp_match(books, home="Atlanta United", away="Toronto FC"):
+    return _match(home, away, books)
+
+
+def _fresh_cache(folder, sport, payload):
+    """Cache con `ts` recente (serve a `load_oracle`, che scarta le stantie)."""
+    import time as _time
+    (folder / f"toa_{sport}.json").write_text(
+        json.dumps({"ts": _time.time(), "remaining": 400,
+                    "payload": payload}), encoding="utf-8")
+
+
+class TestConsensoMultiOracolo:
+    def test_estrae_tutte_le_fonti_sharp_e_ignora_le_soft(self):
+        m = _sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+            _book("betfair_ex_eu", "Betfair Exchange", "Atlanta United",
+                  "Toronto FC", (1.72, 3.65, 4.60)),
+            _book("matchbook", "Matchbook", "Atlanta United", "Toronto FC",
+                  (1.74, 3.62, 4.55)),
+            _book("draftkings", "DraftKings", "Atlanta United", "Toronto FC",
+                  (1.60, 3.90, 5.50)),
+        ])
+        books = po.oracle_quotes([m], "Atlanta United", "Toronto FC")
+        assert set(books) == {"pinnacle", "betfair_ex_eu", "matchbook"}
+        assert books["pinnacle"] == PINNACLE
+
+    def test_la_base_e_media_tra_pinnacle_e_betfair(self):
+        m = _sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+            _book("betfair_ex_eu", "Betfair Exchange", "Atlanta United",
+                  "Toronto FC", (1.72, 3.65, 4.60)),
+        ])
+        c = po.consensus_probabilities(
+            po.oracle_quotes([m], "Atlanta United", "Toronto FC"))
+        assert c is not None and c["n_sources"] == 2
+        assert c["sources"] == ["pinnacle", "betfair_ex_eu"]
+        pin = po.true_probabilities(PINNACLE)
+        bf = po.true_probabilities({"1": 1.72, "X": 3.65, "2": 4.60})
+        for e in "1X2":
+            assert c[e] == pytest.approx((pin[e] + bf[e]) / 2.0, abs=1e-6)
+        assert abs(c["1"] + c["X"] + c["2"] - 1.0) < 1e-5
+
+    def test_mediana_configurabile(self):
+        m = _sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+            _book("betfair_ex_eu", "Betfair Exchange", "Atlanta United",
+                  "Toronto FC", (1.72, 3.65, 4.60)),
+        ])
+        c = po.consensus_probabilities(
+            po.oracle_quotes([m], "Atlanta United", "Toronto FC"),
+            method="median")
+        assert c["consensus_method"] == "median"
+        pin = po.true_probabilities(PINNACLE)
+        bf = po.true_probabilities({"1": 1.72, "X": 3.65, "2": 4.60})
+        for e in "1X2":
+            assert c[e] == pytest.approx((pin[e] + bf[e]) / 2.0, abs=1e-6)
+
+    def test_validatore_conferma_quando_vicino(self):
+        m = _sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+            _book("betfair_ex_eu", "Betfair Exchange", "Atlanta United",
+                  "Toronto FC", (1.72, 3.65, 4.60)),
+            _book("matchbook", "Matchbook", "Atlanta United", "Toronto FC",
+                  (1.73, 3.63, 4.58)),
+        ])
+        c = po.consensus_probabilities(
+            po.oracle_quotes([m], "Atlanta United", "Toronto FC"))
+        assert c["n_sources"] == 3 and c["validated"] is True
+        assert c["sources"] == ["pinnacle", "betfair_ex_eu", "matchbook"]
+
+    def test_validatore_escluso_quando_diverge(self):
+        m = _sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+            _book("matchbook", "Matchbook", "Atlanta United", "Toronto FC",
+                  (2.50, 3.60, 4.50)),   # 1 fuori scala
+        ])
+        c = po.consensus_probabilities(
+            po.oracle_quotes([m], "Atlanta United", "Toronto FC"))
+        assert c["validated"] is False
+        assert c["n_sources"] == 1 and c["sources"] == ["pinnacle"]
+        assert c["agreement_pp"] is not None and c["agreement_pp"] > 5.0
+        # il consenso ESCLUSO non e' stato usato: e' la Pinnacle pura
+        pin = po.true_probabilities(PINNACLE)
+        assert c["1"] == pytest.approx(pin["1"], abs=1e-6)
+
+    def test_tolleranza_validatore_configurabile(self):
+        m = _sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+            _book("matchbook", "Matchbook", "Atlanta United", "Toronto FC",
+                  (2.50, 3.60, 4.50)),
+        ])
+        c = po.consensus_probabilities(
+            po.oracle_quotes([m], "Atlanta United", "Toronto FC"),
+            validator_tolerance=0.50)
+        assert c["validated"] is True and c["n_sources"] == 2
+
+    def test_fallback_solo_pinnacle_coincide_col_comportamento_storico(self):
+        m = _sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+        ])
+        c = po.consensus_probabilities(
+            po.oracle_quotes([m], "Atlanta United", "Toronto FC"))
+        pin = po.true_probabilities(PINNACLE)
+        assert c["n_sources"] == 1 and c["fallback"] == "pinnacle_only"
+        assert c["validated"] is None
+        for e in "1X2":
+            assert c[e] == pytest.approx(pin[e], abs=1e-6)
+
+    def test_fallback_sul_validatore_senza_benchmark(self):
+        m = _sharp_match([
+            _book("matchbook", "Matchbook", "Atlanta United", "Toronto FC",
+                  (1.74, 3.62, 4.55)),
+        ])
+        c = po.consensus_probabilities(
+            po.oracle_quotes([m], "Atlanta United", "Toronto FC"))
+        assert c["fallback"] == "validator_only" and c["sources"] == ["matchbook"]
+
+    def test_fallback_sul_benchmark_senza_pinnacle(self):
+        m = _sharp_match([
+            _book("betfair_ex_eu", "Betfair Exchange", "Atlanta United",
+                  "Toronto FC", (1.72, 3.65, 4.60)),
+        ])
+        c = po.consensus_probabilities(
+            po.oracle_quotes([m], "Atlanta United", "Toronto FC"))
+        assert c["fallback"] == "single_source:betfair_ex_eu"
+        assert c["sources"] == ["betfair_ex_eu"]
+
+    def test_nessuna_fonte_nessun_oracolo(self):
+        assert po.consensus_probabilities({}) is None
+        assert po.consensus_probabilities(None) is None
+        soft = _sharp_match([
+            _book("draftkings", "DraftKings", "Atlanta United", "Toronto FC",
+                  (1.60, 3.90, 5.50)),
+        ])
+        assert po.oracle_quotes([soft], "Atlanta United", "Toronto FC") == {}
+        assert po.consensus_probabilities({}) is None
+
+    def test_consenso_disabilitato_usa_la_sola_pinnacle(self):
+        m = _sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+            _book("betfair_ex_eu", "Betfair Exchange", "Atlanta United",
+                  "Toronto FC", (1.72, 3.65, 4.60)),
+        ])
+        c = po.consensus_probabilities(
+            po.oracle_quotes([m], "Atlanta United", "Toronto FC"),
+            enabled=False)
+        assert c["fallback"] == "consensus_disabled"
+        assert c["sources"] == ["pinnacle"]
+        pin = po.true_probabilities(PINNACLE)
+        assert c["1"] == pytest.approx(pin["1"], abs=1e-6)
+
+    def test_i_metadati_non_entrano_in_ev_o_true_odd(self):
+        probs = po.consensus_probabilities({
+            "pinnacle": PINNACLE,
+            "betfair_ex_eu": {"1": 1.72, "X": 3.65, "2": 4.60},
+        })
+        fair = po.fair_odds(probs)
+        assert set(fair) == {"1", "X", "2"}      # niente sources/n_sources
+        rows = po.ev_gate(probs, {"1": 2.10}, ev_min=0.02)
+        assert {r["esito"] for r in rows} == {"1"}
+
+    def test_canonical_book(self):
+        assert po.canonical_book({"key": "pinnacle", "title": "Pinnacle"}) \
+            == "pinnacle"
+        assert po.canonical_book({"key": "betfair_ex_uk",
+                                  "title": "Betfair Exchange"}) \
+            == "betfair_ex_eu"
+        assert po.canonical_book({"key": None, "title": "Matchbook"}) \
+            == "matchbook"
+        assert po.canonical_book({"key": "draftkings",
+                                  "title": "DraftKings"}) is None
+        assert po.canonical_book(None) is None
+
+    def test_load_oracle_usa_il_consenso(self, tmp_path):
+        _fresh_cache(tmp_path, "soccer_usa_mls", [_sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+            _book("betfair_ex_eu", "Betfair Exchange", "Atlanta United",
+                  "Toronto FC", (1.72, 3.65, 4.60)),
+        ])])
+        probs = po.load_oracle("Atlanta United", "Toronto FC",
+                               cache_dir=tmp_path)
+        assert probs["n_sources"] == 2
+        assert probs["sources"] == ["pinnacle", "betfair_ex_eu"]
+        # il consenso DIFFERISCE dalla sola Pinnacle (altrimenti non serve)
+        pin = po.true_probabilities(PINNACLE)
+        assert probs["1"] != pytest.approx(pin["1"], abs=1e-9)
+
+    def test_load_oracle_fallback_solo_pinnacle(self, tmp_path):
+        _fresh_cache(tmp_path, "soccer_usa_mls", [_sharp_match([
+            _book("pinnacle", "Pinnacle", "Atlanta United", "Toronto FC",
+                  (1.75, 3.60, 4.50)),
+        ])])
+        probs = po.load_oracle("Atlanta United", "Toronto FC",
+                               cache_dir=tmp_path)
+        assert probs["fallback"] == "pinnacle_only"
+        pin = po.true_probabilities(PINNACLE)
+        assert probs["1"] == pytest.approx(pin["1"], abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # 2. TRUE PROBABILITY (de-vig)
 # ---------------------------------------------------------------------------
 
@@ -300,11 +513,13 @@ class TestScanCache:
         _write_cache(tmp_path, "soccer_usa_mls", _payload())
         res = po.scan_cache(tmp_path)
         assert res["totals"] == {"leagues": 1, "matches": 4,
-                                 "with_pinnacle": 1, "candidates": 0,
+                                 "with_pinnacle": 1, "with_consensus": 1,
+                                 "with_multi": 0, "candidates": 0,
                                  "price_errors": 0}
         lg = res["leagues"][0]
         assert lg["sport"] == "soccer_usa_mls"
         assert lg["with_pinnacle"] == 1 and lg["matches"] == 4
+        assert lg["with_consensus"] == 1 and lg["with_multi"] == 0
         assert lg["avg_overround"] > 1.0
 
     def test_le_cache_dei_punteggi_non_sono_quote(self, tmp_path):
@@ -328,6 +543,10 @@ class TestScanCache:
         assert gate["ev_min"] == 0.03
         assert gate["sharp_book"] == "pinnacle"
         assert gate["devig_method"] == po.DEVIG_METHOD
+        # Il consenso multi-oracolo e' dichiarato (fonti e metodo): un report
+        # filtrato e uno no non devono essere indistinguibili.
+        assert gate["consensus_books"] == list(po.CONSENSUS_BOOKS)
+        assert gate["consensus_method"] == po.CONSENSUS_METHOD
 
     def test_senza_price_lookup_nessun_candidato(self, tmp_path):
         """In fase 1 SX non e' collegato: si misura la COPERTURA, non il P/L."""

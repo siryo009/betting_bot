@@ -5792,3 +5792,59 @@ sara' disponibile. Copertura ampliata confermata viva: `ingest 424 mercati ->
 664 quote salvate (30 fixture)`, `28 fixture con quote, 8 segnali giocabili
 (1 nelle corsie live)`. Crediti 392 (reset 01/10, consumo misurato 15/giorno su
 98/giorno sostenibili).
+
+### Consenso multi-oracolo per l'EV: Pinnacle + Betfair, Matchbook validatore (26/09/2026)
+
+Direttiva del proprietario: l'EV non si calcola piu' sul prezzo secco di UNA
+fonte. `pinnacle_oracle.py` estrae TUTTE le fonti sharp disponibili dalla
+stessa cache che la rotazione quote scarica gia' (**zero crediti, zero rete,
+zero ordini**) e le aggrega in un **consenso de-vigato**.
+
+**Fonti e ruoli** (tabelle esplicite, mai fuzzy):
+- **PRIMARIA** `pinnacle`; **BENCHMARK** `betfair_ex_eu` (il pattern
+  `betfair` copre anche `_uk`); **VALIDATORE** `matchbook`.
+- `MULTI_BOOKMAKERS = "pinnacle,betfair_ex_eu,matchbook"`: e' l'array usato
+  dalla chiamata `/odds` del percorso `--live` (`fetch_pinnacle_payload`).
+  ⚠️ the-odds-api addebita `markets x regions`: filtrare i bookmaker **non**
+  costa di piu' e riduce il payload.
+- **SCELTA ESPLICITA**: il fetch PRINCIPALE (`odds_api._get_odds`, quello
+  della rotazione che alimenta `fixture_engine`/line shopping) **NON e'
+  toccato** — resta `regions=eu` senza filtro, per non cambiare quota/edge dei
+  segnali gia' in produzione. Il consenso si calcola solo dentro l'oracolo.
+
+**Algoritmo** (`consensus_probabilities(quotes_by_book)`):
+1. per ogni fonte disponibile con 1X2 COMPLETO, de-vig con la stessa
+   `true_probabilities` del progetto (default `power`, favourite-longshot);
+2. **benchmark** = aggregato di Pinnacle + Betfair (media `mean` di default,
+   o `median`), rinormalizzato a somma 1;
+3. **validatore** Matchbook: entra nell'aggregato **solo se** la sua fair resta
+   entro `PINNACLE_VALIDATOR_TOLERANCE` (default 5pp) dal benchmark; se
+   diverge troppo viene ESCLUSO e il disallineamento e' registrato
+   (`validated=False`, `agreement_pp`);
+4. **fallback robusto** (richiesto dalla direttiva): senza Betfair/Matchbook
+   il consenso ripiega su cio' che c'e'. Con la sola Pinnacle il risultato
+   **coincide bit per bit col comportamento storico** (`fallback:
+   "pinnacle_only"`), quindi la pipeline non si blocca mai. `None` solo se
+   NESSUNA fonte ha i 3 esiti.
+
+**Integrazione EV** (`auto_bet._top_down_eval` -> `_top_down_load` ->
+`load_oracle`): la p_true e' il consenso; il resto e' INVARIATO (stessa soglia
+`value_filter.EV_MIN`, stesso floor EV, stesso fail-closed `no_oracle`). Il
+verdetto espone `oracle_sources`, `oracle_validated`, `oracle_fallback`.
+
+**Env** (`preserve()` in `.railway/railway.ts`, default di codice attivi):
+`PINNACLE_CONSENSUS` (1=ON; `0` ripristina la Pinnacle-secca), 
+`PINNACLE_CONSENSUS_METHOD` (mean|median), `PINNACLE_VALIDATOR_TOLERANCE`
+(0.05), `PINNACLE_DEVIG_METHOD` (power).
+
+**Diagnostica**: `venv/bin/python pinnacle_oracle.py --from-cache` ora misura
+anche la copertura del consenso (`with_consensus`, `with_multi`) e dichiara
+fonti/metodo/tolleranza. `scan_cache`/gate riportano `consensus_books`.
+
+**Test**: `test_pinnacle_api.py` + classe `TestConsensoMultiOracolo` (media,
+mediana, validatore che conferma/esclude, tolleranza configurabile, fallback
+solo-Pinnacle / validator-only / benchmark-senza-Pinnacle, consenso disabilitato,
+metadati esclusi da EV/true-odd, canonical_book, `load_oracle` dal consenso) +
+`test_top_down.TestConsensoNelGateEv` (l'EV usa il consenso e differisce dalla
+Pinnacle secca; fallback pinnacle_only). Tripwire del modulo intatti (nessun
+Poisson, nessuna scrittura, nessun ordine, nessuna rete all'import).
