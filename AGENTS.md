@@ -5939,7 +5939,76 @@ fine-grained PAT del nuovo account. Il token e' entrato nel vault con MERGE
 esplicito (load_vault -> sostituzione GITHUB_TOKEN -> riscrittura atomica chmod 600,
 5/5 segreti preservati, MAI `vault --commit`) e il plaintext e' stato distrutto con
 `shred -u`. L'askpass passa il token nuovo: nessun credential helper di sistema
-(check pulito), `gh` NON installata. ⚠️ Il push sulla nuova repo NON triggera
-deploy: `.railway/railway.ts` punta ancora a `github("Siryochy/quotaverace")` —
-Railway continua a deployare dalla vecchia finche' non si ripunta (dashboard
-Railway → Settings → Repository → `siryo009/betting_bot`).
+(check pulito), `gh` NON installata.
+
+### RIPUNTAMENTO COMPLETATO + CRASH LOOP RISOLTO (27/09/2026) — NUOVA INFRASTRUTTURA
+
+**Cronologia del guasto (27/09, diagnosi in sola lettura).** Dalle 15:16 UTC il
+container crash-loopava con `ValueError: Token non configurato.` (`bot.py:2650`,
+riavvii ogni ~1,3s). CAUSA RADICE DOPPIA, emersa solo con verifiche mirate:
+1) **Il vecchio account Railway (`peppe85palermo`, progetto `quotaverace`) era
+   andato in TRIAL EXPIRED**: servizio `api` fermo pulito il 26/09 19:06 UTC
+   ("Stopping Container"), `railway up` rifiutato ("Your trial has expired"),
+   deploy bloccati. NON un guasto tecnico: tutte le 40 env intatte (token len 46
+   sha12 `0a4a7040dbc3` = vault), volume `api-volume` 355 MB intatto.
+2) Il proprietario aveva ripuntato il deploy da un **NUOVO account Railway**
+   (`peppe85palermo1@libero.it`, progetto **`creative-vibrancy`**, servizio
+   **`betting_bot`**) collegato a `siryo009/betting_bot`: il servizio aveva SOLO
+   le var di sistema RAILWAY_* (zero env app) → lo stesso identico pattern
+   dell'orfano `valiant-liberation` del 12/09.
+**Lezione applicata**: `railway list` PRIMA di inseguire i log — ma stavolta non
+bastava: il CLI era autenticato sull'account SBAGLIATO. Il crash era su un
+account che il CLI non vedeva. `railway whoami` + login browserless
+(`railway login --browserless`, codice device su railway.com/activate) hanno
+rivelato il secondo account.
+
+**Risoluzione (tutto il 27/09, ~1h).**
+1. **Backup env**: `railway variables --kv` dal vecchio servizio → 25 variabili
+   salvate in `~/railway_env_backup_20260927.kv` (chmod 600, valori MAI in chat;
+   copie /tmp distrutte con shred). Da lì in poi il file e' la fonte.
+2. **Env ricreate sul servizio nuovo**: 25/25 via `railway variable set KEY
+   --stdin --skip-deploys` (ciclo di lettura dal file kv; zero falliti).
+3. **Volume creato**: `railway volume add -m /app/data` → `betting_bot-volume`
+   (⚠️ CLI 5.62: opzioni `-s/-p/-e` PRIMA del sottocomando; il path con link
+   attivo evita un panic interno di `volume add`).
+4. **Deploy**: `railway up --detach --yes` → deployment `4277da38` SUCCESS
+   (18:05 UTC). Le vecchie env (ODDS_API_KEY nuova inclusa) funzionano:
+   the-odds-api 382→378 crediti, ZERO 401.
+5. **Verifiche produzione**: `/api/health` **200** sul dominio nuovo
+   **`https://bettingbot-production-2538.up.railway.app`** (creato con
+   `railway domain`, target port auto: web_api 8080); bot scan vivo (36 partite
+   analizzate, gate leghe attivo); moduli `smart_hedging`/`adaptive_weighting`
+   importati OK; **getMe 200 `@Calcifrrbot`** (token valido, verificato senza
+   esporlo).
+6. **Webapp Vercel ripuntata** (CLI autenticato `siryochy`, progetto
+   `quotaverace`, root dir `webapp/`): `NEXT_PUBLIC_API_BASE` e `BACKEND_URL`
+   (proxy `/api/backend/*` in next.config.js) aggiornate al dominio nuovo →
+   redeploy prod. Verificato: `/dashboard` 200, proxy `/api/backend/api/health`
+   200 (la root 307->/dashboard e' il redirect Next della home, normale).
+7. **IaC**: `.railway/railway.ts` source api+surebet → `github("siryo009/betting_bot")`,
+   commit `8ba7778` pushato (piano `0 to add, 3 to change, 0 to destroy`).
+   ⚠️ Ma l'IaC e il progetto `quotaverace` stanno sull'account VECCHIO: per
+   governare il progetto `creative-vibrancy` (nuovo account) la IaC andrebbe
+   ripullata lì (`railway config pull`) — la vecchia file resta come storico.
+
+**⚠️ STATO POST-MIGRAZIONE (da sapere).**
+- **Il DB e' NUOVO**: il volume `api-volume` (355 MB: ledger, 15k match_results,
+  661 team_ratings, ensemble, caches) sta sul volume dell'account VECCHIO
+  (scaduto). Il container nuovo riparte da zero (volume 34 MB al primo giro):
+  ratings/ensemble/ML si ricostruiscono con le sync (API_FOOTBALL_KEY attiva,
+  `football_hist` marcatori di sync ABSENTI nel DB nuovo → la prima sync
+  storica riscarichera' le 35 leghe: pacing 6.5s gia' in codice) e il ledger
+  riparte dai segnali di oggi. Export dai dati vecchi possibile SOLO se
+  l'account vecchio viene riattivato (sessione CLI vecchia non preservata: un
+  `railway login` browser basta; il progetto e i suoi volumi non sono cancellati).
+- **Cron surebet NON esiste** sul nuovo account (il progetto `creative-vibrancy`
+  ha solo `betting_bot`): da ricreare quando serve (Dockerfile.surebet, cron
+  */15, `ODDS_API_KEY` condivisa, volume dedicato, restartPolicyType NEVER).
+- **Chiavi SSH Railway**: `railway ssh` sul nuovo account chiede la
+  registrazione (`railway ssh keys add` o `import from GitHub`).
+- **Dominio webapp invariato** (`quotaverace.vercel.app`), dominio API NUOVO:
+  il vecchio `api-production-dffd.up.railway.app` appartiene all'account
+  scaduto (404). Se il proprietario riattiva l'account vecchio NON far girare
+  DUE bot col medesimo token Telegram (conflitto getUpdates 409): spegnere il
+  vecchio o usare token diversi.
+- `/tmp/railway_env_backup.kv` distrutto; copia autorizzata: `~/railway_env_backup_20260927.kv`.
