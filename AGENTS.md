@@ -6056,6 +6056,38 @@ surebet` → SUCCESS; primo run reale 17:01 UTC: `16 match MLB | crediti residui
 
 **4) VERIFICA FINALE (27/09 sera).** health API 200, webapp 200, proxy
 webapp→api 200, ciclo `auto_bet` pulito ogni 60s (`equity 33.55 USDC`,
-0 candidati giocabili, 0 errori), cron surebet attivo. L'unica azione che
-resta all'utente: riattivare l'account API-Football dal dashboard (blocco
-esterno, non aggirabile) per la sync storica dei rating.
+0 candidati giocabili, 0 errori), cron surebet attivo.
+
+### NUOVA CHIAVE API-FOOTBALL + SYNC STORICA COMPLETATA (27/09/2026, tarda sera)
+
+**1) CHIAVE NUOVA, ACCOUNT NUOVO, VIVA.** Il proprietario ha creato un account
+API-Football NUOVO e ha incollato la chiave in chat (regola 7: da considerare
+compromessa — **DA RUOTARE** appena possibile, Opzione A: la imposta lui con
+`railway variable set API_FOOTBALL_KEY --stdin` dal repo, l'agente verifica
+solo l'impronta). Impostata su `betting_bot` via stdin (`set: true`), redeploy
+automatico `bcda5716` SUCCESS. Verifica SENZA esporre: len 32, sha12
+`71adc24a8010` (= vault), `/status` live dal container → account "GIUSEPPE",
+piano **Free attivo fino al 27/09/2027**, 0/100 richieste del giorno.
+Vault locale aggiornato con MERGE esplicito (load_vault → sostituzione voce →
+riscrittura atomica chmod 600, 5/5 segreti preservati). Nessuna copia della
+chiave in `.env`/`~/.env` (verificato).
+
+**2) SYNC STORICA COMPLETATA AL PRIMO GIRO (risultato MIGLIORE del vecchio
+DB).** `football_hist.py --seasons 2` in background sul container: **17.159
+partite su 41 leghe** (vecchio volume: 15.192), **581 squadre con rating**
+(`team_ratings`), **82/82 marker** (41 leghe × 2 stagioni 2023+2024), log finale
+"✅ Totale: 17159 partite | Rating ricalcolati". Tutto entro il tetto di 100
+richieste/giorno: il memo stagioni in-process (`_SYNC_STATE["first_year"]`)
+ha fatto saltare 2026/2025 dopo la prima lega e il pacing 6,5s ha evitato il
+rate limit per-minuto. Il gate modello NON e' piu' cieco: `team_names` +
+581 rating → la copertura del modello sui segnali SX torna misurabile, e la
+catena `decision` smette di mandare tutto in `review` per DATA_QUALITY_LOW.
+Il job giornaliero 08:30 UTC mantiene le leghe da qui in poi (marker gia'
+scritti, zero riscariche). Ensemble ML: si ritrainera' da solo (05:45 UTC +
+boot) quando il ledger avra' righe chiuse sufficienti.
+
+**3) ⚠️ AZIONE UTENTE RESIDUA — ROTAZIONE CHIAVE.** La chiave `adc2…106a` e'
+stata esposta in chat: va rigenerata dal dashboard api-football.com e
+sostituita (Railway via `--set-from-stdin`/`--stdin`, MAI in chat; poi il
+vault si allinea con il solito merge esplicito). Finche' non ruotata,
+trattarla come compromessa.
