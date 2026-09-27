@@ -284,7 +284,7 @@ export default defineRailway(() => {
   };
 
   const api = service("api", {
-    source: github("Siryochy/quotaverace", { checkSuites: false }),
+    source: github("siryo009/betting_bot", { checkSuites: false }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     replicas: { "ams": 1 },
     volumeMounts: { ["/app/data"]: { type: "volume", name: data.name, address: data.address } },
@@ -300,7 +300,7 @@ export default defineRailway(() => {
   // max ~8 chiamate/giorno per NBA+MLB) e SUREBET_MIN_REMAINING=50 ferma lo
   // scanner sotto i 50 crediti residui, proteggendo il budget del value bot.
   const surebet = fn("surebet", {
-    source: github("Siryochy/quotaverace", { checkSuites: false }),
+    source: github("siryo009/betting_bot", { checkSuites: false }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile.surebet" },
     // restartPolicyType NEVER: il container del cron ESEGUE e DEVE uscire a fine
     // scan (vedi sopra). Era impostato solo sul servizio live, non nel file:
