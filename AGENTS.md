@@ -6091,3 +6091,20 @@ stata esposta in chat: va rigenerata dal dashboard api-football.com e
 sostituita (Railway via `--set-from-stdin`/`--stdin`, MAI in chat; poi il
 vault si allinea con il solito merge esplicito). Finche' non ruotata,
 trattarla come compromessa.
+
+**4) VERIFICA JOB POST-SYNC (27/09 sera, 18:00 UTC).** Job al boot VERI (non
+solo registrati): backup 17:47 integrity ok; retrain ensemble eseguito e
+correttamente DISATTIVATO ("Dataset troppo piccolo 0 < 30" — il ledger nuovo
+non ha ancora chiusure; si attivera' da solo). Job analisi 18:00 UTC: rotazione
+quote rifrescata (crediti 366), SX scan 31 partite, multi_market 636 quote.
+**Primi 4 segnali strong_value del nuovo DB — tutti OU in telemetria** (Liga MX
+Under 3.5 @1.49 EV+14.3%, PL Under 4.5 @1.32 EV+12.3%, MLS Under 4.5 @1.34
+EV+12.3%, PL Under 4 @1.43 EV+14.4%): 0 ordini perche' il gate di prontezza OU
+(`ou_live_ready`, soglia 20 chiusure giocabili post-19/09 con ROI positivo)
+e' IN PAUSA sul DB NUOVO e il suo contatore e' ripartito da zero — l'OU restara in
+shadow finche' la telemetria non si ricostituisce su questo ledger (e'
+il comportamento prudente voluto, NON un guasto; nessun segnale AH al momento).
+Schema `matches` sul nuovo DB: colonne `id/home_team/away_team` (non
+`match_id/home/away`). Nota orari: `history_sync_job` e' alle **06:30 UTC**
+(08:30 ITA; run_daily hour=8 minute=30-IT_OFFSET) — domani saltera' tutto
+(marker 82/82 gia' scritti, zero richieste).
