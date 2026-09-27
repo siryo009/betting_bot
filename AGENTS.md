@@ -6001,14 +6001,61 @@ rivelato il secondo account.
   riparte dai segnali di oggi. Export dai dati vecchi possibile SOLO se
   l'account vecchio viene riattivato (sessione CLI vecchia non preservata: un
   `railway login` browser basta; il progetto e i suoi volumi non sono cancellati).
-- **Cron surebet NON esiste** sul nuovo account (il progetto `creative-vibrancy`
-  ha solo `betting_bot`): da ricreare quando serve (Dockerfile.surebet, cron
-  */15, `ODDS_API_KEY` condivisa, volume dedicato, restartPolicyType NEVER).
+- **Cron surebet RICREATO il 27/09 sera** (vedi sotto).
 - **Chiavi SSH Railway**: `railway ssh` sul nuovo account chiede la
-  registrazione (`railway ssh keys add` o `import from GitHub`).
+  registrazione — FATTA il 27/09 sera (vedi sotto).
 - **Dominio webapp invariato** (`quotaverace.vercel.app`), dominio API NUOVO:
   il vecchio `api-production-dffd.up.railway.app` appartiene all'account
   scaduto (404). Se il proprietario riattiva l'account vecchio NON far girare
   DUE bot col medesimo token Telegram (conflitto getUpdates 409): spegnere il
   vecchio o usare token diversi.
 - `/tmp/railway_env_backup.kv` distrutto; copia autorizzata: `~/railway_env_backup_20260927.kv`.
+
+### Follow-up eseguiti (27/09/2026, sera): SSH + sync + cron surebet
+
+**1) CHIAVE SSH nuovo account.** La vecchia `quotaverace-debug` e' legata
+all'account vecchio (una chiave = un solo account Railway). Generata
+`~/.ssh/id_ed25519_railway` (commento `betting-bot-debug`) e registrata con
+`railway ssh keys add -k <fingerprint>` — il CLI legge le chiavi dall'SSH
+AGENT: se l'agente ne ha due, offre la prima e ssh si autentica come l'account
+SBAGLIATO; per il nuovo account usare un agente temporaneo con SOLA la chiave
+nuova (`eval $(ssh-agent -s); ssh-add ~/.ssh/id_ed25519_railway` prima di
+`railway ssh`). Verificato: SSH OK + moduli `smart_hedging`/`adaptive_weighting`
+importati sul container.
+
+**2) DB NUOVO = VUOTO + API-FOOTBALL DI NUOVO SOSPESO (blocco esterno).**
+Stato al 27/09: `team_ratings` 0 (tabella assente), `match_results` 0,
+`sync_state` assente; ledger di oggi: 31 matches, 70 predictions, 716
+market_quotes (il multi-mercato ha gia' lavorato). Sync storica lanciata a mano
+(`football_hist.py --seasons 2` in background sul container): **0 righe su
+tutte le leghe** — `GET /status` e `/fixtures` rispondono
+`{"access": "Your account is suspended..."}`: l'account API-Football
+(peppe85palermo1? la chiave `fc8972c3a59e` del 12/09) e' stato sospeso di
+nuovo, come gia' l'11/09. Il codice gestisce bene il caso: errore "access" →
+`retry` → 3 tentativi → 0 righe, **ZERO marker `sync_state` scritti** → dopo la
+riattivazione (dashboard api-football.com) la sync riparte pulita con
+`python3 football_hist.py --seasons 2` (o attendere il job 08:30 UTC).
+Intanto i rating arrivano SOLO da `compute_ratings()` sul settlement (job 4h +
+serali): senza `match_results` la tabella non nasce finche' non si referta la
+prima partita — il gate modello resta cieco (profilo neutro) e la catena
+decide `review` per DATA_QUALITY_LOW: comportamento prudenziale voluto.
+
+**3) CRON SUREBET RICREATO sul nuovo account (procedura IaC-native).**
+`railway config pull --force` → il progetto `creative-vibrancy` ha ora il SUO
+file `.railway/railway.ts` (servizio betting_bot + volume, env tutte
+`preserve()`; l'IaC del progetto vecchio resta in git history). Aggiunto il
+servizio `surebet` (`fn`, `Dockerfile.surebet`, cron `*/15`,
+`restartPolicyType NEVER`, volume dedicato `surebet-volume` 100 MB region sfo —
+il progetto non supporta volumi condivisi) + env SUREBET_* da codice + 3
+segreti copiati da `betting_bot` via pipe stdin (ODDS_API_KEY,
+QUOTAVERACE_BOT_TOKEN, ADMIN_CHAT_ID; valori mai in chat). `config plan`: **2
+to add, 0 to change, 0 to destroy** → apply OK. Primo deploy `railway up -s
+surebet` → SUCCESS; primo run reale 17:01 UTC: `16 match MLB | crediti residui
+372` e run completato (exit pulito, chiave condivisa funzionante — fine dei
+401 del vecchio cron).
+
+**4) VERIFICA FINALE (27/09 sera).** health API 200, webapp 200, proxy
+webapp→api 200, ciclo `auto_bet` pulito ogni 60s (`equity 33.55 USDC`,
+0 candidati giocabili, 0 errori), cron surebet attivo. L'unica azione che
+resta all'utente: riattivare l'account API-Football dal dashboard (blocco
+esterno, non aggirabile) per la sync storica dei rating.
