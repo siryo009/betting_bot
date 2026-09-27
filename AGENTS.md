@@ -2401,6 +2401,67 @@ di staking tennis, `SUREBET_CRON_HOLD_SECONDS` solo sul cron) e
 Regola: dopo ogni modifica al file IaC o alle env da dashboard, girare
 `railway config plan` e pretendere **0 to destroy**.
 
+### Gerarchia a 4 Agenti + Chief Orchestrator + AdvisorAgent (27/09/2026, Fase 1 SHADOW)
+
+Direttiva del proprietario: modello piramidale **Chief → 4 Lead Agent → sub-agenti**, con
+l'esecuzione reale del denaro INALTERATA (Fase 1 = solo shadow) e orchestrazione
+headless (job APScheduler / CLI / HTTP-n8n).
+
+**Nuovi file (tutti wrapper di DELEGA, zero formule copiate):**
+- `chief_orchestrator.py` — la state machine del ciclo: Data → Strategy → Finance
+  → [Advisor] → Execution. Il requisito gerarchico "esecuzione solo se la Finanza
+  approva" e' la mappa comandi di `decision.engine` (place_order solo su approve),
+  filtrata nel Capo per difesa in profondita'. UN MarketFeed condiviso fra Data e
+  Finance (un refresh per ciclo, stessa identita' di mercato). Fail-safe totale
+  (un errore del ciclo = `blocked_reason`, mai un'eccezione al chiamante). CLI:
+  `venv/bin/python chief_orchestrator.py [--json]` (exit 1 se bloccato).
+- `agents/contracts.py` — contratti Pydantic di uscita per agente (`MarketData`,
+  `StrategyOutput`, `FinanceOutput`, `ExecutionOutput`, `CycleReport`,
+  `AdvisorResolution`), tutti serializzabili (`as_json()`) per log/HTTP/n8n.
+- `agents/data_agent.py` — delega a `iter_signals` + `MarketFeed`/`verify_feed`.
+- `agents/strategy_agent.py` — filtra per `PLAYABLE_TIERS` (UNA definizione, da
+  `value_filter`); gli stati fuori lista finiscono in `unclassified` (mai spariti).
+- `agents/finance_agent.py` — delega a `build_plan` (fail-fast → risk → stake →
+  comandi), con `kills`/`feed` iniettabili e `bankroll_override` per l'Advisor.
+- `agents/execution_agent.py` — delega a `Dispatcher` + `ShadowGateway` (Fase 1:
+  SOLO shadow; il ValidatingLedgerGateway e' opt-in `persist=True`). Tripwire:
+  nessun `PlaceOrderGateway`/`execution_engine` montabile.
+- `agents/advisor_agent.py` — il **braccio destro** del Capo: interpellato SOLO su
+  piani bloccati (reject di valore o stake non eseguibile — nota: `LIQUIDITY_LOW`
+  e' un motivo di STAKE con verdetto approve, gestito). Tre risoluzioni: (1)
+  **micro-stake** = ri-valutazione con lo STESSO motore e bankroll virtuale
+  frazionato (0.5x/0.25x): se il piano ridotto diventa approve+eseguibile e'
+  l'UNICO override che diventa ordine (sempre via percorso shadow in Fase 1);
+  (2) **market switch**: propone il gemello OU/AH GIOCABILE dello stesso evento
+  come ESCALATION umana (mai segni calcolati ad hoc); (3) **contesto**: rule
+  engine deterministico (+ LLM opzionale che affina solo la NOTA) per falsi
+  positivi/steam chasing → SEMPRE escalation alla coda revisioni. Autorita'
+  intoccabili (KS, stop loss, feed) e soglie di strategia congelate (EV/edge/
+  fascia/lega): non negoziabili — si sale all'umano, non si scavalcano.
+  Interruttore `DECISION_ADVISOR` (default ON; `advisor_enabled=False` da codice).
+
+**Perche' queste scelte**: i bug gravi di progetto (stop-loss fantasma 21/09,
+doppio Kelly 13/09, doppio ordine 26/09) sono tutti "logica copiata in due
+posti"; ogni formula resta nel modulo originale e i wrapper sono facciate
+sottili con test di PARITA' (wrapper vs modulo: stessi input → stessi valori).
+Il micro-stake usa il bankroll virtuale perche' Kelly/cap sono proporzionali al
+bankroll (il floor no: se cade sotto il floor anche al minimo, il blocco e'
+strutturale e resta).
+
+**Test**: `test_agent_hierarchy.py` (**17 verdi**: parita' per i 3 wrapper +
+tripwire "niente denaro/import leggeri" + e2e offline: approve/review-copertura/
+reject-fascia/KS-iniettato/gate-mercato/fail-safe/CLI) e `test_advisor_agent.py`
+(**13 verdi**: perimetro, micro-stake con LIQUIDITY_LOW reale, blocco strutturale
+live, review-gia'-presidiata, market switch solo-escalation, LLM solo-nota,
+fail-safe, ramo del Capo con advisor ON/OFF, tripwire gateway shadow,
+contratto serializzabile). Regressioni `decision/` 299 verdi.
+
+**⚠️ NON collegato alla produzione dei soldi**: `auto_bet.run_today_bets` resta
+l'unico esecutore; il Chief gira come CLI diagnostica e sara' collegato in
+shadow a un job solo dopo il push. Fasi successive: F2 = confronto shadow
+(`decision_compare`), F3 = cutover (l'Execution Agent monta `PlaceOrderGateway`
+verso `auto_bet._live_fill` e `run_today_bets` smette di orchestrare).
+
 ### Catena di decisione `decision/` (14/09/2026)
 
 Direttiva del proprietario: dare alla pipeline una struttura esplicita
