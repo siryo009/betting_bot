@@ -450,8 +450,10 @@ class TestGate:
     def test_regola_dichiarata_nella_catena(self):
         from decision.guards import SAFETY_CHAIN
         # Il gate di mercato NON entra nella catena delle autorita' (kill switch,
-        # stop-loss, pausa): la precedenza assoluta resta al kill switch.
+        # stop-loss, weekly stop, pausa): la precedenza assoluta resta al kill
+        # switch. Allineato al CB settimanale aggiunto il 26/09/2026.
         assert [rule.name for rule in SAFETY_CHAIN] == ["manual", "daily_stop",
+                                                        "weekly_stop",
                                                         "settlement_pause"]
 
 

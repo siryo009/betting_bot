@@ -2462,6 +2462,49 @@ shadow a un job solo dopo il push. Fasi successive: F2 = confronto shadow
 (`decision_compare`), F3 = cutover (l'Execution Agent monta `PlaceOrderGateway`
 verso `auto_bet._live_fill` e `run_today_bets` smette di orchestrare).
 
+### Fase 2 avviata — Task 2.1: ciclo del Chief nel giro di produzione, SHADOW (27/09/2026, notte)
+
+Direttiva del proprietario: piano di uscita dalla shadow in 5 task (2.1 wiring shadow,
+2.2 raccolta dati + CLI confronto, 2.3 criteri di sblocco SCRITTI PRIMA di guardare
+i numeri: >= 7 giorni, >= 50 decisioni, 0 divergenze sugli invarianti, feed validato
+>= 95% dei cicli, micro-stake mai sopra cap; 2.4 canary 1 ordine/giorno a floor
+1 USDC in finestra T-60 con `CHIEF_EXECUTION=canary`; 2.5/F3 cutover).
+
+**Task 2.1 COMPLETATO** (`chief_shadow_wiring.py` + hook in `auto_bet._shadow_run`):
+- a OGNI giro di `auto_bet` (dopo corsia reale e shadow `decision/`) il
+  **ChiefOrchestrator valuta gli stessi segnali** con la piramide (Data ->
+  Strategy -> Finance -> Advisor -> Execution) e registra il riepilogo in
+  `data/decision/chief_cycles.jsonl` (env `CHIEF_CYCLE_LOG`; default
+  `DATA_DIR/decision/chief_cycles.jsonl`);
+- **nessun effetto reale**: Execution Agent solo shadow, zero crediti (feed con
+  riuso), fail-safe totale: l'hook gira in `finally` con doppia cintura, un
+  errore e' una riga DEBUG, mai un'eccezione al giro puntate; interruttore
+  `CHIEF_SHADOW_ENABLED` (default ON, `0` per spegnere);
+- CLI di lettura: `venv/bin/python chief_shadow_wiring.py [--days N] [--json]`
+  (cicli, verdict, blocchi, consigli advisor per kind);
+- il FinanceAgent del ciclo usa bankroll/mode del giro reale (same-era, cosi' il
+  confronto 2.2 e' apples-to-apples).
+
+**Test**: `test_chief_shadow_wiring.py` (**8 verdi**: hook registra + giro
+`run_today_bets` INVARIATO con l'hook attivo (KS off, 0 puntate), fail-safe su
+modulo rotto, interruttore, summarize/report coerenti, path default, tripwire
+"nessun gateway reale" + import leggero in subprocess). Due bug reali fixati in
+fase di test: `FeedSnapshot` non ha `as_json` (usato `model_dump(mode="json")`
+in `MarketData.as_json` — nei test passava perche' il conftest spegne il feed) e
+una variabile rimasta orfana nel refactoring di `summarize`.
+**Tripwire preesistente riparato**: `test_decision_feed.test_regola_dichiarata_
+nella_catena` falliva GIA' senza le mie modifiche (verificato con `git stash`):
+la catena `SAFETY_CHAIN` ha ora 4 regole (weekly_stop aggiunto col CB settimanale
+26/09) e il test aspettava 3 — allineato.
+Regressioni verdi in lotti: gerarchia+advisor+wiring (38), auto_bet+pipeline+
+commands (144), guards/shadow/validation/adapters/limits/feed/t60/weekly (191),
+review/review_telegram/compare/clv (85). `compileall` OK, 0 marker.
+
+**Prossimo: Task 2.2** — lasciar registrare i cicli sul container 3-7 giorni e
+leggere `chief_shadow_wiring.py` per il confronto Chief <-> corsia (agreement,
+blocchi, consigli advisor). Il canary (2.4) parte SOLO dopo i criteri del 2.3
+con via libera esplicita del proprietario.
+
 ### Catena di decisione `decision/` (14/09/2026)
 
 Direttiva del proprietario: dare alla pipeline una struttura esplicita

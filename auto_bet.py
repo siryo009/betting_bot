@@ -2648,6 +2648,21 @@ def _shadow_run(*, mode: str, bankroll: float, placed: int = 0) -> dict | None:
     except Exception as exc:
         logger.warning("auto_bet shadow: valutazione saltata (%s)", exc)
         return None
+    finally:
+        # FASE 2 (27/09/2026): il ciclo del Chief (piramide a 4 agenti) valuta
+        # gli stessi segnali e registra il riepilogo su un JSONL dedicato.
+        # NESSUN effetto reale (gateway shadow), zero crediti, fail-safe totale:
+        # un errore e' una riga di log, non tocca il giro puntate. Si spegne
+        # con `CHIEF_SHADOW_ENABLED=0`. Lettura: `python chief_shadow_wiring.py`.
+        try:
+            from chief_shadow_wiring import chief_shadow_enabled, run_chief_cycle_shadow
+            if chief_shadow_enabled():
+                chief_rec = run_chief_cycle_shadow(bankroll=bankroll, mode=mode)
+                if chief_rec is not None:
+                    logger.debug("chief shadow: ciclo registrato (ok=%s, finance=%s)",
+                                 chief_rec.get("ok"), chief_rec.get("finance"))
+        except Exception as exc:  # doppia cintura: mai rompere il giro
+            logger.debug("chief shadow: hook non disponibile (%s)", exc)
 
 
 if __name__ == "__main__":
