@@ -6086,11 +6086,16 @@ Il job giornaliero 08:30 UTC mantiene le leghe da qui in poi (marker gia'
 scritti, zero riscariche). Ensemble ML: si ritrainera' da solo (05:45 UTC +
 boot) quando il ledger avra' righe chiuse sufficienti.
 
-**3) ⚠️ AZIONE UTENTE RESIDUA — ROTAZIONE CHIAVE.** La chiave `adc2…106a` e'
-stata esposta in chat: va rigenerata dal dashboard api-football.com e
-sostituita (Railway via `--set-from-stdin`/`--stdin`, MAI in chat; poi il
-vault si allinea con il solito merge esplicito). Finche' non ruotata,
-trattarla come compromessa.
+**3) ROTAZIONE CHIAVE COMPLETATA (27/09 sera).** La chiave esposta in chat
+(`adc2…106a`) e' stata rigenerata dal proprietario dal dashboard api-football.com
+e impostata LUI STESSO su Railway via `railway variable set --stdin` (mai in
+chat, Opzione A della regola 7). Verifica dell'agente SENZA esporre: redeploy
+automatico `b9fa335b` SUCCESS (20:15), len 32, sha12 `9b878cf1f004` (≠ la
+vecchia `71adc24a8010`), `/status` live dal container → account "GIUSEPPE",
+piano Free attivo, 82/100 richieste del giorno (la sync pomeridiana). Vault
+locale allineato leggendo il valore da Railway via pipe ( Railway → stdin →
+vault: mai stampato), 5/5 segreti preservati. La chiave esposta in chat e'
+MORTA (la rigenerazione la invalida).
 
 **4) VERIFICA JOB POST-SYNC (27/09 sera, 18:00 UTC).** Job al boot VERI (non
 solo registrati): backup 17:47 integrity ok; retrain ensemble eseguito e
