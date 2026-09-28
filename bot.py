@@ -1495,6 +1495,26 @@ async def cmd_hedge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("cmd_hedge: %s", e)
         await update.message.reply_text(f"❌ Errore hedge: {e}")
 
+async def cmd_ordini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ordini — verifica ordini reali: stake fisso e recinto (solo admin).
+
+    Direttiva 28/09/2026: stake fisso 1.50 USDC e recinto del 40%
+    sull'esposizione APERTA. Il controllo e' una lettura del ledger (zero
+    crediti) e dichiara anche cio' che NON ha potuto verificare.
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text(
+            "⛔ Comando riservato agli admin.")
+        return
+    try:
+        import order_watch
+        await update.message.reply_text(order_watch.format_report())
+    except Exception as e:
+        logger.error("cmd_ordini: %s", e)
+        await update.message.reply_text(f"❌ Errore verifica ordini: {e}")
+
+
 def format_bet_verdicts(settlements: list) -> str:
     """Formatta i verdetti delle puntate appena saldate (fine partita)."""
     if not settlements:
@@ -1978,6 +1998,44 @@ async def liquidity_monitor_job(context: ContextTypes.DEFAULT_TYPE = None):
             logger.warning("liquidity_monitor: %s", text.replace("\n", " | "))
     except Exception as e:
         logger.warning("liquidity_monitor_job fallito: %s", e)
+
+
+async def order_watch_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Verifica gli ORDINI REALI ogni 30' (28/09/2026).
+
+    Dal 28/09 valgono due invarianti sul DENARO: stake fisso 1.50 USDC per
+    ordine e recinto del 40% sull'esposizione APERTA. Un ordine che li viola
+    puo' arrivare in qualsiasi momento e senza un controllo che si ripete
+    nessuno se ne accorgerebbe fino al drawdown.
+
+    Sola lettura del ledger (zero crediti, zero ordini). Lo stato viene SEMPRE
+    loggato; la notifica parte SOLO sulle violazioni, con anti-spam 1/giorno
+    (chiave ORDER_WATCH): un allarme ripetuto ogni 30' viene ignorato, uno che
+    arriva una volta viene letto.
+    """
+    try:
+        import order_watch
+        data = order_watch.audit()
+        o = data.get("orders") or {}
+        logger.info("order_watch: %d ordini live (%d dopo la direttiva), "
+                    "%d aperti, %.2f USDC esposti — %s", o.get("live", 0),
+                    o.get("live_dopo_direttiva", 0), o.get("aperte", 0),
+                    data.get("esposizione_corrente", 0.0), data.get("verdict"))
+        if not (data.get("violations") or []):
+            return
+        from tracker import is_notified, mark_notified
+        from datetime import timezone as _tz, timedelta as _td
+        day = (datetime.now(_tz.utc) + _td(hours=2)).strftime("%Y-%m-%d")
+        if is_notified("ORDER_WATCH", day):
+            return
+        mark_notified("ORDER_WATCH", day)
+        text = "🚨 " + order_watch.format_report(data)
+        if context is not None:
+            await _send_report_to_recipients(context, text)
+        else:
+            logger.warning("order_watch: %s", text.replace("\n", " | "))
+    except Exception as e:
+        logger.warning("order_watch_job fallito: %s", e)
 
 
 async def book_flow_job(context: ContextTypes.DEFAULT_TYPE = None):
@@ -2697,6 +2755,7 @@ def main() -> None:
     application.add_handler(CommandHandler("backup", cmd_backup))
     application.add_handler(CommandHandler("autobet", cmd_autobet))
     application.add_handler(CommandHandler("hedge", cmd_hedge))
+    application.add_handler(CommandHandler("ordini", cmd_ordini))
     application.add_handler(CommandHandler("t60reset", cmd_t60reset))
     application.add_handler(CommandHandler("settlement", cmd_settlement))
     application.add_handler(CommandHandler("revisioni", cmd_revisioni))
@@ -2833,6 +2892,12 @@ def main() -> None:
         # Zero costi API: legge solo il JSONL sul volume.
         job_queue.run_repeating(liquidity_monitor_job, interval=6 * 3600,
                                 first=600)
+        # Verifica degli ORDINI REALI (28/09): ogni 30' controlla stake fisso
+        # (1.50) e recinto del 40% sull'esposizione aperta. Sola lettura del
+        # ledger, zero crediti; allerta SOLO sulle violazioni (1/giorno).
+        # Piu' frequente degli altri monitor perche' un ordine fuori regola va
+        # visto adesso, non fra 6 ore.
+        job_queue.run_repeating(order_watch_job, interval=1800, first=420)
         # Flusso dell'order book SX (26/09): ogni 6h legge il registro degli
         # ingressi di liquidita' e allerta SOLO se ce ne sono nelle ultime
         # 24h (anti-spam 1/giorno). TELEMETRIA: zero costi API, zero ordini.

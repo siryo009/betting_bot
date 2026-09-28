@@ -73,10 +73,12 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # ⚠️ `cap_order_stake` hardcoda il tetto ed e' DI PROPOSITO non
     # disattivabile via env (vedi `test_tetto_inviolabile`): settare
     # `ORDER_MAX_STAKE_USDC = 0.0` non basta. L'isolamento quindi sostituisce
-    # la FUNZIONE (come si fa per `_top_down_load`), non la soglia. Il file
-    # dei tripwire del recinto (test_capital_enclosure.py) esercita la
-    # funzione VERA e per questo e' l'unico che non viene isolato.
-    if "test_capital_enclosure" not in request.node.nodeid:
+    # la FUNZIONE (come si fa per `_top_down_load`), non la soglia. I file che
+    # esercitano la funzione VERA non vengono isolati: sono i tripwire del
+    # recinto (`test_capital_enclosure`) e la sua VERIFICA sugli ordini reali
+    # (`test_order_watch`, che gira su un ledger temporaneo).
+    _verifica_il_recinto = ("test_capital_enclosure", "test_order_watch")
+    if not any(name in request.node.nodeid for name in _verifica_il_recinto):
         monkeypatch.setattr("auto_bet.cap_order_stake",
                             lambda stake: float(stake or 0.0))
         # STAKE FISSO (28/09/2026): la size di ogni ordine REALE e' un importo

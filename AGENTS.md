@@ -6474,3 +6474,66 @@ league_gate_impact/value_filter/market_calib/risk_guards/auto_bet x2/
 capital_enclosure/exposure_gate/advisor/hierarchy/t60/ou; bot/decision x5/
 chief/secret_hygiene/settlement/liquidity). `verify_guardrails.py`: **A–H
 tutti bloccano**. `compileall` OK, 0 marker di conflitto.
+
+### Verifica degli ordini reali: `order_watch.py` (28/09/2026)
+
+**Perche' esiste**: gli invarianti del 28/09 (**stake fisso 1.50 USDC**,
+**recinto 40%** = 13.42 a equity 33.55 → **8 ordini**) sono invarianti sul
+DENARO. Verificarli a mano una volta non serve: un ordine fuori regola puo'
+arrivare in qualsiasi momento e senza un controllo che si RIPETE nessuno se ne
+accorgerebbe fino al drawdown. Primo ordine reale atteso in questa fase:
+**0** — il ledger `bets` della nuova infrastruttura e' **vuoto** (0 righe dal
+reset del 27/09) e i candidati giocabili sono 0: la corsia e' armata e valuta,
+ma non c'e' niente da giocare.
+
+**Cosa controlla** (`audit()` → `violations` + `declared` + `max_open`):
+1. **stake esatto** — ogni riga `mode='live'` creata dalla data della direttiva
+   deve avere `stake == auto_bet.fixed_order_stake()` (valore letto, mai
+   copiato). Le righe **precedenti** sono dichiarate `stake_predirective`, non
+   giudicate: applicare la regola di oggi al passato sarebbe un falso positivo
+   su una strategia diversa.
+2. **tetto per-ordine inviolabile** (`ORDER_MAX_STAKE_USDC`) — vale anche sulle
+   righe pre-direttiva e anche con lo stake fisso spento: non e' una regola di
+   strategia.
+3. **recinto 40%** — replay CRONOLOGICO di aperture e chiusure: a ogni apertura
+   la somma degli stake aperti deve stare dentro `equity_istante x 40%`.
+   L'equity dell'istante viene dallo storico campionato
+   (`bankroll_history.json`, 1 campione/ora): `source` dichiara la provenienza
+   (`sample` / `nearest` / `now`), perche' **un tetto STIMATO non e' un tetto
+   verificato** — senza campione la riga finisce in `declared`
+   (`cap_estimated` / `cap_unverifiable`), mai in "ok".
+   A parita' di istante le CHIUSURE precedono le aperture (altrimenti una
+   sostituzione nello stesso secondo conterebbe come sfondamento).
+4. **ordine senza `bet_id`** su `FULLY_FILLED` (guardia del 26/09).
+
+**Verificato in locale su ledger temporaneo**: 8 ordini da 1.50 = **12.00**
+dentro il tetto **13.42** (picco ricostruito, fonte `sample`); il **nono**
+(13.50) viola; con il **settlement** del primo il nono **entra** (rilascio
+dinamico); a equity 100 il tetto diventa 40.00 e ci stanno 26 ordini
+(compounding).
+
+**In produzione**: job **`bot.order_watch_job` ogni 30'** (piu' frequente degli
+altri monitor: un ordine fuori regola va visto adesso, non fra 6 ore) — logga
+SEMPRE lo stato e allerta admin+iscritti SOLO sulle violazioni, anti-spam
+1/giorno (chiave `ORDER_WATCH`). Comando admin **`/ordini`**. CLI:
+`venv/bin/python order_watch.py [--json] [--db PATH] [--equity N]` e la
+**sorveglianza** `--wait 15 --interval 60` (verifica ogni nuovo ordine appena
+compare, exit 1 se viola). Sola lettura (`mode=ro`), zero crediti, zero ordini.
+
+**Isolamento test**: `conftest.py` isolava `cap_order_stake`/`FIXED_STAKE_USDC`
+per tutti i file tranne `test_capital_enclosure`; ora l'eccezione e' un elenco
+DICHIARATO (`test_capital_enclosure`, `test_order_watch`) — sono i due file che
+esercitano il recinto VERO, entrambi su ledger temporanei.
+
+**Test**: `test_order_watch.py` **33 verdi, tutti OFFLINE** (stake esatto,
+pre-direttiva, tetto che vale con stake fisso spento, 8/9 ordini, rilascio al
+settlement, compounding a equity 100, tetto stimato dichiarato, equity
+iniettabile, report, CLI exit code, sorveglianza che rileva il primo ordine,
+job e comando registrati, job silenzioso senza violazioni e che allerta con
+esse, job che non esplode su ledger rotto, sola-lettura/nessuna rete/nessun
+ordine, nessuna soglia duplicata). Lotti di regressione verdi: bot + auto_bet
+x2 + capital_enclosure + exposure_gate + order_watch; t60 + risk_guards +
+advisor + hierarchy + chief + weekly; significance + multi_market +
+market_diagnose + predictions + web_api + reports; secret_hygiene +
+liquidity + top_down + hedging + book_flow. `verify_guardrails.py`: **A–H
+tutti bloccano**. `compileall` OK, 0 marker.
