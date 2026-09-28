@@ -6217,3 +6217,57 @@ Schema `matches` sul nuovo DB: colonne `id/home_team/away_team` (non
 `match_id/home/away`). Nota orari: `history_sync_job` e' alle **06:30 UTC**
 (08:30 ITA; run_daily hour=8 minute=30-IT_OFFSET) — domani saltera' tutto
 (marker 82/82 gia' scritti, zero richieste).
+
+### Recinto di capitale in LIVE + suite verde al 100% (28/09/2026)
+
+**Direttiva del proprietario**: blindare la gestione del rischio in LIVE con un
+tetto inviolabile `min(stake, 1.50)` e portare la suite a verde prima del
+rilascio. Commit `c2d38d7`, deploy Railway `e907eb81` SUCCESS.
+
+**1) Il recinto (tre guardie, `auto_bet.py`).**
+- `cap_order_stake()` = **`min(stake, 1.50)` HARDCODED**: tetto assoluto per
+  SINGOLO ordine reale, NON disattivabile via env (`ORDER_MAX_STAKE_USDC=0.0`
+  non lo spegne — e' la regola di business, difesa da
+  `TestMicroStake::test_tetto_inviolabile`). Riduce, non alza mai.
+- `OPEN_EXPOSURE_CAP_PCT` = **0.40**: quando l'esposizione APERTA (stake delle
+  bet `mode='live'` non ancora saldate = capitale immobilizzato) raggiunge il
+  40% del bankroll il giro DEGRADA a shadow (nessun nuovo ordine reale,
+  valutazione e telemetria proseguono; si sblocca da sola coi settlement).
+  Complementare a `TOTAL_EXPOSURE_CAP_PCT` (flussi del giorno). Lettura fallita
+  -> `inf` (fail-closed: il recinto non si apre per un errore di lettura).
+- `CHIEF_EXECUTION` (default `off`): con `live` i piani approvati dalla catena
+  piramidale entrano nella STESSA coda di esecuzione della corsia storica
+  (T-60, liquidita', oracolo top-down, cap, dedup) — nessun canale parallelo.
+
+**2) I due test rotti del recinto (difetti del TEST, cap non toccato).**
+- `test_puntata_saldata_libera_il_capitale` chiamava
+  `tracker.save_result("sx-1", 2, 1)`: firma SBAGLIATA (reale `match_id,
+  league, home, away, sh, sa, settled_at`) -> `TypeError`.
+- `test_esposizione_piena_nessun_ordine_reale` usava
+  `_stub_wallet(33.55, exposure=13.42)`, ma il PRIMO argomento e' il
+  DISPONIBILE: l'equity diventava 46.97 (cap 18.79) e 13.50 di esposizione non
+  bloccava nulla. Corretto in `33.55 - 13.42` (equity 33.55, cap 13.42).
+
+**3) Il tetto non era isolato negli altri test (`conftest.py`).** Il conftest
+lo "disattivava" con `ORDER_MAX_STAKE_USDC = 0.0`, ma la funzione e' hardcoded
+-> il tetto si applicava a TUTTA la suite e rompeva i test di staking
+(`test_auto_bet_live`: stake attesi 3.0/3.98, ottenuti 1.50). Ora l'isolamento
+sostituisce la FUNZIONE (`cap_order_stake`) per tutti i file TRANNE
+`test_capital_enclosure.py` (nodeid escluso), che esercita quella VERA: 21 test
+verdi. Il valore di produzione non e' mai stato modificato.
+
+**4) 4 rossi PREESISTENTI: env perse dal `config pull` del 27/09.** La
+rigenerazione dell'IaC sul nuovo account aveva perso le dichiarazioni
+`preserve()`, e i tripwire `test_*_env_dichiarate_nella_iac` le difendono:
+fallivano adaptive weighting, smart hedging, top-down e book flow. Ripristinate
+in `.railway/railway.ts` (~30 env, incluse le nuove del recinto
+`OPEN_EXPOSURE_CAP_PCT`, `ORDER_MAX_STAKE_USDC`, `CHIEF_EXECUTION`). `preserve()`
+NON crea valori: le variabili assenti restano assenti (valgono i default di
+codice) e `config apply` resta "0 to destroy".
+
+**5) Esito.** Suite **2686 test su 102 file, 0 fallimenti** (`-m "not
+integration"`, offline; i 2 `integration` restano opt-in su rete/chiavi). Push
+su `main` -> deploy automatico **SUCCESS**, health **200**. Log del giro
+`auto_bet` (00:05 UTC): `esposizione aperta 0.00/13.42 USDC (cap 40%, tetto
+per-ordine 1.50 USDC)` — recinto attivo in produzione; 1 pick AH saltato da
+`no_oracle` (gate top-down fail-closed), 0 ordini come atteso.
