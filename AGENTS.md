@@ -6373,3 +6373,104 @@ capital_enclosure, auto_bet_live, auto_bet, agent_hierarchy, advisor_agent,
 chief_shadow_wiring, risk_guards, top_down, railway_drift_check) + **tutti i
 lotti della suite** (`-m "not integration"`, 11 lotti, 103 file) verdi,
 `compileall` OK, 0 marker di conflitto.
+
+### Significativita' statistica + dipendenze dichiarate (28/09/2026)
+
+**Direttiva del proprietario**: aggiungere la libreria di analisi statistica
+(`scipy`, `numpy`, `pandas`, `aiohttp`, `requests`, `pydantic`) e usarla per
+rendere leggibile il campione del ledger. Il modulo di significativita' e' la
+risposta al problema che ha gia' prodotto due letture sbagliate in una
+settimana (22/09: `-21,64%` sul 1X2 letto come prova contro la strategia, ma
+74 delle 85 righe erano pre-11/09; 25/09: `+21,21%` OU portato per intero da
+22 righe pre-19/09).
+
+**1) DIPENDENZE — cosa c'era davvero (audit, non assunzioni).**
+
+| libreria | stato PRIMA | azione |
+|---|---|---|
+| `numpy` 2.5.2 | in uso (ml_ensemble, probability_calibration) ma **solo transitiva** | dichiarata esplicitamente |
+| `scipy` 1.18.1 | **installata e MAI importata** (arriva con scikit-learn) | dichiarata + USATA (questo modulo) |
+| `pandas` 3.0.5 | in uso (odds_ingest, surebet_scanner) | gia' dichiarata |
+| `requests` 2.34.2 | in uso in 10+ moduli | gia' dichiarata |
+| `pydantic` 2.13.5 | in uso in `decision/` e `research_graph/` | gia' dichiarata |
+| `aiohttp` | assente | **installata (3.14.3) e dichiarata** |
+| `statsmodels` | assente | **NON aggiunta** (scelta del proprietario): `scipy.stats` copre i test e `sklearn`/`xgboost` le regressioni — sarebbe peso morto |
+
+⚠️ Nota onesta registrata: `aiohttp` **non e' ancora utilizzata da nessun
+percorso**. Il collo di bottiglia delle API non e' la latenza ma il **budget
+crediti** (500/mese) e il **rate limit** (10 req/min su API-Football, pacing
+6,5s gia' in `football_hist._throttle`): un fetch asincrono consumerebbe i
+crediti piu' in fretta, non produrrebbe piu' edge. Il parallelismo dove serve
+esiste gia' (`sx_signals._books_parallel`). La dipendenza resta dichiarata
+(richiesta diretta) e pronta per un client asincrono quando servira'.
+**Effetto pratico**: `requirements.txt` non dipende piu' da arrivi TRANSITIVI —
+un cambio di versione a monte non puo' piu' cambiare il comportamento del
+progetto senza che nessuno lo veda.
+
+**2) `significance.py` (nuovo, top-level come `flow_measure.py`) — sola
+LETTURA, offline, zero crediti.** Non decide nulla: dice se il risultato e'
+**distinguibile da zero** e **quante chiusure servono**.
+- `wilson_interval` (regge agli estremi: 0 su 8, 8 su 8, dove l'intervallo
+  normale produce limiti fuori da [0,1]), `hit_rate_test` (binomtest esatto),
+  `roi_test` (t-test sul P/L per unita' di stake, **stessa definizione di ROI
+  del report**: media su TUTTE le chiuse, push a 0), `required_n`,
+  `detectable_edge` (l'INVERSO di `required_n`), `breakeven_hit_rate`.
+- `evaluate(rows)` -> blocco con campione, ROI + **CI95**, p-value, hit rate +
+  CI95, confronto con la **prob. del modello** (overconfidence) e con la
+  **break-even implicita dalla quota media**, edge minimo rilevabile, chiusure
+  necessarie e `status` machine-readable (`insufficient` / `no_edge` /
+  `positive` / `negative` / `unavailable`).
+- `from_ledger(...)` legge il ledger con i filtri CONDIVISI
+  (`tracker.filter_predictions`: era + fascia quota) e `by_market`.
+- CLI: `venv/bin/python significance.py [--json] [--since D] [--odds-min X]
+  [--odds-max Y] [--all-statuses] [--db PATH]`.
+
+**3) IL NUMERO CHE RENDE ONESTI I GATE DI DECISIONE.** A quota media 1.65
+(size al floor del progetto, quota media reale della fascia 1.30-1.80):
+
+| chiusure | edge minimo distinguibile (potenza 80%) |
+|---|---|
+| **30** | **41,2%** |
+| 100 | 22,6% |
+| 500 | 10,1% |
+
+E per confermare un edge del **+2%** servono **~12.700 chiusure**. Conseguenza
+dichiarata: la soglia "30-40 chiusure dell'era nuova" **non puo' confermare un
+edge del +2%** — puo' solo **smentire un disastro** (ROI fortemente negativo)
+o confermare un edge enorme. E' la stessa conclusione del 22/09 arrivata per
+via statistica invece che per intuizione: prima di leggere un ROI come misura,
+guardare l'intervallo. Due tripwire bloccano la cosa
+(`test_30_chiusure_non_possono_confermare_un_edge_del_2pct`).
+
+**4) INTEGRAZIONE (nessuna soglia duplicata, nessun giudizio cambiato).**
+- `multi_market.shadow_report()` -> `markets[mt]["significance"]` (popolazione
+  **giocabile**: le righe conservate sono le stesse che alimentano il bucket) +
+  righe nel `format_report` sotto la riga "giocabili".
+- `market_diagnose.analyze_db()` -> `significance` (totale) + per mercato, con
+  sezione "🧮 Significativita' del campione" nel report. **I giudizi non
+  cambiano**: un campione sotto la soglia resta `insufficient` anche col
+  p-value piccolo (verificato da un test).
+- **`GET /api/significance`** (nuovo endpoint): `?since=`, `?odds_min=`,
+  `?odds_max=`, `?all=1` (modalita' confronto su tutto il ledger). Include il
+  report testuale in `report`.
+- `significance.MIN_SAMPLES` == `multi_market.MIN_RELIABLE_CLOSED` == 30
+  (tripwire: un progetto, una sola idea di "campione affidabile").
+- **Degrado, non crash**: senza `scipy` il modulo risponde `unavailable` e i
+  report stampano una riga di degrado; un errore di lettura diventa un blocco
+  con il motivo. In ogni punto l'errore e' **inghiottito e contato**, mai
+  propagato (la diagnostica non deve poter rompere un report).
+
+**5) GARANZIE (tripwire in `test_significance.py`)**: nessuna istruzione di
+scrittura nel sorgente, connessione SEMPRE `mode=ro` (il test tenta una
+`UPDATE` e pretende che SQLite la rifiuti), nessuna rete (niente `requests`/
+`aiohttp`/`odds_api`/`sx_signals`), nessun ordine (`place_limit_order`,
+`execution_engine`, `_live_fill`, `save_bet`), e `import significance` in
+sottoprocesso NON carica `tracker`/`auto_bet`/`bot`/`odds_api`/`decision`.
+
+**6) Verifica**: **`test_significance.py` = 63 verdi, tutti OFFLINE** (ledger
+temporaneo, nessuna rete) + 3 lotti di regressione (871 test:
+multi_market/market_diagnose/predictions/web_api/reports/performance/flow;
+league_gate_impact/value_filter/market_calib/risk_guards/auto_bet x2/
+capital_enclosure/exposure_gate/advisor/hierarchy/t60/ou; bot/decision x5/
+chief/secret_hygiene/settlement/liquidity). `verify_guardrails.py`: **A–H
+tutti bloccano**. `compileall` OK, 0 marker di conflitto.

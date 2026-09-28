@@ -49,8 +49,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Soglie di default, coerenti con STRATEGY.md:
 # - MIN_TOTAL: primo segnale affidabile da ~100 previsioni chiuse;
@@ -293,6 +296,45 @@ def _subtract(everything: Dict[str, Dict], playable: Dict[str, Dict]) -> Dict[st
     return out
 
 
+def _attach_significance(res: Dict, *, statuses, since, odds_min, odds_max,
+                         all_statuses: bool = False) -> Dict:
+    """Aggiunge il blocco di significativita' statistica alla diagnosi.
+
+    Un ROI su 8 chiusure non e' una misura: qui si aggiunge, per il totale e
+    per ogni mercato, se il risultato e' DISTINGUIBILE da zero e l'edge minimo
+    rilevabile col campione attuale. E' un di piu' dichiarato: nessun giudizio
+    o soglia di questa diagnosi cambia (un campione sotto la soglia resta
+    `insufficient` anche se il p-value fosse piccolo).
+
+    Fail-safe: se la lettura o il calcolo falliscono, il campo e' `unavailable`
+    con il motivo — mai un'eccezione che toglie la diagnosi.
+    """
+    try:
+        import significance
+        sig = significance.from_ledger(statuses=statuses, since=since,
+                                       odds_min=odds_min, odds_max=odds_max,
+                                       by_market=True,
+                                       all_statuses=all_statuses)
+    except Exception as exc:
+        logger.debug("market_diagnose: significativita' non calcolata: %s", exc)
+        sig = {"status": "unavailable", "error": str(exc), "by_market": {}}
+    res["significance"] = sig
+    by_mkt = sig.get("by_market") or {}
+    for m in res.get("markets") or []:
+        if isinstance(m, dict):
+            m["significance"] = by_mkt.get(str(m.get("mercato")))
+    return res
+
+
+def _significance_lines(block) -> List[str]:
+    """Righe di significativita' per il report (vuote se non c'e' nulla)."""
+    try:
+        import significance
+        return significance.format_lines(block, indent="   ")
+    except Exception:
+        return []
+
+
 def analyze_db(all_statuses: bool = False, *, since=None, odds_min=None,
                odds_max=None, **kwargs) -> Dict:
     """Diagnosi sul DB reale: legge predictions_summary() da tracker.
@@ -316,12 +358,17 @@ def analyze_db(all_statuses: bool = False, *, since=None, odds_min=None,
              "odds_max": odds_max}
     filtro = {"since": since, "odds_min": odds_min, "odds_max": odds_max}
     if all_statuses:
-        return diagnose(predictions_summary(**extra), filtro=filtro, **kwargs)
+        res = diagnose(predictions_summary(**extra), filtro=filtro, **kwargs)
+        return _attach_significance(res, statuses=None, since=since,
+                                    odds_min=odds_min, odds_max=odds_max,
+                                    all_statuses=True)
     from value_filter import PLAYABLE_TIERS
     playable = predictions_summary(statuses=PLAYABLE_TIERS, **extra)
-    return diagnose(playable,
-                    skipped=_subtract(predictions_summary(**extra), playable),
-                    filtro=filtro, **kwargs)
+    res = diagnose(playable,
+                   skipped=_subtract(predictions_summary(**extra), playable),
+                   filtro=filtro, **kwargs)
+    return _attach_significance(res, statuses=list(PLAYABLE_TIERS), since=since,
+                               odds_min=odds_min, odds_max=odds_max)
 
 
 def _fmt_pct(v: Optional[float], digits: int = 1) -> str:
@@ -376,6 +423,9 @@ def _report(res: Dict, all_statuses: bool = False) -> str:
         f"{label}: {t['n']} chiusi (V {t['won']} / P {t['lost']} / "
         f"Push {t['push']}) | ROI {_fmt_pct(t['roi'], 2)} | EV atteso "
         f"{_fmt_pct(t['avg_ev'], 2)} | gap {_fmt_pct(t['gap'], 2)}")
+    # Significativita' statistica (28/09/2026): il ROI da solo, su questo
+    # campione, non dice se il risultato e' distinguibile da zero.
+    out.extend(_significance_lines(res.get("significance")))
     if ex.get("n"):
         # Dichiarato, mai sommato: e' cio' che i gate hanno tagliato.
         out.append(
@@ -389,6 +439,16 @@ def _report(res: Dict, all_statuses: bool = False) -> str:
         return "\n".join(out)
     out.append("")
     out.append(_table(res["markets"]))
+    # Dettaglio per mercato: solo dove c'e' un blocco calcolabile (il filtro
+    # d'era/fascia, se attivo, e' gia' dichiarato in testa al report).
+    if any(m.get("significance") for m in res["markets"]):
+        out.append("")
+        out.append("🧮 Significativita' del campione (scipy):")
+        for m in res["markets"]:
+            lines = _significance_lines(m.get("significance"))
+            if lines:
+                out.append(f"   {m.get('label') or m.get('mercato')}")
+                out.extend(lines)
     out.append("")
     if not res["sufficiente"]:
         out.append(f"ℹ️  {res['note']}")

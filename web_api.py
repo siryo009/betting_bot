@@ -11,6 +11,7 @@ Endpoint:
   GET /api/scan              -> rimosso (04/09): Betfair non è più in architettura
   GET /api/drift             -> stato drift modello (verifica remota)
   GET /api/calibration       -> dashboard calibrazione (Brier/ECE, curve)
+  GET /api/significance      -> significativita' statistica del campione
 
 Uso su Railway: dopo aver deployato il bot, crea un secondo servizio con
   startCommand = "python web_api.py"
@@ -727,6 +728,41 @@ def _market_signals_json(params=None):
     return {"summary": summarize_market_signals(signals), "signals": signals}
 
 
+def _significance_json(params=None):
+    """GET /api/significance — significativita' statistica del campione.
+
+    Legge il ledger (sola lettura, zero crediti) e dice, per la popolazione
+    GIOCABILE e per ogni mercato, se il ROI osservato e' distinguibile da zero
+    e l'edge minimo rilevabile col campione attuale. E' il numero che rende
+    leggibili le soglie di decisione del progetto ("30-40 chiusure dell'era
+    nuova", "20 chiusure OU"): un ROI su 8 righe e' rumore con un segno.
+
+    Query opzionali: `?since=YYYY-MM-DD&odds_min=1.30&odds_max=1.80` (era e
+    fascia quota, gli stessi filtri dei report) e `?all=1` per la modalita'
+    CONFRONTO su tutto il ledger (non decisionale).
+    """
+    p = params or {}
+    try:
+        import significance
+
+        def _num(key):
+            try:
+                return float(p[key]) if p.get(key) not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        all_statuses = str(p.get("all", "")).strip().lower() in ("1", "true", "yes")
+        data = significance.from_ledger(
+            since=p.get("since") or None,
+            odds_min=_num("odds_min"), odds_max=_num("odds_max"),
+            by_market=True, all_statuses=all_statuses)
+        data["report"] = significance.format_report(data)
+        return data
+    except Exception as e:
+        logger.exception("errore /api/significance")
+        return {"status": "error", "error": str(e)}
+
+
 def _drift_json(params=None):
     """GET /api/drift — stato del drift modello (verifica REMOTA).
 
@@ -890,6 +926,7 @@ ROUTES = {
     "/api/market_signals": _market_signals_json,
     "/api/drift": _drift_json,
     "/api/calibration": _calibration_json,
+    "/api/significance": _significance_json,
 }
 
 POST_ROUTES = {

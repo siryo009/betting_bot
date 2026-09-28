@@ -1249,6 +1249,30 @@ def _bucket_add(bucket: Dict[str, Any], row: Dict[str, Any]) -> None:
         pass
 
 
+def _significance(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Blocco di significativita' statistica (`significance.py`), fail-safe.
+
+    Il ROI di un campione di 8 chiusure non e' una misura: questo blocco dice
+    se e' distinguibile da zero e quante chiusure servirebbero. Un errore qui
+    non deve rompere il report: si degrada la singola sezione.
+    """
+    try:
+        import significance
+        return significance.evaluate(rows)
+    except Exception as exc:
+        logger.debug("multi_market: significativita' non calcolata: %s", exc)
+        return {"status": "unavailable"}
+
+
+def _significance_lines(block: Optional[Dict[str, Any]]) -> List[str]:
+    """Righe di significativita' per il report (lista vuota se non c'e')."""
+    try:
+        import significance
+        return significance.format_lines(block, indent="      ")
+    except Exception:
+        return []
+
+
 def _finalize(bucket: Dict[str, Any]) -> Dict[str, Any]:
     """Chiude un bucket: arrotonda il profitto, calcola il ROI, dichiara il campione."""
     bucket["profit"] = round(float(bucket.get("profit") or 0.0), 4)
@@ -1329,6 +1353,9 @@ def shadow_report(*, now: Optional[datetime] = None, since: Any = None,
         playable = _empty_bucket()
         rejected = _empty_bucket()
         unclassified = _empty_bucket()
+        # Righe giocabili conservate per la significativita': il ROI da solo
+        # non dice se il campione e' giudicabile (28/09/2026).
+        playable_rows: List[Dict[str, Any]] = []
         try:
             from tracker import get_predictions, filter_predictions
             rows_all = get_predictions(mercato=market_type, limit=5000)
@@ -1348,6 +1375,7 @@ def shadow_report(*, now: Optional[datetime] = None, since: Any = None,
             _bucket_add(by_status.setdefault(status, _empty_bucket()), row)
             if status in PLAYABLE_STATUSES:
                 _bucket_add(playable, row)
+                playable_rows.append(row)
             elif status == "rejected":
                 _bucket_add(rejected, row)
             else:
@@ -1361,6 +1389,7 @@ def shadow_report(*, now: Optional[datetime] = None, since: Any = None,
         report["markets"][market_type]["by_status"] = {
             name: _finalize(bucket) for name, bucket in sorted(by_status.items())}
         report["markets"][market_type]["playable"] = _finalize(playable)
+        report["markets"][market_type]["significance"] = _significance(playable_rows)
         report["markets"][market_type]["rejected"] = _finalize(rejected)
         report["markets"][market_type]["unclassified"] = _finalize(unclassified)
     report["filter"] = {
@@ -1445,6 +1474,7 @@ def format_report(data: Optional[Dict[str, Any]] = None) -> str:
                 f"• {market_type}: {entry.get('quotes', 0)} quote sul ledger | "
                 f"{entry.get('closed', 0)} chiuse + {entry.get('open', 0)} aperte")
             lines.append(_group_line("giocabili ", entry.get("playable") or {}))
+            lines.extend(_significance_lines(entry.get("significance")))
             lines.append(_group_line("scartati  ", entry.get("rejected") or {}))
             unclassified = entry.get("unclassified") or {}
             if (unclassified.get("closed") or unclassified.get("open")):
