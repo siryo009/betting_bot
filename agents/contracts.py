@@ -105,6 +105,10 @@ class AdvisorResolution(BaseModel):
     - `escalate_review=True`: proposta di SALIRE all'umano (coda revisioni
       Telegram), mai esecuzione automatica — e' la via per i falsi positivi
       di contesto e per il market switch.
+
+    `exposure` porta lo stato del recinto di esposizione aperta quando la
+    risoluzione lo riguarda (direttiva 28/09/2026): quali ordini sono aperti,
+    quanto capitale immobilizzano e quanto ne resta per un nuovo piano.
     """
 
     resolved: bool = False
@@ -116,6 +120,8 @@ class AdvisorResolution(BaseModel):
     escalate_review: bool = False
     context: dict[str, Any] = Field(default_factory=dict)
     original_reason: str = ""
+    #: Stato del recinto di esposizione aperta (ordini in corso, tetto 40%).
+    exposure: dict[str, Any] = Field(default_factory=dict)
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -128,6 +134,7 @@ class AdvisorResolution(BaseModel):
             "original_reason": self.original_reason,
             "has_modified_plan": self.modified_plan is not None,
             "context": self.context,
+            "exposure": self.exposure,
         }
 
 
@@ -143,6 +150,9 @@ class CycleReport(BaseModel):
     execution: dict[str, Any] = Field(default_factory=dict)
     #: Consigli dell'Advisor sui blocchi (uno per segnale bloccato, se chiamato)
     advisor: list[dict[str, Any]] = Field(default_factory=list)
+    #: Recinto di esposizione aperta (direttiva 28/09/2026): ordini in corso,
+    #: capitale immobilizzato e tetto del 40% ricalcolato sull'equity corrente.
+    exposure: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -156,6 +166,8 @@ class CycleReport(BaseModel):
             "strategy": self.strategy,
             "finance": self.finance,
             "execution": self.execution,
+            "advisor": self.advisor,
+            "exposure": self.exposure,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }

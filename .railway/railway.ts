@@ -51,6 +51,7 @@ export default defineRailway(() => {
       ODDS_API_KEY: preserve(),
       ODDS_DAILY_BUDGET: preserve(),
       OPEN_EXPOSURE_CAP_PCT: preserve(),
+      ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),
       OU_LIVE_MIN_CLOSURES: preserve(),
       PINNACLE_CONSENSUS: preserve(),

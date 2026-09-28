@@ -107,7 +107,9 @@ def summarize(days: int = 7, *, path: Optional[Path] = None) -> dict[str, Any]:
     """Riepilogo dei cicli registrati: verdict, blocchi, consigli, advisor."""
     path = path or cycle_log_path()
     out: dict[str, Any] = {"cycles": 0, "ok": 0, "blocked": 0, "by_verdict": {},
-                           "advisor_kinds": {}, "blocked_reasons": {}, "files": str(path)}
+                           "advisor_kinds": {}, "blocked_reasons": {},
+                           "exposure_blocked": 0, "exposure_gates": 0,
+                           "exposure": {}, "files": str(path)}
     if not path.exists():
         return out
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -115,6 +117,9 @@ def summarize(days: int = 7, *, path: Optional[Path] = None) -> dict[str, Any]:
     advisor_kinds: dict[str, int] = {}
     blocked_reasons: dict[str, int] = {}
     cycles = ok = blocked = 0
+    exposure_blocked = 0        # cicli con il recinto del 40% pieno
+    exposure_gates = 0          # piani respinti dal recinto
+    last_exposure: dict[str, Any] = {}
     try:
         with open(path, "r", encoding="utf-8") as handle:
             for line in handle.readlines()[-_LOG_TAIL:]:
@@ -142,15 +147,28 @@ def summarize(days: int = 7, *, path: Optional[Path] = None) -> dict[str, Any]:
                 by_verdict["approve"] = by_verdict.get("approve", 0) + approved
                 by_verdict["review"] = by_verdict.get("review", 0) + review
                 by_verdict["reject"] = by_verdict.get("reject", 0) + rejected
+                exposure = rec.get("exposure") or {}
+                if exposure:
+                    last_exposure = exposure
+                    if not exposure.get("allowed", True):
+                        exposure_blocked += 1
                 for advice in rec.get("advisor") or []:
-                    kind = str(advice.get("override_kind") or ("escalation" if advice.get("escalate_review") else "none"))
+                    kind = str(advice.get("override_kind")
+                               or ("escalation" if advice.get("escalate_review")
+                                   else "none"))
+                    if str(advice.get("original_reason") or "") == "exposure_cap":
+                        kind = "exposure_cap"
+                        exposure_gates += 1
                     advisor_kinds[kind] = advisor_kinds.get(kind, 0) + 1
     except Exception as exc:
         out["error"] = str(exc)
         return out
     out.update({"cycles": cycles, "ok": ok, "blocked": blocked,
                 "by_verdict": by_verdict, "advisor_kinds": advisor_kinds,
-                "blocked_reasons": blocked_reasons})
+                "blocked_reasons": blocked_reasons,
+                "exposure_blocked": exposure_blocked,
+                "exposure_gates": exposure_gates,
+                "exposure": last_exposure})
     return out
 
 
@@ -161,6 +179,17 @@ def format_report(summary: dict[str, Any]) -> str:
         f"(ok {summary.get('ok', 0)} / bloccati {summary.get('blocked', 0)})",
         f"Verdict finanza: {summary.get('by_verdict') or {}}",
     ]
+    exposure = summary.get("exposure") or {}
+    if exposure:
+        count = exposure.get("count")
+        lines.append(
+            "Esposizione aperta: %.2f/%.2f USDC (%s ordini aperti, %s cicli "
+            "al tetto, %s piani respinti)" % (
+                float(exposure.get("open_stake") or 0.0),
+                float(exposure.get("cap") or 0.0),
+                count if count is not None else "?",
+                summary.get("exposure_blocked", 0),
+                summary.get("exposure_gates", 0)))
     kinds = summary.get("advisor_kinds") or {}
     if kinds:
         lines.append(f"Advisor: {kinds}")

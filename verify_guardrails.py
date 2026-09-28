@@ -8,7 +8,10 @@ temporaneo e MAI un provider reale (nessun ordine, nessuna rete).
 Scenari:
   A. Kill-switch OFF           -> il giro non parte
   B. Stop-loss giornaliero -5% -> puntate bloccate 24h
-  C. Cap stake severo 1-2%     -> stake cappato < minimo ordine = ordine saltato
+  C. Stake fisso + cap severo  -> ogni ordine reale vale ESATTAMENTE 1.50 USDC
+                                  e con fondi liberi insufficienti viene
+                                  saltato; a stake dinamico (env 0) il cap
+                                  severo 1-2% torna a bloccare
   D. Filtro prezzo             -> fascia bottom-up (SIM) / gate oracolo
                                   Pinnacle (LIVE): il bypass ordina solo con
                                   EV oracolo >= soglia, i gate NON-prezzo
@@ -17,6 +20,8 @@ Scenari:
   F. Lega STRATEGY_LEAGUES     -> campionati non vincenti mai candidati
   G. Circuit breakers T-60     -> finestra T-60..T-50, CB1 cap per ordine,
                                   CB2 kill switch patrimoniale 30 USDC
+  H. Recinto esposizione       -> 8 ordini aperti (40% impegnato): l'Advisor
+                                  respinge i nuovi piani, il giro non ordina
 
 Uso: venv/bin/python verify_guardrails.py
 """
@@ -122,6 +127,12 @@ def _seed(mid: str, esito: str, quota: float, market_prob: float,
 def _reset_state() -> None:
     auto_bet.clear_kill_switch()
     auto_bet.clear_daily_stop()
+    # Circuit breaker SETTIMANALE (26/09): la diagnostica fa oscillare il
+    # bankroll fra scenari e un solo salto verrebbe letto come drawdown
+    # (osservato il 28/09: -96.8% dalla cassa al wallet micro del recinto,
+    # che armava il blocco e svuotava gli scenari successivi). Ogni scenario
+    # parte da uno stato pulito.
+    auto_bet.clear_weekly_stop()
 
 
 class _LiqProv:
@@ -200,8 +211,8 @@ def main() -> int:
     print(f"  {GREEN if ok_b else RED}→ puntate piazzate: "
           f"{len(placed)}  (atteso 0){RESET}")
 
-    # ---------------------------------------------------------- C. CAP 1-2% ---
-    _head("C. CAP STAKE SEVERO 1% — wallet 38 USDC: cap 0.38 < min ordine 1.0")
+    # ------------------------------------------------- C. STAKE FISSO 1.50 ---
+    _head("C. STAKE FISSO 1.50 USDC + CAP SEVERO — wallet 38 USDC")
     _reset_state()
     # Forza la modalita' LIVE con un wallet di 38 USDC (mai un ordine vero:
     # _live_fill e' sostituito da uno stub che conta le chiamate).
@@ -209,39 +220,73 @@ def main() -> int:
     # Wallet reale: 36 USDC liberi + 2 in gioco (escrow) = 38 di EQUITY.
     # Il cap 1% si misura sull'equity (fix stop-loss/equity del 15/09):
     # sul solo disponibile sarebbe 0.36, non 0.38.
-    auto_bet._live_wallet_snapshot = lambda: {
-        "available": 36.0, "exposure": 2.0, "equity": 38.0}
-    calls = {"fill": 0}
+    _wallet_reale = {"available": 36.0, "exposure": 2.0, "equity": 38.0}
+    auto_bet._live_wallet_snapshot = lambda: dict(_wallet_reale)
+    calls = {"fill": 0, "stake": 0.0}
     _real_live_fill = auto_bet._live_fill   # ripristinata nello scenario E
+    _fixed_vero = auto_bet.fixed_order_stake()
 
     def _stub_fill(pick, stake, floor):  # noqa: ANN001
         calls["fill"] += 1
+        calls["stake"] = stake
         return None
 
     auto_bet._live_fill = _stub_fill
     # La finestra T-60 e' dimostrata dallo scenario G: qui il candidato a +3h
-    # deve ARRIVARE alla fase stake, altrimenti il cap non verrebbe mai
+    # deve ARRIVARE alla fase stake, altrimenti lo stake non verrebbe mai
     # misurato (dal 17/09 il default ON del T-60 svuotava questo scenario).
     auto_bet.T60_EXECUTION_ONLY = False
     mark = len(_RECORDS)
     placed = auto_bet.run_today_bets()
     _print_logs(mark)
-    auto_bet.T60_EXECUTION_ONLY = True
-    ok_c = (auto_bet.cap_hard_active() and placed == []
-            and calls["fill"] == 0)
-    print(f"  {DIM}stake teorico Kelly×cap1% su 38 = "
-          f"{38.0 * 0.01:.2f} USDC{RESET}")
-    print(f"  {GREEN if ok_c else RED}→ ordini inviati al provider: "
-          f"{calls['fill']}  (atteso 0){RESET}")
-    # Controprova: con STAKE_CAP_HARD=0 vale il floor exchange (1 USDC).
+    # C1 — IMPORTO FISSO: qualunque stake calcolato a monte, l'ordine vale 1.50.
+    ok_c1 = (calls["fill"] == 1
+             and abs(calls["stake"] - _fixed_vero) < 1e-9)
+    print(f"  {GREEN if ok_c1 else RED}→ stake FISSO: ordini "
+          f"{calls['fill']} con stake {calls['stake']:.2f} USDC "
+          f"(atteso 1 ordine da {_fixed_vero:.2f}){RESET}")
+
+    # C2 — VINCOLO DI CASSA: con meno dell'importo fisso libero non si ordina
+    # (mai un importo diverso dalla direttiva per far passare l'ordine).
+    # L'EQUITY resta 38 (il resto e' in escrow): la cassa libera e' l'unica
+    # grandezza che cambia, cosi' si misura il vincolo di cassa e non un
+    # drawdown (che armerebbe il circuit breaker settimanale).
+    _reset_state()
+    _libero = _fixed_vero - 0.30
+    _wallet_reale = {"available": _libero, "exposure": 38.0 - _libero,
+                     "equity": 38.0}
+    calls.update({"fill": 0, "stake": 0.0})
+    placed_c2 = auto_bet.run_today_bets()
+    ok_c2 = placed_c2 == [] and calls["fill"] == 0
+    print(f"  {GREEN if ok_c2 else RED}→ fondi liberi "
+          f"{_wallet_reale['available']:.2f} < importo fisso "
+          f"{_fixed_vero:.2f}: ordini {calls['fill']} (atteso 0, fail-closed){RESET}")
+
+    # C3 — STAKING DINAMICO STORICO (env a 0) + CAP SEVERO: il guardrail del
+    # 11/09 torna a bloccare (0.38 cappato < minimo ordine 1.0).
+    auto_bet.FIXED_STAKE_USDC = 0.0
+    _wallet_reale = {"available": 36.0, "exposure": 2.0, "equity": 38.0}
+    auto_bet._live_wallet_snapshot = lambda: dict(_wallet_reale)
+    _reset_state()
+    calls.update({"fill": 0, "stake": 0.0})
+    placed_c3 = auto_bet.run_today_bets()
+    ok_c3 = (auto_bet.cap_hard_active() and placed_c3 == []
+             and calls["fill"] == 0)
+    print(f"  {DIM}stake teorico Kelly×cap1% su 38 = 0.38 USDC{RESET}")
+    print(f"  {GREEN if ok_c3 else RED}→ staking dinamico + cap severo: "
+          f"ordini inviati {calls['fill']} (atteso 0){RESET}")
+    # C4 — Controprova: con STAKE_CAP_HARD=0 vale il floor exchange (1 USDC).
     auto_bet.STAKE_CAP_HARD = False
     auto_bet.clear_daily_stop()
     calls["fill"] = 0
-    placed = auto_bet.run_today_bets()
+    placed_c4 = auto_bet.run_today_bets()
     print(f"  {DIM}controprova STAKE_CAP_HARD=0 → il floor viene accettato: "
           f"ordini inviati {calls['fill']} (stake forzato al minimo "
           f"{auto_bet.MIN_STAKE_EUR} USDC){RESET}")
     auto_bet.STAKE_CAP_HARD = True
+    auto_bet.FIXED_STAKE_USDC = _fixed_vero   # direttiva ripristinata
+    auto_bet.T60_EXECUTION_ONLY = True
+    ok_c = ok_c1 and ok_c2 and ok_c3
 
     # ------------------------------------------------- D. FILTRO PREZZO ----
     _head("D. FILTRO PREZZO — fascia bottom-up (SIM) vs gate oracolo (LIVE)")
@@ -288,6 +333,13 @@ def main() -> int:
     auto_bet.T60_EXECUTION_ONLY = False      # il T-60 e' dello scenario G
     _saved_hard = auto_bet.STAKE_CAP_HARD
     auto_bet.STAKE_CAP_HARD = False          # il cap e' dello scenario C
+    # BYPASS DELLA FASCIA (25/09): SPENTO di default dal 26/09 — qui lo si
+    # accende ESPLICITAMENTE, altrimenti il filtro bottom-up svuota la corsia
+    # e lo scenario misurerebbe la fascia invece del gate oracolo (era il
+    # motivo del rosso D dal 26/09). Il default resta comunque verificato: il
+    # bypass non deve governare ordini reali senza una scelta dichiarata.
+    _bypass_default = bool(getattr(auto_bet, "TOP_DOWN_BYPASS", False))
+    auto_bet.TOP_DOWN_BYPASS = True
 
     def _fill_ok(pick, stake, floor):        # noqa: ANN001
         calls_d["fill"] += 1
@@ -303,11 +355,16 @@ def main() -> int:
     live_placed = auto_bet.run_today_bets()
     _print_logs(mark)
     ids_live = sorted(p["match_id"] for p in live_placed)
-    ok_bypass = (set(ids_live) == {"g-high", "g-low", "g-nfav"}
+    # La corsia top-down prende OGNI riga 1X2 aperta e lascia decidere
+    # l'oracolo: con p_true 0.92 passa anche g-valid (favorito in fascia, che
+    # la corsia bottom-up avrebbe giocato comunque — dedup (match_id, esito)
+    # nel canale unico). g-legacy resta fuori per LEGA: il bypass e' di
+    # PREZZO, non di strategia.
+    ok_bypass = (set(ids_live) == {"g-high", "g-low", "g-nfav", "g-valid"}
                  and "g-legacy" not in ids_live)
     print(f"  {GREEN if ok_bypass else RED}→ corsia top-down LIVE (p_true "
-          f"0.92): candidati {ids_live} (atteso: le tre quote fuori fascia "
-          f"DI AMBO I LATI, mai g-legacy){RESET}")
+          f"0.92): candidati {ids_live} (atteso: le quote fuori fascia DI "
+          f"AMBO I LATI + g-valid, mai g-legacy){RESET}")
     # Controprova: stesso board, oracolo con EV sempre negativo -> 0 ordini.
     conn = tracker._get_conn()
     conn.execute("DELETE FROM bets")     # DB temporaneo della diagnostica
@@ -325,10 +382,15 @@ def main() -> int:
           f"(atteso 0: il gate oracolo filtra){RESET}")
     auto_bet.T60_EXECUTION_ONLY = True
     auto_bet.STAKE_CAP_HARD = _saved_hard
+    auto_bet.TOP_DOWN_BYPASS = _bypass_default
     auto_bet._execution_mode = lambda allow_sim=True: "sim"
     auto_bet._top_down_load = lambda home, away: {   # stub storico ripristinato
         "1": 0.65, "X": 0.65, "2": 0.65, "overround": 0.0}
-    ok_d = ok_board and ok_bypass and ok_gate
+    ok_default = (_bypass_default is False)
+    print(f"  {GREEN if ok_default else RED}→ default TOP_DOWN_BYPASS "
+          f"spento: {not _bypass_default} (atteso si: il bypass si accende "
+          f"solo per scelta esplicita, mai per ordini reali automatici){RESET}")
+    ok_d = ok_board and ok_bypass and ok_gate and ok_default
 
     # --------------------------------------------------------- E. LIQUIDITA' ---
     _head("E. LIQUIDITA' SX — book sottile: ordine RIFIUTATO (no slippage)")
@@ -469,16 +531,70 @@ def main() -> int:
     auto_bet.t60_clear_kill()
     ok_g = ok_g1 and ok_g2 and ok_g3 and ok_g4 and ok_g5
 
+    # ------------------------------- H. RECINTO DI ESPOSIZIONE APERTA (28/09) ---
+    _head("H. RECINTO ESPOSIZIONE 40% — l'Advisor respinge i nuovi piani")
+    from agents.advisor_agent import AdvisorAgent   # noqa: E402
+    _reset_state()
+    conn = tracker._get_conn()
+    conn.execute("DELETE FROM bets")     # DB temporaneo della diagnostica
+    conn.commit()
+    conn.close()
+    equity_h = 33.55                                  # equity reale del wallet
+    fixed_h = auto_bet.fixed_order_stake()
+    cap_h = round(equity_h * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2)
+    auto_bet._execution_mode = lambda allow_sim=True: "live"
+    auto_bet._live_wallet_snapshot = lambda: {
+        "available": equity_h, "exposure": 0.0, "equity": equity_h}
+    calls_h = {"fill": 0}
+
+    def _fill_h(pick, stake, floor):  # noqa: ANN001
+        calls_h["fill"] += 1
+        return {"ok": True, "market_id": "m", "selection_id": 1,
+                "bet_id": "b", "status": "FULLY_FILLED",
+                "price": floor, "stake": stake}
+
+    auto_bet._live_fill = _fill_h
+    auto_bet.T60_EXECUTION_ONLY = False
+    for i in range(8):        # 8 ordini aperti = 12.00 USDC immobilizzati
+        tracker.save_bet(match_id=f"h{i}", mercato="1X2", esito="1",
+                         market_id="0xm", selection_id=1, price=1.65,
+                         stake=fixed_h, mode="live", status="FULLY_FILLED",
+                         bet_id=f"0xb{i}")
+    stato_h = auto_bet.open_exposure_status(equity_h)
+    allow_h = auto_bet.exposure_allows(equity_h, fixed_h)
+    gate_h = AdvisorAgent().exposure_gate(bankroll=equity_h, stake=fixed_h)
+    mark = len(_RECORDS)
+    placed_h = auto_bet.run_today_bets(stake_eur=5.0)
+    _print_logs(mark)
+    ok_h1 = (stato_h["open_stake"] == round(8 * fixed_h, 2)
+             and stato_h["count"] == 8 and stato_h["cap"] == cap_h)
+    ok_h2 = (allow_h["allowed"] is False
+             and gate_h.resolved is False
+             and gate_h.original_reason == "exposure_cap")
+    ok_h3 = placed_h == [] and calls_h["fill"] == 0
+    print(f"  {GREEN if ok_h1 else RED}→ ordini aperti: {stato_h['count']} "
+          f"per {stato_h['open_stake']:.2f}/{cap_h:.2f} USDC{RESET}")
+    print(f"  {GREEN if ok_h2 else RED}→ Advisor: nuovo stake "
+          f"{fixed_h:.2f} ammesso: {allow_h['allowed']} (atteso no: "
+          f"proiezione {fixed_h:.2f} oltre il tetto){RESET}")
+    print(f"  {GREEN if ok_h3 else RED}→ ordini inviati al provider: "
+          f"{calls_h['fill']} (atteso 0){RESET}")
+    auto_bet.T60_EXECUTION_ONLY = True
+    auto_bet._execution_mode = lambda allow_sim=True: "sim"
+    ok_h = ok_h1 and ok_h2 and ok_h3
+
     # ------------------------------------------------------------- ESITO ------
     _head("ESITO")
-    all_ok = ok_a and ok_b and ok_c and ok_d and ok_e and ok_f and ok_g
+    all_ok = (ok_a and ok_b and ok_c and ok_d and ok_e and ok_f and ok_g
+              and ok_h)
     for name, ok in (("A kill-switch OFF", ok_a),
                      ("B stop-loss 24h", ok_b),
-                     ("C cap severo 1%", ok_c),
+                     ("C stake fisso 1.50 + cap severo", ok_c),
                      ("D filtro prezzo/oracolo", ok_d),
                      ("E liquidita' SX", ok_e),
                      ("F lega strategia", ok_f),
-                     ("G circuit breakers T-60", ok_g)):
+                     ("G circuit breakers T-60", ok_g),
+                     ("H recinto esposizione 40%", ok_h)):
         print(f"  {GREEN + '✅' if ok else RED + '❌'} {name}{RESET}")
     print(f"\n  {BOLD}{GREEN + 'TUTTI I GUARDRAIL BLOCCANO' if all_ok else RED + 'QUALCOSA NON BLOCCA'}{RESET}\n")
     return 0 if all_ok else 1

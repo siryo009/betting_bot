@@ -132,6 +132,14 @@ OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.40"))
 # partite, non concentrata su una. Vale per ogni corsia (quella storica e la
 # catena piramidale): e' un tetto ASSOLUTO, mai un floor.
 ORDER_MAX_STAKE_USDC = float(os.getenv("ORDER_MAX_STAKE_USDC", "1.50"))
+# --- STAKE FISSO (direttiva 28/09/2026) ------------------------------------
+# La size di ogni singola scommessa REALE non e' piu' dimensionata (Kelly +
+# cap): e' un IMPORTO FISSO, 1.50 USDC. Con 8 ordini aperti l'esposizione e'
+# 12.00 USDC, sotto il recinto del 40%. Il valore resta comunque soggetto al
+# tetto per-ordine qui sopra (l'env puo' abbassare l'importo, mai alzarlo
+# oltre 1.50) e al vincolo di cassa (non si spendono fondi che non ci sono).
+# `ORDER_FIXED_STAKE_USDC=0` ripristina lo staking dinamico storico.
+FIXED_STAKE_USDC = float(os.getenv("ORDER_FIXED_STAKE_USDC", "1.50"))
 # Modalita' della catena piramidale dentro il giro REALE:
 #   "off"   (default) -> la catena registra/valuta, non esegue (Fase 1/2);
 #   "live"            -> i piani approvati dal Finance Agent entrano nella
@@ -1013,40 +1021,55 @@ def _today_placed_stake(hours: float = 24.0) -> float:
 # funzioni in un posto solo perche' due copie di una soglia di denaro
 # divergono, e la prima che diverge e' quella che spende.
 
-def _open_live_exposure() -> float:
-    """Stake REALE attualmente in gioco (puntate live non ancora saldate).
+def _open_live_snapshot() -> tuple[float, int]:
+    """(stake in gioco, numero di ordini aperti) — il capitale IMMOBILIZZATO.
 
     Solo `mode='live'`: la cassa simulata non immobilizza capitale e non deve
     occupare il recinto. Un'eccezione di lettura restituisce `inf`: meglio
     dichiarare un'esposizione ignota che aprire il varco del recinto (stessa
     direzione fail-closed del CB2).
+
+    Il RILASCIO e' dinamico per costruzione: la lettura non filtra per data
+    ma per `esito_finale IS NULL`, cioe' per gli ordini ANCORA IN CORSO —
+    appena un settlement chiude una riga l'esposizione scende da sola, senza
+    finestre giornaliere da riarmare (direttiva 28/09/2026).
     """
     try:
         from tracker import _get_conn
         conn = _get_conn()
         row = conn.execute(
-            "SELECT COALESCE(SUM(stake), 0) FROM bets "
+            "SELECT COALESCE(SUM(stake), 0), COUNT(*) FROM bets "
             "WHERE esito_finale IS NULL AND mode = 'live'").fetchone()
         conn.close()
-        return float(row[0]) if row and row[0] is not None else 0.0
+        stake = float(row[0]) if row and row[0] is not None else 0.0
+        count = int(row[1]) if row and row[1] is not None else 0
+        return stake, count
     except Exception as e:
         logger.warning("auto_bet: lettura esposizione aperta fallita: %s", e)
-        return float("inf")
+        return float("inf"), -1
+
+
+def _open_live_exposure() -> float:
+    """Stake REALE attualmente in gioco (puntate live non ancora saldate)."""
+    return _open_live_snapshot()[0]
 
 
 def open_exposure_status(bankroll: float) -> dict:
     """Stato del recinto d'esposizione aperta (lettura, nessuna scrittura).
 
-    Ritorna {open_stake, cap, blocked, pct, reason}: `blocked=True` quando
-    l'esposizione aperta raggiunge la soglia — da quel momento il giro non
-    piazza ordini reali ma continua a valutare e telemetrizzare (shadow).
+    Ritorna {open_stake, count, cap, blocked, pct, reason}: `blocked=True`
+    quando l'esposizione aperta raggiunge la soglia — da quel momento il giro
+    non piazza ordini reali ma continua a valutare e telemetrizzare (shadow).
+    `cap` e' SEMPRE `bankroll x 40%` letto fresco: con il capitale aggiornato
+    il tetto segue (compounding automatico, nessun valore congelato).
     """
     bankroll = float(bankroll or 0.0)
     cap = max(bankroll, 0.0) * OPEN_EXPOSURE_CAP_PCT
-    open_stake = _open_live_exposure()
+    open_stake, count = _open_live_snapshot()
     blocked = open_stake >= cap
     return {
         "open_stake": open_stake,
+        "count": count,
         "cap": round(cap, 2),
         "bankroll": round(bankroll, 2),
         "pct": (round(open_stake / bankroll, 4) if bankroll > 0 else None),
@@ -1057,6 +1080,60 @@ def open_exposure_status(bankroll: float) -> dict:
                    % (open_stake, cap, OPEN_EXPOSURE_CAP_PCT * 100, bankroll))
         if blocked else "",
     }
+
+
+def exposure_allows(bankroll: float, new_stake: float) -> dict:
+    """Il recinto accetta un NUOVO ordine di `new_stake` USDC?
+
+    Direttiva 28/09/2026: il 40% e' un tetto sul capitale immobilizzato
+    SIMULTANEO, non solo una soglia di blocco: un nuovo ordine e' ammesso solo
+    se l'esposizione PROIETTATA (aperta + nuovo stake) resta entro il cap.
+    Con equity 33.55 USDC (cap 13.42) e stake fisso 1.50 entrano 8 ordini
+    (12.00 USDC); il nono porterebbe a 13.50 > 13.42 e viene respinto.
+
+    E' la lettura che l'Advisor interroga a OGNI ciclo (via Execution Agent):
+    un solo punto di verita' per il tetto, cosi' la corsia di denaro e il
+    consigliere non possono divergere.
+
+    Fail-closed: una lettura impossibile (`open_stake` non finito) o un
+    bankroll non positivo non autorizzano l'ordine.
+    """
+    state = open_exposure_status(bankroll)
+    stake = max(float(new_stake or 0.0), 0.0)
+    open_stake = float(state["open_stake"])
+    cap = float(state["cap"])
+    usable = bool(bankroll) and bankroll > 0 and cap > 0 \
+        and open_stake == open_stake and open_stake != float("inf")
+    projected = round(open_stake + stake, 2) if usable else float("inf")
+    allowed = bool(usable and projected <= cap)
+    out = dict(state)
+    out.update({
+        "new_stake": round(stake, 2),
+        "projected": projected,
+        "allowed": allowed,
+        "reason": "" if allowed else _exposure_deny_reason(
+            usable, projected, cap, bankroll, open_stake,
+            int(state.get("count") or 0), stake),
+    })
+    return out
+
+
+def _exposure_deny_reason(usable: bool, projected: float, cap: float,
+                          bankroll: float, open_stake: float, count: int,
+                          stake: float) -> str:
+    """Motivo (leggibile) del rifiuto del recinto — sempre dichiarato."""
+    if usable:
+        return ("esposizione proiettata %.2f > tetto %.2f (%.0f%% del bankroll "
+                "%.2f): %d ordini aperti per %.2f USDC + %.2f nuovi — ordine "
+                "respinto, il tetto si libera da solo quando i settlement "
+                "chiudono un match"
+                % (projected, cap, OPEN_EXPOSURE_CAP_PCT * 100, float(bankroll or 0.0),
+                   count, open_stake, stake))
+    if float(bankroll or 0.0) <= 0:
+        return ("bankroll non positivo (%.2f): nessun nuovo ordine reale"
+                % float(bankroll or 0.0))
+    return ("recinto di esposizione non leggibile (esposizione %.2f): nessun "
+            "nuovo ordine (fail-closed)" % open_stake)
 
 
 def cap_order_stake(stake: float) -> float:
@@ -1070,6 +1147,56 @@ def cap_order_stake(stake: float) -> float:
     """
     stake = float(stake or 0.0)
     return min(stake, 1.50)
+
+
+# --- STAKE FISSO per gli ordini reali (direttiva 28/09/2026) ----------------
+
+def fixed_order_stake() -> float:
+    """Importo FISSO di ogni ordine reale (default 1.50 USDC), 0 = disattivo.
+
+    Un solo punto di verita': l'env puo' solo ABBASSARE l'importo (il tetto
+    per singolo ordine resta inviolabile), mai alzarlo. Un valore non
+    numerico ricade sul default di progetto invece di creare uno stake
+    casuale.
+    """
+    try:
+        fixed = float(FIXED_STAKE_USDC)
+    except (TypeError, ValueError):
+        fixed = 1.50
+    if fixed <= 0:
+        return 0.0
+    return cap_order_stake(round(fixed, 2))
+
+
+def fixed_stake_active() -> bool:
+    """True se la size degli ordini reali e' l'importo fisso (default)."""
+    return fixed_order_stake() > 0
+
+
+def order_stake(stake: float, spendable: float = float("inf")) -> float:
+    """Stake FINALE di un ordine REALE — unico punto di verita'.
+
+    Direttiva 28/09/2026: importo FISSO (`ORDER_FIXED_STAKE_USDC`, 1.50 USDC)
+    invece del dimensionamento dinamico. Con l'importo fisso disattivato
+    (0) resta il percorso storico (tetto per-ordine sopra lo stake calcolato).
+
+    Il vincolo di CASSA non e' negoziabile: se i fondi liberi del wallet non
+    coprono l'importo fisso la funzione restituisce 0 e il chiamante salta
+    l'ordine (fail-closed) — mai un importo diverso da quello della direttiva
+    per far passare comunque un ordine.
+    """
+    try:
+        cassa = float(spendable)
+    except (TypeError, ValueError):
+        cassa = float("inf")
+    fixed = fixed_order_stake()
+    if fixed > 0:
+        # Importo fisso: se i fondi liberi non lo coprono l'ordine e' 0
+        # (fail-closed), mai un importo diverso dalla direttiva.
+        return fixed if cassa >= fixed else 0.0
+    # Staking dinamico storico: tetto per-ordine SOPRA il vincolo di cassa
+    # (i fondi in escrow non si possono spendere due volte).
+    return min(cap_order_stake(stake), cassa)
 
 
 def chief_execution_enabled() -> bool:
@@ -2299,11 +2426,12 @@ def run_today_bets(stake_eur: float | None = None,
         logger.error("auto_bet: RECINTO ESPOSIZIONE APERTA — %s",
                      exposure_state.get("reason"))
     elif mode == "live":
-        logger.info("auto_bet: esposizione aperta %.2f/%.2f USDC (cap %.0f%%, "
-                    "tetto per-ordine %.2f USDC)",
+        logger.info("auto_bet: esposizione aperta %.2f/%.2f USDC su %s ordini "
+                    "(cap %.0f%%, stake fisso %.2f USDC)",
                     exposure_state.get("open_stake") or 0.0,
                     exposure_state.get("cap") or 0.0,
-                    OPEN_EXPOSURE_CAP_PCT * 100, ORDER_MAX_STAKE_USDC)
+                    exposure_state.get("count"),
+                    OPEN_EXPOSURE_CAP_PCT * 100, fixed_order_stake())
 
     # Carica CLV storico per la confidenza
     try:
@@ -2518,11 +2646,21 @@ def run_today_bets(stake_eur: float | None = None,
         # dell'exchange, il floor NON lo alza (sforerebbe il cap): l'ordine
         # viene saltato, a meno che il cap severo sia disattivato.
         if mode == "live":
-            pick_stake = min(pick_stake, _spendable)
-            # Tetto per SINGOLO ordine (27/09): micro-stake per diversificare
-            # l'esposizione su piu' partite. Riduce, non alza mai.
-            pick_stake = cap_order_stake(pick_stake)
+            # --- STAKE FISSO (direttiva 28/09/2026): la size dell'ordine REALE
+            # e' un IMPORTO FISSO (default 1.50 USDC), non piu' il Kelly.
+            # `order_stake` e' l'unico punto di verita' (tetto per-ordine
+            # inviolabile + vincolo di cassa): con fondi liberi insufficienti
+            # restituisce 0 e l'ordine viene saltato — mai un importo diverso
+            # dalla direttiva (fail-closed).
+            pick_stake = order_stake(pick_stake, _spendable)
             if pick_stake < MIN_STAKE_EUR:
+                if fixed_stake_active():
+                    logger.warning("auto_bet: STAKE FISSO %.2f non sostenibile "
+                                   "per %s (fondi liberi %.2f < minimo ordine "
+                                   "%.2f): ordine saltato (fail-closed)",
+                                   fixed_order_stake(), pick["match_id"],
+                                   _spendable, MIN_STAKE_EUR)
+                    continue
                 if STAKE_CAP_HARD:
                     logger.warning("auto_bet: %s (%s)",
                                    hard_cap_skip_message(pick_stake, _bankroll),
@@ -2608,12 +2746,27 @@ def run_today_bets(stake_eur: float | None = None,
     candidates = [c for c in candidates if c.get("stake", 0) > 0]
     if mode == "live":
         kept = []
+        _fixed = fixed_order_stake()
         for c in candidates:
-            stake = min(float(c["stake"]), _spendable)
-            # Stesso tetto per-ordine dopo i cap di portafoglio: i cap
-            # riducono, ma il tetto assoluto vale comunque sull'ordine FINALE.
-            stake = cap_order_stake(stake)
+            raw_stake = float(c["stake"])
+            if _fixed > 0 and raw_stake < _fixed:
+                # Un cap di portafoglio (correlazione/esposizione) ha ridotto lo
+                # stake sotto l'importo fisso: non si rialza a 1.50 (sforerebbe
+                # il cap) e non si scende sotto la direttiva -> ordine saltato
+                # (fail-closed). I cap decidono SE, l'importo fisso decide QUANTO.
+                logger.info("auto_bet: %s (%s) stake %.2f < importo fisso %.2f "
+                            "dopo i cap di portafoglio: salto",
+                            c.get("match_id"), c.get("esito_key"),
+                            raw_stake, _fixed)
+                continue
+            stake = order_stake(raw_stake, _spendable)
             if stake < MIN_STAKE_EUR:
+                if _fixed > 0:
+                    logger.warning("auto_bet: STAKE FISSO %.2f non sostenibile "
+                                   "per %s (fondi liberi %.2f): salto "
+                                   "(fail-closed)", _fixed, c.get("match_id"),
+                                   _spendable)
+                    continue
                 if STAKE_CAP_HARD:
                     # I risk cap (correlazione/esposizione) hanno ridotto lo
                     # stake sotto il minimo ordine: si salta, mai alzarlo al
@@ -2664,16 +2817,20 @@ def run_today_bets(stake_eur: float | None = None,
 
         if mode == "live":
             # Recinto d'esposizione: nessun NUOVO ordine reale finche' lo
-            # stake aperto non torna sotto il tetto. La degradazione e' a
-            # shadow: il ciclo di valutazione/telemetria gira comunque.
-            if _exposure_blocked:
+            # stake aperto non torna sotto il tetto E il nuovo ordine non
+            # farebbe superare il cap (PROIEZIONE: aperto + questo stake).
+            # La lettura e' fresca per ogni candidato: piu' ordini nella
+            # stessa tornata non possono sfondare il 40% sommandosi.
+            _allow = exposure_allows(_bankroll, pick_stake)
+            if _exposure_blocked or not _allow.get("allowed"):
                 open_exposure_skipped += 1
                 logger.info("auto_bet: %s (%s) sospeso dal recinto "
-                            "esposizione aperta (%.2f/%s USDC): nessun "
-                            "ordine reale, telemetria invariata",
+                            "esposizione aperta (%.2f/%.2f USDC, con questo "
+                            "ordine %.2f, %s aperti): nessun ordine reale, "
+                            "telemetria invariata",
                             cand.get("match_id"), cand.get("esito_key"),
-                            exposure_state.get("open_stake") or 0.0,
-                            exposure_state.get("cap"))
+                            _allow.get("open_stake"), _allow.get("cap"),
+                            _allow.get("projected"), _allow.get("count"))
                 continue
             filled = _live_fill(cand, pick_stake, price)
             if filled is None:
@@ -2830,7 +2987,7 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
                             "ottimale, scartato", payload.get("match_id"),
                             payload.get("outcome"))
                 continue
-            stake = cap_order_stake(float(payload.get("stake") or 0.0))
+            stake = order_stake(float(payload.get("stake") or 0.0))
             if stake <= 0:
                 continue
             out.append({

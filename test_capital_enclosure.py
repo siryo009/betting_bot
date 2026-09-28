@@ -5,9 +5,13 @@ disattiva di proposito per gli altri test — vedi la nota in conftest.py):
 
 1. **Esposizione aperta**: tetto del 40% del bankroll sugli stake REALI non
    ancora saldate. Raggiunta la soglia il giro degrada a shadow: nessun
-   nuovo ordine, ma valutazione e telemetria continuano.
-2. **Micro-stake**: tetto assoluto di 1.50 USDC per singolo ordine, così
-   l'esposizione si spalma su più partite invece di concentrarsi.
+   nuovo ordine, ma valutazione e telemetria continuano. Il tetto vale anche
+   in PROIEZIONE (esposizione aperta + nuovo ordine), quindi otto micro-stake
+   da 1.50 saturano il recinto e il nono non entra.
+2. **Stake fisso + micro-stake**: dal 28/09/2026 la size di ogni ordine REALE
+   è un IMPORTO FISSO di 1.50 USDC (`ORDER_FIXED_STAKE_USDC`), che resta
+   anche il tetto assoluto per singolo ordine: l'esposizione si spalma su più
+   partite invece di concentrarsi.
 3. **Corsiа Chief**: `CHIEF_EXECUTION=live` fa entrare i piani approvati
    dalla catena piramidale nella STESSA coda di esecuzione della corsia
    storica — non un canale di denaro parallelo (tripwire sul sorgente).
@@ -125,6 +129,72 @@ class TestEsposizioneAperta:
 # 2. MICRO-STAKE (tetto per singolo ordine)
 # ---------------------------------------------------------------------------
 
+class TestFixedStake:
+    """Direttiva 28/09/2026: la size dell'ordine reale e' un IMPORTO FISSO."""
+
+    def test_importo_esatto(self):
+        assert auto_bet.fixed_order_stake() == 1.50
+        assert auto_bet.fixed_stake_active() is True
+        # Qualunque stake calcolato a monte, l'ordine vale 1.50.
+        assert auto_bet.order_stake(5.0) == 1.50
+        assert auto_bet.order_stake(0.40) == 1.50
+
+    def test_env_puo_solo_abbassare(self, monkeypatch):
+        """Il tetto per-ordine resta inviolabile: l'env abbassa l'importo,
+        non lo alza oltre 1.50."""
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.90)
+        assert auto_bet.fixed_order_stake() == 0.90
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 9.0)
+        assert auto_bet.fixed_order_stake() == 1.50
+
+    def test_zero_ripristina_lo_staking_dinamico(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
+        assert auto_bet.fixed_stake_active() is False
+        assert auto_bet.order_stake(5.0) == 1.50      # torna il tetto classico
+        assert auto_bet.order_stake(0.80) == 0.80     # riduce, non alza
+
+    def test_valore_non_numerico_non_crea_stake_casuali(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", "boh")
+        assert auto_bet.fixed_order_stake() == 1.50
+
+    def test_fondi_liberi_insufficienti_saltano_l_ordine(self, monkeypatch):
+        """Mai un importo diverso dalla direttiva per far passare un ordine:
+        con meno di 1.50 USDC liberi lo stake e' 0 (fail-closed)."""
+        assert auto_bet.order_stake(5.0, spendable=1.20) == 0.0
+        assert auto_bet.order_stake(5.0, spendable=1.50) == 1.50
+
+    def test_l_ordine_reale_vale_esattamente_l_importo_fisso(self, monkeypatch,
+                                                             temp_db):
+        from test_auto_bet_live import _filled, _stub_wallet
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 1.50)
+        _stub_wallet(monkeypatch, 33.55)
+        seen = {}
+
+        def _fill(pick, stake, floor):
+            seen["stake"] = stake
+            out = _filled()
+            out["stake"] = stake
+            return out
+
+        _seed_one(monkeypatch)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "_live_fill", _fill)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)   # Kelly direbbe 5.0
+        assert len(placed) == 1
+        assert seen["stake"] == 1.50 and placed[0]["stake"] == 1.50
+
+    def test_sim_non_cambia_era(self, monkeypatch, temp_db):
+        """La cassa simulata alimenta ML/CLV: resta allo stake del segnale."""
+        from test_auto_bet_live import _fixed_stake
+        _fixed_stake(monkeypatch)
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 1.50)
+        _seed_one(monkeypatch)
+        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        assert len(placed) == 1 and placed[0]["mode"] == "sim"
+        assert placed[0]["stake"] == 5.0
+
+
 class TestMicroStake:
     def test_riduce_ma_non_alza(self):
         assert auto_bet.cap_order_stake(5.0) == 1.50
@@ -197,6 +267,26 @@ class TestRecintoNelGiroLive:
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert placed == []              # nessun ordine REALE
         assert called == []              # _live_fill non e' mai stato chiamato
+
+    def test_il_nono_ordine_non_entra_per_proiezione(self, monkeypatch, temp_db):
+        """Otto ordini da 1.50 = 12.00 USDC: sotto il tetto 13.42, ma il NONO
+        (13.50) sforerebbe il 40% -> respinto dalla proiezione, mai oltre il
+        cap impegnato simultaneamente (direttiva 28/09/2026)."""
+        from test_auto_bet_live import _fixed_stake, _filled, _stub_wallet
+        _fixed_stake(monkeypatch)
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 1.50)
+        # equity 33.55 = 12.00 liberi + 12.00 in gioco (8 ordini aperti)
+        _stub_wallet(monkeypatch, 33.55 - 12.00, exposure=12.00)
+        for i in range(8):
+            _open_bet(mid=f"old{i}", esito="1", stake=1.50)
+        _seed_one(monkeypatch)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        called = []
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda p, s, f: called.append(p) or _filled())
+        assert auto_bet.run_today_bets(stake_eur=5.0) == []
+        assert called == []          # il nono ordine non arriva mai a SX
 
     def test_esposizione_sotto_soglia_lordine_confermato(self, monkeypatch,
                                                          temp_db):

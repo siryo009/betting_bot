@@ -58,6 +58,28 @@ def _isolate_daily_stop(tmp_path, monkeypatch):
                                             "overround": 0.0})
 
 
+@pytest.fixture(autouse=True)
+def _isolate_enclosure(monkeypatch):
+    """Recinto di esposizione aperta LIBERO (direttiva 28/09/2026).
+
+    Questi test misurano il tetto del WALLET, i cap di portafoglio e lo
+    staking: il recinto del 40% e' un'altra cosa e con un wallet di 3 USDC
+    respingerebbe QUALSIASI ordine (cap 1.20 < stake), nascondendo la
+    grandezza che il test vuole verificare. Il recinto VERO ha i suoi tripwire
+    in `test_exposure_gate.py` e `test_capital_enclosure.py` (che non sono
+    isolati).
+    """
+    monkeypatch.setattr(auto_bet, "exposure_allows",
+                        lambda bankroll, stake=0.0: {
+                            "allowed": True, "blocked": False,
+                            "open_stake": 0.0, "count": 0,
+                            "cap": round(max(float(bankroll or 0.0), 0.0) * 0.40, 2),
+                            "bankroll": round(float(bankroll or 0.0), 2),
+                            "pct": 0.0, "new_stake": round(float(stake or 0.0), 2),
+                            "projected": round(float(stake or 0.0), 2),
+                            "reason": ""})
+
+
 ALLOWED_LEAGUE = "Premier League"   # in STRATEGY_LEAGUES
 # Le 5 leghe della strategia: servono a dare leghe DISTINTE (e ammesse) ai
 # test di correlazione/esposizione senza uscire dal gate di lega.

@@ -79,6 +79,23 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     if "test_capital_enclosure" not in request.node.nodeid:
         monkeypatch.setattr("auto_bet.cap_order_stake",
                             lambda stake: float(stake or 0.0))
+        # STAKE FISSO (28/09/2026): la size di ogni ordine REALE e' un importo
+        # fisso (1.50 USDC). La maggior parte dei test misura altro (cap
+        # percentuali, liquidita', wallet, stop-loss): con l'importo fisso
+        # attivo ogni asserzione leggerebbe 1.50 invece della grandezza in
+        # esame. I tripwire del recinto vero stanno in test_capital_enclosure,
+        # che non viene isolato (`0` = staking dinamico storico).
+        monkeypatch.setattr("auto_bet.FIXED_STAKE_USDC", 0.0)
+    # Stato degli ORDINI APERTI (direttiva 28/09/2026): la lettura reale
+    # interroga il ledger (`tracker`) e nei test che non isolano il DB sarebbe
+    # una scrittura silenziosa sul data dir vero (le migrazioni girano alla
+    # prima connessione). Si sostituisce il LETTORE DI DEFAULT con un recinto
+    # LIBERO: i test che vogliono il recinto vero (test_exposure_gate) lo
+    # riaccendono con un ledger temporaneo.
+    if "test_exposure_gate" not in request.node.nodeid:
+        import agents.execution_agent as _execution_agent
+        monkeypatch.setattr(_execution_agent, "default_exposure_reader",
+                            lambda: _free_enclosure)
     # `CHIEF_EXECUTION` decide se i piani della catena piramidale diventano
     # ordini reali. Nei test resta "off": la corsia Chief ha i suoi test
     # dedicati che lo accendono esplicitamente.
@@ -106,3 +123,20 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     _mm.reset_ou_ready_cache()
     yield
     _mm.reset_ou_ready_cache()
+
+
+def _free_enclosure(bankroll: float, new_stake: float = 0.0) -> dict:
+    """Recinto LIBERO per i test: nessun ordine aperto, nessun blocco.
+
+    Riproduce la forma di `auto_bet.exposure_allows` (stesse chiavi) senza
+    toccare il DB: chi verifica il recinto vero usa `test_exposure_gate`.
+    """
+    bankroll = float(bankroll or 0.0)
+    stake = max(float(new_stake or 0.0), 0.0)
+    cap = round(max(bankroll, 0.0) * 0.40, 2)
+    return {
+        "allowed": True, "blocked": False, "open_stake": 0.0, "count": 0,
+        "cap": cap, "bankroll": round(bankroll, 2), "pct": 0.0,
+        "new_stake": round(stake, 2), "projected": round(stake, 2),
+        "reason": "",
+    }

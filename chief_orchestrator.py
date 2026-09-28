@@ -85,6 +85,14 @@ class ChiefOrchestrator:
                 self.advisor.strategy = self.strategy
             if getattr(self.advisor, "data", None) is None:
                 self.advisor.data = self.data
+            # --- Stato degli ORDINI APERTI (direttiva 28/09/2026) ---------
+            # La lettura arriva dall'Execution Engine (unico che sa cosa e'
+            # stato eseguito) e delega al tetto unico di `auto_bet`: il
+            # consigliere e la corsia che spende NON possono misurare due
+            # esposizioni diverse. Nessun import di produzione a livello di
+            # modulo: si passa il bound method, l'import resta pigro.
+            if getattr(self.advisor, "exposure_reader", None) is None:
+                self.advisor.exposure_reader = self.execution.open_exposure
 
     def run_cycle(self, *, conn=None, now=None) -> CycleReport:
         report = CycleReport(
@@ -157,6 +165,22 @@ class ChiefOrchestrator:
                     logger.warning("chief: advisor fallito su %s: %s",
                                    plan.record.signal.signal_id, exc)
 
+        # --- 3c. RECINTO DI ESPOSIZIONE APERTA (direttiva 28/09/2026) -----
+        # L'Advisor interroga lo stato degli ORDINI APERTI a OGNI ciclo: se il
+        # capitale immobilizzato (40% del bankroll, ricalcolato sull'equity
+        # corrente) non lascia spazio a un nuovo ordine, ogni piano approvato
+        # viene RESPINTO — resta shadow finche' un settlement non chiude un
+        # match. Il rilascio e' dinamico: nessuna finestra giornaliera da
+        # riarmare, il ciclo successivo riparte da solo.
+        if self.advisor is not None:
+            bankroll = float(getattr(self.finance, "bankroll", 0.0) or 0.0)
+            try:
+                report.exposure = self.advisor.exposure_status(bankroll)
+            except Exception as exc:  # la telemetria non rompe il ciclo
+                logger.warning("chief: stato esposizione non leggibile: %s", exc)
+            approved_plans = self._apply_exposure_gate(approved_plans, bankroll,
+                                                       report)
+
         # --- 4. ESECUZIONE (solo approvati, difesa in profondita') --------
         # Il requisito gerarchico e' il VERDETTO: solo cio' che la Finanza ha
         # approvato (piu' i micro-stake dell'Advisor passati dallo stesso gate)
@@ -168,6 +192,43 @@ class ChiefOrchestrator:
 
         report.finished_at = datetime.now(timezone.utc).isoformat()
         return report
+
+
+    def _apply_exposure_gate(self, plans: list, bankroll: float,
+                             report: "CycleReport") -> list:
+        """Filtra i piani approvati con il recinto di esposizione APERTA.
+
+        Un piano entra solo se la PROIEZIONE (esposizione aperta + il suo
+        stake) resta entro il tetto del 40% del bankroll corrente. Il valore
+        del tetto NON e' replicato qui: vive una volta sola in `auto_bet` e
+        arriva dall'Execution Agent (nessuna soglia duplicata). Un gate non
+        leggibile RESPINGE (fail-closed): un recinto di cui non si sa nulla
+        non autorizza ordini.
+        """
+        if self.advisor is None or not plans:
+            return plans
+        kept: list = []
+        for plan in plans:
+            stake = float(getattr(plan.record.stake, "stake", 0.0) or 0.0)
+            try:
+                gate = self.advisor.exposure_gate(bankroll=bankroll, stake=stake)
+            except Exception as exc:
+                logger.warning("chief: gate esposizione fallito (%s): piano "
+                               "respinto", exc)
+                report.advisor.append({"resolved": False,
+                                       "reason_no": f"exposure_gate_error: {exc}",
+                                       "original_reason": "exposure_cap"})
+                continue
+            if gate.resolved:
+                kept.append(plan)
+                continue
+            report.advisor.append(gate.as_json())
+            logger.info("chief: piano %s RESPINTO dal recinto di esposizione "
+                        "(%.2f/%.2f USDC, %s ordini aperti)",
+                        plan.record.signal.signal_id,
+                        gate.exposure.get("open_stake"),
+                        gate.exposure.get("cap"), gate.exposure.get("count"))
+        return kept
 
 
 def main(argv: Optional[list[str]] = None) -> int:

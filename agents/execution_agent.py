@@ -11,16 +11,22 @@ Sub-agenti delegati (esistenti, gia' testati):
   (prima persistere, poi convalidare); l'ordine resta registrato, mai
   eseguito.
 
-**Il denaro resta fuori**: nessun gateway reale (`PlaceOrderGateway` verso
+**Il denaro resta fuori**: nessun gateway reale (quello che chiamerebbe
 `auto_bet._live_fill`) e' montato in Fase 1 — un tripwire lo pretende
 (`test_agent_hierarchy.py`). Il cutover e' la Fase 3, decisa sui numeri di
 `decision_compare`.
+
+**Stato degli ORDINI APERTI (direttiva 28/09/2026)**: l'Execution Engine e'
+l'unico che sa cosa e' stato eseguito, quindi e' anche la fonte dello stato
+del capitale immobilizzato. `open_exposure()` legge gli ordini reali ancora
+in corso (`mode='live'`, non saldati) e dice se un NUOVO stake entra nel
+tetto del 40%: e' la lettura che l'Advisor interroga a ogni ciclo.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from decision.commands import CommandPlan
 from decision.dispatcher import Dispatcher
@@ -30,6 +36,41 @@ from decision.middleware import Observability
 from .contracts import ExecutionOutput
 
 
+#: Tipo del lettore iniettabile: (bankroll, nuovo_stake) -> stato del recinto.
+ExposureReader = Callable[[float, float], dict]
+
+
+def default_exposure_reader() -> ExposureReader:
+    """Lettore REALE dello stato degli ordini aperti (import pigro).
+
+    Delega a `auto_bet.exposure_allows`: il tetto del 40% e la proiezione
+    (aperto + nuovo stake) vivono in UN posto solo — due copie di una soglia
+    di denaro divergono, e la prima che diverge e' quella che spende.
+
+    L'import e' dentro la funzione (non a livello di modulo) perche'
+    `import agents` deve restare leggero: `auto_bet` trascina il ledger e il
+    percorso d'ordine, che il ciclo di valutazione non deve caricare.
+    """
+    import auto_bet
+    return auto_bet.exposure_allows
+
+
+def _exposure_unavailable(exc: Exception, bankroll: float) -> dict:
+    """Stato FAIL-CLOSED: senza lettura non si autorizza nessun ordine."""
+    return {
+        "allowed": False,
+        "open_stake": float("inf"),
+        "count": -1,
+        "cap": 0.0,
+        "bankroll": float(bankroll or 0.0),
+        "new_stake": 0.0,
+        "projected": float("inf"),
+        "blocked": True,
+        "reason": ("stato degli ordini aperti non leggibile: nessun nuovo "
+                   "ordine (fail-closed) — %s" % exc),
+    }
+
+
 class ExecutionAgent:
     """Dispatch dei piani approvati. In Fase 1 i gateway sono solo shadow."""
 
@@ -37,10 +78,14 @@ class ExecutionAgent:
 
     def __init__(self, *, shadow_path: Optional[str | Path] = None,
                  persist: bool = False,
-                 observability: Optional[Observability] = None) -> None:
+                 observability: Optional[Observability] = None,
+                 exposure_reader: Optional[ExposureReader] = None) -> None:
         self.shadow_path = shadow_path
         self.persist = bool(persist)
         self.observability = observability or Observability()
+        #: Lettore dello stato degli ordini aperti (None = lettura di
+        #: produzione, risolta a ogni chiamata: cosi' l'import resta pigro).
+        self.exposure_reader = exposure_reader
 
     def _gateways(self) -> list:
         gateways: list = []
@@ -51,6 +96,30 @@ class ExecutionAgent:
             gateways.append(ValidatingLedgerGateway())
         gateways.append(ShadowGateway(self.shadow_path))
         return gateways
+
+    # ------------------------------------------------------------------
+    # Stato degli ORDINI APERTI (capitale immobilizzato)
+    # ------------------------------------------------------------------
+    def open_exposure(self, bankroll: float, new_stake: float = 0.0) -> dict:
+        """Stato degli ordini aperti + verifica per un NUOVO stake.
+
+        Ritorna {open_stake, count, cap, bankroll, projected, allowed,
+        blocked, reason}. `new_stake=0` da' il solo stato corrente.
+
+        Mai un'eccezione verso il chiamante: un lettore rotto o assente
+        restituisce lo stato FAIL-CLOSED (`allowed=False`) — meglio respingere
+        un piano che autorizzarne uno su un recinto di cui non si sa nulla.
+        """
+        reader = self.exposure_reader
+        if reader is None:
+            try:
+                reader = default_exposure_reader()
+            except Exception as exc:  # auto_bet non importabile
+                return _exposure_unavailable(exc, bankroll)
+        try:
+            return dict(reader(bankroll, new_stake))
+        except Exception as exc:  # lettura del ledger esplosa
+            return _exposure_unavailable(exc, bankroll)
 
     def process(self, plans: list[CommandPlan]) -> ExecutionOutput:
         out = ExecutionOutput(shadow=True)

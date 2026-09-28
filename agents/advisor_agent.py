@@ -31,6 +31,17 @@ Tre strategie di risoluzione, in ordine di prudente preferenza:
 Il Chief NON esegue mai un ordine per un piano che la Finanza ha respinto
 per VALORE (EV/edge/fascia/lega/qualita'): quelle sono soglie di strategia
 congelate (22/09) — l'Advisor puo' solo ESCALARE all'umano.
+
+**Recinto di esposizione APERTA (direttiva 28/09/2026).** Prima di qualunque
+consiglio l'Advisor interroga lo stato degli ORDINI APERTI (lettura fornita
+dall'Execution Engine, che delega ad `auto_bet.exposure_allows`): il 40% del
+bankroll e' un tetto sul capitale immobilizzato SIMULTANEO, non una finestra
+giornaliera. Se la proiezione (esposizione aperta + nuovo stake) sfora il
+tetto il piano viene RESPINTO — e un tetto di capitale non si negozia: il
+micro-stake non e' una risposta (un piano ridotto occuperebbe comunque il
+recinto). Il rilascio e' dinamico: appena un settlement chiude un match
+l'esposizione scende e il ciclo successivo riparte da solo, con il tetto
+ricalcolato sul capitale aggiornato (compounding automatico).
 """
 
 from __future__ import annotations
@@ -73,12 +84,16 @@ class AdvisorAgent:
                  strategy: Optional[StrategyAgent] = None,
                  data: Optional[DataAgent] = None,
                  llm_classifier: Optional[Any] = None,
-                 review_queue: Optional[Any] = None) -> None:
+                 review_queue: Optional[Any] = None,
+                 exposure_reader: Optional[Any] = None) -> None:
         self.finance = finance          # riusato per ri-valutare i piani ridotti
         self.strategy = strategy        # Market Switch: segnali gemelli
         self.data = data                # contesto: altri segnali dello stesso evento
         self.llm_classifier = llm_classifier   # opzionale (Gemini); None = rule engine
         self.review_queue = review_queue
+        #: Lettore dello stato degli ORDINI APERTI (Execution Engine). None =
+        #: lettura di produzione, risolta a ogni chiamata (import pigro).
+        self.exposure_reader = exposure_reader
 
     # ------------------------------------------------------------------
     # Interfaccia richiesta dal Capo
@@ -113,6 +128,25 @@ class AdvisorAgent:
             if verdict == "review":
                 return AdvisorResolution(resolved=False, reason_no=(
                     "verdetto review: c'e' gia' un umano sulla coda"))
+            # --- 0. RECINTO DI ESPOSIZIONE APERTA (direttiva 28/09/2026) --
+            # Interrogato PRIMA di ogni consiglio: se il capitale immobilizzato
+            # non lascia spazio al nuovo stake non c'e' niente da consigliare
+            # (il micro-stake occuperebbe comunque il recinto). Solo con un
+            # bankroll noto: senza bankroll il motivo originale del blocco
+            # resta quello vero (non si maschera con un tetto non misurabile).
+            _stake_dec = plan.record.stake
+            _bankroll = float(getattr(_stake_dec, "bankroll", 0.0) or 0.0)
+            if _bankroll > 0:
+                _state = self._exposure_state(
+                    _bankroll, float(getattr(_stake_dec, "stake", 0.0) or 0.0))
+                if not _state.get("allowed"):
+                    return AdvisorResolution(
+                        resolved=False,
+                        reason_no=("recinto di esposizione aperta: %s"
+                                   % (_state.get("reason")
+                                      or "tetto del 40% raggiunto")),
+                        original_reason="exposure_cap",
+                        exposure=_state)
             # --- 1. Riduzione rischio -----------------------------------
             if reason in self.SIZE_REASONS:
                 res = self._resolve_stake(signal, plan)
@@ -128,6 +162,77 @@ class AdvisorAgent:
         except Exception as exc:  # fail-safe assoluto
             logger.warning("advisor: errore interno: %s", exc, exc_info=True)
             return AdvisorResolution(resolved=False, reason_no=f"advisor_error: {exc}")
+
+    # ------------------------------------------------------------------
+    # 0. Recinto di esposizione APERTA (interrogato a OGNI ciclo)
+    # ------------------------------------------------------------------
+    def exposure_status(self, bankroll: float) -> dict:
+        """Sola lettura: stato del recinto (esposizione aperta, tetto, ordini).
+
+        Il tetto e' SEMPRE `bankroll x 40%` letto fresco: con il capitale
+        aggiornato il limite segue da solo (compounding), e gli ordini aperti
+        sono letti DAL LEDGER (non una copia in memoria) — chiuso un match,
+        l'esposizione scende e il ciclo successivo riparte senza interventi.
+        """
+        return self._exposure_state(bankroll, 0.0)
+
+    def exposure_gate(self, *, bankroll: float, stake: float = 0.0) -> AdvisorResolution:
+        """Il recinto ammette un NUOVO piano di `stake` USDC?
+
+        `resolved=True` = nessun blocco (il piano puo' procedere);
+        `resolved=False` = il piano va RESPINTO, con lo stato del recinto
+        allegato (`exposure`) per log e telemetria.
+
+        Autorita' dell'Advisor (direttiva 28/09/2026): raggiunto il 40% del
+        bankroll impegnato simultaneamente, ogni nuovo piano della Strategia
+        viene respinto finche' un settlement non libera capitale.
+        """
+        state = self._exposure_state(bankroll, stake)
+        if state.get("allowed"):
+            return AdvisorResolution(resolved=True,
+                                     note="recinto di esposizione: spazio disponibile",
+                                     exposure=state)
+        return AdvisorResolution(
+            resolved=False, override_approved=False,
+            reason_no=("recinto di esposizione aperta: %s"
+                       % (state.get("reason") or "tetto del 40% raggiunto")),
+            original_reason="exposure_cap", exposure=state)
+
+    def _exposure_state(self, bankroll: float, stake: float) -> dict:
+        """Legge lo stato degli ordini aperti e proietta il nuovo stake.
+
+        La lettura arriva dall'Execution Engine (iniettata); se manca si usa
+        quella di produzione (`agents.execution_agent.default_exposure_reader`),
+        risolta a OGNI chiamata — cosi' un lettore sostituito dai test vale
+        anche da qui. Fail-closed: senza lettura o con lettore rotto si
+        risponde `allowed=False`, mai un varco aperto per un errore.
+        """
+        reader = self.exposure_reader or self._default_reader()
+        if reader is None:
+            return {"allowed": False, "blocked": True, "count": -1,
+                    "open_stake": float("inf"), "cap": 0.0, "projected": float("inf"),
+                    "bankroll": float(bankroll or 0.0),
+                    "reason": "lettore dello stato ordini non disponibile "
+                              "(fail-closed)"}
+        try:
+            return dict(reader(bankroll, stake))
+        except Exception as exc:  # lettura del ledger esplosa
+            logger.warning("advisor: lettura ordini aperti fallita: %s", exc)
+            return {"allowed": False, "blocked": True, "count": -1,
+                    "open_stake": float("inf"), "cap": 0.0, "projected": float("inf"),
+                    "bankroll": float(bankroll or 0.0),
+                    "reason": "lettura ordini aperti fallita (fail-closed): %s" % exc}
+
+    @staticmethod
+    def _default_reader() -> Optional[Any]:
+        """Lettore di produzione (Execution Engine), import pigro e fail-safe."""
+        try:
+            from agents.execution_agent import default_exposure_reader
+            return default_exposure_reader()
+        except Exception as exc:
+            logger.warning("advisor: lettore esposizione di produzione non "
+                           "disponibile: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # 1. Riduzione rischio (micro-stake)

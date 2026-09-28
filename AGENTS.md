@@ -6271,3 +6271,105 @@ su `main` -> deploy automatico **SUCCESS**, health **200**. Log del giro
 `auto_bet` (00:05 UTC): `esposizione aperta 0.00/13.42 USDC (cap 40%, tetto
 per-ordine 1.50 USDC)` — recinto attivo in produzione; 1 pick AH saltato da
 `no_oracle` (gate top-down fail-closed), 0 ordini come atteso.
+
+### Risk management: stake FISSO 1.50 + recinto 40% dinamico fra Execution e Advisor (28/09/2026)
+
+**Direttiva del proprietario**: la size di ogni singola scommessa REALE e'
+esattamente **1.50 USDC**; il bot non supera MAI il **40% del bankroll
+impegnato simultaneamente** (8 ordini aperti = 12.00 USDC); il limite **non e'
+giornaliero** ma basato sugli **ordini in corso**; chiuso un match il bot
+riparte subito col **nuovo 40% del capitale aggiornato**. Da implementare: la
+**lettura dello stato degli ordini aperti fra Execution Engine e Advisor**.
+
+**1) STAKE FISSO (`auto_bet.py`)** — `ORDER_FIXED_STAKE_USDC` (default **1.50**),
+`fixed_order_stake()`, `fixed_stake_active()`, **`order_stake(stake,
+spendable)`** = UNICO punto di verita' dello stake degli ordini reali:
+- importo FISSO, non piu' Kelly; l'env puo' solo ABBASSARLO (il tetto
+  per-ordine 1.50 resta inviolabile);
+- **vincolo di cassa**: con meno di 1.50 USDC liberi lo stake e' 0 e l'ordine
+  viene SALTATO (fail-closed) — mai un importo diverso dalla direttiva per far
+  passare un ordine;
+- `ORDER_FIXED_STAKE_USDC=0` ripristina lo staking dinamico storico (usato da
+  test e diagnostica);
+- applicato in TUTTE le corsie (storica, multi-mercato, chief). **SIM
+  invariata**: la cassa simulata alimenta ML/CLV e non si cambia d'era.
+- ⚠️ I cap di portafoglio (correlazione 30% / esposizione 40%) decidono **SE**
+  (un candidato ridotto sotto 1.50 viene saltato, non rialzato); l'importo
+  fisso decide **QUANTO**.
+
+**2) RECINTO DI ESPOSIZIONE APERTA — lettura Execution EngiNE -> Advisor.**
+- `auto_bet._open_live_snapshot()` -> (stake in gioco, numero ordini) da `bets`
+  `WHERE esito_finale IS NULL AND mode='live'`: sono gli ORDINI IN CORSO, quindi
+  il **rilascio e' dinamico per costruzione** (chiuso il match, la riga esce dal
+  conteggio — nessuna finestra giornaliera da riarmare).
+- **`auto_bet.exposure_allows(bankroll, new_stake)`** = la PROIEZIONE (aperto +
+  nuovo stake <= 40% del bankroll). Con equity **33.55** (cap **13.42**) e stake
+  1.50 entrano **8 ordini (12.00)**; il nono sarebbe **13.50** -> respinto.
+  Fail-closed su lettura impossibile o bankroll non positivo.
+- **`ExecutionAgent.open_exposure(bankroll, new_stake)`** (`agents/execution_agent.py`):
+  l'Execution Engine e' l'unico che sa cosa e' stato eseguito, quindi e' lui la
+  FONTE dello stato; delega a `auto_bet.exposure_allows` con import PIGRO
+  (`import agents` resta leggero) e NON reimplementa la soglia.
+- **`AdvisorAgent.exposure_status()` / `exposure_gate()`**
+  (`agents/advisor_agent.py`): il Capo gli passa il bound method dell'Execution
+  Agent (`advisor.exposure_reader = execution.open_exposure`, wiring in
+  `chief_orchestrator`), e l'Advisor **interroga lo stato a OGNI ciclo**:
+  `resolved=False` + `original_reason="exposure_cap"` quando la proiezione
+  sfora. Il tetto e' sempre `equity x 40%` **letto fresco** -> compounding
+  automatico e ripresa senza interventi.
+- **Ciclo del Capo (nuovo step 3c)**: `report.exposure` registra lo stato e i
+  piani approvati vengono filtrati dal gate PRIMA dell'esecuzione (gate non
+  leggibile = RESPINTO). Il **micro-stake NON si applica**: un tetto di capitale
+  non si negozia col ridimensionamento. Il **kill switch resta la prima
+  autorita'** (l'esposizione non lo maschera).
+- La corsia di DENARO (dal 27/09) ora usa la **proiezione per candidato** e non
+  la sola soglia di blocco: piu' ordini nella stessa tornata non sommano oltre
+  il 40%.
+
+**3) OSSERVABILITA'**: `CycleReport.exposure` + `as_json()` che ora espone anche
+`advisor` (prima il campo non era serializzato: `advisor_kinds` era vuoto **per
+costruzione**); `chief_shadow_wiring.summarize()` conta `exposure_blocked`
+(cicli al tetto) e `exposure_gates` (piani respinti) e `format_report()` stampa
+`Esposizione aperta: X/Y USDC (N ordini aperti, … cicli al tetto, … piani
+respinti)`.
+
+**4) TRIPWIRE**: **`test_exposure_gate.py`** (nuovo, 27 test: parita' con il
+tetto di `auto_bet`, proiezione 8/9 ordini con equity 33.55, rilascio dopo il
+settlement, compounding sull'equity raddoppiata, fail-closed su lettore rotto,
+kill switch prima autorita', filtro dei piani approvati nel ciclo, nessuna
+soglia duplicata negli agenti, env dichiarate in IaC) + **`TestFixedStake`** in
+`test_capital_enclosure.py` (importo esatto, env che abbassa, `0` = dinamico,
+fondi insufficienti = 0, ordine reale esattamente 1.50, SIM invariata) + il
+`test_il_nono_ordine_non_entra_per_proiezione` nel giro reale.
+`conftest.py` isola lo stake fisso (i test misurano altro: cap, wallet,
+liquidita', stop-loss) e il **lettore di default del recinto** (senza
+isolamento la lettura reale aprirebbe il DB di produzione nei test che non lo
+patchano); `test_auto_bet_live.py` ha un fixture autouse che dichiara
+l'isolamento del recinto (wallet 3 USDC: cap 1.20 respingerebbe ogni ordine).
+
+**5) `verify_guardrails.py` — A–H TUTTI BLOCCANO (exit 0)**:
+- **C** riscritto ("stake fisso 1.50 + cap severo"): 1 ordine da **esattamente
+  1.50**; fondi liberi 1.20 -> **0 ordini** (fail-closed); staking dinamico
+  (`FIXED=0`) + cap severo -> 0 ordini; controprova `STAKE_CAP_HARD=0` -> floor
+  1 USDC accettato.
+- **H** NUOVO: 8 ordini aperti (12.00/**13.42**) -> l'Advisor respinge il nuovo
+  stake e il giro non manda nulla al provider.
+- **D** riparato (era rosso dal 26/09): lo scenario accende ESPLICITAMENTE
+  `TOP_DOWN_BYPASS` nella sua parte LIVE e verifica a parte che il **default
+  resti spento**; l'attesa sui candidati include ora anche `g-valid` (la corsia
+  top-down prende ogni riga 1X2 e lascia decidere l'oracolo; `g-legacy` resta
+  fuori per LEGA: il bypass e' di prezzo, non di strategia).
+- `_reset_state()` azzera anche il **CB settimanale**: la diagnostica fa
+  oscillare il bankroll fra scenari e un salto veniva letto come drawdown
+  (-96.8%) armando il blocco per gli scenari successivi.
+
+**6) Env**: `ORDER_FIXED_STAKE_USDC` dichiarata `preserve()` in
+`.railway/railway.ts` (accanto a `OPEN_EXPOSURE_CAP_PCT` e
+`ORDER_MAX_STAKE_USDC`). ⚠️ **NON impostate su Railway**: valgono i default di
+codice (fisso **1.50**, cap **40%**).
+
+**7) Verifica**: **252 test verdi** nel lotto mirato (exposure_gate,
+capital_enclosure, auto_bet_live, auto_bet, agent_hierarchy, advisor_agent,
+chief_shadow_wiring, risk_guards, top_down, railway_drift_check) + **tutti i
+lotti della suite** (`-m "not integration"`, 11 lotti, 103 file) verdi,
+`compileall` OK, 0 marker di conflitto.

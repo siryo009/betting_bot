@@ -61,6 +61,26 @@ class TestCicloShadow:
         text = format_report(s)
         assert "CHIEF ORCHESTRATOR" in text and "2" in text
 
+    def test_riepilogo_esposizione_aperta(self, tmp_path):
+        """Direttiva 28/09/2026: il registro dichiara gli ordini APERTI, il
+        tetto e i piani respinti dal recinto del 40%."""
+        from datetime import datetime, timezone
+        log = tmp_path / "chief_cycles.jsonl"
+        log.write_text(json.dumps({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": "chief_cycle", "ok": True,
+            "exposure": {"allowed": False, "open_stake": 12.0,
+                         "cap": 13.42, "count": 8},
+            "advisor": [{"resolved": False, "original_reason": "exposure_cap",
+                         "reason_no": "tetto 40%"}],
+        }) + "\n", encoding="utf-8")
+        s = summarize(days=7, path=log)
+        assert s["exposure_blocked"] == 1 and s["exposure_gates"] == 1
+        assert s["exposure"]["open_stake"] == 12.0
+        assert s["advisor_kinds"].get("exposure_cap") == 1
+        testo = format_report(s)
+        assert "Esposizione aperta" in testo and "12.00" in testo
+
     def test_registro_su_path_produzione_coerente(self, monkeypatch):
         # default: DATA_DIR/decision/chief_cycles.jsonl (o fallback locale)
         monkeypatch.delenv("CHIEF_CYCLE_LOG", raising=False)
