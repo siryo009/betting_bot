@@ -35,7 +35,8 @@ class MarketData(BaseModel):
         return {
             "gate": self.gate.as_json(),
             "signals": len(self.signals),
-            "snapshot": self.snapshot.as_json() if self.snapshot is not None else None,
+            "snapshot": (self.snapshot.model_dump(mode="json")
+                         if self.snapshot is not None else None),
         }
 
 

@@ -28,7 +28,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolated_decision_io(tmp_path, monkeypatch):
+def _isolated_decision_io(request, tmp_path, monkeypatch):
     """Log spenti, registro shadow nella tmp e feed di mercato disattivato."""
     monkeypatch.setenv("DECISION_LOG_SINK", "off")
     monkeypatch.setenv("DECISION_SHADOW_LOG", str(tmp_path / "shadow_commands.jsonl"))
@@ -63,6 +63,26 @@ def _isolated_decision_io(tmp_path, monkeypatch):
     # il timing (in produzione vale il default ON). I test della strategia
     # T-60 (test_t60_breakers) lo accendono esplicitamente.
     monkeypatch.setattr("auto_bet.T60_EXECUTION_ONLY", False)
+    # Recinto di capitale (27/09/2026): tetto per singolo ordine e modalita'
+    # della catena piramidale. La maggior parte dei test verifica staking,
+    # cap percentuali, wallet e liquidita' con `stake_eur` espliciti (5.0,
+    # 20.0, ...): applicare qui il tetto assoluto di 1.50 USDC cambierebbe
+    # la grandezza che quei test misurano, e ogni asserzione leggerebbe il
+    # tetto invece del cap che vuole verificare.
+    #
+    # ⚠️ `cap_order_stake` hardcoda il tetto ed e' DI PROPOSITO non
+    # disattivabile via env (vedi `test_tetto_inviolabile`): settare
+    # `ORDER_MAX_STAKE_USDC = 0.0` non basta. L'isolamento quindi sostituisce
+    # la FUNZIONE (come si fa per `_top_down_load`), non la soglia. Il file
+    # dei tripwire del recinto (test_capital_enclosure.py) esercita la
+    # funzione VERA e per questo e' l'unico che non viene isolato.
+    if "test_capital_enclosure" not in request.node.nodeid:
+        monkeypatch.setattr("auto_bet.cap_order_stake",
+                            lambda stake: float(stake or 0.0))
+    # `CHIEF_EXECUTION` decide se i piani della catena piramidale diventano
+    # ordini reali. Nei test resta "off": la corsia Chief ha i suoi test
+    # dedicati che lo accendono esplicitamente.
+    monkeypatch.setenv("CHIEF_EXECUTION", "off")
     # Flusso dell'order book SX (26/09): stato e registro vivono sul volume e
     # li scrivono `sx_signals.scan` e `multi_market.ingest` — che i test
     # esercitano con provider finti. Senza isolamento la suite lascia

@@ -118,6 +118,32 @@ CORRELATION_WINDOW_MIN = 90    # kickoff entro 90' = stesso blocco temporale
 # complessivo che cresce col numero di pick (varianza additiva).
 TOTAL_EXPOSURE_CAP_PCT = 0.40  # max 40% di bankroll per il portafoglio del giorno
 
+# --- RECINTO DI CAPITALE (direttiva 27/09/2026) -----------------------------
+# Il cap di portafoglio sopra misura i FLUSSI del giorno; questo misura
+# l'ESPOSIZIONE APERTA, cioe' il capitale immobilizzato nelle puntate reali
+# non ancora saldate (escrow): e' il numero che descrive davvero quanti soldi
+# sono in gioco. Le due soglie sono complementari, non alternative.
+# Quando l'esposizione aperta >= OPEN_EXPOSURE_CAP_PCT del bankroll il bot
+# DEGRADA a shadow: nessun nuovo ordine REALE, telemetria e valutazione
+# (corsia + catena) continuano a girare. Si sblocca da sola quando i
+# settlement chiudono le righe e l'esposizione torna sotto soglia.
+OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.40"))
+# Tetto per SINGOLO ordine (micro-stake): l'esposizione va spalmata su piu'
+# partite, non concentrata su una. Vale per ogni corsia (quella storica e la
+# catena piramidale): e' un tetto ASSOLUTO, mai un floor.
+ORDER_MAX_STAKE_USDC = float(os.getenv("ORDER_MAX_STAKE_USDC", "1.50"))
+# Modalita' della catena piramidale dentro il giro REALE:
+#   "off"   (default) -> la catena registra/valuta, non esegue (Fase 1/2);
+#   "live"            -> i piani approvati dal Finance Agent entrano nella
+#                        STESSA coda di esecuzione della corsia storica, con
+#                        T-60, liquidita', oracolo top-down, cap e ledger
+#                        condivisi: non esiste un secondo canale di denaro.
+# La decisione di eseguire resta SEMPRE del Capo (verdetto `approve` +
+# stake eseguibile): qui si regola solo se quei piani possono diventare
+# ordini reali invece che registri shadow.
+CHIEF_EXECUTION = (os.getenv("CHIEF_EXECUTION", "off").strip().lower()
+                   or "off")
+
 # Staking 100% dinamico (08/09): NESSUN importo fisso. Lo stake lo decide
 # il Kelly frazionato sul bankroll corrente (saldo reale del wallet in
 # LIVE). Restano solo due vincoli di sicurezza:
@@ -980,6 +1006,80 @@ def _today_placed_stake(hours: float = 24.0) -> float:
         logger.warning("auto_bet: lettura esposizione gia' piazzata "
                        "fallita: %s", e)
         return 0.0
+
+
+# --- RECINTO DI CAPITALE (direttiva 27/09/2026): le tre guardie condivise da
+# TUTTE le corsie di ordine (quella storica e la catena piramidale). Sono
+# funzioni in un posto solo perche' due copie di una soglia di denaro
+# divergono, e la prima che diverge e' quella che spende.
+
+def _open_live_exposure() -> float:
+    """Stake REALE attualmente in gioco (puntate live non ancora saldate).
+
+    Solo `mode='live'`: la cassa simulata non immobilizza capitale e non deve
+    occupare il recinto. Un'eccezione di lettura restituisce `inf`: meglio
+    dichiarare un'esposizione ignota che aprire il varco del recinto (stessa
+    direzione fail-closed del CB2).
+    """
+    try:
+        from tracker import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(stake), 0) FROM bets "
+            "WHERE esito_finale IS NULL AND mode = 'live'").fetchone()
+        conn.close()
+        return float(row[0]) if row and row[0] is not None else 0.0
+    except Exception as e:
+        logger.warning("auto_bet: lettura esposizione aperta fallita: %s", e)
+        return float("inf")
+
+
+def open_exposure_status(bankroll: float) -> dict:
+    """Stato del recinto d'esposizione aperta (lettura, nessuna scrittura).
+
+    Ritorna {open_stake, cap, blocked, pct, reason}: `blocked=True` quando
+    l'esposizione aperta raggiunge la soglia — da quel momento il giro non
+    piazza ordini reali ma continua a valutare e telemetrizzare (shadow).
+    """
+    bankroll = float(bankroll or 0.0)
+    cap = max(bankroll, 0.0) * OPEN_EXPOSURE_CAP_PCT
+    open_stake = _open_live_exposure()
+    blocked = open_stake >= cap
+    return {
+        "open_stake": open_stake,
+        "cap": round(cap, 2),
+        "bankroll": round(bankroll, 2),
+        "pct": (round(open_stake / bankroll, 4) if bankroll > 0 else None),
+        "blocked": bool(blocked),
+        "reason": ("esposizione aperta %.2f >= tetto %.2f (%.0f%% del bankroll "
+                   "%.2f): ordini reali sospesi, sola shadow finche' i "
+                   "settlement non liberano fondi"
+                   % (open_stake, cap, OPEN_EXPOSURE_CAP_PCT * 100, bankroll))
+        if blocked else "",
+    }
+
+
+def cap_order_stake(stake: float) -> float:
+    """Tetto assoluto per singolo ordine (micro-stake, 27/09/2026).
+
+    Riduce, non alza mai: un cap non puo' creare un ordine. Il tetto di
+    1.50 USDC e' una regola di business inviolabile: non puo' essere
+    disattivato neanche impostando l'ENV a 0.0. Se il tetto scende sotto
+    il minimo ordine dell'exchange la funzione restituisce comunque il tetto
+    — il chiamante (fail-closed) salta la puntata invece di alzarla al floor.
+    """
+    stake = float(stake or 0.0)
+    return min(stake, 1.50)
+
+
+def chief_execution_enabled() -> bool:
+    """La catena piramidale puo' emettere ordini REALI in questo giro?
+
+    Lettura a ogni giro (non a import): cambiare la variabile su Railway si
+    applica al giro successivo senza redeploy. Default "off" = nessun ordine.
+    """
+    return ((os.getenv("CHIEF_EXECUTION", "off") or "off").strip().lower()
+            == "live")
 
 
 def _norm_team(name: str) -> str:
@@ -2185,6 +2285,26 @@ def run_today_bets(stake_eur: float | None = None,
                 t60_kill_switch_status().get("reason") or "soglia wallet")
             return []
 
+    # --- RECINTO DI ESPOSIZIONE APERTA (27/09/2026): tetto sul CAPITALE
+    # immobilizzato nelle puntate reali ancora aperte. Complementare (non
+    # sostitutivo) a TOTAL_EXPOSURE_CAP_PCT, che misura i FLUSSI del giorno:
+    # qui conta quanto e' davvero in gioco. Raggiunta la soglia il giro
+    # DEGRADA a shadow: nessun ordine reale, ma classificazione, valutazione
+    # e telemetria continuano a girare (e' cio' che deve accadere finche' le
+    # partite in corso non sono saldate). Solo in LIVE: la cassa simulata non
+    # immobilizza capitale reale.
+    exposure_state = open_exposure_status(_bankroll)
+    _exposure_blocked = bool(mode == "live" and exposure_state.get("blocked"))
+    if _exposure_blocked:
+        logger.error("auto_bet: RECINTO ESPOSIZIONE APERTA — %s",
+                     exposure_state.get("reason"))
+    elif mode == "live":
+        logger.info("auto_bet: esposizione aperta %.2f/%.2f USDC (cap %.0f%%, "
+                    "tetto per-ordine %.2f USDC)",
+                    exposure_state.get("open_stake") or 0.0,
+                    exposure_state.get("cap") or 0.0,
+                    OPEN_EXPOSURE_CAP_PCT * 100, ORDER_MAX_STAKE_USDC)
+
     # Carica CLV storico per la confidenza
     try:
         from tracker import _get_conn as _gc
@@ -2399,6 +2519,9 @@ def run_today_bets(stake_eur: float | None = None,
         # viene saltato, a meno che il cap severo sia disattivato.
         if mode == "live":
             pick_stake = min(pick_stake, _spendable)
+            # Tetto per SINGOLO ordine (27/09): micro-stake per diversificare
+            # l'esposizione su piu' partite. Riduce, non alza mai.
+            pick_stake = cap_order_stake(pick_stake)
             if pick_stake < MIN_STAKE_EUR:
                 if STAKE_CAP_HARD:
                     logger.warning("auto_bet: %s (%s)",
@@ -2415,6 +2538,23 @@ def run_today_bets(stake_eur: float | None = None,
             **pick, "price": price, "stake": pick_stake,
             "odds_movement": odds_movement_val,
         })
+
+    # --- CORSAIA CHIEF (27/09/2026, `CHIEF_EXECUTION=live`): i piani
+    # approvati dalla catena piramidale entrano nella STESSA coda di
+    # esecuzione. Da qui in avanti passano per gli stessi guardrail della
+    # corsia storica: gate di mercato, cap di correlazione ed esposizione
+    # totale, tetto per-ordine, recinto d'esposizione aperta, liquidita' e
+    # ledger in `_live_fill`. Nessun canale di denaro parallelo.
+    if mode == "live":
+        for chief_cand in _chief_live_candidates(bankroll=_bankroll):
+            if bet_exists_open(chief_cand["match_id"],
+                               chief_cand["esito_key"]):
+                logger.info("auto_bet: piano chief %s (%s) gia' coperto da "
+                            "una puntata aperta, scartato",
+                            chief_cand["match_id"],
+                            chief_cand["esito_key"])
+                continue
+            candidates.append(chief_cand)
 
     # --- GATE DI MERCATO: refresh forzato del gateway (SX primaria) e verifica
     # --- PRIMA di qualunque ordine. Blocco fail-closed: senza un feed fresco,
@@ -2470,6 +2610,9 @@ def run_today_bets(stake_eur: float | None = None,
         kept = []
         for c in candidates:
             stake = min(float(c["stake"]), _spendable)
+            # Stesso tetto per-ordine dopo i cap di portafoglio: i cap
+            # riducono, ma il tetto assoluto vale comunque sull'ordine FINALE.
+            stake = cap_order_stake(stake)
             if stake < MIN_STAKE_EUR:
                 if STAKE_CAP_HARD:
                     # I risk cap (correlazione/esposizione) hanno ridotto lo
@@ -2488,6 +2631,7 @@ def run_today_bets(stake_eur: float | None = None,
     from tracker import save_bet
     placed: list[dict] = []
     dry_run_blocked = 0
+    open_exposure_skipped = 0
     for cand in candidates:
         pick_stake = cand["stake"]
         price = cand["price"]
@@ -2519,6 +2663,18 @@ def run_today_bets(stake_eur: float | None = None,
             continue
 
         if mode == "live":
+            # Recinto d'esposizione: nessun NUOVO ordine reale finche' lo
+            # stake aperto non torna sotto il tetto. La degradazione e' a
+            # shadow: il ciclo di valutazione/telemetria gira comunque.
+            if _exposure_blocked:
+                open_exposure_skipped += 1
+                logger.info("auto_bet: %s (%s) sospeso dal recinto "
+                            "esposizione aperta (%.2f/%s USDC): nessun "
+                            "ordine reale, telemetria invariata",
+                            cand.get("match_id"), cand.get("esito_key"),
+                            exposure_state.get("open_stake") or 0.0,
+                            exposure_state.get("cap"))
+                continue
             filled = _live_fill(cand, pick_stake, price)
             if filled is None:
                 # Saltata (mercato assente/ambiguo, prezzo sotto il floor EV,
@@ -2580,6 +2736,13 @@ def run_today_bets(stake_eur: float | None = None,
     # leggere la configurazione ripetuta.
     if placed:
         logger.info("auto_bet: %d puntate piazzate (%s)", len(placed), mode)
+    elif open_exposure_skipped:
+        logger.warning("auto_bet: %d candidati sospesi dal recinto "
+                       "esposizione aperta (%.2f/%s USDC in gioco): nessun "
+                       "ordine reale, telemetria e shadow attivi",
+                       open_exposure_skipped,
+                       exposure_state.get("open_stake") or 0.0,
+                       exposure_state.get("cap"))
     elif DRY_RUN and dry_run_blocked:
         logger.warning("auto_bet: DRY-RUN (%s) — %d candidati hanno superato "
                        "tutti i gate e sono stati INTERCETTATI prima "
@@ -2589,6 +2752,110 @@ def run_today_bets(stake_eur: float | None = None,
         logger.info("auto_bet: nessuna puntata (%s) — 0 candidati giocabili",
                     mode)
     return placed
+
+
+def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
+    """Candidati REALI dalla catena piramidale (Chief Orchestrator).
+
+    Non esiste un secondo canale di denaro: i piani approvati dal Finance
+    Agent entrano nella STESSA coda di esecuzione della corsia storica e
+    quindi passano per gli stessi guardrail (finestra T-60, timing, dedup
+    `bet_exists_open`, quota sensa, gate di mercato, cap di correlazione ed
+    esposizione, liquidita' in `_live_fill`, tetto per-ordine, recinto
+    d'esposizione aperta). Cosa cambia rispetto alla corsia storica: qui lo
+    STAKE e' quello deciso dalla Finanza (Kelly, cap tier/lega/risk,
+    cap severo), non ricalcolato dalla corsia.
+
+    Gate applicati qui, perche' nascono come piano e non come segnale grezzo:
+      - verdetto `approve` + stake eseguibile (l'Engine Agent li richiede a sua
+        volta, ma il Capo filtera: difesa in profondita');
+      - quota nella fascia della strategia (1.30-1.80): un piano non puo'
+        superarla perche' l'oracolo e' de-vigato altrove;
+      - T-60 e timing: la finestra esecutiva e' un vincolo di denaro, non di
+        segnaletica.
+
+    Fail-safe totale: un errore della catena restituisce lista vuota e non
+    interrompe mai il giro. Con `CHIEF_EXECUTION` != "live" non fa nulla.
+    """
+    if not chief_execution_enabled():
+        return []
+    out: list[dict] = []
+    try:
+        from chief_orchestrator import ChiefOrchestrator
+        from decision.commands import CommandKind
+        from value_filter import get_optimal_timing, ODDS_MIN, ODDS_MAX
+
+        chief = ChiefOrchestrator()
+        # La Finanza del ciclo lavora sul bankroll REALE e in modalita' live:
+        # e' l'unica differenza rispetto al giro shadow (stessa-era).
+        chief.finance.bankroll = float(bankroll or 0.0)
+        chief.finance.mode = "live"
+        # 1+2. Dati (feed di mercato) e Strategia (tier giocabili): stessi
+        # agenti del Capo, quindi stesso feed validato e stesso filtro.
+        market = chief.data.process(now=now)
+        if not market.validated:
+            logger.warning("auto_bet: ciclo chief live fermato dal gate di "
+                           "mercato (%s): nessun ordine",
+                           market.gate.reason.value)
+            return []
+        strategy = chief.strategy.process(market.signals)
+        # 3. Finanza: un piano per segnale.
+        finance = chief.finance.process_many(strategy.signals, now=now)
+        for plan in finance.plans:
+            if plan.record.risk.verdict != "approve" or not plan.places_order:
+                continue
+            stake_dec = plan.record.stake
+            if stake_dec is None or not bool(getattr(stake_dec, "executable",
+                                                     False)):
+                continue
+            order_cmd = plan.of_kind(CommandKind.PLACE_ORDER)[0]
+            payload = dict(order_cmd.payload)
+            price = float(payload.get("price") or 0.0)
+            if not (ODDS_MIN <= price <= ODDS_MAX):
+                logger.info("auto_bet: piano chief %s (%s) quota %.2f fuori "
+                            "fascia %.2f-%.2f, scartato",
+                            payload.get("match_id"), payload.get("outcome"),
+                            price, ODDS_MIN, ODDS_MAX)
+                continue
+            kickoff = payload.get("kickoff")
+            if T60_EXECUTION_ONLY and \
+                    t60_window(_parse_iso_utc(kickoff)) != "within":
+                logger.info("auto_bet: piano chief %s (%s) fuori finestra "
+                            "T-60 (%s): solo scansione",
+                            payload.get("match_id"), payload.get("outcome"),
+                            t60_window(_parse_iso_utc(kickoff)))
+                continue
+            if not get_optimal_timing(kickoff)["optimal"]:
+                logger.info("auto_bet: piano chief %s (%s) timing non "
+                            "ottimale, scartato", payload.get("match_id"),
+                            payload.get("outcome"))
+                continue
+            stake = cap_order_stake(float(payload.get("stake") or 0.0))
+            if stake <= 0:
+                continue
+            out.append({
+                "match_id": payload.get("match_id"),
+                "mercato": payload.get("market") or "1X2",
+                "esito_key": payload.get("outcome"),
+                "home": payload.get("home") or "",
+                "away": payload.get("away") or "",
+                "commence": kickoff,
+                "quota": price,
+                "league": payload.get("league") or "",
+                "price": price,
+                "stake": stake,
+                "lane": "chief",
+                "signal_id": getattr(order_cmd, "signal_id", "") or "",
+                "record_id": getattr(order_cmd, "record_id", "") or "",
+            })
+        if out:
+            logger.info("auto_bet: %d piani chief approvati entrano nella "
+                        "coda di esecuzione (stake %s)", len(out),
+                        ", ".join("%.2f" % c["stake"] for c in out))
+    except Exception as exc:
+        logger.warning("auto_bet: ciclo chief live saltato (%s)", exc)
+        return []
+    return out
 
 
 def _shadow_run(*, mode: str, bankroll: float, placed: int = 0) -> dict | None:

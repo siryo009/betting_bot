@@ -2349,9 +2349,10 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
     mode_label = {"live": "LIVE", "sim": "SIMULAZIONE",
                   "dry-run": "DRY-RUN"}.get(mode, mode)
     total = sum(p["stake"] for p in placed)
+    _lane = {"chief": " 🏛️catena"}
     rows = "\n".join(
         f"• {p['home']} vs {p['away']} — {p['esito_key']} @ {p['price']:.2f} "
-        f"(€{p['stake']:.2f})" for p in placed)
+        f"(€{p['stake']:.2f}){_lane.get(p.get('lane'), '')}" for p in placed)
     text = (f"🎯 *PUNTATE AUTOMATICHE ({mode_label})*\n"
             f"{len(placed)} puntate, €{total:.2f} di stake\n\n{rows}\n\n"
             f"📌 {'ORDINI REALI' if mode == 'live' else 'Simulazione: nessun ordine reale inviato.'}")
@@ -2363,7 +2364,9 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
         filled = [p for p in placed if p.get("status") == "FULLY_FILLED"
                   and p.get("mode") == "live"]
         for p in filled:
-            msg = (f"✅ *ORDINE FULLY_FILLED*\n\n"
+            msg = (f"✅ *ORDINE FULLY_FILLED*"
+                   f"{' 🏛️catena Chief' if p.get('lane') == 'chief' else ''}"
+                   f"\n\n"
                    f"🏟️ {p['home']} vs {p['away']}\n"
                    f"🎯 {p['esito_key']} @ {p['price']:.2f}\n"
                    f"💰 Stake: €{p['stake']:.2f}\n"
