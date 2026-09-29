@@ -6710,15 +6710,30 @@ telemetria (transito al confine, non aritmetica) — eventuale cleanup futuro.
 - **OddsPapi** (provider scelto): BASE `https://api.oddspapi.io/v4`, auth via
   QUERY PARAM `apiKey` (nessun header → niente chiavi nei log header);
   sportId: dota2=16, cs2=17, lol=18, cod=56, rocket_league=59, valorant=61;
-  Match Winner = market id **171** con esiti **171/172**, prezzo annidato sotto
-  `outcomes["171"].players["0"].price` (+ campo `active` per sospensione);
   **`/v4/account` NON consuma quota** ed e' sempre accessibile (probe di
-  salute); `/v4/historical-odds` gratis; 429 = `REQUEST_LIMIT_EXCEEDED`.
-- **`esports_oracle.py` (nuovo, 60 test verdi TUTTI offline)**: tabella
+  salute); 429 = `REQUEST_LIMIT_EXCEEDED`.
+  ⚠️ **DUE ASSERZIONI DOCUMENTALI SMENTITE DAI DATI LIVE (29/09, container,
+  fixture reali CBLOL/LCS)**: (1) il parametro `bookmakers=pinnacle` FA
+  SVUOTARE `bookmakerOdds` (payload ridotto ai soli metadati, 12 chiavi);
+  SENZA il parametro il payload porta TUTTI i book (89) — il filtro book va
+  fatto LATO CLIENT, la query NON invia piu' `bookmakers` (tripwire);
+  (2) il Match Winner compare col market id **185** ed esiti **185/186**, non
+  171/172 come da documentazione — `winner_market` prova la forma osservata
+  (185/186) PRIMA e la forma documentata (171/172) come FALLBACK
+  (`WINNER_MARKET_ID_LEGACY`). Struttura reale: `bookmakerOdds → {book} →
+  markets → {marketId} → outcomes → {outcomeId} → players["0"].price`.
+  **Copertura Pinnacle eSports**: `/bookmakers` elenca 361 book CON
+  `pinnacle` (+ varianti `pinnacle+5/+30` = piani premium), ma nelle fixture
+  eSports misurate Pinnacle NON aveva ancora pubblicato prezzi (89 soft book,
+  0 sharp): l'oracolo resta fail-closed su quelle fixture (nessun verdetto
+  invece di un verdetto su un book ricreativo). Da riverificare su eventi
+  major (la pubblicazione sharp e' tipicamente tardiva).
+- **`esports_oracle.py` (nuovo, 63 test verdi TUTTI offline)**: tabella
   `ESPORTS_TITLES` + `SX_LABEL_TITLES` DETERMINISTICA (sconosciuto → None,
   mai fuzzy: un titolo sbagliato confronterebbe il prezzo con l'oracolo di
   un altro gioco); `winner_market` fail-closed su entrambi i lati (scarta
-  `active=false` e `price<=1`); `true_probabilities` DELEGA a
+  `active=false` e `price<=1`) con doppia forma 185/186 + fallback 171/172;
+  `true_probabilities` DELEGA a
   `market_calib.market_implied` (zero formule copiate); orientamento nomi via
   `team_names.same_team` (inversione gestita, non agganciabile → None);
   `ev_gate`/`value_candidates`/`candidate_for` **IMPORTATI da
@@ -6733,16 +6748,28 @@ telemetria (transito al confine, non aritmetica) — eventuale cleanup futuro.
   `ODDSPAPI_KEY`, `ODDSPAPI_BASE`, `ODDSPAPI_BOOK`, `ESPORTS_DEVIG_METHOD`
   devono stare in `preserve()` in `.railway/railway.ts` (lezione del 28/09:
   `config apply` distrugge cio' che non e' dichiarato).
-- **Chiave**: `ODDSPAPI_KEY` impostata dal PROPRIETARIO direttamente su
-  Railway (regola 7: mai in chat; l'agente verifica solo l'impronta len+sha12).
-  Vault locale NON la contiene (i CLI locali restano fail-closed exit 1:
-  comportamento atteso, la prova dal vivo si fa sul container).
+- **Chiave**: `ODDSPAPI_KEY` impostata dal PROPRIETARIO su Railway ma
+  **SOLO sul servizio `surebet`** (impostazione a livello ambiente presa dal
+  cron): il `config plan` ha visto `1 to destroy` (variabile presente ma non
+  dichiarata sul cron) e sul container `betting_bot` la chiave era ASSENTE.
+  Fix: `preserve()` dichiarata ANCHE sul servizio surebet (piano pulito) e
+  chiave copiata su `betting_bot` con PIPE DIRETTO fra i servizi
+  (`railway variables --service surebet --kv | railway variable set --stdin`:
+  valore mai in chat). Impronta sul container: **len 36, sha12
+  `a6b0e8e539d2`**. Vault locale NON la contiene (i CLI locali restano
+  fail-closed exit 1: comportamento atteso, la prova dal vivo si fa sul
+  container). Redeploy automatico dopo il set: SUCCESS.
 
-**6) STATO (29/09).** Push su `main` = deploy automatico (remoto
-`siryo009/betting_bot`, servizio `betting_bot` del progetto
-`creative-vibrancy`). ⚠️ L'oracolo NON e' ancora wired in `auto_bet` (Item 4b:
-ingestione mercati SX type 52/3/1536 in `market_quotes` + corsia ordini
-eSports collegata all'oracolo — DA DECIDERE): "inizializzazione corretta" in
-produzione = import OK + `configured()` True + `/account` risponde. Nessun
-ordine eSports coinvolto. Collegamento non fatto: item 4b sara' progettato
-dopo la conferma dell'oracolo live.
+**6) VERIFICA IN PRODUZIONE (29/09, dopo deploy `bd780a2e` SUCCESS).**
+- `/api/health` 200 (quota the-odds-api 335); import `esports_oracle` +
+  `sx_realtime` OK sul container; `configured()` **True** dopo la copia della
+  chiave; `python3 esports_oracle.py --account` risponde (endpoint
+  non-metered vivo, nessun errore auth).
+- Prova metered: `--fixtures lol` → 2 fixture reali (CBLOL, LCS) con
+  `fixtureId` in formato `id...`; `--odds` sulla CBLOL → estrazione
+  185/186 corretta dopo il fix (odds reali 1xbet 3.4/1.3, de-vig OK) —
+  Pinnacle assente → `None` fail-closed, come da progetto.
+- **CONFERMA ORACOLO**: l'oracolo si inizializza e legge in remoto
+  (configured + account + fixtures + odds con filtro client). Il gap
+  Pinnacle-eSports (pubblicazione tardiva) e' l'unico limite operativo
+  noto: le fixture senza sharp NON generano verdicti (fail-closed).

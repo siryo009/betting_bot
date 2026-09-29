@@ -108,12 +108,19 @@ SX_LABEL_TITLES: Tuple[Tuple[str, str], ...] = (
 )
 
 #: Nomi accettati per il mercato "chi vince la partita" nel catalogo OddsPapi.
-WINNER_MARKET_NAMES: Tuple[str, ...] = ("match winner", "moneyline", "winner")
 #: Market id documentato del Match Winner e i suoi due esiti (Team 1 / Team 2).
 #: Usato come fallback quando `/markets` non risponde: il catalogo resta la
 #: fonte preferita (gli id dei mercati a linea cambiano per linea e periodo).
-WINNER_MARKET_ID = "171"
-WINNER_OUTCOMES: Tuple[str, str] = ("171", "172")
+#: ⚠️ MISURA LIVE 29/09/2026 (container, fixture reali): il Match Winner
+#: compare col market id **185** ed esiti **185/186** — la forma documentata
+#: 171/172 non e' apparsa in NESSUN payload reale. L'ordine e' FUORI DI
+#: PROPOSITO: `winner_market` prova la forma osservata sul campo PRIMA della
+#: documentazione (i vicoli ciechi vanno seguiti, non documentati).
+WINNER_MARKET_ID = "185"
+WINNER_OUTCOMES: Tuple[str, str] = ("185", "186")
+#: Forma documentata (171/172): provata come FALLBACK, mai come primaria.
+WINNER_MARKET_ID_LEGACY = "171"
+WINNER_OUTCOMES_LEGACY: Tuple[str, str] = ("171", "172")
 
 #: Bookmaker dell'oracolo: Pinnacle (il benchmark sharp). Il nome e' quello
 #: usato da OddsPapi negli slug di `bookmakerOdds`.
@@ -305,9 +312,13 @@ def odds(fixture_id: Any, *, bookmaker: Optional[str] = ORACLE_BOOK,
     if not fid:
         return {"ok": False, "payload": None, "requests": 0,
                 "error": "fixture_id mancante"}
+    # ⚠️ MISURA LIVE 29/09/2026 (container, fixture reali CBLOL/LCS): il
+    # parametro documentato `bookmakers=<slug>` FA SVUOTARE `bookmakerOdds`
+    # (payload ridotto ai soli metadati, 12 chiavi); SENZA il parametro il
+    # payload porta TUTTI i book (89 su CBLOL). Il filtro del book avviene
+    # quindi LATO CLIENT in `winner_market(payload, bookmaker=...)`: il
+    # parametro resta nella firma solo come SELEZIONE del book da estrarre.
     params: Dict[str, Any] = {"fixtureId": fid}
-    if bookmaker:
-        params["bookmakers"] = str(bookmaker)
     res = _call("odds", params, http_get=http_get, key=key)
     return {"ok": res["ok"], "payload": res["payload"],
             "requests": 1 if res.get("status") else 0, "error": res["error"],
@@ -390,23 +401,30 @@ def winner_market(payload: Any, bookmaker: str = ORACLE_BOOK
     book_markets = node.get("markets")
     if not isinstance(book_markets, dict):
         return None
-    mkt = book_markets.get(WINNER_MARKET_ID)
-    if not isinstance(mkt, dict):
-        return None
-    outcomes = mkt.get("outcomes")
-    if not isinstance(outcomes, dict):
-        return None
-    first = _price_of(outcomes.get(WINNER_OUTCOMES[0]))
-    second = _price_of(outcomes.get(WINNER_OUTCOMES[1]))
-    if first is None or second is None:
-        return None
-    return {
-        "market_id": WINNER_MARKET_ID,
-        "team1": str(payload.get("participant1Name") or "").strip(),
-        "team2": str(payload.get("participant2Name") or "").strip(),
-        "odds": {"1": first, "2": second},
-        "bookmaker": str(bookmaker or "").strip().casefold(),
-    }
+    # Forma osservata sul campo (185/186) prima, forma documentata (171/172)
+    # come fallback. La forma 171/172 NON e' mai apparsa nei payload reali
+    # misurati: resta solo per robustezza se il provider cambia schema.
+    for market_id, outcome_ids in (
+            (WINNER_MARKET_ID, WINNER_OUTCOMES),
+            (WINNER_MARKET_ID_LEGACY, WINNER_OUTCOMES_LEGACY)):
+        mkt = book_markets.get(market_id)
+        if not isinstance(mkt, dict):
+            continue
+        outcomes = mkt.get("outcomes")
+        if not isinstance(outcomes, dict):
+            continue
+        first = _price_of(outcomes.get(outcome_ids[0]))
+        second = _price_of(outcomes.get(outcome_ids[1]))
+        if first is None or second is None:
+            continue
+        return {
+            "market_id": market_id,
+            "team1": str(payload.get("participant1Name") or "").strip(),
+            "team2": str(payload.get("participant2Name") or "").strip(),
+            "odds": {"1": first, "2": second},
+            "bookmaker": str(bookmaker or "").strip().casefold(),
+        }
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -68,7 +68,11 @@ def _node(price, *, flat=False, active=True):
 def odds_payload(team1="Estral E-Sports", team2="9Z Globant", p1=1.19, p2=4.89,
                  *, flat=False, active=True, market_id=eo.WINNER_MARKET_ID,
                  book="pinnacle"):
-    """Risposta di `/v4/odds` nella forma documentata di OddsPapi."""
+    """Risposta di `/v4/odds` nella forma osservata sui payload REALI (29/09):
+    il market id coincide col primo outcome id (185->185/186, 171->171/172).
+    `legacy=True` costruisce la forma DOCUMENTATA (171/172) per il fallback.
+    """
+    second = "172" if market_id == "171" else "186"
     return {
         "fixtureId": "id1704591169167084",
         "participant1Name": team1,
@@ -76,8 +80,8 @@ def odds_payload(team1="Estral E-Sports", team2="9Z Globant", p1=1.19, p2=4.89,
         "sportId": 18,
         "bookmakerOdds": {
             book: {"markets": {market_id: {"outcomes": {
-                "171": _node(p1, flat=flat, active=active),
-                "172": _node(p2, flat=flat, active=active),
+                market_id: _node(p1, flat=flat, active=active),
+                second: _node(p2, flat=flat, active=active),
             }}}},
         },
     }
@@ -249,16 +253,45 @@ class TestWinnerMarket:
     def test_manca_un_lato_nessun_oracolo(self):
         """FAIL-CLOSED: con 1 esito il margine mancante verrebbe attribuito all'altro."""
         payload = odds_payload()
-        del payload["bookmakerOdds"]["pinnacle"]["markets"]["171"]["outcomes"]["172"]
+        del payload["bookmakerOdds"]["pinnacle"]["markets"][eo.WINNER_MARKET_ID][
+            "outcomes"][eo.WINNER_OUTCOMES[1]]
         assert eo.winner_market(payload) is None
 
     def test_prezzo_sospeso_scartato(self):
         payload = odds_payload()
-        payload["bookmakerOdds"]["pinnacle"]["markets"]["171"]["outcomes"]["171"]["active"] = False
+        payload["bookmakerOdds"]["pinnacle"]["markets"][eo.WINNER_MARKET_ID][
+            "outcomes"][eo.WINNER_OUTCOMES[0]]["active"] = False
         assert eo.winner_market(payload) is None
 
     def test_prezzo_sotto_uno_scartato(self):
         assert eo.winner_market(odds_payload(p1=0.95)) is None
+
+    def test_forma_documentata_171_trovata_fallback(self):
+        """La forma DOCUMENTATA (171/172) non e' mai apparsa nei payload reali
+        (misura 29/09: il campo usa 185/186) ma resta come fallback: se il
+        provider cambia schema, l'estrazione non muore."""
+        market = eo.winner_market(odds_payload(market_id=eo.WINNER_MARKET_ID_LEGACY))
+        assert market is not None
+        assert market["market_id"] == eo.WINNER_MARKET_ID_LEGACY
+        assert market["odds"] == {"1": 1.19, "2": 4.89}
+
+    def test_odds_non_invia_il_parametro_bookmakers(self, monkeypatch):
+        """MISURA 29/09 (container): il parametro documentato
+        `bookmakers=<slug>` FA SVUOTARE `bookmakerOdds` (payload ridotto ai
+        soli metadati); senza il parametro il payload porta tutti i book.
+        Il filtro avviene lato client in `winner_market`: la query NON deve
+        piu' contenere `bookmakers` (tripwire sulla regressione del payload
+        vuoto)."""
+        monkeypatch.setenv(eo.KEY_ENV, "k" * 12)
+        class Http:
+            def __call__(self, url, params, timeout):
+                self.query = dict(params)
+                return 200, {"fixtureId": "x"}
+        http = Http()
+        res = eo.odds("id123", bookmaker="pinnacle", http_get=http)
+        assert res["ok"] is True
+        assert "bookmakers" not in http.query, http.query
+        assert http.query.get("fixtureId") == "id123"
 
     def test_bookmaker_diverso_non_aggancia(self):
         assert eo.winner_market(odds_payload(book="bet365")) is None
