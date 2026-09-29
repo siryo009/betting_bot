@@ -274,6 +274,52 @@ def account(*, http_get: Optional[HttpGet] = None,
     return _call("account", {}, http_get=http_get, key=key)
 
 
+def account_quota(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Quota del piano estratta dalla risposta di `/account`.
+
+    ⚠️ I campi NON stanno al livello superiore: vivono nella SOTTOSCRIZIONE
+    (`subscriptions[]`, quella indicata da `current_subscription_id` o quella
+    `is_active`). Leggerli in cima restituisce `None/None` **anche con una
+    chiave perfettamente valida** — un display che fa sembrare rotta una
+    chiave che funziona, ed e' esattamente cio' che e' successo il 30/09/2026
+    durante la verifica di integrita' (si e' dovuto guardare il JSON grezzo
+    per distinguere "chiave rifiutata" da "campo letto nel posto sbagliato").
+
+    Ordine: sottoscrizione corrente -> prima attiva -> prima disponibile ->
+    livello superiore (retrocompatibilita' col formato piatto).
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    subs = payload.get("subscriptions")
+    chosen: Optional[Dict[str, Any]] = None
+    if isinstance(subs, list) and subs:
+        valid = [s for s in subs if isinstance(s, dict)]
+        current = payload.get("current_subscription_id")
+        if current:
+            chosen = next((s for s in valid
+                           if s.get("subscription_id") == current), None)
+        if chosen is None:
+            chosen = next((s for s in valid if s.get("is_active")), None)
+        if chosen is None and valid:
+            chosen = valid[0]
+    src = chosen if isinstance(chosen, dict) else payload
+
+    def _int(value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    out: Dict[str, Any] = {}
+    for field in ("request_limit", "request_count", "plan", "valid_until",
+                  "is_active"):
+        out[field] = src.get(field, payload.get(field))
+    limit, used = _int(out.get("request_limit")), _int(out.get("request_count"))
+    out["request_limit"], out["request_count"] = limit, used
+    out["remaining"] = (limit - used) if (limit is not None and used is not None) \
+        else None
+    return out
+
+
 def fixtures(title_or_id: Any, *, days_ahead: int = MAX_DAYS_AHEAD,
              has_odds: bool = True, http_get: Optional[HttpGet] = None,
              key: Optional[str] = None, now: Optional[datetime] = None
@@ -689,10 +735,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.json:
             print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
         elif res["ok"]:
-            payload = res["payload"] or {}
-            limit = payload.get("request_limit")
-            used = payload.get("request_count")
-            print(f"Quota OddsPapi: {used}/{limit} richieste usate")
+            q = account_quota(res["payload"])
+            limit, used = q.get("request_limit"), q.get("request_count")
+            if limit is None:
+                print("Quota OddsPapi: non dichiarata nella risposta "
+                      "(chiave accettata: l'endpoint ha risposto)")
+            else:
+                extra = []
+                if q.get("remaining") is not None:
+                    extra.append(f"residuo {q['remaining']}")
+                if q.get("plan"):
+                    extra.append(f"piano {q['plan']}")
+                if q.get("valid_until"):
+                    extra.append(f"valido fino al {q['valid_until']}")
+                suffix = (" (" + " · ".join(extra) + ")") if extra else ""
+                print(f"Quota OddsPapi: {used}/{limit} richieste usate{suffix}")
         else:
             print(f"KO  [{res.get('status')}] {res['error']}")
         return 0 if res["ok"] else 2

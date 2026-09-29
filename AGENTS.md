@@ -6790,3 +6790,128 @@ telemetria (transito al confine, non aritmetica) — eventuale cleanup futuro.
   sopra). Il limite operativo residuo e' SOLO il timing di pubblicazione
   Pinnacle sugli eSports: quando pubblica, l'oracolo e' pronto senza
   interventi.
+
+### Gate di lega: nazionali in CORE + `league_dynamic.py` + chiave OddsPapi (30/09/2026)
+
+**1) IL COLLO DI BOTTIGLIA ERA IL GATE DI LEGA, E LA SUA "FIX" ERA INERTE.**
+Nelle 24h del 24/09 AFCON + UEFA Nations League erano l'88% delle righe
+scartate (111 su 126) e l'unico motivo di stop del flusso: le nazionali giocano
+quando i campionati di club sono in pausa, quindi il gate le vedeva mentre il
+resto del calendario era fermo.
+⚠️ **Il diff che sembrava risolverlo NON cambiava nulla.** Mappava
+`"uefa nations league" -> "Nations League"` e `"africa cup of nations" ->
+"AFCON"`, cioe' i nomi CANONICI verso nomi **assenti** da
+`STRATEGY_LEAGUES`/`PROBATION_LEAGUES`: `canonical_league()` riscriveva il nome
+corretto in un nome BLOCCATO, quindi `tier` restava `blocked` **prima e dopo**
+(zero righe di flusso cambiate). **Regola**: un alias deve portare le VARIANTI
+verso il nome canonico, **mai il contrario** — la direzione e' cio' che lo rende
+utile o dannoso. Tripwire: `test_value_filter.test_alias_nazionali_puntano_al_
+nome_canonico` (asserisce anche che NESSUN alias punti a una lega vietata).
+
+**2) COSA E' STATO APPLICATO.**
+- `UEFA Nations League` e `Africa Cup of Nations` in `STRATEGY_LEAGUES`
+  (**CORE**), coi parametri PIU' PRUDENTI del core (`kelly_mult 0.8`,
+  `max_stake 1.5%`, `min_edge 2.5pp` — gli stessi di Eredivisie).
+  ⚠️ **ONESTA' SUL CRITERIO**: queste due **non hanno un ROI misurato
+  positivo** (il backtest 2022-2026 copre i club). Il criterio storico del core
+  NON e' soddisfatto: e' una direttiva del proprietario, non una misura, e il
+  codice lo dichiara.
+- Nomi = chiavi di `odds_api.SPORTS_MAP` (sono i nomi che il ledger contiene
+  davvero: diagnosi 24/09 «lega 'UEFA Nations League' esclusa») e su cui girano
+  rotazione quote + settlement.
+- `odds_api.SPORTS_INTERVAL_DAYS`: entrambe **30gg -> 2gg**. Una lega ammessa a
+  30gg e' **dormiente di fatto** e non produce candidati qualunque soglia
+  (difetto misurato il 24/09). Costo mensile teorico rotazione **398.6/460**
+  ✓ (`test_budget_mensile_piano_free`).
+- `market_calib.LEAGUE_EFFICIENCY`: +0.55 (Nations League) / +0.50 (AFCON) per
+  il blend dinamico.
+- `ODDS_DAILY_BUDGET` su Railway **16 -> 24** (env, zero redeploy). Il 25/09 la
+  misura sul giro reale aveva mostrato MLS 16ª lega e Liga MX 18ª nell'ordine
+  effettivo: con un tetto piu' basso entrambe venivano rinviate al giorno dopo e
+  le partite PERSE.
+- Tripwire aggiornati DI PROPOSITO: `test_odds_api.test_rotazione_crediti`
+  (`soccer_uefa_nations_league` era asserito `== 30`, ora `== 2`) e
+  `test_stagger_non_anticipa_le_leghe_30gg` (usava Nations League come esempio
+  di lega dormiente: ora usa `soccer_conmebol_copa_america`, che non e' ammessa).
+
+**3) `league_dynamic.py` (NUOVO) — il gate MISURATO dal ledger.** Il gate era
+una tabella statica mentre il ledger cresce; dal 22/09 `predictions.league`
+esiste, quindi la strategia per campionato e' finalmente misurabile. Il modulo
+legge il ledger in **sola lettura**, con i filtri CONDIVISI di era e fascia quota
+(`tracker.filter_predictions`), e calcola per lega n/ROI/hit-rate/quota media
+sulle SOLE righe giocabili (`PLAYABLE_TIERS`), con il conteggio **DICHIARATO**
+delle righe escluse (era/fascia + non giocabili + senza lega): le due letture
+sbagliate del 22/09 e del 25/09 erano nate da query manuali senza filtro d'era.
+- **AUTORITA' (default prudente, stesso schema di `adaptive_weighting`)**: env
+  `LEAGUE_DYNAMIC_ENABLED` **OFF** = sola telemetria; quando accesa puo' **solo
+  RESTRINGERE**. **Non promuove MAI** una lega non ammessa: aprire una lega a
+  denaro reale resta una decisione umana, perche' `significance.py` misura che
+  con 30 chiusure a quota media 1.65 l'edge minimo distinguibile e' **~41%** —
+  un campione di gate a taglia minima non e' una prova di profitto.
+- Fail-open sulla lettura (telemetria rotta = nessuna restrizione) e fail-closed
+  sul campione (sotto 30 chiusure non si conclude nulla).
+- CLI: `venv/bin/python league_dynamic.py [--json] [--since D] [--odds-min X]
+  [--odds-max Y] [--all]`.
+- Env in `preserve()` (`.railway/railway.ts`): `LEAGUE_DYNAMIC_ENABLED`,
+  `_SINCE`, `_MIN_SAMPLES`, `_DEMOTE_ROI`, `_PROMOTE_ROI`, `_TTL`.
+
+**4) `ODDSPAPI_KEY` ERA TRONCATA SU PRODUZIONE (chiave rifiutata).**
+Verifica richiesta dal proprietario: su `betting_bot` la chiave era **len 27 /
+sha12 `fa614ddf6a12`** e OddsPapi rispondeva **HTTP 500** a ogni tentativo
+(non transitorio). La chiave INTEGRA (**len 36 / sha12 `a6b0e8e539d2`**, il
+formato UUID e l'impronta gia' documentata il 29/09) era rimasta su `surebet`.
+Fix: **pipe diretto** `surebet -> betting_bot` (il valore non e' mai transitato
+in chat), redeploy `a01a04e6` SUCCESS.
+**Esito**: `--account` risponde **200** → `plan free`, `request_limit 250`,
+`request_count 29`, `error: null`, **`pinnacle` presente nel piano** e
+`sport_ids` con 16/17/18 (eSports). La copia di una chiave fra servizi con pipe
+`railway variables --kv | ... --stdin` resta la procedura corretta (regola 7).
+
+**5) BUG DI DISPLAY FIXATO (`esports_oracle.account_quota`).** La CLI leggeva
+`payload["request_limit"]`/`["request_count"]` al livello SUPERIORE e stampava
+**`None/None` con una chiave VALIDA** — cioè faceva sembrare rotta una chiave
+che funzionava, e durante la verifica di integrita' si e' dovuto guardare il
+JSON grezzo per distinguere "chiave rifiutata" da "campo letto nel posto
+sbagliato". I campi vivono nella **sottoscrizione** (`subscriptions[]`, quella
+di `current_subscription_id` o `is_active`). Nuovo `account_quota()` con ordine
+sottoscrizione-corrente -> prima attiva -> prima -> livello superiore
+(retrocompatibile); il display dichiara anche residuo/piano/validita' e, se la
+quota manca, dice **"non dichiarata nella risposta (chiave accettata)"** invece
+di stampare `None`. Output reale: `29/250 richieste usate (residuo 221 · piano
+free)`. Test: `TestAccountQuota` (7) in `test_esports_oracle.py`.
+
+**6) TRAPPOLA DELLA DATA FISSA (di nuovo) — 4 test rossi pre-esistenti.**
+`test_live_intel._seed_match_and_signal` seminava il kickoff
+`"2026-09-29T20:45:00Z"`, ma `decision.adapters.iter_signals` usa una finestra
+**MOBILE** (`now..now+24h`): il 30/09 quella data era nel passato → `signals=[]`
+→ 4 test di `TestDataAgentIntel` rossi **senza che nulla fosse rotto**.
+Verificato con `git stash` che le failure erano pre-esistenti. Ora il kickoff e'
+RELATIVO a `now`. E' la stessa lezione del 15/09 e del 17/09: **un test che
+scade col calendario arriva sempre nel momento peggiore**.
+
+**7) VERIFICA IN PRODUZIONE (30/09/2026).** Deploy `f0cabfac` (+ `a01a04e6`)
+SUCCESS; `/api/health` **200**, `overdue_orphans 0`, crediti **325** (reset
+01/10, ritmo 17.6/giorno), nessun traceback; cicli `auto_bet` ogni 60s con
+`equity 33.55 · esposizione 0.00/13.42 · stake fisso 1.50`.
+**Gate di lega SBL OCCATO, verificato sui valori esatti del log** (AFCON,
+esito `2` @1.30, EV -30.4%): `league_allowed=True`, `tier=core`, e il motivo
+dello scarto e' **`"EV troppo basso (-30.4% < 2%)"`** — NON la lega.
+⚠️ **Il gate sbloccato non produce puntate**: quelle partite vengono
+giustamente scartate dall'EV. Il gate era il blocco *strutturale*; ora si applica
+il filtro che deve applicarsi. Le 209 previsioni aperte (95 AFCON + 30 Nations
+League) sono righe `rejected` **storiche**, non candidati.
+⚠️ **La riga di log `sx_signals.py:667` NON stampa `reason`**, quindi dal log da
+solo NON si distingue "scartato per lega" da "scartato per EV": per questo la
+verifica e' stata fatta con `is_sane(..., league=...)` sui valori del log. Non
+dedurre il motivo dello scarto dallo `status` nel log.
+
+**8) NOTA OPERATIVA STRUMENTI (30/09/2026).** In questa CLI
+`railway ssh --service <svc> -- <cmd>` **non raggiunge il container**: atterra
+sull'**agente Railway** (`railway.new`) e restituisce il banner dell'account,
+**ignorando il comando** (verificato con 3 varianti di sintassi; nessun blocco
+stale in `~/.ssh/config`). Per eseguire codice con le ENV del servizio usare
+**`railway run --service <svc> -- <cmd>`** (gira in locale con l'ambiente
+deployato): e' cosi' che sono stati verificati impronta della chiave, `--account`
+e il gate. ⚠️ `railway logs` **streamma**: usare `--lines N` (storico, non
+bloccante). ⚠️ `verify_guardrails.py` dura >5 min ed e' stato saltato (i suoi
+scenari A-H restano da rilanciare fuori da una shell con timeout breve).

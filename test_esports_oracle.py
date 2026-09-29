@@ -491,6 +491,85 @@ class TestOracleForFixture:
 # 8. Tripwire di struttura
 # ---------------------------------------------------------------------------
 
+class TestAccountQuota:
+    """La quota vive nella SOTTOSCRIZIONE, non in cima alla risposta.
+
+    Regressione del 30/09/2026: la CLI leggeva `payload["request_limit"]` al
+    livello superiore e stampava `None/None` con una chiave VALIDA, facendo
+    sembrare rotta la chiave durante la verifica di integrita'. Il campo e'
+    annidato in `subscriptions[]`: qui si blinda l'estrazione.
+    """
+
+    _SUB = {"subscription_id": "s1", "is_active": True, "request_limit": 250,
+            "request_count": 29, "plan": "free",
+            "valid_until": "2026-10-30T00:00:00Z"}
+
+    def test_sottoscrizione_corrente(self):
+        payload = {"current_subscription_id": "s2",
+                   "subscriptions": [dict(self._SUB),
+                                     {**self._SUB, "subscription_id": "s2",
+                                      "request_limit": 1000,
+                                      "request_count": 7}]}
+        q = eo.account_quota(payload)
+        assert q["request_limit"] == 1000
+        assert q["request_count"] == 7
+        assert q["remaining"] == 993
+        assert q["plan"] == "free"
+
+    def test_prima_attiva_senza_id_corrente(self):
+        payload = {"subscriptions": [
+            {"subscription_id": "old", "is_active": False,
+             "request_limit": 10, "request_count": 10},
+            self._SUB]}
+        q = eo.account_quota(payload)
+        assert q["request_limit"] == 250 and q["request_count"] == 29
+        assert q["remaining"] == 221
+
+    def test_formato_piatto_retrocompatibile(self):
+        q = eo.account_quota({"request_limit": 500, "request_count": 100})
+        assert q["request_limit"] == 500
+        assert q["remaining"] == 400
+
+    def test_numeri_come_stringhe(self):
+        q = eo.account_quota({"subscriptions":
+                              [{**self._SUB, "request_limit": "250",
+                                "request_count": "29"}]})
+        assert q["request_limit"] == 250 and q["remaining"] == 221
+
+    def test_payload_vuoto_o_ostile_non_solleva(self):
+        for payload in ({}, None, "stringa", {"subscriptions": "nope"},
+                        {"subscriptions": [None, 3]},
+                        {"request_limit": "abc", "request_count": None}):
+            q = eo.account_quota(payload)
+            assert q["request_limit"] is None
+            assert q["remaining"] is None
+
+    def test_cli_non_stampa_none_none_con_chiave_valida(self, monkeypatch,
+                                                        capsys):
+        payload = {"subscriptions": [self._SUB]}
+        monkeypatch.setattr(eo, "configured", lambda *a, **k: True)
+        monkeypatch.setattr(eo, "account",
+                            lambda **kw: {"ok": True, "status": 200,
+                                          "payload": payload, "error": None})
+        assert eo.main(["--account"]) == 0
+        out = capsys.readouterr().out
+        assert "None/None" not in out
+        assert "29/250" in out and "residuo 221" in out and "piano free" in out
+
+    def test_cli_dichiara_quota_assente_invece_di_mentire(self, monkeypatch,
+                                                          capsys):
+        """Una risposta senza quota NON deve leggersi come chiave rotta."""
+        monkeypatch.setattr(eo, "configured", lambda *a, **k: True)
+        monkeypatch.setattr(eo, "account",
+                            lambda **kw: {"ok": True, "status": 200,
+                                          "payload": {"email": "x@y.z"},
+                                          "error": None})
+        assert eo.main(["--account"]) == 0
+        out = capsys.readouterr().out
+        assert "None/None" not in out
+        assert "non dichiarata" in out
+
+
 class TestTripwireStruttura:
     def test_nessun_motore_statistico(self):
         """Un oracolo che calcola da se' non e' un oracolo."""
