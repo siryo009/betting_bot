@@ -6728,11 +6728,15 @@ telemetria (transito al confine, non aritmetica) — eventuale cleanup futuro.
   0 sharp): l'oracolo resta fail-closed su quelle fixture (nessun verdetto
   invece di un verdetto su un book ricreativo). Da riverificare su eventi
   major (la pubblicazione sharp e' tipicamente tardiva).
-- **`esports_oracle.py` (nuovo, 63 test verdi TUTTI offline)**: tabella
+- **`esports_oracle.py` (nuovo, 67 test verdi TUTTI offline)**: tabella
   `ESPORTS_TITLES` + `SX_LABEL_TITLES` DETERMINISTICA (sconosciuto → None,
   mai fuzzy: un titolo sbagliato confronterebbe il prezzo con l'oracolo di
   un altro gioco); `winner_market` fail-closed su entrambi i lati (scarta
   `active=false` e `price<=1`) con doppia forma 185/186 + fallback 171/172;
+  **i NOMI arrivano dalla riga fixture** (`team_names=`): il payload /odds
+  reale ha solo `participant1Id/2Id` — `oracle_for_fixture` li passa con
+  GUARDIA DI ORIENTAMENTO PER ID (payload invertito → nomi scambiati; id non
+  coincidenti → fail-closed, mai un verdetto orientato a caso);
   `true_probabilities` DELEGA a
   `market_calib.market_implied` (zero formule copiate); orientamento nomi via
   `team_names.same_team` (inversione gestita, non agganciabile → None);

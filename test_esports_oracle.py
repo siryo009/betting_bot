@@ -301,6 +301,20 @@ class TestWinnerMarket:
                     {"bookmakerOdds": {"pinnacle": {"markets": None}}}):
             assert eo.winner_market(bad) is None
 
+    def test_nomi_dalla_fixture_se_payload_non_li_porta(self):
+        """MISURA 29/09: il payload /odds REALE non ha i nomi (solo gli id).
+        I nomi arrivano dal parametro `team_names` (riga fixture)."""
+        payload = odds_payload()
+        payload.pop("participant1Name", None)
+        payload.pop("participant2Name", None)
+        assert eo.winner_market(payload) is None or \
+            eo.winner_market(payload)["team1"] == ""
+        market = eo.winner_market(
+            payload, team_names=("Estral E-Sports", "9Z Globant"))
+        assert market is not None
+        assert market["team1"] == "Estral E-Sports"
+        assert market["team2"] == "9Z Globant"
+
     def test_market_id_diverso_non_aggancia(self):
         """Gli id dei mercati a linea cambiano: qui si legge SOLO il Match Winner."""
         assert eo.winner_market(odds_payload(market_id="999")) is None
@@ -442,6 +456,35 @@ class TestOracleForFixture:
         monkeypatch.setenv(eo.KEY_ENV, "k" * 12)
         res = eo.oracle_for_fixture({}, http_get=_fail_if_called)
         assert res["ok"] is False and res["requests"] == 0
+
+    def _fixture_con_id(self):
+        return {"fixtureId": "id1",
+                "participant1Id": "p1", "participant2Id": "p2",
+                "participant1Name": "Estral E-Sports",
+                "participant2Name": "9Z Globant"}
+
+    def test_payload_con_id_invertiti_scambia_i_nomi(self, monkeypatch):
+        """Se il payload odds elenca i partecipanti AL CONTRARIO rispetto alla
+        fixture, i nomi passati all'oracolo vanno scambiati (l'orientamento
+        scambiato comprerebbe l'esito sbagliato)."""
+        monkeypatch.setenv(eo.KEY_ENV, "k" * 12)
+        payload = odds_payload()
+        payload["participant1Id"], payload["participant2Id"] = "p2", "p1"
+        http = FakeHttp(payload=payload)
+        res = eo.oracle_for_fixture(self._fixture_con_id(), http_get=http)
+        assert res["ok"] is True
+        # gli odds 1.19/4.89 si riferiscono ora al SECONDO nome della fixture
+        assert res["oracle"]["_teams"]["1"] == "9Z Globant"
+
+    def test_payload_con_id_non_coincidenti_e_fail_closed(self, monkeypatch):
+        """ID non coincidenti = aggancio non dimostrabile: nessun verdetto."""
+        monkeypatch.setenv(eo.KEY_ENV, "k" * 12)
+        payload = odds_payload()
+        payload["participant1Id"], payload["participant2Id"] = "x1", "x2"
+        http = FakeHttp(payload=payload)
+        res = eo.oracle_for_fixture(self._fixture_con_id(), http_get=http)
+        assert res["ok"] is False and res["oracle"] is None
+        assert "rifiutato" in res["error"]
 
 
 # ---------------------------------------------------------------------------

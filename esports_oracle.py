@@ -376,7 +376,8 @@ def _price_of(node: Any) -> Optional[float]:
     return None
 
 
-def winner_market(payload: Any, bookmaker: str = ORACLE_BOOK
+def winner_market(payload: Any, bookmaker: str = ORACLE_BOOK,
+                  team_names: Optional[Tuple[str, str]] = None
                   ) -> Optional[Dict[str, Any]]:
     """Il mercato 'chi vince' di UN bookmaker dal payload di `odds`.
 
@@ -384,6 +385,11 @@ def winner_market(payload: Any, bookmaker: str = ORACLE_BOOK
     verrebbe attribuito all'altro e la probabilita' "vera" risulterebbe
     sbagliata **senza che nulla lo dica**. Meglio nessun oracolo che un
     oracolo distorto (stessa regola del 1X2 a tre esiti).
+
+    ⚠️ MISURA LIVE 29/09: il payload `/odds` reale NON porta i nomi dei
+    partecipanti (solo `participant1Id`/`participant2Id`). I nomi arrivano
+    dalla RIGA FIXTURE via `team_names=(nome1, nome2)` — il chiamante e'
+    responsabile dell'aggancio fixture->odds per ID (vedi `oracle_for_fixture`).
     """
     if not isinstance(payload, dict):
         return None
@@ -417,10 +423,14 @@ def winner_market(payload: Any, bookmaker: str = ORACLE_BOOK
         second = _price_of(outcomes.get(outcome_ids[1]))
         if first is None or second is None:
             continue
+        label1 = label2 = ""
+        if isinstance(team_names, (tuple, list)) and len(team_names) == 2:
+            label1 = str(team_names[0] or "").strip()
+            label2 = str(team_names[1] or "").strip()
         return {
             "market_id": market_id,
-            "team1": str(payload.get("participant1Name") or "").strip(),
-            "team2": str(payload.get("participant2Name") or "").strip(),
+            "team1": label1 or str(payload.get("participant1Name") or "").strip(),
+            "team2": label2 or str(payload.get("participant2Name") or "").strip(),
             "odds": {"1": first, "2": second},
             "bookmaker": str(bookmaker or "").strip().casefold(),
         }
@@ -464,7 +474,8 @@ def _same_team(a: str, b: str) -> bool:
 
 
 def oracle(payload: Any, *, home: str = "", away: str = "",
-           bookmaker: str = ORACLE_BOOK, method: Optional[str] = None
+           bookmaker: str = ORACLE_BOOK, method: Optional[str] = None,
+           team_names: Optional[Tuple[str, str]] = None
            ) -> Optional[Dict[str, Any]]:
     """Probabilita' "vera" 2 vie orientate su (home, away). None = nessun oracolo.
 
@@ -476,7 +487,7 @@ def oracle(payload: Any, *, home: str = "", away: str = "",
     rispetto al chiamante, le probabilita' vengono scambiate — un incrocio non
     rilevato comprerebbe l'esito sbagliato "con valore".
     """
-    market = winner_market(payload, bookmaker)
+    market = winner_market(payload, bookmaker, team_names=team_names)
     if market is None:
         return None
     probs = true_probabilities(market["odds"], method=method)
@@ -520,13 +531,35 @@ def oracle_for_fixture(fixture: Dict[str, Any], *, home: str = "", away: str = "
     fid = None
     if isinstance(fixture, dict):
         fid = fixture.get("fixtureId") or fixture.get("fixture_id")
-    home = home or str((fixture or {}).get("participant1Name") or "")
-    away = away or str((fixture or {}).get("participant2Name") or "")
+    fixture = fixture if isinstance(fixture, dict) else {}
+    # ⚠️ MISURA LIVE 29/09: i NOMI arrivano dalla riga fixture (il payload
+    # /odds ha solo gli ID). Guardia di orientamento per ID: se il payload
+    # elenca i partecipanti AL CONTRARIO rispetto alla fixture, l'ordine dei
+    # nomi va scambiato; se gli ID non coincidono per niente, fail-closed
+    # (mai un verdetto orientato a caso).
+    name1 = str(fixture.get("participant1Name") or "").strip()
+    name2 = str(fixture.get("participant2Name") or "").strip()
+    home = home or name1
+    away = away or name2
     res = odds(fid, bookmaker=bookmaker, http_get=http_get, key=key)
     if not res["ok"]:
         return {"ok": False, "fixture_id": fid, "oracle": None,
                 "requests": res["requests"], "error": res["error"]}
-    probs = oracle(res["payload"], home=home, away=away, bookmaker=bookmaker)
+    payload = res["payload"]
+    pid1 = str((payload or {}).get("participant1Id") or "")
+    pid2 = str((payload or {}).get("participant2Id") or "")
+    fpid1 = str(fixture.get("participant1Id") or "")
+    fpid2 = str(fixture.get("participant2Id") or "")
+    if pid1 and pid2 and fpid1 and fpid2:
+        if pid1 == fpid2 and pid2 == fpid1:
+            name1, name2 = name2, name1               # ordine invertito
+        elif not (pid1 == fpid1 and pid2 == fpid2):
+            return {"ok": False, "fixture_id": fid, "oracle": None,
+                    "requests": res["requests"],
+                    "error": "partecipanti del payload odds non coincidono "
+                             "con la fixture (id): aggancio rifiutato"}
+    probs = oracle(payload, home=home, away=away, bookmaker=bookmaker,
+                   team_names=(name1, name2))
     if probs is None:
         return {"ok": False, "fixture_id": fid, "oracle": None,
                 "requests": res["requests"],
