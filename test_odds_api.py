@@ -58,10 +58,17 @@ def test_rotazione_crediti():
     # (misurato: a 7 giorni Serie A/Bundesliga/La Liga/Eredivisie a 0 eventi,
     # mentre MLS 15 e Liga MX 9 nella stessa finestra), e alla successiva
     # interrogazione (X+7) erano passate -> zero candidati per sempre.
-    # Il resto resta dormiente (es. UEFA Nations League a 30gg).
+    # Il resto resta dormiente (es. Copa America a 30gg).
     assert interval_for_sport("soccer_epl") == 2
     assert interval_for_sport("soccer_turkey_super_league") == 2
-    assert interval_for_sport("soccer_uefa_nations_league") == 30
+    assert interval_for_sport("soccer_conmebol_copa_america") == 30
+    # ⚠️ 29/09/2026 — LE NAZIONALI SONO PASSATE A CORE. Fino al 28/09 questa
+    # riga asseriva `== 30` (dormiente) ed era corretta: UEFA Nations League
+    # NON era una lega ammessa. Da quando il gate la ammette, tenerla a 30gg
+    # sarebbe il difetto del 24/09 (una lega giocabile mai interrogata = zero
+    # candidati qualunque soglia). Ora segue gli intervalli delle ammesse.
+    assert interval_for_sport("soccer_uefa_nations_league") == 2
+    assert interval_for_sport("soccer_africa_cup_of_nations") == 2
     # ogni lega in SPORTS_MAP deve avere un intervallo ESPLICITO
     # (niente default silenziosi: prima "Chile Primera" finiva a 1 = 30/mese)
     for league, key in SPORTS_MAP.items():
@@ -294,16 +301,17 @@ def test_stagger_non_anticipa_le_leghe_30gg(monkeypatch, tmp_path):
     """Le leghe a 30gg (dormienti) NON vengono anticipate dal giorno di
     fase: restano dovute solo a scadenza intervallo (zero costi extra).
 
-    Esempio: una competizione di nazionali fuori strategia. NB dal 24/09 le
-    leghe AMMESSE (compresa Turkey Super Lig) stanno a 7gg, quindi non sono
-    piu' un esempio valido di lega dormiente.
+    Esempio: una competizione di nazionali fuori strategia. NB le leghe
+    AMMESSE stanno a 2gg (dal 25/09) e dal 29/09 anche UEFA Nations League e
+    Africa Cup of Nations sono in CORE: per una lega dormiente va scelta una
+    competizione che NON e' ammessa (qui Copa America).
     """
     import odds_api
     monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
     now = 1_800_000_000.0
     monkeypatch.setattr(odds_api.time, "time", lambda: now)
 
-    key = "soccer_uefa_nations_league"
+    key = "soccer_conmebol_copa_america"
     assert odds_api.interval_for_sport(key) == 30
     _write_cache(tmp_path, key, now - 2 * 86400)  # eta' 2 giorni
     assert odds_api.is_sport_due(key) is False

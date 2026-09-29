@@ -142,8 +142,16 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # `live_markets()` risponderebbe in base all'ultimo test eseguito.
     import multi_market as _mm
     _mm.reset_ou_ready_cache()
+    # Gate di lega dinamico (29/09/2026, `league_dynamic.py`): la tabella vive a
+    # livello di MODULO e sopravvive fra i test dello stesso processo, mentre il
+    # ledger no (ogni test ha il suo DB temporaneo). Senza reset un caso che
+    # misura una lega in perdita restringerebbe quella lega per TUTTI i test
+    # successivi. L'interruttore resta OFF (default di codice): la restrizione
+    # e' opt-in e i test che la vogliono la accendono esplicitamente.
+    import league_dynamic as _ld
+    _ld.reset_cache()
     yield
-    _mm.reset_ou_ready_cache()
+    _ld.reset_cache()
 
 
 def _free_enclosure(bankroll: float, new_stake: float = 0.0) -> dict:

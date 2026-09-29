@@ -48,6 +48,16 @@ export default defineRailway(() => {
       HEDGE_MIN_STAKE_USDC: preserve(),
       KELLY_MAX_FRACTION: preserve(),
       KELLY_MIN_FRACTION: preserve(),
+      // Gate di lega dinamico (29/09/2026, `league_dynamic.py`): misura per
+      // lega dal ledger, default OFF (sola telemetria) e in ogni caso
+      // autorizzato solo a RESTRINGERE. Senza queste voci un `config apply`
+      // distruggerebbe le soglie impostate dall'operatore.
+      LEAGUE_DYNAMIC_ENABLED: preserve(),
+      LEAGUE_DYNAMIC_SINCE: preserve(),
+      LEAGUE_DYNAMIC_MIN_SAMPLES: preserve(),
+      LEAGUE_DYNAMIC_DEMOTE_ROI: preserve(),
+      LEAGUE_DYNAMIC_PROMOTE_ROI: preserve(),
+      LEAGUE_DYNAMIC_TTL: preserve(),
       // Intel live (29/09/2026, `live_intel.py` + `agents/data_agent.py`):
       // interruttore, cache e guardia di rete. I TTL per provider sono uno per
       // libreria (fbref/elo via soccerdata, news via ddgs, mlb, nba_api).

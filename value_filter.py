@@ -79,6 +79,24 @@ STRATEGY_LEAGUES = {
     "Turkey Super Lig":     {"min_edge": 0.025, "kelly_mult": 1.1, "max_stake": 0.018, "efficiency": 0.60},
     "Ligue 1":              {"min_edge": 0.025, "kelly_mult": 1.0, "max_stake": 0.018, "efficiency": 0.75},
     "Eredivisie":           {"min_edge": 0.025, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.65},
+    # --- NAZIONALI IN CORSO (29/09/2026) — direttiva del proprietario: CORE ---
+    # Perche': nelle 24h del 24/09 AFCON + UEFA Nations League erano l'88%
+    # (111 su 126) delle righe scartate e l'UNICO motivo di stop del flusso:
+    # le nazionali giocano quando i campionati di club sono in pausa, quindi
+    # il gate le vedeva mentre il resto del calendario era fermo.
+    # I nomi sono ESATTAMENTE le chiavi di `odds_api.SPORTS_MAP`: sono i nomi
+    # che il ledger contiene davvero (diagnosi 24/09: «lega 'UEFA Nations
+    # League' esclusa») e quelli su cui girano rotazione quote e settlement.
+    # ⚠️ ONESTA' SUL CRITERIO: queste due competizioni NON hanno un ROI
+    # misurato positivo — il backtest 2022-2026 copre i campionati di club, non
+    # le nazionali. Il criterio storico del core («ROI positivo misurato») qui
+    # NON e' soddisfatto: e' una decisione del proprietario, non una misura.
+    # Per questo i parametri sono i PIU' PRUDENTI del core (gli stessi di
+    # Eredivisie, l'unica lega core con la differenza dentro il rumore) e il
+    # campione va rimisurato sul ledger prima di qualunque allargamento
+    # (`league_dynamic.py` fa esattamente questo, in sola lettura).
+    "UEFA Nations League":  {"min_edge": 0.025, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.55},
+    "Africa Cup of Nations":{"min_edge": 0.025, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.50},
     # Leghe perse nel backtest: generate NO segnali
     # "Serie A", "La Liga", "Belgian Pro League", "Liga Portugal",
     # "Greek Super League" — escluse per ROI negativo
@@ -157,6 +175,19 @@ LEAGUE_ALIASES = {
     "major league soccer": "MLS",
     "usa mls": "MLS",
     "united states mls": "MLS",
+    # Nazionali (29/09/2026): il nome canonico e' la chiave di
+    # `odds_api.SPORTS_MAP` — "UEFA Nations League" / "Africa Cup of Nations".
+    # ⚠️ TRAPPOLA MISURATA (29/09): NON mappare mai il nome canonico su un nome
+    # ABBREVIATO ("Nations League", "AFCON"). Il gate risolve per STRINGA,
+    # quindi un alias che riscrive il nome corretto in un nome assente da
+    # STRATEGY_LEAGUES/PROBATION_LEAGUES lo BLOCCA: la prima stesura era
+    # esattamente cosi' e risultava INERTE (`canonical_league('UEFA Nations
+    # League')` -> 'Nations League' -> tier=blocked, prima e dopo la modifica).
+    # Gli alias qui sotto portano le VARIANTI verso il nome canonico, mai il
+    # contrario: la direzione e' cio' che rende l'alias utile o dannoso.
+    "nations league": "UEFA Nations League",
+    "afrika cup of nations": "Africa Cup of Nations",
+    "caf africa cup of nations": "Africa Cup of Nations",
 }
 
 

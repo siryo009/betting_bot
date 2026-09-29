@@ -362,6 +362,10 @@ SPORTS_INTERVAL_DAYS = {
     "Eliteserien": 2, "J1 League": 2, "K League 1": 2,
     "Scottish Premiership": 2, "Superliga Danimarca": 2,
     "Swiss Super League": 2,
+    # Nazionali CORE dal 29/09/2026: il gate le ammette, quindi NON possono
+    # restare dormienti a 30gg (lezione del 24/09: una lega ammessa a 30gg non
+    # viene mai interrogata e non puo' produrre candidati, qualunque soglia).
+    "UEFA Nations League": 2, "Africa Cup of Nations": 2,
     # ogni 3 giorni: leghe NON ammesse ma con mercato liquido (telemetria/CLV)
     "Serie A": 3, "La Liga": 3,
     # ogni 7 giorni: coppe europee + mercati maggiori extra-Europa
@@ -381,19 +385,23 @@ SPORTS_INTERVAL_DAYS = {
     "Sweden Superettan": 30, "China Super League": 30,
     "League of Ireland": 30, "Frauen-Bundesliga": 30,
     "FIFA Club World Cup": 30, "UCL Qualification": 30,
-    "UEFA Women's Champions League": 30, "UEFA Nations League": 30,
+    "UEFA Women's Champions League": 30,
     "Copa America": 30, "CONCACAF Leagues Cup": 30,
     "FIFA World Cup": 30, "FIFA World Cup Qualifiers Europe": 30,
     "FIFA World Cup Qualifiers S.America": 30, "FIFA Women's World Cup": 30,
     "UEFA Euro": 30, "UEFA Euro Qualifiers": 30,
-    "CONCACAF Gold Cup": 30, "Africa Cup of Nations": 30,
+    "CONCACAF Gold Cup": 30,
 }
 
 # Cap giornaliero di chiamate odds. Le leghe in eccedenza vengono rinviate al
-# giorno dopo. ⚠️ Con le 20 leghe ammesse a 2gg (~10 dovute/giorno) un tetto di
-# 8 ne rinvierebbe meta': in produzione `ODDS_DAILY_BUDGET=16` (env, nessun
-# redeploy). Il tetto mensile vero resta comunque quello del piano free (460),
-# verificato da `test_budget_mensile_piano_free`.
+# giorno dopo. ⚠️ Con le 22 leghe ammesse a 2gg (~11 dovute/giorno) un tetto di
+# 8 ne rinvierebbe meta'. In produzione il valore e' 24 (`ODDS_DAILY_BUDGET`,
+# env, nessun redeploy): il 25/09 la misura sul giro reale ha mostrato che
+# MLS era la 16ª lega e Liga MX la 18ª nell'ordine effettivo, quindi con un
+# tetto piu' basso (8 o 16) entrambe venivano rinviate al giorno dopo e le
+# loro partite PERSE — era l'ultimo pezzo rimasto del buco "zero candidati".
+# Il tetto mensile vero resta quello del piano free (460), verificato da
+# `test_budget_mensile_piano_free`.
 DAILY_QUERY_BUDGET = int(os.getenv("ODDS_DAILY_BUDGET", "12"))
 
 

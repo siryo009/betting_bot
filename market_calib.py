@@ -120,6 +120,11 @@ LEAGUE_EFFICIENCY = {
     "Copa Libertadores": 0.55,
     "Copa Sudamericana": 0.45,
     "CONCACAF Champions Cup": 0.45,
+    # Nazionali (29/09/2026): liquide durante le finestre FIFA ma campione
+    # storico ridotto -> il modello ha piu' spazio del top 5 (stessa logica
+    # delle leghe minori). Nomi = chiavi di `odds_api.SPORTS_MAP`.
+    "UEFA Nations League": 0.55,
+    "Africa Cup of Nations": 0.50,
 }
 
 # Default per leghe non mappate: mercato medio

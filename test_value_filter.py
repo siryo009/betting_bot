@@ -275,6 +275,54 @@ class TestStrategiaPerLega:
         assert league_tier("") == "blocked"
         assert league_tier("Serie A") == "blocked"
 
+    def test_nazionali_in_core(self):
+        """AFCON + Nations League in CORE (direttiva del proprietario, 29/09).
+
+        Erano l'88% delle righe scartate nelle 24h del 24/09 e l'unico motivo
+        di stop del flusso: le nazionali giocano quando i club sono in pausa.
+        ⚠️ Queste due NON hanno un ROI misurato positivo (il backtest copre i
+        club): entrano per decisione del proprietario, con i parametri PIU'
+        PRUDENTI del core — l'uguaglianza qui e' la tracciabilita' di quella
+        scelta, non una misura.
+        """
+        import value_filter as vf
+        for lg in ("UEFA Nations League", "Africa Cup of Nations"):
+            assert vf.league_tier(lg) == "core", lg
+            assert vf.league_allowed(lg) is True, lg
+            strat = vf.get_league_strategy(lg)
+            assert strat["min_edge"] == 0.025, lg
+            assert strat["kelly_mult"] == 0.8, lg
+            assert strat["max_stake"] == 0.015, lg
+        # Le leghe MISURATE negative non devono essersi aperte per sbaglio.
+        for lg in ("Serie A", "La Liga", "Greek Super League"):
+            assert vf.league_allowed(lg) is False, lg
+
+    def test_alias_nazionali_puntano_al_nome_canonico(self):
+        """REGRESSIONE 29/09: l'alias NON deve riscrivere il nome canonico in
+        un nome bloccato.
+
+        La prima stesura mappava `"uefa nations league" -> "Nations League"`:
+        il nome corretto veniva riscritto in un nome ASSENTE da
+        STRATEGY_LEAGUES/PROBATION_LEAGUES, quindi il gate rispondeva
+        `tier=blocked` PRIMA e DOPO la modifica — un alias INERTE, che sembrava
+        una fix e non cambiava una riga di flusso. La direzione dell'alias e'
+        cio' che lo rende utile o dannoso: le varianti puntano al canonico,
+        mai il contrario.
+        """
+        import value_filter as vf
+        assert vf.canonical_league("UEFA Nations League") == "UEFA Nations League"
+        assert vf.canonical_league("Africa Cup of Nations") == "Africa Cup of Nations"
+        # le varianti convergono sul canonico
+        for raw, expected in (("Nations League", "UEFA Nations League"),
+                              ("Afrika Cup of Nations", "Africa Cup of Nations"),
+                              ("CAF Africa Cup of Nations", "Africa Cup of Nations")):
+            assert vf.canonical_league(raw) == expected, raw
+            assert vf.league_allowed(raw) is True, raw
+        # e l'invariante che il bug violava: nessun alias porta a un nome vietato
+        for alias, target in vf.LEAGUE_ALIASES.items():
+            assert vf.league_allowed(target), \
+                f"alias {alias!r} -> {target!r} e' una lega vietata (alias inerte)"
+
     def test_is_sane_tier2_edge_4pp(self):
         """In probation l'edge minimo e' +4pp: +2.5pp passa nel core, non qui."""
         from value_filter import is_sane

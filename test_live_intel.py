@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -474,9 +475,17 @@ import tracker  # noqa: E402  (dopo il monkeypatch di fixture: import pigro nel 
 
 def _seed_match_and_signal(db_path: Path, match_id="sx-L1",
                            league="Serie A", home="Inter", away="Milan"):
+    # Kickoff RELATIVO a `now`, mai una data fissa: l'adapter dei segnali usa
+    # una finestra MOBILE (`iter_signals`, now..now+24h), quindi un kickoff
+    # fissato al calendario scade da solo e fa fallire i test senza che nulla
+    # sia rotto. Osservato il 30/09/2026: `"2026-09-29T20:45:00Z"` era ormai
+    # nel passato -> `signals=[]` -> 4 test rossi in `TestDataAgentIntel`.
+    # E' la stessa trappola documentata il 15/09 e il 17/09 (un test che scade
+    # col calendario arriva sempre nel momento peggiore).
+    kickoff = (datetime.now(timezone.utc) + timedelta(hours=3))
     conn = sqlite3.connect(db_path)
     tracker.save_match(match_id, league, home, away,
-                       "2026-09-29T20:45:00Z")
+                       kickoff.isoformat().replace("+00:00", "Z"))
     tracker.save_prediction(match_id=match_id, mercato="1X2", esito=home,
                             quota=1.65, prob=0.60, ev=0.05,
                             market_prob=0.55, market_edge=0.05,
