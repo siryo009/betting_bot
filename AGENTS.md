@@ -6722,12 +6722,20 @@ telemetria (transito al confine, non aritmetica) — eventuale cleanup futuro.
   (185/186) PRIMA e la forma documentata (171/172) come FALLBACK
   (`WINNER_MARKET_ID_LEGACY`). Struttura reale: `bookmakerOdds → {book} →
   markets → {marketId} → outcomes → {outcomeId} → players["0"].price`.
-  **Copertura Pinnacle eSports**: `/bookmakers` elenca 361 book CON
-  `pinnacle` (+ varianti `pinnacle+5/+30` = piani premium), ma nelle fixture
-  eSports misurate Pinnacle NON aveva ancora pubblicato prezzi (89 soft book,
-  0 sharp): l'oracolo resta fail-closed su quelle fixture (nessun verdetto
-  invece di un verdetto su un book ricreativo). Da riverificare su eventi
-  major (la pubblicazione sharp e' tipicamente tardiva).
+  **Copertura Pinnacle eSports — CONFERMATA dal piano**: `/account` →
+  `subscriptions[0].bookmakers` (dict, 348 chiavi) CONTIENE `pinnacle` +
+  `betfair-ex`, `matchbook`, `sbobet`, `marathonbet` (gli sharp); quota del
+  piano free **250 richieste/mese** (`request_count`/`request_limit`).
+  L'assenza di prezzi Pinnacle sulle fixture eSports misurate e' quindi
+  TIMING DI PUBBLICAZIONE (lo sharp pubblica tardivo, tipicamente vicino al
+  match), non copertura del piano: le fixture senza prezzi sharp danno
+  `None` fail-closed (nessun verdetto invece di un verdetto su un book
+  ricreativo) e l'oracolo parte da solo quando Pinnacle pubblica.
+  ⚠️ **429 = RATE LIMIT A RAFFICA, non quota esaurita**: il piano free limita
+  le chiamate AL MINUTO (misurato: 429 dopo 2 chiamate consecutive rapide
+  con quota ancora a 222 residui); un eventuale scanner deve fare PACING
+  (il pattern `football_hist._throttle` e' il precedente). Quota consumata
+  dalle diagnostiche del 29/09: ~28/250.
 - **`esports_oracle.py` (nuovo, 67 test verdi TUTTI offline)**: tabella
   `ESPORTS_TITLES` + `SX_LABEL_TITLES` DETERMINISTICA (sconosciuto → None,
   mai fuzzy: un titolo sbagliato confronterebbe il prezzo con l'oracolo di
@@ -6769,11 +6777,16 @@ telemetria (transito al confine, non aritmetica) — eventuale cleanup futuro.
   `sx_realtime` OK sul container; `configured()` **True** dopo la copia della
   chiave; `python3 esports_oracle.py --account` risponde (endpoint
   non-metered vivo, nessun errore auth).
-- Prova metered: `--fixtures lol` → 2 fixture reali (CBLOL, LCS) con
-  `fixtureId` in formato `id...`; `--odds` sulla CBLOL → estrazione
-  185/186 corretta dopo il fix (odds reali 1xbet 3.4/1.3, de-vig OK) —
-  Pinnacle assente → `None` fail-closed, come da progetto.
+- Prova metered: `--fixtures lol` → fixture reali (CBLOL, LCS; a fine
+  giornata il palinsesto era salito a 12 partite) con `fixtureId` in
+  formato `id...`; estrazione end-to-end su dati reali verificata: market
+  185/186, odds reali 1xbet 3.4/1.3, de-vig OK (p 0.2544/0.7456, overround
+  6.3%), `value_candidates` = nessuno (corretto: quote sotto true_odd);
+  Pinnacle senza prezzi sulle fixture odierne → `None` fail-closed, come da
+  progetto (pubblica tardivo; nel piano c'e', vedi sopra).
 - **CONFERMA ORACOLO**: l'oracolo si inizializza e legge in remoto
-  (configured + account + fixtures + odds con filtro client). Il gap
-  Pinnacle-eSports (pubblicazione tardiva) e' l'unico limite operativo
-  noto: le fixture senza sharp NON generano verdicti (fail-closed).
+  (configured True + account 200 + fixtures + odds + de-vig + gate EV) con
+  quota 28/250. Tre difetti documentali trovati e fixati sul campo (vedi
+  sopra). Il limite operativo residuo e' SOLO il timing di pubblicazione
+  Pinnacle sugli eSports: quando pubblica, l'oracolo e' pronto senza
+  interventi.
