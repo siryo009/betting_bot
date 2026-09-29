@@ -6915,3 +6915,21 @@ deployato): e' cosi' che sono stati verificati impronta della chiave, `--account
 e il gate. ⚠️ `railway logs` **streamma**: usare `--lines N` (storico, non
 bloccante). ⚠️ `verify_guardrails.py` dura >5 min ed e' stato saltato (i suoi
 scenari A-H restano da rilanciare fuori da una shell con timeout breve).
+
+**9) FIX DEL DISPLAY QUOTA + LEZIONE SUI COMANDI CHE TRONCANO IL TURNO
+(30/09/2026).** Il fix del display (`account_quota`: la quota vive in
+`subscriptions[]`, non in cima al payload) e i 7 test sono stati deployati con
+`e6868d9` -> deployment **`4f3101ef` SUCCESS** (23:35 UTC); health 200 dopo il
+riavvio, ensemble riaddestrato al boot (n=54, brier 0.0392), backup integrity
+ok, cicli `auto_bet` puliti.
+
+⚠️ **Il terminale si e' chiuso 3 volte durante la sessione — causa trovata e
+regola permanente.** Non era un crash dell'agente: (1) una chiamata a
+`verify_guardrails.py` (>5 min) ha superato il timeout della shell a meta'
+turno; (2) tre attese `sleep 60/90/120/200` hanno superato lo stesso timeout;
+(3) il check di stato era **sbagliato**: `pgrep -f verify_guardrails.py`
+intercettava la PROPRIA riga di comando (che contiene il pattern) e riportava
+`ELAPSED 00:00`, quindi dichiarava "IN CORSO" su un processo gia' morto.
+Regole: **niente comandi bloccanti e niente `sleep` lunghi** (usare
+`--lines N` sui log e `--json` sugli stati, mai lo streaming); mai `pgrep -f` /
+`pkill -f` con un pattern che compare nella riga di comando invocante.
