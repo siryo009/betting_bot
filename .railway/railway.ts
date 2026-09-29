@@ -48,8 +48,26 @@ export default defineRailway(() => {
       HEDGE_MIN_STAKE_USDC: preserve(),
       KELLY_MAX_FRACTION: preserve(),
       KELLY_MIN_FRACTION: preserve(),
+      // Intel live (29/09/2026, `live_intel.py` + `agents/data_agent.py`):
+      // interruttore, cache e guardia di rete. I TTL per provider sono uno per
+      // libreria (fbref/elo via soccerdata, news via ddgs, mlb, nba_api).
+      LIVE_INTEL: preserve(),
+      LIVE_INTEL_CACHE: preserve(),
+      LIVE_INTEL_TIMEOUT_S: preserve(),
+      LIVE_INTEL_TTL_ELO: preserve(),
+      LIVE_INTEL_TTL_FBREF: preserve(),
+      LIVE_INTEL_TTL_MLB: preserve(),
+      LIVE_INTEL_TTL_NBA: preserve(),
+      LIVE_INTEL_TTL_NEWS: preserve(),
       ODDS_API_KEY: preserve(),
       ODDS_DAILY_BUDGET: preserve(),
+      // Oracolo eSports (29/09/2026, `esports_oracle.py`): chiave OddsPapi
+      // impostata DIRETTAMENTE dal proprietario su Railway (regola 7, mai in
+      // chat). Facoltative: base URL, bookmaker sharp, metodo de-vig.
+      ODDSPAPI_KEY: preserve(),
+      ODDSPAPI_BASE: preserve(),
+      ODDSPAPI_BOOK: preserve(),
+      ESPORTS_DEVIG_METHOD: preserve(),
       OPEN_EXPOSURE_CAP_PCT: preserve(),
       ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),
@@ -88,6 +106,9 @@ export default defineRailway(() => {
     volumeMounts: { "/app/data": surebetData },
     env: {
       ADMIN_CHAT_ID: preserve(),
+      // Impostata dall'operatore a livello ambiente (visibile anche a questo
+      // servizio): preserve() la protegge senza crearla né usarla.
+      ODDSPAPI_KEY: preserve(),
       ODDS_API_KEY: preserve(),
       QUOTAVERACE_BOT_TOKEN: preserve(),
       SUREBET_BUDGET: "100",

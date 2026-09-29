@@ -6537,3 +6537,212 @@ advisor + hierarchy + chief + weekly; significance + multi_market +
 market_diagnose + predictions + web_api + reports; secret_hygiene +
 liquidity + top_down + hedging + book_flow. `verify_guardrails.py`: **A–H
 tutti bloccano**. `compileall` OK, 0 marker.
+
+### Intel live nel Data Agent + suite sbloccata (29/09/2026)
+
+**Direttiva**: dare al Data Agent un FOCUS INTEL a costo zero (statistiche di
+stagione, ELO, news infortuni, lanciatori MLB, statistiche NBA) per i match in
+finestra — senza API key e senza toccare il denaro.
+
+**1) `live_intel.py` (nuovo, 693 righe) — raccoglie, non decide.**
+Cinque provider, tutti gratuiti e con import PIGRI:
+| provider | libreria | cosa porta |
+|---|---|---|
+| statistiche calcio | `soccerdata` → FBref | xG/xGA, gol fatti/subiti, partite |
+| ELO | `soccerdata` → ClubElo | rating ELO (club europei) |
+| news | `ddgs` (DuckDuckGo) | titoli infortuni/formazioni |
+| MLB | MLB StatsAPI pubblico (`requests`) | probabili lanciatori del giorno |
+| NBA | `nba_api` | punti, OPP_PTS, GP, win% |
+Contratti Pydantic (`MatchIntel`/`TeamStats`/`NewsItem`/`ProviderStatus`),
+`as_json()` per log/HTTP. Titoli e link delle news, MAI il corpo: sono un
+PUNTATORE alla fonte.
+
+**2) Cablaggio (`agents/data_agent.py`, `agents/contracts.py`).** Il Data
+Agent raccoglie l'intel per i match dei segnali (una voce per MATCH, mai per
+segnale) e la mette in `MarketData.intel` (`CycleReport.market` la include).
+I nomi delle squadre vengono dalla tabella `matches` (il `Signal` non li porta):
+senza riga `matches` NESSUNA intel — mai costruita su match_id opachi.
+**L'intel NON e' un gate**: vuota o con provider in errore il ciclo prosegue
+(degrado dichiarato in `providers[].detail` + `errors`/`partial`),
+disattivabile con `LIVE_INTEL=0`. L'Advisor riceve gia' il `MarketData` in
+`resolve_blocker(..., data_report, ...)`: il consumo e' il passo naturale
+successivo, la raccolta e' completa.
+
+**3) IL BLOCCO DELLA SUITE (causa trovata e chiusa).** `DataAgent().process()`
+con segnali e nessun `intel_fn` iniettato chiamava gli scraper REALI:
+`test_agent_hierarchy`/`test_advisor_agent`/`test_exposure_gate` costruiscono
+`DataAgent()` "nudo" e facevano partire lo scraping FBref a OGNI test —
+`test_exposure_gate` 48s e (senza la guardia) attese senza timeout. Due
+contromisure: **`conftest.py`** spegne l'intel alla fonte (`LIVE_INTEL=0`) e
+porta la cache nella tmp; **`pytest.ini`** aggiunge `-p no:seleniumbase`
+(SeleniumBase non e' una dipendenza del progetto ma, se presente, inietta il
+proprio plugin in ogni run: banner, download di webdriver in
+`downloaded_files/`, lock all'avvio — osservato il 29/09). `-p no:` non
+solleva se il pacchetto manca.
+
+**4) Guardia di TIMEOUT (`_network_deadline`).** `soccerdata` e `ddgs` non
+espongono un timeout: senza guardia una fonte lenta blocca il ciclo a tempo
+INDEFINITO. Il modulo limita la durata agendo sul default dei socket
+(il punto che urllib3/requests rispettano quando il chiamante non passa un
+timeout) e RIPRISTINA sempre il valore precedente — il processo ospita anche
+lo scheduler del bot. `LIVE_INTEL_TIMEOUT_S` (default 20s); un valore non
+numerico o <= 0 ricade sul default: una guardia non si spegne con un env
+sbagliato.
+
+**5) Cache su disco con TTL** (`LIVE_INTEL_CACHE`, default `DATA_DIR/intel`;
+`LIVE_INTEL_TTL_<PROVIDER>`): le librerie sono gratuite ma NON a costo zero in
+TEMPO, quindi il ciclo non martella le fonti. `data/intel/` e' gitignored.
+
+**6) Fix `backtest_mc.py` — era O(n²).** `_walk_forward` riaddestrava
+l'ensemble AD OGNI RIGA sullo STESSO campione (train deterministico del
+medesimo slice): ora il modello dell'epoca si conserva e si riusa. Misurato:
+il file di test (7 casi) e' passato da 2:47 a **1m48** e la regressione non
+sfora piu' il budget della shell sembrando bloccata.
+
+**7) Dipendenze dichiarate** (`requirements.txt`, tutte PIGRE): `soccerdata`
+1.9.1, `nba_api` 1.11.4, `pybaseball` 2.2.7, `ddgs` 9.16.0 — installate e
+verificate. ⚠️ `pybaseball` e' dichiarata ma la versione 2.2.7 **non espone
+`probable_starters`** e non e' invocabile fuori dal baseball: l'adapter usa
+l'endpoint pubblico MLB StatsAPI e `pybaseball` resta come dipendenza
+richiesta (nessun numero inventato).
+
+**8) IaC.** `LIVE_INTEL`, `LIVE_INTEL_CACHE`, `LIVE_INTEL_TIMEOUT_S` e i cinque
+`LIVE_INTEL_TTL_*` dichiarati `preserve()` in `.railway/railway.ts` (senza,
+un `config apply` distrugge cio' che l'operatore imposta). Tripwire
+`TestIaC` in `test_live_intel.py`: env dichiarate, **ogni env letta dal modulo
+presente nella IaC** (i TTL sono composti a runtime: i provider si ricavano
+dalle chiamate `_cache_*`), e le 4 dipendenze presenti nei requirements.
+`railway config plan` verificato dopo la modifica: **"already up to date"**
+(0 to add, 0 to change, 0 to destroy) — nessuna variabile da distruggere.
+
+**9) Test**: `test_live_intel.py` **50 verdi, tutti OFFLINE** (provider finti
+in `sys.modules` o iniettati, cache nella tmp, DB temporaneo): contratti,
+mappa leghe, query news, cache (scaduta/corrotta), guardie di rete (timeout
+attivo DURANTE la chiamata, ripristinato dopo, env impossibili), assembler
+(soccer/nba/mlb, provider rotto che non nega gli altri), tripwire
+(nessun import di produzione, import leggero in sottoprocesso, nessuna soglia
+di strategia nel sorgente) e integrazione `DataAgent` (intel per match, una
+sola voce con piu' segnali, fail-safe, switch `LIVE_INTEL`, gate intatto).
+Regressioni verdi: gerarchia+advisor+recinto+chief (142),
+`backtest_mc` (7), `railway_drift_check`+`adaptive_weighting`+`smart_hedging`
+(121). `compileall` OK, 0 marker di conflitto.
+
+**10) STATO: non ancora committato.** Il lavoro e' nel working tree
+(`live_intel.py` e `test_live_intel.py` sono untracked; `agents/data_agent.py`,
+`agents/contracts.py`, `conftest.py`, `pytest.ini`, `backtest_mc.py`,
+`requirements.txt`, `.gitignore`, `.railway/railway.ts` modificati). In
+PRODUZIONE vale ancora il codice precedente: l'intel NON gira sul container.
+Da fare prima del push: `compileall`, i lotti di regressione, `railway config
+plan` (**0 to destroy**), poi il deploy — e dopo, la prima esecuzione reale
+(`venv/bin/python live_intel.py "<casa>" "<trasferta>" --league "..."`) per
+misurare quali provider rispondono DAVVERO dalle rete/container: FBref e DDG
+possono essere bloccati e il fail-safe li rende indistinguibili da "nessun
+dato" (per questo ogni provider dichiara il proprio `detail`).
+⚠️ Nota di perf (NON risolta, pre-esistente e non causata da questo lavoro):
+il fixture autouse di `conftest.py` costa ~2,5s di `setup` per test
+(misurato anche su file vecchi come `test_tier.py`): e' il costo di import +
+`config` (vault Fernet/PBKDF2) per ogni test, non un'attesa di rete.
+
+### Quattro direttive tecniche del 29/09 + oracolo eSports (OddsPapi)
+
+Direttive del proprietario: (1) networking asincrono, (2) motore statistico,
+(3) conferma web3/eth-account per EIP-712, (4) tipizzazione finanziaria
+(Divimal ai confini, divieto float sul denaro) + item aggiuntivo: **eSports
+con provider odds esterno** come oracolo per la corsia top-down. Scelte
+confermate via `ask_user`: realtime ADDITIVO (client async in modulo nuovo,
+pipeline sync intatta), vettorizzazione DENTRO `poisson_engine.py` (fonte
+unica: `agents/strategy_agent.py` DELEGA), Decimal SOLO AI CONFINI (contratti
++ conversione agli estremi, aritmetica interna invariata), eSports con
+**OddsPapi** (scelto sui fatti: il free tier INCLUDE Pinnacle su eSports,
+~4.5% margine mediano Match Winner; scartato odds-api.io = solo 2 bookmaker
+ricreativi nel free tier, nessuno sharp → oracolo inutile).
+
+**1) NETWORKING ASINCRONO — `sx_realtime.py` (nuovo, 54 test verdi).**
+Client async Centrifugo per SX Bet (`wss://realtime.sx.bet/connection/
+websocket`), token richiesto a `/user/realtime-token-v3/api-key`
+(`REALTIME_ENDPOINT_PATH` — ⚠️ il nome iniziale `TOKEN_PATH` faceva SCOPPIARE
+`test_secret_hygiene`: nome credential-like + valore simile a chiave; rinominato
+e test aggiornato). Fail-closed senza `SX_API_KEY`. Trasporto (`http_async`)
+iniettabile → test interamente OFFLINE. Dipendenze dichiarate in
+`requirements.txt` (prima solo transitivi): `httpx>=0.27`, `websockets>=13`.
+Nessun collegamento alla pipeline: il realtime e' un canale AGGIUNTIVO.
+
+**2) MOTORE STATISTICO — Poisson vettorizzato.** `poisson_engine.py`
+riscritto internamente con numpy (matrici punteggio), Dixon-Coles e rating
+time-decay PRESERVATI; parita' col vecchio percorso verificata da
+`test_poisson_vectorized.py` (~1500 casi). `agents/strategy_agent.py` resta in
+delegra (nessuna formula copiata, regola anti-bug del 13/09 e 27/09).
+
+**3) WEB3/ETH-ACCOUNT — confermato.** `eth-account` 0.14.0 installato e USATO
+(`execution_engine._sign_order` via `encode_typed_data`+`sign_message`, 26 test
+verdi). **web3 NON installato e NON necessario**: l'ordine e' firmato EIP-712
+lato client e inviato via REST; aggiungere web3 sarebbe peso morto. Non
+aggiunto.
+
+**4) TIPIZZAZIONE FINANZIARIA — Decimal ai confini (fix BUG VERO incluso).**
+`decision/models.py`: `money()` (costruzione via STRINGA, mai da float),
+`as_float()` (unico punto di uscita), `Money = Annotated[Decimal, ...]` con
+serializzazione JSON → float; `validate_assignment` su `Signal`/`StakeDecision`;
+campi denaro (bankroll/stake/kelly_stake/floor/price) in Money,
+kelly_fraction/cap_pct restano float (NON sono denaro). Esteso a commands/
+stake_engine/pipeline/shadow/engine/review_queue/review_telegram/middleware
+(`_json_default` Decimal→float) e `agents/finance_agent.py` (docstring DIRETTIVA
+FINANZIARIA, ingresso `money()`, unico `as_float` verso `build_plan`).
+**BUG VERO trovato dal confine tipizzato**: `decision/risk_engine.py`
+confrontava `signal.price` (Decimal) direttamente con soglie float →
+`Decimal("1.3") < 1.30` era **TRUE** (il float 1.30 vale 1.30000000000000004):
+un segnale ESATTO a 1.30 veniva rifiutato al confine della fascia. Fix:
+`price = as_float(signal.price)` UNA volta prima dei gate + tripwire
+(`test_money_decimal.test_il_confronto_grezzo_col_float_e_una_trappola`, che
+replica la trappola con `pytest.approx`). `test_money_decimal.py` ~40 test
+verdi (tripwire ast-based con `_code_only`: le docstring NOMINANO float(/Decimal(
+per spiegare la direttiva, il tripwire non deve colpire la PROSA).
+Residuo accettato: `agents/advisor_agent.py` ~riga 250 fa `float(...)` per
+telemetria (transito al confine, non aritmetica) — eventuale cleanup futuro.
+
+**5) ESPORTS — fatti MISURATI (29/09, probe reali, zero crediti) e oracolo.**
+- **SX Bet**: eSports = `sportId=9`, 67 mercati: **type 52** = moneyline 2 vie
+  SENZA pareggio (23), **type 3** = AH con linea (23), **type 1536** = O/U
+  totale mappe (21); `liveEnabled: false` su tutti → pre-match.
+- **the-odds-api NON ha NESSUN gruppo eSports** (lista ufficiale /v4/sports
+  letta per intero): senza oracolo esterno il gate top-down risponde
+  `no_oracle` → **nessun ordine eSports possibile** (fail-closed per progetto).
+- **OddsPapi** (provider scelto): BASE `https://api.oddspapi.io/v4`, auth via
+  QUERY PARAM `apiKey` (nessun header → niente chiavi nei log header);
+  sportId: dota2=16, cs2=17, lol=18, cod=56, rocket_league=59, valorant=61;
+  Match Winner = market id **171** con esiti **171/172**, prezzo annidato sotto
+  `outcomes["171"].players["0"].price` (+ campo `active` per sospensione);
+  **`/v4/account` NON consuma quota** ed e' sempre accessibile (probe di
+  salute); `/v4/historical-odds` gratis; 429 = `REQUEST_LIMIT_EXCEEDED`.
+- **`esports_oracle.py` (nuovo, 60 test verdi TUTTI offline)**: tabella
+  `ESPORTS_TITLES` + `SX_LABEL_TITLES` DETERMINISTICA (sconosciuto → None,
+  mai fuzzy: un titolo sbagliato confronterebbe il prezzo con l'oracolo di
+  un altro gioco); `winner_market` fail-closed su entrambi i lati (scarta
+  `active=false` e `price<=1`); `true_probabilities` DELEGA a
+  `market_calib.market_implied` (zero formule copiate); orientamento nomi via
+  `team_names.same_team` (inversione gestita, non agganciabile → None);
+  `ev_gate`/`value_candidates`/`candidate_for` **IMPORTATI da
+  pinnacle_oracle** (tripwire: `"p * (price - 1.0)" not in CODE`); `api_key`
+  da env `ODDSPAPI_KEY` (iniettabile vince); `requests` import PIGRO
+  (tripwire subprocess: importare il modulo non carica requests/tracker/
+  decision); `_call` restituisce sempre `{ok,status,payload,error,code}` (mai
+  eccezioni al chiamante); CLI con guard `__main__` (`--titles` senza rete,
+  `--fixtures`/`--odds`/`--account` fail-closed exit 1 senza chiave).
+  Tripwire: niente poisson/numpy/scritture/ordini nel CODE (ast-based).
+- **Tripwire IaC**: classe `TestIaC` in `test_esports_oracle.py` —
+  `ODDSPAPI_KEY`, `ODDSPAPI_BASE`, `ODDSPAPI_BOOK`, `ESPORTS_DEVIG_METHOD`
+  devono stare in `preserve()` in `.railway/railway.ts` (lezione del 28/09:
+  `config apply` distrugge cio' che non e' dichiarato).
+- **Chiave**: `ODDSPAPI_KEY` impostata dal PROPRIETARIO direttamente su
+  Railway (regola 7: mai in chat; l'agente verifica solo l'impronta len+sha12).
+  Vault locale NON la contiene (i CLI locali restano fail-closed exit 1:
+  comportamento atteso, la prova dal vivo si fa sul container).
+
+**6) STATO (29/09).** Push su `main` = deploy automatico (remoto
+`siryo009/betting_bot`, servizio `betting_bot` del progetto
+`creative-vibrancy`). ⚠️ L'oracolo NON e' ancora wired in `auto_bet` (Item 4b:
+ingestione mercati SX type 52/3/1536 in `market_quotes` + corsia ordini
+eSports collegata all'oracolo — DA DECIDERE): "inizializzazione corretta" in
+produzione = import OK + `configured()` True + `/account` risponde. Nessun
+ordine eSports coinvolto. Collegamento non fatto: item 4b sara' progettato
+dopo la conferma dell'oracolo live.

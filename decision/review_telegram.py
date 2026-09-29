@@ -69,7 +69,7 @@ from .dispatcher import Dispatcher
 from .gateways import ShadowGateway, admin_targets
 from .limits import RiskLimits
 from .middleware import Observability, TraceContext
-from .models import Mode, ReasonCode, utcnow
+from .models import Mode, ReasonCode, as_float, utcnow
 from .review_queue import ReviewQueue
 
 logger = logging.getLogger("decision.review_telegram")
@@ -712,7 +712,10 @@ def handle_callback(data: Any, *, queue: Optional[ReviewQueue] = None,
         outcome.duplicate = True
         outcome.record_id = str(resolved.get("record_id") or "")
         outcome.status = str(resolved.get("status") or "claimed")
-        outcome.stake = resolved.get("stake")
+        # Lo store su disco e' JSON: `as_float` mantiene numerico l'importo
+        # (la serializzazione di un Decimal passerebbe come stringa).
+        stored = resolved.get("stake")
+        outcome.stake = as_float(stored) if stored is not None else None
         outcome.plan_id = str(resolved.get("plan_id") or "")
         outcome.verdict = str(resolved.get("verdict") or "")
         outcome.reason = str(resolved.get("reason") or "")
@@ -758,7 +761,7 @@ def handle_callback(data: Any, *, queue: Optional[ReviewQueue] = None,
             bankroll=bankroll, limits=limits, mode=mode, now=now)
         outcome.verdict = record.risk.verdict
         outcome.reason = record.risk.reason.value
-        outcome.stake = record.stake.stake if record.stake else None
+        outcome.stake = as_float(record.stake.stake) if record.stake else None
 
         if record.risk.reason == ReasonCode.REVIEW_EXPIRED:
             outcome.status = "expired"

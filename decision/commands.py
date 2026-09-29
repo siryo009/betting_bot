@@ -40,7 +40,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from .models import DecisionRecord, Mode, Outcome, Signal, utcnow
+from .models import DecisionRecord, Mode, Money, Outcome, Signal, utcnow
 
 
 class CommandKind(str, Enum):
@@ -89,8 +89,10 @@ class PlaceOrderPayload(BaseModel):
     selection_label: str = ""
     kickoff: datetime
     #: Quota del segnale: e' il BOUND dell'ordine (mai peggio di cosi').
-    price: float = Field(..., gt=1.0)
-    stake: float = Field(..., gt=0.0)
+    #: Denaro (direttiva 29/09): nel payload serializzato esce come NUMERO
+    #: (`Money` -> float in JSON), quindi i gateway lo leggono come prima.
+    price: Money = Field(..., gt=1.0)
+    stake: Money = Field(..., gt=0.0)
     mode: Mode = "live"
     provider: str = ""
     time_in_force: str = "IOC"
@@ -200,14 +202,16 @@ def persist_decision_command(record: DecisionRecord) -> Command:
 
 def place_order_command(record: DecisionRecord, *, provider: str = "",
                         home: str = "", away: str = "",
-                        stake: Optional[float] = None) -> Command:
+                        stake: Optional[Any] = None) -> Command:
     """Comando d'ordine per un segnale APPROVATO ed ESEGUIBILE.
 
     La quota nel payload e' quella del segnale: il gateway non puo' riempire a
     un prezzo peggiore (floor EV, come in `auto_bet._live_fill`). La
     `dedup_key` rende l'ordine idempotente per (match, esito).
     """
-    stake_value = float(stake if stake is not None else (record.stake.stake if record.stake else 0.0))
+    # Denaro: `Decimal` o float, normalizzato dal campo `Money` del payload
+    # (unico punto di conversione). Il dict del comando esce col NUMERO.
+    stake_value = stake if stake is not None else (record.stake.stake if record.stake else 0.0)
     payload = PlaceOrderPayload(
         match_id=record.signal.match_id,
         league=record.signal.league,

@@ -34,8 +34,8 @@ from typing import Optional
 
 from .limits import RiskLimits
 from .models import (
-    KillSwitchStatus, ReasonCode, RiskDecision, Signal, risk_approve, risk_reject,
-    risk_review,
+    KillSwitchStatus, ReasonCode, RiskDecision, Signal, as_float, risk_approve,
+    risk_reject, risk_review,
 )
 
 #: Ordine dei controlli (uguale a `is_sane`, piu' i due aggiunti).
@@ -82,13 +82,20 @@ def evaluate(signal: Signal, *, kills: KillSwitchStatus, limits: RiskLimits,
         return risk_reject(ReasonCode.MARKET_INCOHERENT, detail, checked=checked)
 
     # 4. Fascia quote dei favoriti netti.
+    #    La quota e' `Decimal` a riposo (direttiva 29/09) mentre le soglie sono
+    #    float: la conversione avviene QUI, una volta. Confrontare il `Decimal`
+    #    con la soglia grezza sarebbe SBAGLIATO proprio al confine —
+    #    `Decimal("1.3") >= 1.30` e' FALSO, perche' il float 1.30 vale
+    #    1.30000000000000004: un segnale esattamente a 1.30 verrebbe rifiutato
+    #    per un bit. Tripwire: `test_money_decimal` (confine 1.30).
     checked.append("odds_range")
-    if signal.price < limits.odds_min:
+    price = as_float(signal.price)
+    if price < limits.odds_min:
         return risk_reject(ReasonCode.ODDS_TOO_LOW,
-                           f"quota {signal.price:.2f} < {limits.odds_min}", checked=checked)
-    if signal.price > limits.odds_max:
+                           f"quota {price:.2f} < {limits.odds_min}", checked=checked)
+    if price > limits.odds_max:
         return risk_reject(ReasonCode.ODDS_TOO_HIGH,
-                           f"quota {signal.price:.2f} > {limits.odds_max}", checked=checked)
+                           f"quota {price:.2f} > {limits.odds_max}", checked=checked)
 
     # 5. Deve essere il favorito di mercato (difesa in profondita').
     checked.append("favourite")

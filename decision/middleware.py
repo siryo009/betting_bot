@@ -43,6 +43,7 @@ import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Protocol
 
@@ -92,8 +93,21 @@ def config_hash(limits: Any = None, extra: Optional[Mapping[str, Any]] = None) -
         payload["limits"] = "unavailable"
     if extra:
         payload.update({str(k): v for k, v in sorted(extra.items())})
-    raw = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
+    raw = json.dumps(payload, sort_keys=True, default=_json_default, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _json_default(value: Any) -> Any:
+    """Fallback di `json.dumps` per i tipi non nativi.
+
+    Il denaro e' `Decimal` (direttiva 29/09): con `default=str` finirebbe nei
+    log come STRINGA (`"1.50"`) e un lettore — dashboard, grep, JSONL verso
+    n8n — non potrebbe piu' sommare. Qui il `Decimal` esce come numero e ogni
+    altro tipo non serializzabile ricade su `str`, come prima.
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
 
 
 def redact(details: Optional[Mapping[str, Any]]) -> dict[str, Any]:
@@ -189,7 +203,7 @@ class JsonlSink:
                 source.rename(target)
 
     def write(self, event: dict[str, Any]) -> None:
-        line = json.dumps(event, ensure_ascii=False, default=str, sort_keys=False)
+        line = json.dumps(event, ensure_ascii=False, default=_json_default, sort_keys=False)
         if self.path is None:
             print(line, file=sys.stdout, flush=True)
             return

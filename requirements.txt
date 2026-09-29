@@ -14,3 +14,21 @@ google-genai>=1.0.0
 xgboost>=2.0.0
 scikit-learn>=1.3.0
 eth-account>=0.11.0
+# Intel live a costo zero (direttiva 29/09/2026, `live_intel.py`): statistiche
+# calcio (xG/ELO), NBA, MLB e news last-minute senza API key. Import PIGRI:
+# nessuno di questi pacchetti viene caricato da `import live_intel`.
+soccerdata>=1.9.0
+nba_api>=1.10.0
+pybaseball>=2.2.7
+ddgs>=9.0.0
+# Realtime SX Bet (direttiva 29/09/2026, `sx_realtime.py`): il book pushato a
+# ogni variazione invece del polling ogni 15'. `websockets` e' il trasporto
+# del protocollo Centrifugo; `httpx` e' il client ASYNC del token realtime
+# (`/user/realtime-token-v3/api-key`). Import PIGRI: `import sx_realtime` non
+# carica nessuno dei due. Fino al 29/09 arrivavano entrambi solo per via
+# TRANSITIVA (telegram/google-genai).
+# NB: il pacchetto ufficiale `centrifuge` esiste, ma il protocollo usato qui e'
+# quello minimo (connect/subscribe/ping) ed e' coperto dai test: una
+# dipendenza in meno da tenere allineata.
+httpx>=0.27.0
+websockets>=13.0

@@ -59,7 +59,7 @@ from .feeds import (
 from .gateways import ShadowGateway, shadow_log_path
 from .limits import RiskLimits
 from .middleware import Observability, TraceContext
-from .models import Signal
+from .models import Signal, as_float
 from .review_queue import ReviewQueue
 
 logger = logging.getLogger("decision.shadow")
@@ -335,7 +335,7 @@ def run_shadow(*, signals: Optional[Sequence[Signal]] = None, bankroll: float = 
                 "would_order": plan.places_order,
                 "order_blocked": report.aborted,
                 "decision_status": decision_status,
-                "stake": (plan.record.stake.stake if plan.record.stake else 0.0),
+                "stake": (as_float(plan.record.stake.stake) if plan.record.stake else 0.0),
                 "executed": report.executed,
                 "duplicated": report.duplicated,
             })

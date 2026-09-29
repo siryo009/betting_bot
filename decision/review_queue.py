@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .models import DecisionRecord, ReasonCode, utcnow
+from .models import DecisionRecord, ReasonCode, as_float, utcnow
 
 logger = logging.getLogger("decision.review")
 
@@ -115,7 +115,8 @@ class ReviewQueue:
             "outcome": signal.outcome,
             "selection": signal.selection_label or signal.outcome,
             "kickoff": signal.kickoff.isoformat(),
-            "price": signal.price,
+            # La coda e' un JSON su disco: la quota esce NUMERO, non stringa.
+            "price": as_float(signal.price),
             "market_prob": signal.market_prob,
             "blended_prob": signal.blended_prob,
             "edge": signal.edge,

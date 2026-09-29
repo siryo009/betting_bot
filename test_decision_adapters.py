@@ -7,6 +7,7 @@ produzione. Nessuna rete, nessun provider, nessuna scrittura.
 """
 
 import sqlite3
+from decimal import Decimal
 
 import pytest
 
@@ -96,7 +97,10 @@ class TestSignalDaRiga:
     def test_mapping_completo(self):
         signal = signal_from_row(row(), coverage=1.0, calibrated=True)
         assert signal.match_id == "sx-1"
-        assert signal.price == pytest.approx(1.60)
+        # La quota e' `Money` (Decimal): la riga 1.60 del ledger deve arrivare
+        # come `Decimal('1.6')`, non come il float binario 1.6000000000000001.
+        assert signal.price == Decimal("1.6")
+        assert isinstance(signal.price, Decimal)
         assert signal.blended_prob == pytest.approx(0.65)
         assert signal.model_prob == pytest.approx(0.62)      # da match_analysis
         assert signal.market_prob == pytest.approx(0.58)

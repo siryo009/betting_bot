@@ -354,7 +354,10 @@ class TestStakeEngine:
 
         stake_value, fraction = stake_engine.kelly_stake(signal, bankroll=1000.0,
                                                          limits=fixed)
-        full = vf.kelly_fraction(signal.blended_prob, signal.price, fraction=1.0)
+        # La quota del segnale e' `Decimal` (Money): il Kelly e' una formula
+        # statistica e vive in float, quindi qui si converte all'estremo — la
+        # stessa conversione che fa il motore.
+        full = vf.kelly_fraction(signal.blended_prob, float(signal.price), fraction=1.0)
         assert fraction == pytest.approx(0.25)
         assert stake_value == pytest.approx(1000.0 * full * 0.25)
         assert stake_value != pytest.approx(1000.0 * full * 0.25 * 0.25)

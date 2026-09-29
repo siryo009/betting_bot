@@ -162,6 +162,95 @@ class TestParitaFinanceAgent:
 
 
 # ---------------------------------------------------------------------------
+# 1b. MODELLO: lo StrategyAgent DELEGA a poisson_engine (zero formule copiate)
+# ---------------------------------------------------------------------------
+
+class TestDelegaModello:
+    """Il modello vive in `poisson_engine`: qui si verifica la PARITA'.
+
+    Un agente che ricalcola il Poisson per conto suo sarebbe una seconda
+    formula: il giorno che divergono non si saprebbe quale ha deciso la
+    puntata (lezione 13/09, costo reale in produzione).
+    """
+
+    def test_expected_goals_delegato(self):
+        import poisson_engine
+        agent = StrategyAgent()
+        for home, away in (("Inter", "Milan"), ("Arsenal", "Chelsea")):
+            assert agent.expected_goals(home, away) == \
+                poisson_engine.expected_goals(home, away)
+
+    def test_1x2_parita_col_motore(self):
+        import poisson_engine
+        agent = StrategyAgent()
+        lam_h, lam_a = poisson_engine.expected_goals("Inter", "Milan")
+        want = poisson_engine.prob_1x2(lam_h, lam_a)
+        got = agent.model_probabilities("1X2", "Inter", "Milan")
+        assert (got["p1"], got["pX"], got["p2"]) == pytest.approx(want)
+        assert sum(got.values()) == pytest.approx(1.0)
+
+    @pytest.mark.parametrize("line", [1.5, 2.0, 2.5, 2.25, 3.5])
+    def test_ou_parita_col_motore_incluso_il_push(self, line):
+        import poisson_engine
+        agent = StrategyAgent()
+        lam_h, lam_a = poisson_engine.expected_goals("Inter", "Milan")
+        for side in ("over", "under"):
+            want = poisson_engine.ou_outcome_probs(lam_h, lam_a, line, side)
+            got = agent.model_probabilities("OU", "Inter", "Milan",
+                                            line=line, side=side)
+            assert (got["p_win"], got["p_push"], got["p_lose"]) == \
+                pytest.approx(want)
+
+    @pytest.mark.parametrize("line,side", [(-0.75, "home"), (0.5, "away"),
+                                            (-1.25, "home"), (2.0, "away")])
+    def test_ah_parita_col_motore(self, line, side):
+        import poisson_engine
+        agent = StrategyAgent()
+        lam_h, lam_a = poisson_engine.expected_goals("Inter", "Milan")
+        want = poisson_engine.ah_outcome_probs(lam_h, lam_a, line, side)
+        got = agent.model_probabilities("AH", "Inter", "Milan",
+                                        line=line, side=side)
+        assert (got["p_win"], got["p_push"], got["p_lose"]) == \
+            pytest.approx(want)
+
+    def test_btts_parita_col_motore(self):
+        import poisson_engine
+        agent = StrategyAgent()
+        lam_h, lam_a = poisson_engine.expected_goals("Inter", "Milan")
+        got = agent.model_probabilities("BTTS", "Inter", "Milan")
+        assert got["p_yes"] == pytest.approx(poisson_engine.prob_btts(lam_h, lam_a))
+        assert got["p_no"] == pytest.approx(1.0 - got["p_yes"])
+
+    def test_mercato_senza_modello_e_errore_dichiarato(self):
+        """Fail-closed: mai una probabilita' inventata per un mercato ignoto."""
+        with pytest.raises(ValueError, match="senza modello"):
+            StrategyAgent().model_probabilities("CS", "Inter", "Milan")
+        with pytest.raises(ValueError):
+            StrategyAgent().model_probabilities("", "Inter", "Milan")
+
+    @pytest.mark.parametrize("market", ["OU", "AH"])
+    def test_mercato_con_linea_senza_linea_e_errore(self, market):
+        with pytest.raises(ValueError, match="senza linea"):
+            StrategyAgent().model_probabilities(market, "Inter", "Milan")
+
+    def test_lo_strategy_agent_non_importa_numpy_o_scipy(self):
+        """La vettorizzazione vive nel MOTORE: l'agente non la reimplementa."""
+        import agents.strategy_agent as sa
+        src = open(sa.__file__, encoding="utf-8").read()
+        for banned in ("import numpy", "import scipy", "from scipy",
+                       "stats.poisson", "math.", "def prob_1x2"):
+            assert banned not in src, banned
+
+    def test_delega_al_motore_e_non_a_una_copia(self, monkeypatch):
+        """Se il motore cambia, l'agente cambia con lui (nessuna copia)."""
+        import poisson_engine
+        monkeypatch.setattr(poisson_engine, "prob_1x2",
+                            lambda lh, la, mg=10: (0.5, 0.3, 0.2))
+        got = StrategyAgent().model_probabilities("1X2", "Inter", "Milan")
+        assert (got["p1"], got["pX"], got["p2"]) == (0.5, 0.3, 0.2)
+
+
+# ---------------------------------------------------------------------------
 # 2. TRIPWIRE: niente denaro, import leggeri, contratti serializzabili
 # ---------------------------------------------------------------------------
 

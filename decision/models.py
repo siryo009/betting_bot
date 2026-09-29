@@ -18,16 +18,26 @@ Regole di ferro (verificate dai tripwire in `test_decision_pipeline.py`):
    prosa: il feedback engine aggrega i motivi, non interpreta frasi.
 4. **Nessun effetto collaterale.** Questi modelli non toccano DB, rete o
    provider: sono dati.
+5. **I soldi sono `Decimal` (direttiva 29/09/2026).** Stake, quote d'ordine e
+   bilanci NON sono `float`: `0.1 + 0.2 != 0.3` in binario e su un bankroll di
+   33 USDC con stake da 1.50 l'errore si accumula a ogni giro. Il tipo
+   `Money` incapsula la conversione (`money()` dalla stringa, mai
+   `Decimal(float)`) e la serializzazione agli ESTREMI (`as_float()` per
+   SQLite/JSON/motori float). Tutto cio' che e' probabilita', frazione di
+   Kelly, EV, edge o copertura resta `float`: sono quantita' statistiche, non
+   denaro.
 """
 
 from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (BaseModel, BeforeValidator, Field, PlainSerializer,
+                      field_validator, model_validator)
 
 Market = Literal["1X2"]
 Outcome = Literal["1", "X", "2"]
@@ -39,6 +49,55 @@ Verdict = Literal["approve", "review", "reject"]
 def utcnow() -> datetime:
     """Ora UTC timezone-aware (mai naive: i kickoff sono UTC)."""
     return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Denaro: Decimal ai confini (direttiva 29/09/2026)
+# ---------------------------------------------------------------------------
+
+def money(value: Any) -> Decimal:
+    """Converte un importo/una quota in `Decimal` SENZA il rumore binario.
+
+    `Decimal(1.5)` e' esatto, ma `Decimal(0.1)` diventa
+    `0.1000000000000000055511151231257827` (la rappresentazione binaria del
+    float): passando dalla STRINGA si ottiene `Decimal('0.1')`, cioe' il
+    numero che il float *intendeva*. E' la stessa conversione che Pydantic
+    applica internamente, resa esplicita qui perche' vale anche fuori dai
+    modelli (letture dal ledger, aritmetica di supporto).
+
+    Un valore non convertibile NON viene mai inghiottito: solleva `ValueError`,
+    cosi' un importo malformato si vede invece di diventare 0 in silenzio.
+    """
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError(f"importo non convertibile in Decimal: {value!r}") from exc
+
+
+def as_float(value: Any) -> float:
+    """Decimal -> float: la conversione degli ESTREMI.
+
+    Serve dove il `Decimal` esce dal perimetro dei contratti: binding SQLite,
+    JSON, gli helper di `auto_bet`/`value_filter` che ragionano in float. La
+    conversione e' esplicita e avviene in un punto solo, mai dentro una
+    formula: e' la regola "Decimal a riposo, float in transito".
+    """
+    if value is None:
+        return 0.0
+    return float(value)
+
+
+#: Importo in valuta (stake, bankroll, bilanci, quota d'ordine).
+#: In python resta `Decimal` (aritmetica esatta); in JSON esce come numero
+#: (float), non come stringa: i consumatori a valle (webapp, report, n8n)
+#: leggono numeri, non `"1.50"`.
+Money = Annotated[
+    Decimal,
+    BeforeValidator(money),
+    PlainSerializer(lambda value: float(value), return_type=float, when_used="json"),
+]
 
 
 class ReasonCode(str, Enum):
@@ -136,7 +195,15 @@ class DataQuality(BaseModel):
 
 
 class Signal(BaseModel):
-    """Un'opportunita' rilevata dal Signal Engine. NON contiene lo stake."""
+    """Un'opportunita' rilevata dal Signal Engine. NON contiene lo stake.
+
+    `validate_assignment` e' attivo per lo stesso motivo di `StakeDecision`:
+    la quota e' `Money` e un'assegnazione a valle (`signal.price = 2.6`) non
+    deve poter sostituire il `Decimal` con un float, rendendo la direttiva
+    una dichiarazione di facciata.
+    """
+
+    model_config = {"validate_assignment": True}
 
     signal_id: str = ""
     match_id: str
@@ -145,7 +212,9 @@ class Signal(BaseModel):
     outcome: Outcome
     selection_label: str = ""
     kickoff: datetime
-    price: float = Field(..., gt=1.0, description="quota giocabile")
+    #: Quota giocabile: e' denaro (il prezzo a cui si punta), quindi `Money`.
+    #: Le PROBABILITA' restano float: sono stime statistiche, non importi.
+    price: Money = Field(..., gt=1.0, description="quota giocabile")
     price_source: str = ""
     market_prob: float = Field(..., gt=0.0, lt=1.0)
     model_prob: float = Field(..., ge=0.0, le=1.0)
@@ -164,7 +233,9 @@ class Signal(BaseModel):
         if self.edge is None:
             self.edge = self.blended_prob - self.market_prob
         if self.ev is None:
-            self.ev = self.blended_prob * self.price - 1.0
+            # EV = p*quota - 1: formula STATISTICA, quindi in float. La quota
+            # torna float qui e solo qui (estremo), mai dentro una formula di stake.
+            self.ev = self.blended_prob * as_float(self.price) - 1.0
         if not self.signal_id:
             self.signal_id = make_signal_id(self.match_id, self.market, self.outcome)
         if self.data_quality.is_blind and "ratings_assenti" not in self.warnings:
@@ -287,15 +358,28 @@ def risk_reject(reason: ReasonCode, detail: str, *,
 # ---------------------------------------------------------------------------
 
 class StakeDecision(BaseModel):
-    """Quanto puntare. Esiste SOLO a valle di un verdetto che autorizza."""
+    """Quanto puntare. Esiste SOLO a valle di un verdetto che autorizza.
 
-    bankroll: float
-    stake: float = 0.0
+    Denaro (bankroll, stake, floor) in `Decimal`; `kelly_fraction` e `cap_pct`
+    restano float — sono RAPPORTI e percentuali, non importi: tipizzarli
+    `Decimal` darebbe una precisione che non serve e romperebbe le moltipliche
+    con i motori float del progetto (`adaptive_staking`, `value_filter`).
+
+    `validate_assignment` e' obbligatorio qui: lo Stake Engine ASsegna dopo la
+    costruzione (`base.stake = stake_value`), e senza coercizione il campo
+    conterrebbe un float in un modello che dichiara `Decimal` — la
+    tipizzazione diventerebbe una dichiarazione di facciata.
+    """
+
+    model_config = {"validate_assignment": True}
+
+    bankroll: Money
+    stake: Money = Decimal("0")
     kelly_fraction: float = 0.0
-    kelly_stake: float = 0.0          # stake prima dei cap (per l'audit)
-    cap_pct: Optional[float] = None   # cap che ha morso (percentuale bankroll)
-    cap_source: str = ""              # "tier" | "league" | "risk" | "none"
-    floor: float = 0.0
+    kelly_stake: Money = Decimal("0")  # stake prima dei cap (per l'audit)
+    cap_pct: Optional[float] = None    # cap che ha morso (percentuale bankroll)
+    cap_source: str = ""               # "tier" | "league" | "risk" | "none"
+    floor: Money = Decimal("0")
     executable: bool = False
     reason: ReasonCode = ReasonCode.OK
     detail: str = ""
@@ -350,7 +434,7 @@ class DecisionRecord(BaseModel):
             "outcome": self.signal.outcome,
             "selection_label": self.signal.selection_label,
             "kickoff": self.signal.kickoff.isoformat(),
-            "price": self.signal.price,
+            "price": as_float(self.signal.price),
             "price_source": self.signal.price_source,
             "market_prob": self.signal.market_prob,
             "model_prob": self.signal.model_prob,
@@ -372,7 +456,9 @@ class DecisionRecord(BaseModel):
         }
         if self.stake is not None:
             row.update({
-                "stake": self.stake.stake,
+                # Agli ESTREMI il denaro torna float: la colonna del ledger e'
+                # REAL e il driver del DB non accetta un `Decimal` come binding.
+                "stake": as_float(self.stake.stake),
                 "stake_executable": self.stake.executable,
                 "kelly_fraction": self.stake.kelly_fraction,
                 "cap_pct": self.stake.cap_pct,
@@ -418,8 +504,9 @@ class T60OrderContract(BaseModel):
     outcome: str = Field(..., min_length=1)
     home: str = ""
     away: str = ""
-    price: float = Field(..., gt=1.0)
-    stake: float = Field(..., gt=0.0)
+    # Denaro: la quota d'ORDINE e lo stake sono importi, non stime.
+    price: Money = Field(..., gt=1.0)
+    stake: Money = Field(..., gt=0.0)
     verdict: Verdict = "approve"
     mode: Mode = "live"
     provider: str = ""
@@ -465,7 +552,8 @@ __all__ = [
     "DECISION_STATUSES", "DECISION_STATUS_PENDING", "DECISION_STATUS_REJECTED",
     "DECISION_STATUS_VALIDATED", "DataQuality", "DecisionRecord", "DecisionStatus",
     "KILL_SWITCH_PRECEDENCE", "KillSwitchStatus", "Market", "Mode", "Outcome",
-    "ReasonCode", "RiskDecision", "Signal", "StakeDecision", "T60OrderContract",
-    "Tier", "Verdict", "make_signal_id", "risk_approve", "risk_reject",
-    "risk_review", "t60_executable", "utcnow",
+    "Money", "ReasonCode", "RiskDecision", "Signal", "StakeDecision",
+    "T60OrderContract", "Tier", "Verdict", "as_float", "make_signal_id",
+    "money", "risk_approve", "risk_reject", "risk_review", "t60_executable",
+    "utcnow",
 ]

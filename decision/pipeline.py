@@ -32,7 +32,7 @@ from . import risk_engine, stake_engine
 from .limits import RiskLimits
 from .models import (
     DecisionRecord, KillSwitchStatus, Mode, ReasonCode, Signal, StakeDecision,
-    utcnow,
+    as_float, utcnow,
 )
 from .review_queue import ReviewQueue
 
@@ -149,7 +149,9 @@ def summary(records: list[DecisionRecord]) -> dict:
         stake: Optional[StakeDecision] = record.stake
         if stake is not None and stake.executable:
             out["executable"] += 1
-            out["stake_total"] = round(out["stake_total"] + stake.stake, 2)
+            # `stake_total` e' una SOMMA di telemetria in float: il denaro
+            # (Decimal) si converte all'estremo, mai dentro la formula di stake.
+            out["stake_total"] = round(out["stake_total"] + as_float(stake.stake), 2)
     return out
 
 

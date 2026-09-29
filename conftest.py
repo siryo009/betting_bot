@@ -22,6 +22,15 @@ Terzo sink: lo **store dei callback** delle revisioni
 (`decision/review_telegram.py`), che registra i callback risolti e i prompt
 inviati. Anche quello va nella tmp: senza isolamento un test scriverebbe sul
 volume la memoria dell'idempotenza — e il test successivo la troverebbe.
+
+Quarto confine: l'**intel live** (`live_intel.py`, 29/09/2026). Il `DataAgent`
+raggiunge gli scraper REALI (soccerdata -> FBref, ClubElo, `ddgs`) quando ha
+segnali e nessun `intel_fn` iniettato: e' una chiamata di RETE, non una
+lettura locale. Senza isolamento ogni file che costruisce un `DataAgent`
+(gerarchia agenti, advisor, recinto) faceva partire lo scraping FBref ad ogni
+test — lento e senza timeout — e la suite si e' BLOCCATA il 29/09. Qui
+l'intel e' spenta alla fonte (`LIVE_INTEL=0`) e la cache va nella tmp; il file
+dedicato (`test_live_intel.py`) la riaccende con provider finti.
 """
 
 import pytest
@@ -116,6 +125,16 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # test iniettano `price_lookup`/`fill`, quindi non toccano l'exchange, ma
     # senza isolamento lascerebbero `data/execution/hedge_events.jsonl` reale.
     monkeypatch.setenv("HEDGE_LOG", str(tmp_path / "hedge_events.jsonl"))
+    # Intel live (29/09/2026): `DataAgent` chiama gli scraper REALI (soccerdata
+    # -> FBref, ClubElo, ddgs) quando ha segnali e nessun `intel_fn` iniettato.
+    # Sono chiamate di RETE senza timeout: il 29/09 la suite si e' bloccata
+    # proprio perche' `test_agent_hierarchy`/`test_advisor_agent`/
+    # `test_exposure_gate` costruiscono `DataAgent()` "nudo" su un ledger con
+    # segnali e facevano partire lo scraping FBref ad ogni test. In test
+    # l'intel e' SPENTA alla fonte; la cache va nella tmp (due difese: se un
+    # test la riaccende esplicitamente, non scrive comunque sul volume).
+    monkeypatch.setenv("LIVE_INTEL", "0")
+    monkeypatch.setenv("LIVE_INTEL_CACHE", str(tmp_path / "intel"))
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di
     # MODULO e sopravvive fra i test dello stesso processo, mentre il ledger
     # no (ogni test ha il suo DB temporaneo). Senza reset un caso che semina

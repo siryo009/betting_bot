@@ -57,7 +57,8 @@ from .feeds import FeedSnapshot, MarketFeed, feed_enabled as feeds_enabled, veri
 from .limits import RiskLimits
 from .middleware import Observability, TraceContext
 from .models import (
-    DecisionRecord, KillSwitchStatus, Mode, RiskDecision, Signal, risk_reject,
+    DecisionRecord, KillSwitchStatus, Mode, RiskDecision, Signal, as_float,
+    risk_reject,
 )
 from .review_queue import ReviewQueue
 
@@ -169,7 +170,7 @@ def build_plan(signal: Signal, *, kills: Optional[KillSwitchStatus] = None,
             already_exposed=already_exposed)
     obs.event("decision", ctx=risk_span, stage="risk", outcome=record.risk.verdict,
               reason=record.risk.reason.value, mode=record.mode,
-              stake=(record.stake.stake if record.stake else None),
+              stake=(as_float(record.stake.stake) if record.stake else None),
               executable=(record.stake.executable if record.stake else False),
               coverage=signal.data_quality.model_coverage,
               confidence=signal.confidence)

@@ -25,7 +25,8 @@ from __future__ import annotations
 from typing import Optional
 
 from .limits import RiskLimits
-from .models import Mode, ReasonCode, RiskDecision, Signal, StakeDecision
+from .models import (Mode, ReasonCode, RiskDecision, Signal, StakeDecision,
+                     as_float)
 
 
 def _round_step(value: float, step: float) -> float:
@@ -41,16 +42,19 @@ def kelly_stake(signal: Signal, *, bankroll: float, limits: RiskLimits,
     import adaptive_staking as stake_mod
     import value_filter as vf
 
+    # La quota e' `Decimal` a riposo (Money) e questi motori ragionano in float:
+    # conversione esplicita all'ESTREMO, una volta per chiamata.
+    price = as_float(signal.price)
     fraction = stake_mod.confidence_kelly_fraction(
         prob=signal.blended_prob,
-        odds=signal.price,
+        odds=price,
         market_edge=signal.edge,
         ml_confidence=ml_confidence,
         has_clv_positive=has_clv_positive,
         status=signal.tier,
     )
     fraction = max(limits.kelly_min, min(limits.kelly_max, float(fraction)))
-    full = vf.kelly_fraction(signal.blended_prob, signal.price, fraction=1.0)
+    full = vf.kelly_fraction(signal.blended_prob, price, fraction=1.0)
     return (bankroll * full * fraction, fraction)
 
 
@@ -126,8 +130,11 @@ def size(signal: Signal, risk: RiskDecision, *, bankroll: float,
             base.executable = False
             return base
         base.stake = base.floor
+        # `base.stake` e' un `Decimal` (Money): la percentuale di telemetria si
+        # calcola in float, altrimenti Decimal/float solleva TypeError.
+        pct = as_float(base.stake) / as_float(bankroll) * 100 if bankroll else 0.0
         base.detail = (f"floor {base.floor:.2f} applicato (STAKE_CAP_HARD=0): stake "
-                       f"{base.stake:.2f} = {base.stake/bankroll*100:.2f}% del bankroll")
+                       f"{base.stake:.2f} = {pct:.2f}% del bankroll")
 
     depth = signal.data_quality.depth_usdc
     if depth is not None:

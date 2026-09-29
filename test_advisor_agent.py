@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -138,9 +139,14 @@ class TestMicroStake:
         so2 = strategy.process(market2.signals)
         # la query del ledger filtra i tier giocabili: ricostruisco il piano
         # a mano dal segnale "forte" precedente con quota alterata
+        # `signal.price` e' `Money` con validate_assignment: l'assegnazione
+        # viene COERCITA a Decimal('2.6'). Il blocco nasce dalla quota fuori
+        # fascia (ODDS_TOO_HIGH), non da un tier inventato: "rejected" non e'
+        # un Tier valido e prima passava solo perche' Pydantic non validava le
+        # assegnazioni (il buco che la direttiva del 29/09 chiude).
         signal.price = 2.60
         signal.ev = 0.65 * 2.60 - 1
-        signal.tier = "rejected"
+        assert isinstance(signal.price, Decimal)
         from decision.engine import build_plan
         blocked = build_plan(signal, bankroll=100.0, mode="sim", kills=KillSwitchStatus())
         res = advisor.resolve_blocker(signal, market, strategy_out, blocked)

@@ -25,6 +25,10 @@ class MarketData(BaseModel):
     snapshot: Optional[FeedSnapshot] = None
     gate: FeedGateResult
     signals: list[Signal] = Field(default_factory=list)
+    #: Intel live per i segnali in finestra (direttiva 29/09/2026):
+    #: statistiche di stagione, ELO, news infortuni, probabili lanciatori.
+    #: Vuota (o con `errors > 0`) NON blocca: e' degrado dichiarato.
+    intel: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
     def validated(self) -> bool:
@@ -37,6 +41,7 @@ class MarketData(BaseModel):
             "signals": len(self.signals),
             "snapshot": (self.snapshot.model_dump(mode="json")
                          if self.snapshot is not None else None),
+            "intel": self.intel,
         }
 
 

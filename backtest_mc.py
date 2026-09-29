@@ -75,31 +75,41 @@ def _walk_forward(rows: List[Dict], window: int) -> List[Dict]:
     piccolo), le predizioni iniziali usano la prob base (come in produzione:
     ensemble non addestrato -> prob Poisson/blend).
     """
+    import numpy as np
     from ml_ensemble import EnsemblePredictor, _build_features
 
     preds: List[Dict] = []
     last_trained_at = -1
+    #: Modello dell'EPOCA corrente: `rows[:last_trained_at]` non cambia finche'
+    #: non scatta il prossimo retrain, quindi il modello e' lo stesso per tutte
+    #: le righe dell'epoca. Si conserva invece di ricostruirlo.
+    model = None
 
     for i in range(len(rows)):
         row = rows[i]
 
         # Retrain SOLO sui dati passati, quando la finestra cresce di 20
         if i >= window and (i - window) % 20 == 0:
-            ens = EnsemblePredictor()
-            metrics = ens.train(rows[:i])
+            candidato = EnsemblePredictor()
+            metrics = candidato.train(rows[:i])
             if metrics.get("status") == "trained":
                 last_trained_at = i
+                # E' addestrato ESATTAMENTE sul campione che serve alle
+                # predizioni di questa epoca: si riusa (vedi sotto).
+                model = candidato
 
         base_prob = float(row.get("prob") or row.get("prob_1") or 0.5)
-        if last_trained_at < 0:
+        if last_trained_at < 0 or model is None:
             ml_prob = base_prob
         else:
-            ens = EnsemblePredictor()
-            ens.train(rows[:last_trained_at])
+            # ⚠️ Qui si riaddestrava il modello AD OGNI RIGA sullo stesso
+            # campione: costo O(n^2) a parita' di risultato (train e' una
+            # funzione deterministica del slice). Misurato il 29/09/2026: un
+            # solo file di test (7 casi) impiegava 2:47 e la regressione
+            # completa sforava il budget della shell, sembrando BLOCCATA.
             features = _build_features(row)
-            p = ens.lr_model.predict_proba(
-                __import__("numpy").array([features]))[0]
-            ml_prob = float(p)
+            ml_prob = float(model.lr_model.predict_proba(
+                np.array([features]))[0])
 
         # Ensemble: media ponderata (peso default 0.4, come produzione pre-metrica)
         # NOTA: qui usiamo il peso fisso 0.35 per semplicita' e riproducibilita'.

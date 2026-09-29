@@ -28,3 +28,6 @@ data/surebet/
 data/execution/
 data/tennis_sandbox/
 data/decision/
+data/intel/
+# artefatti del plugin SeleniumBase (non e' una dipendenza del progetto)
+downloaded_files/
