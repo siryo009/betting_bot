@@ -6933,3 +6933,128 @@ intercettava la PROPRIA riga di comando (che contiene il pattern) e riportava
 Regole: **niente comandi bloccanti e niente `sleep` lunghi** (usare
 `--lines N` sui log e `--json` sugli stati, mai lo streaming); mai `pgrep -f` /
 `pkill -f` con un pattern che compare nella riga di comando invocante.
+
+### Oracolo eSports cablato + corsia LIVE (30/09/2026)
+
+**Direttiva**: integrare `esports_oracle` in `auto_bet.py` e attivare la corsia
+LIVE. Ricognizione fatta PRIMA di scrivere codice (tutto verificato sui valori
+reali del servizio, non ipotesi): `AUTO_BET_MODE=live`,
+`EXECUTION_PROVIDER=sxbet`, `ODDS_DAILY_BUDGET=24`, `ENABLE_LIVE_OU=1`,
+`STAKE_CAP_HARD=0` erano **gia' presenti** su `betting_bot` → il passo "abilita
+il live" e' stato un no-op; `EXECUTION_DRY_RUN` assente (dry-run spento) e
+`ESPORTS_LIVE` assente (default di codice ON).
+
+**Il problema non era "filtrare", era "non c'e' nessuno che guardi".** La
+discovery di `sx_signals` (`sportIds=5`, `type=1`) e quella di `multi_market`
+(`sportIds=5`) sono **solo calcio**, e `execution_engine.resolve_market_for`
+usa `event_type_ids=("5",)`: nessun mercato eSports entrava nel sistema, quindi
+non c'era nulla da filtrare. Serviva una **corsia nuova**, non un flag.
+
+**`esports_lane.py` (nuovo)**: catena in 4 passi, **gratuita tranne l'oracolo**.
+1. DISCOVERY (SX `sportId=9`, `type 52` = moneyline 2 vie senza pareggio,
+   lettura pubblica, zero chiavi/crediti): su SX un mercato binario e' "X vs
+   Not X" con `outcomeOne` = il lato comprabile con `selection 1`, e per una
+   partita 2 vie esistono DUE mercati (uno per squadra), raggruppati per evento
+   con chiave `(_norm(t1), _norm(t2), minuto kickoff)`.
+2. ORACOLO OddsPapi (l'unica voce a pagamento): `esports_oracle.match_fixture`
+   + `oracle_for_fixture` (probabilita' fair de-vigate di Pinnacle).
+   **the-odds-api NON ha eSports**: senza oracolo esterno il gate top-down
+   risponderebbe `no_oracle` su ogni riga e la classe resterebbe non giocabile
+   per costruzione.
+3. EV GATE: `esports_oracle.candidate_for` → `pinnacle_oracle.ev_gate`, soglia
+   `value_filter.EV_MIN` **importata** (una sola definizione di soglia).
+4. PICK nella forma attesa da `run_today_bets`, con `mercato="ML"`, `esito_key`
+   1|2, `team` = lato da comprare, `match_id=sx-esports-<event_id>` e
+   `market_id`/`selection_id` (servono al settlement).
+
+**Perche' NON si applica il gate di lega (decisione dichiarata, non dimenticanza)**:
+`value_filter.league_allowed` misura **campionati di calcio** con un ROI
+storico; gli eSports sono un'altra classe di rischio senza misura e le etichette
+SX (`League of Legends`, `CBLOL`...) non sono nel set ammesso → applicarlo
+significherebbe che la corsia non puo' giocare NULLA per definizione. La
+prudenza sta altrove: **fascia quota di produzione** (1.30-1.80 da
+`value_filter`, override `ESPORTS_ODDS_MIN/MAX`), profondita' minima SX,
+oracolo sharp de-vigato e **stake fisso 1.50** del recinto.
+
+**Settlement eSports = SX-native, a costo zero.** `sx_signals._results_from_sx`
+legge `markets/find` sui `market_id` salvati sulle bet
+(`WHERE mode='live' AND esito_finale IS NULL AND match_id LIKE 'sx-%' AND
+market_id != ''`), **senza riga in `matches` e senza the-odds-api**. E' il
+motivo del prefisso `sx-esports-` e del `market_id`/`selection_id` nel pick:
+senza quelli la riga non sarebbe saldabile e il capitale resterebbe
+immobilizzato fino alla scadenza automatica.
+
+**`execution_engine.resolve_moneyline_market` (nuova)**: sport 9 / type 52,
+verifica che il `team` sia un partecipante, esclude i mercati **con linea**,
+aggancia `outcome_one_name` **per nome** e ritorna `selection_id=1`,
+`market_type="ML"`. Il grouping evento di `resolve_match_market` e' stato
+estratto in `_unique_event_markets` e **riusato** (due copie divergerebbero).
+
+**`auto_bet`**: `_esports_picks()` (fail-safe → lista vuota) entra nel board **solo
+con `mode == "live"`** — l'oracolo costa quota e il suo unico scopo e' decidere
+il PREZZO di un ordine reale. Il gate top-down Pinnacle e' **escluso** per
+`mercato == "ML"` (legge le cache del **calcio**: su un pick eSports
+risponderebbe `no_oracle` e ucciderebbe la corsia). `_live_fill` ha un branch
+`is_ml` che usa il resolver moneyline (guardia: pick ML senza `team` → salto).
+
+**BUG REALI trovati scrivendo/verificando** (non ipotesi):
+1. `sx_signals.ev_gate` espone la probabilita' fair come **`prob`** (non
+   `p_true`) e **NON** ripete la soglia (`ev_min` non esiste nella riga) → il
+   codice sollevava `KeyError('ev_min')` inghiottito come "corsia non
+   disponibile". Fix: `p_true = float(verdict["prob"])`, soglia da
+   `eo.min_ev()`.
+2. La prob. implicita del lato va mappata **per NOME squadra**, non per
+   posizione: l'ordine con cui SX restituisce i due mercati non e' un
+   contratto.
+3. `ESPORTS_ORACLE_WINDOW_H`/`ESPORTS_MIN_INTERVAL_S` lette **all'import** non
+   erano ne' tarabili ne' testabili → convertite in funzioni runtime
+   `oracle_window_h()`/`min_interval_s()` (pattern `smart_hedging`) con
+   `_num_env()` (valore impossibile → default + warning; negativo → 0).
+4. **Il primo ciclo reale ha bruciato 6/6 richieste in un giro**: interrogava
+   eventi a 4h+ dal kickoff (quando Pinnacle non ha ancora pubblicato) e due
+   chiamate ravvicinate prendevano **HTTP 429** — e la 429 e' un **rate limit
+   al MINUTO**, non una quota esaurita: la richiesta e' **persa** (quota
+   pagata, zero dati). Fix: `_pace()` (distanziamento prima di ogni richiesta,
+   default 2.5s) e `oracle_window_h()` (default 3h) che esclude dall'oracolo
+   gli eventi lontani. Discovery e fascia quota restano a **24h** perche' sono
+   gratuite.
+5. In produzione il testo del log non distingueva "corsia dormiente" da
+   "corsia rotta": aggiunto `events_in_oracle_window` a `summary()` (due
+   conteggi DISTINTI: discovery 24h vs finestra oracolo) e la riga nel report.
+   ⚠️ `summary()`/`--report` **NON sono gratis**: chiamano `picks()`, quindi
+   consumano quota quando c'e' un evento in finestra.
+
+**Log del primo ciclo della corsia (deploy `a407586d`)** — la corsia GIRA in
+produzione e fallisce in modo **dichiarato**:
+```
+esports_lane: oracolo assente per Betboom Team vs OG (nessun Match Winner completo per 'pinnacle' ...)
+esports_lane: fixtures 'valorant' non lette (HTTP 429)
+esports_lane: budget OddsPapi esaurito per oggi (6/6) — nessuna richiesta
+```
+**Log dopo il fix (deploy `ed388951`, 00:31-00:37 UTC)** — tutti e 6 gli eventi
+discovery sono a 9h+ dal kickoff → **zero richieste, zero costo** e silenzio
+voluto (il log del salto finestra e' a DEBUG). Verificato coi valori reali:
+`finestra oracolo 3.0h | ora UTC 00:31`, eventi 09:00 / 10:00 / 13:00 / 16:00 /
+16:00 / 21:00 → **tutti "oltre"**. `oracle_window_h=3.0`, `min_interval_s=2.5`
+letti dal container. **Zero HTTP 429 reali** nei log (le 2 occorrenze di "429"
+erano i millisecondi del timestamp, `00:26:43,429`).
+
+**Deploy**: `ca78363` (corsia, 9 file, +1519/-3) → `a407586d` SUCCESS;
+`e80794d` (finestra + pacing + `events_in_oracle_window`) → `ed388951`
+SUCCESS. **Env**: tutte le `ESPORTS_*` dichiarate `preserve()` in
+`.railway/railway.ts`; `railway config plan` pulito (0 to destroy). I default
+di codice valgono su Railway (nessuna env ESPORTS_* impostata a mano).
+
+**⚠️ Pinnacle pubblica TARDIVO sugli eSports**: ogni fixture senza prezzi sharp
+da' `None` **fail-closed** (nessun verdetto invece di un verdetto su un book
+ricreativo). Sul piano free `pinnacle` E' incluso nelle sottoscrizioni
+(`subscriptions[0].bookmakers`), quindi il limite operativo e' solo il timing:
+la corsia parte da sola quando lo sharp quota. Aspettativa realistica:
+**zero ordini eSports finche' non pubblica** — il fail-closed e' il progetto,
+non un difetto.
+
+**Regola permanente dagli incidenti**: `verify_guardrails.py` deve spegnere le
+sorgenti di rete PRIMA di girare. Senza `LIVE_INTEL=0` il `DataAgent` faceva
+**scraping reale di FBref** e la diagnostica moriva a meta' scenario C; ora
+imposta `LIVE_INTEL=0` **e** `ESPORTS_LIVE=0` e completa in ~45s con
+**A-H tutti bloccanti**.
