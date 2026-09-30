@@ -7405,3 +7405,44 @@ testa-a-testa a 2 esiti: ha una LINEA): serve o un oracolo a linea (non
 sostenibile coi crediti: `totals,spreads` triplica il costo) o l'esenzione
 dichiarata dei mercati a linea dal gate 1X2. **Decisione del proprietario**,
 non effetto collaterale.
+
+#### Esito della misura tennis (30/09/2026, sera): la corsia tennis sarebbe stata un no-op
+
+**STRUTTURA SX DEL TENNIS — misurata (era il dato mancante).** Il tennis
+(`sportId 6`, `type 52`) è **UN mercato per match**, non due: i due lati stanno
+sulle chiavi del BOOK `1` (= `outcome_one`, il lato "X") e `2` (= "Not X",
+l'avversario). Prova reale (Nakashima–Humbert):
+`mid=0xd696527bbe77 | key 1 -> 1.6842 depth 3002 | key 2 -> 2.3669 depth 1287`
+(`inv_sum = 1.0163`, dentro la banda 0.98-1.08). ⚠️ `esports_lane.discover`
+legge SOLO `book.get(1)`: corretto per gli eSports (che hanno due mercati
+separati) ma **sbagliato per il tennis**, che richiede entrambe le chiavi.
+Il campionato catalogo è: 1 riga per match, `market_id` = hash esadecimale,
+`outcome_one_name` = `team_one_name`.
+
+**MISURA SU DATI REALI (66 match SX tennis, 3 tornei ATP/WTA, 3 crediti).**
+Cache delle quote tennis scaricate nei 3 tornei attivi (`tennis_atp_china_open`
+16 eventi, `tennis_atp_japan_open` 16, `tennis_wta_china_open` 32; tutti con
+Pinnacle, h2h a 2 esiti, 1 credito ciascuno) e gate EV applicato con il nuovo
+oracolo a 2 esiti:
+
+| grandezza | valore |
+|---|---|
+| match SX tennis in palinsesto | **66** |
+| senza oracolo Pinnacle | 6 |
+| book sottile/assente | 5 |
+| **coppie valutate** | **55** |
+| lati con EV > 0 | 7 |
+| **EV massimo trovato** | **+0.69%** |
+| **candidati sopra soglia 2.5%** | **0** |
+| `inv_sum` osservato | 1.003-1.014 |
+
+I migliori: Arthur Gea @1.32 EV +0.69%, Nakashima @1.44 +0.50%, Alcaraz @1.21
++0.47%, Rublev @1.62 +0.45%, Kudermetova @1.51 +0.36%, Munar @4.15 +0.32%,
+Snigur @1.16 +0.27%.
+
+**Conclusione operativa**: il prezzo SX del tennis è allineato a Pinnacle entro
+**~0.7%** (spread d'exchange 0.3-1.4%). Il "ritardo di prezzo" che la strategia
+top-down compra **sul tennis non esiste**: accendere la corsia LIVE tennis
+avrebbe prodotto **ZERO ordini** a qualunque soglia >= 1%, a fronte di un costo
+in crediti e codice. **Misurare prima ha evitato un no-op costoso** — la stessa
+lezione del 22/09 e del 25/09.
