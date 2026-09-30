@@ -137,7 +137,9 @@ VALIDATOR_TOLERANCE: float = float(
 try:                        # stessa soglia del gate di produzione, mai copiata
     from value_filter import EV_MIN as DEFAULT_EV_MIN
 except Exception:                                                   # pragma: no cover
-    DEFAULT_EV_MIN = 0.02
+    # Ripiego DICHIARATO solo per l'import a modulo rotto: stessa soglia di
+    # produzione (2.5%). Un valore diverso qui sarebbe una seconda soglia.
+    DEFAULT_EV_MIN = 0.025
 
 #: Endpoint della fonte (the-odds-api). Usato SOLO dal percorso `--live`.
 ODDS_ENDPOINT = "https://api.the-odds-api.com/v4/sports/{sport}/odds"

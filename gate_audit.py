@@ -210,7 +210,14 @@ def audit_esports(stake: float = 1.5) -> Dict[str, Any]:
     try:
         import esports_lane as el
         required = _required_depth(stake)
-        ev_min = float(os.getenv("ESPORTS_EV_MIN", "0.02"))
+        # Soglia EV di produzione, UNICA: mai un default hardcoded qui (una
+        # seconda soglia nell'audit farebbe leggere come "sotto soglia" un
+        # segnale che il gate vero ha gia' bocciato, o viceversa).
+        try:
+            import esports_oracle as eo
+            ev_min = float(eo.min_ev())
+        except Exception:
+            from value_filter import EV_MIN as ev_min
         for e in el.discover():
             try:
                 pick = None

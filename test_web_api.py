@@ -174,12 +174,18 @@ class TestCredits:
         now = time.time()
         self._cache(tmp_path, monkeypatch, "italy_serie_a", 400, now - 86400)
         self._cache(tmp_path, monkeypatch, "soccer_epl", 300, now)
+        # `days_to_reset` dipende dal CALENDARIO (`CREDITS_RESET` = 01/10):
+        # senza questo blocco il test scade a fine mese e misurerebbe la data,
+        # non il consumo. Il valore e' quello di 10 giorni al reset usato nelle
+        # verifiche del progetto (30/09).
+        import odds_api
+        monkeypatch.setattr(odds_api, "days_to_reset", lambda *a, **k: 10)
         d = web_api._credits_json()
         assert d["consumption_source"] == "measured"
         assert d["estimated_daily_consumption"] == pytest.approx(100.0, abs=0.5)
         assert d["observed_window_hours"] == pytest.approx(24.0, abs=0.1)
-        # 300 crediti / giorni al reset: il sostenibile segue il valore vero
-        assert d["sustainable_daily"] > 0
+        # 300 crediti / 10 giorni al reset: il sostenibile segue il valore vero
+        assert d["sustainable_daily"] == pytest.approx(30.0, abs=0.1)
 
     def test_senza_finestra_utile_resta_stima(self, tmp_path, monkeypatch):
         """Una sola lettura (o tutte nello stesso minuto) non misura il

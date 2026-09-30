@@ -152,7 +152,7 @@ class TestStrategiaSoloFavoriti:
 
     def test_favorito_netto_ammesso(self):
         from value_filter import is_sane
-        ok, _ = is_sane(0.62, 1.65, 0.023, market_prob=0.57)
+        ok, _ = is_sane(0.62, 1.65, 0.026, market_prob=0.57)
         assert ok
 
     def test_eligible_favourites_solo_il_piu_probabile(self):
@@ -371,7 +371,7 @@ class TestStrategiaPerLega:
     def test_is_sane_league_winning(self):
         """Un segnale in Premier League passa i filtri."""
         from value_filter import is_sane
-        ok, reason = is_sane(0.60, 1.65, 0.023, market_prob=0.57,
+        ok, reason = is_sane(0.60, 1.65, 0.026, market_prob=0.57,
                               league="Premier League")
         assert ok, f"Expected ok, got: {reason}"
 

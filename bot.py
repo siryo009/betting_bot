@@ -110,7 +110,7 @@ DISCLAIMER = (
 # value_filter, cosi' non puo' piu' restare indietro rispetto alla strategia
 # (prima era hardcoded: diceva "Odds 1.30-1.80 / Edge +3pp / EV 2-15%" anche
 # dopo i cambi di strategia del 12-13/09).
-FILTRI_TXT = (f"EV {EV_MIN*100:.0f}%-{EV_MAX*100:.0f}% | "
+FILTRI_TXT = (f"EV {EV_MIN*100:g}%-{EV_MAX*100:g}% | "
               f"Odds {ODDS_MIN:.2f}-{ODDS_MAX:.2f} | "
               f"Edge ≥ +{MARKET_EDGE_MIN*100:.0f}pp | Kelly frazionato | Cap 0.5-2%")
 
@@ -388,7 +388,7 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• Aggiornamenti pomeriggio e sera\n\n"
         "🛡 *Filtri Pro attivi:*\n"
         "• Kelly frazionato | Cap puntata 0.5-2%\n"
-        f"• EV min +{EV_MIN*100:.0f}% | EV max +{EV_MAX*100:.0f}%\n"
+        f"• EV min +{EV_MIN*100:g}% | EV max +{EV_MAX*100:g}%\n"
         f"• Odds {ODDS_MIN:.2f}-{ODDS_MAX:.2f} (solo favoriti netti)\n\n"
         "💎 *Premium* (segnali istantanei, strong value, surebet): "
         "`/premium` per info.", parse_mode="Markdown")
@@ -484,7 +484,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/campionati` – elenco squadre\n"
         "`/ai <pertanyaan>` – Comandante AI (Gemini)\n\n"
         "🛡 *Filtri Pro attivi (solo favoriti netti):*\n"
-        f"• Quota: {ODDS_MIN:.2f}–{ODDS_MAX:.2f} | EV: +{EV_MIN*100:.0f}% to +{EV_MAX*100:.0f}%\n"
+        f"• Quota: {ODDS_MIN:.2f}–{ODDS_MAX:.2f} | EV: +{EV_MIN*100:g}% to +{EV_MAX*100:g}%\n"
         f"• Edge vs mercato: +{MARKET_EDGE_MIN*100:.0f}pp (value) / +{MARKET_EDGE_STRONG*100:.0f}pp (strong)\n"
         "• Kelly frazionato | Cap: 1% value, 2% strong\n"
         "• Stop-loss giornaliero: -5% → 24h"

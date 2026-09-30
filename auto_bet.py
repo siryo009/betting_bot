@@ -238,7 +238,15 @@ TOP_DOWN_EV = os.getenv("TOP_DOWN_EV", "1").strip().lower() \
 #: Moltiplicatore della quota equa di Pinnacle ("true odd + margine"): la
 #: stessa condizione del gate EV scritta come prezzo minimo
 #: (EV >= ev_min  <=>  quota >= true_odd x (1 + TOP_DOWN_MARGIN)).
-TOP_DOWN_MARGIN = float(os.getenv("TOP_DOWN_MARGIN", "0.02"))
+#: Il default NON e' un numero scritto a mano: e' la soglia UNICA di
+#: produzione (`value_filter.EV_MIN`), cosi' le due letture della condizione
+#: restano la STESSA condizione anche se EV_MIN cambia (direttiva 30/09:
+#: soglia unificata al 2.5%).
+try:                    # soglia unica, mai ricopiata
+    from value_filter import EV_MIN as _EV_MIN_PROD
+except Exception:                                        # pragma: no cover
+    _EV_MIN_PROD = 0.025
+TOP_DOWN_MARGIN = float(os.getenv("TOP_DOWN_MARGIN", str(_EV_MIN_PROD)))
 #: Dry-Run (25/09): calcola EV e logga i candidati che superano la soglia,
 #: ma intercetta l'ordine PRIMA della chiamata POST a SX Bet. Env
 #: AUTO_BET_DRY_RUN=1 (o argomento dry_run=True). Il resto del giro e'
@@ -2557,7 +2565,7 @@ def run_today_bets(stake_eur: float | None = None,
     # A DEBUG di proposito (21/09/2026): sono CONFIGURAZIONE, identiche a ogni
     # giro. Ripetute a INFO ogni 60s affogavano il log operativo. Le soglie
     # reali restano leggibili con `/autobet` e qui sopra nel report.
-    logger.debug("auto_bet: strategia favoriti netti (EV_MIN=%.0f%%, ODDS "
+    logger.debug("auto_bet: strategia favoriti netti (EV_MIN=%g%%, ODDS "
                  "%.2f-%.2f, edge >= +%.0fpp, adaptive Kelly)",
                  EV_MIN * 100, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN * 100)
     try:

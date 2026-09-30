@@ -30,7 +30,13 @@ from market_calib import (
 #   4) Kelly adattivo per lega (kelly_mult + max_stake)
 #   5) Esclusione automatica leghe con CLV negativo cronico
 
-EV_MIN = 0.02            # +2% minimo (frequenza + profitto)
+#: Soglia EV minima **UNICA** del progetto (direttiva 30/09/2026: 2.5%).
+#: Tutti i percorsi la IMPORTANO, mai la ricopiare: calcio 1X2 (`is_sane`),
+#: multi-mercato OU/AH, eSports (`esports_oracle.min_ev`), oracolo top-down
+#: (`pinnacle_oracle.DEFAULT_EV_MIN`) e catena di decisione
+#: (`decision/limits.py`). Il tennis ha la soglia PROPRIA dichiarata
+#: (`tennis_lane.EV_MIN`, env `TENNIS_EV_MIN`, default 0.025 = stesso valore).
+EV_MIN = 0.025           # +2.5% minimo
 EV_MAX = 0.20            # +20% massimo (oltre = anomalia)
 
 # Fascia quote: favoriti NETTI (guardrail 11/09)
@@ -334,7 +340,9 @@ def is_sane(prob: float, odds: float, ev: float,
                        f"{market_prob*100:.1f}% < "
                        f"{MIN_FAVOURITE_MARKET_PROB*100:.0f}%)")
     if ev < EV_MIN:
-        return False, f"EV troppo basso ({ev*100:.1f}% < {EV_MIN*100:.0f}%)"
+        # `:g` e non `:.0f`: con EV_MIN = 2.5% il `:.0f` arrotterebbe a "2%"
+        # (round-half-even) e il messaggio mentirebbe sulla soglia.
+        return False, f"EV troppo basso ({ev*100:.1f}% < {EV_MIN*100:g}%)"
     if ev > EV_MAX:
         return False, f"ANOMALIA: EV troppo alto ({ev*100:.1f}% > {EV_MAX*100:.0f}%)"
     if market_prob is not None:

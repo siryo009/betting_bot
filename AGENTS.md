@@ -7544,3 +7544,61 @@ value_filter + risk_guards + league_gate + market_calib + predictions +
 sx_signals + decision_shadow + decision_compare + liquidity_monitor.
 `verify_guardrails.py`: **A-H tutti bloccano**. `railway config plan`: **0 to
 destroy**. `compileall` OK, 0 marker di conflitto.
+
+### Soglia EV unificata al 2.5% + finestra T-15 per i mercati derivati (30/09/2026)
+
+Direttiva del proprietario: **una sola soglia EV minima** per tutta la pipeline e
+la **finestra di scansione T-15** per l'oracolo single-shot dei mercati derivati
+(OU/AH). Nessuna modifica di struttura: solo costanti, testi e test.
+
+**1) `value_filter.EV_MIN`: 0.02 -> 0.025, soglia UNICA dichiarata.** Il
+docblock del modulo elenca TUTTI i consumatori, cosi' la prossima soglia non
+nasce in un posto solo: calcio 1X2 (`is_sane`), multi-mercato OU/AH
+(`multi_market`), eSports (`gate_audit`), oracolo top-down (`pinnacle_oracle` +
+`auto_bet.TOP_DOWN_MARGIN`) e catena `decision` (`decision/limits.py` legge la
+stessa costante). Il **tennis** ha gia' soglia PROPRIA (`tennis_lane.EV_MIN`,
+env `TENNIS_EV_MIN`, default 0.025 = stesso valore): resta perche' il modello
+Elo ha una base di probabilita' diversa dal blend di mercato, ed e' gia' allineata.
+- Eccezioni hardcoded al 2.0% **rimosse**: `pinnacle_oracle.DEFAULT_EV_MIN`
+  (fallback), `gate_audit.ESPORTS_EV_MIN` (ora importa), `auto_bet.TOP_DOWN_MARGIN`
+  (default `str(value_filter.EV_MIN)` — mantiene l'equivalenza
+  `EV >= ev_min <=> quota >= true_odd * (1 + margin)`, con `required_price`).
+- **`:g` invece di `:.0f`** ovunque si stampa la soglia (`value_filter`,
+  `decision/risk_engine`, `bot` x3, `fixture_engine`): con 2.5% il `:.0f`
+  arrotterebbe a "2%" per round-half-even — un messaggio **bugiardo** in un
+  rifiuto di rischio.
+- Soglia effettiva **probation** = 2.5% + `TOP_DOWN_PROBATION_EXTRA` 2% = **4.5%**.
+
+**2) T-15 gia' conforme, reso irreversibile da un tripwire.** In
+`run_today_bets` il gate `if T60_EXECUTION_ONLY: _tw = t60_window(...)` e'
+applicato **incondizionatamente a ogni pick** (`if _tw != "within": continue`),
+quindi i mercati derivati OU/AH leggono gia' `T60_WINDOW_MAX_MIN` (default 15,
+env impostata 15 su Railway; `T60_WINDOW_MIN_MIN` default di codice 60 ma **120
+in produzione** → finestra T-120..T-15). Nessun codice di struttura cambiato: la
+nuova classe `TestFinestraT15MercatiDerivati` in `test_t60_breakers.py` fissa i
+tre fatti che oggi reggono solo per convenzione (costante 15.0; il blocco
+`T60_EXECUTION_ONLY` **non** e' condizionato al mercato; `t60_window(...)`
+compare **esattamente una volta** in `auto_bet.py`, quindi nessun percorso puo'
+aggirarlo).
+
+**3) TEST ROSSO RISOLTO — preesistente e calendar-dependent.**
+`test_web_api.py::TestCredits::test_consumo_misurato_dalla_telemetria` falliva
+perche' `sustainable_daily = rem_now / days_to_reset()` e `days_to_reset()` =
+`(CREDITS_RESET 01/10 - now).days` = **0** a fine mese: il test misurava il
+**calendario**, non il consumo (verificato con `git stash`: falliva gia' prima
+delle modifiche). Fix: `monkeypatch` su `odds_api.days_to_reset` = 10 giorni
+all'inizio del test + asserzione sul valore esatto (30.0 crediti/giorno), invece
+di `> 0`. Stessa lezione del 15/09 e del 17/09: **un test che scade col
+calendario arriva sempre nel momento peggiore.**
+
+**4) Test aggiornati alla nuova soglia**: `test_book_flow` (`EV_MIN == 0.025`),
+`test_value_filter` (2 EV "ammesso" 0.023 -> 0.026), `test_risk_guards`
+(`test_edge_sotto_2pp_bocciato`: EV 0.02 -> 0.03 cosi' il rifiuto resta
+attribuito all'**edge** e non all'EV), `test_top_down` (`required_price` calcolato
+da `value_filter.EV_MIN`, soglie 0.045/0.025/0.125), `test_decision_pipeline`
+(blended_prob 0.645: EV sopra soglia, edge sotto).
+
+**5) Verifica**: 4 lotti di regressione verdi (filtri/gate, auto_bet/bot/lane,
+`decision`+settlement+API+report, piu` i test delle modifiche), `compileall` OK,
+**0 marker di conflitto**. Nessuna env nuova introdotta → nessuna modifica a
+`.railway/railway.ts`.

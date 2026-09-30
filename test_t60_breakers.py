@@ -483,3 +483,32 @@ class TestContrattoT60:
         assert t60_executable(cap, 1.65) is True
         assert t60_executable(cap + 0.01, 1.65) is False
         assert t60_executable(1.0, 2.0) is False
+
+
+class TestFinestraT15MercatiDerivati:
+    """I mercati DERIVATI (OU/AH) leggono la stessa costante di scansione T-15.
+
+    Direttiva 30/09/2026: la chiusura della finestra esecutiva e' T-15 (era
+    T-50) e deve valere per OGNI mercato, derivati inclusi. Non bastache il
+    codice lo faccia oggi: serve che NON PUO' regredire a una costante
+    diversa per mercato (bug del 09/09: un `over` trattato come 1X2).
+    """
+
+    def test_costante_di_chiusura_e_t15(self):
+        assert auto_bet.T60_WINDOW_MAX_MIN == 15.0
+
+    def test_il_gate_finestra_e_applicato_a_ogni_mercato(self):
+        """Il blocco `T60_EXECUTION_ONLY` in `run_today_bets` NON e'
+        condizionato al tipo di mercato: se lo fosse, un mercato derivato
+        leggerebbe una finestra diversa (o nessuna)."""
+        src = Path("auto_bet.py").read_text(encoding="utf-8")
+        block = src.split("if T60_EXECUTION_ONLY:", 1)[1][:400]
+        assert "t60_window" in block
+        # tra il blocco e la chiamata di `t60_window` non compare nessuna
+        # condizione sul mercato: il gate non puo' essere saltato per tipo
+        assert "mercato" not in block.split("t60_window")[0]
+
+    def test_i_pick_derivati_hanno_lo_stesso_tetto(self):
+        """OU/AH non hanno una finestra propria: passano da `t60_window`."""
+        src = Path("auto_bet.py").read_text(encoding="utf-8")
+        assert src.count('t60_window(_parse_iso_utc(pick.get("commence")))') == 1

@@ -108,8 +108,10 @@ def evaluate(signal: Signal, *, kills: KillSwitchStatus, limits: RiskLimits,
     checked.append("ev")
     ev = float(signal.ev or 0.0)
     if ev < limits.ev_min:
+        # `:g` e non `:.0f`: con soglia 2.5% il `:.0f` mostrerebbe "2%"
+        # (round-half-even) e il motivo del rifiuto mentirebbe.
         return risk_reject(ReasonCode.EV_TOO_LOW,
-                           f"EV {ev*100:.1f}% < {limits.ev_min*100:.0f}%", checked=checked)
+                           f"EV {ev*100:.1f}% < {limits.ev_min*100:g}%", checked=checked)
     if ev > limits.ev_max:
         return risk_reject(ReasonCode.EV_ANOMALOUS,
                            f"EV {ev*100:.1f}% > {limits.ev_max*100:.0f}% (anomalia)",

@@ -270,8 +270,10 @@ class TestRiskEngine:
         ({"market_prob": 0.45, "blended_prob": 0.55}, ReasonCode.NOT_FAVOURITE),
         ({"price": 1.50, "market_prob": 0.58, "blended_prob": 0.585}, ReasonCode.EV_TOO_LOW),
         ({"price": 1.79, "market_prob": 0.55, "blended_prob": 0.90}, ReasonCode.EV_ANOMALOUS),
-        # EV sopra soglia (+2.4%) ma edge sotto il minimo di lega (1pp < 2pp)
-        ({"price": 1.60, "market_prob": 0.63, "blended_prob": 0.64}, ReasonCode.EDGE_TOO_LOW),
+        # EV sopra soglia (+3.2%) ma edge sotto il minimo di lega (1.5pp < 2pp):
+        # l'EV deve restare PASSATO, altrimenti il rifiuto sarebbe attribuito
+        # al gate sbagliato.
+        ({"price": 1.60, "market_prob": 0.63, "blended_prob": 0.645}, ReasonCode.EDGE_TOO_LOW),
     ])
     def test_reject_col_motivo_giusto(self, limits, kwargs, expected):
         decision = risk_engine.evaluate(make_signal(**kwargs), kills=live_kills(),

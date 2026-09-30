@@ -379,7 +379,7 @@ class TestCoperturaMultiMercato:
         from market_calib import MARKET_EDGE_MIN
         from value_filter import EV_MIN, ODDS_MAX, ODDS_MIN
         assert (ODDS_MIN, ODDS_MAX) == (1.30, 1.80)
-        assert EV_MIN == pytest.approx(0.02)
+        assert EV_MIN == pytest.approx(0.025)
         assert MARKET_EDGE_MIN == pytest.approx(0.02)
         assert multi_market.MIN_EXEC_DEPTH_USDC >= 20.0
         assert multi_market.MIN_DEPTH_USDC >= 20.0

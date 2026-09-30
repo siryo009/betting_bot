@@ -64,7 +64,7 @@ class TestFasciaFavoriti:
         from value_filter import is_sane
         # Direttiva 21/09/2026: +2pp minimo vs mercato (il fallback
         # DEFAULT_LEAGUE_STRATEGY e' allineato a +2pp).
-        ok, reason = is_sane(0.61, 1.65, 0.02, market_prob=0.60)   # +1pp
+        ok, reason = is_sane(0.61, 1.65, 0.03, market_prob=0.60)   # +1pp
         assert not ok and "non batte il mercato" in reason
         # +2pp: OK (con la soglia a +3pp questo caso era respinto)
         ok, reason = is_sane(0.62, 1.65, 0.03, market_prob=0.60)   # +2pp

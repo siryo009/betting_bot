@@ -594,7 +594,7 @@ def format_schedina(picks: List[Dict], bankroll: float = 100.0) -> str:
             f"*{i}. {p['evento']}*\n"
             f"   🎯 {p['esito']} @ {p['quota']:.2f} ({p['bookmaker']})\n"
             f"   📈 EV: +{p['ev']*100:.1f}%{mkt_txt} | Stake: €{stake:.2f} ({pro['stake_pct_of_bankroll']:.1f}% bankroll)\n"
-            f"   🛡 Filtri: Kelly 1/4 | Cap 1-2% | EV {EV_MIN*100:.0f}-{EV_MAX*100:.0f}% | "
+            f"   🛡 Filtri: Kelly 1/4 | Cap 1-2% | EV {EV_MIN*100:g}-{EV_MAX*100:g}% | "
             f"Odds {ODDS_MIN:.2f}-{ODDS_MAX:.2f} | Edge ≥ +{MARKET_EDGE_MIN*100:.0f}pp | "
             f"Mercato: devig power\n\n"
         )
