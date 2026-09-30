@@ -22,6 +22,37 @@ STALE_INPLAY_HOURS = 3
 CREDIT_LOW = 50           # sotto 50: disattiva leghe non-core (intervallo >7gg)
 CREDIT_CRITICAL = 30      # sotto 30: solo top 6 leghe core
 CREDIT_EMERGENCY = 15     # sotto 15: solo Serie A, PL, La Liga
+
+# --- ORACOLO A LINEA OU/AH (30/09/2026, decisione del proprietario) --------
+# I pick OU/AH muoiono con `no_oracle`: il gate top-down legge un oracolo
+# 1X2 che non ha MAI le chiavi 'Over 2.5' / 'Home -0.75'. L'oracolo a linea
+# richiede i mercati `totals,spreads` di Pinnacle, e the-odds-api addebita
+# `markets x regions` per chiamata: metterli sulla rotazione di RICERCA
+# triplicherebbe OGNI chiamata (370.6 -> ~938 crediti/mese, fuori dal tetto
+# 460 anche tagliando la rotazione a 7gg). Design scelto (follow-the-money):
+# la rotazione di ricerca resta `h2h` (1 credito), e una SECONDA chiamata a
+# `markets=h2h,totals,spreads` (3 crediti) viene fatta SOLO per le leghe con
+# pick OU/AH aperti in finestra d'ordine — si paga la linea SOLO dove c'e'
+# denaro in gioco. Costo atteso misurato: ~118 crediti/mese (2 crediti
+# extra x ~59 chiusure/giorno storiche). La cache oracolo e' SEPARATA
+# (`toao_<sport>.json`, TTL 24h): la cache di ricerca resta h2h-only per
+# `fixture_engine`/`pinnacle_oracle` 1X2, la cache oracolo serve a
+# `line_oracle.py` (scelta dichiarata: le due letture hanno consumatori
+# diversi e un file unico confonderebbe le forme).
+ORACLE_MARKETS_LIST = "h2h,totals,spreads"   # 3 crediti a chiamata (eu)
+ORACLE_EXTRA_CREDITS = 2                     # over h2h (1 gia' contato a parte)
+ORACLE_CACHE_TTL_S = 86400                   # 24h: la linea non e' intra-day
+ORACLE_CACHE_PREFIX = "toao_"
+# TETTO di leghe fetchate al giorno (3 crediti l'una = 6 crediti/giorno =
+# 180/mese): con la rotazione a 7gg (~169 crediti/mese) il totale ~349 resta
+# sotto il tetto 460 del piano free con margine per /scores. E' un TETTO,
+# non un target: il consumo reale segue i pick in gioco (~59 righe OU/AH
+# giocabili chiuse/giorno su ~2-4 leghe distinte). Env per alzarlo (ogni
+# aumento va verificato contro test_budget_mensile_piano_free).
+ORACLE_BUDGET_DAY = int(os.getenv("ORACLE_BUDGET_DAY", "2"))
+ORACLE_ENABLED = os.getenv("ORACLE_ENABLED", "1").strip().lower() \
+    in ("1", "true", "yes", "on")
+_oracle_req_day = {"day": None, "n": 0}
 # HARD STOP (direttiva del proprietario, 21/09/2026): sotto questa soglia
 # NESSUNA chiamata HTTP verso the-odds-api, indipendentemente dalla
 # rotazione ridotta. Il piano free risponde 429 quando i crediti finiscono e
@@ -355,23 +386,49 @@ SPORTS_INTERVAL_DAYS = {
     # massimo che il tetto crediti sostiene (costo mensile teorico 191 -> 371 su
     # un tetto di 460; a 1gg sarebbe 671). Le chiamate vuote sono gratuite,
     # quindi il costo REALE resta piu' basso del teorico.
-    "Premier League": 2, "Bundesliga": 2, "Turkey Super Lig": 2,
-    "Ligue 1": 2, "Eredivisie": 2, "EFL Championship": 2, "Serie B": 2,
-    "MLS": 2, "Brasileirao": 2, "Liga MX": 2, "Saudi Pro League": 2,
-    "Allsvenskan": 2, "Argentina Primera": 2, "Austrian Bundesliga": 2,
-    "Eliteserien": 2, "J1 League": 2, "K League 1": 2,
-    "Scottish Premiership": 2, "Superliga Danimarca": 2,
-    "Swiss Super League": 2,
-    # Nazionali CORE dal 29/09/2026: il gate le ammette, quindi NON possono
-    # restare dormienti a 30gg (lezione del 24/09: una lega ammessa a 30gg non
-    # viene mai interrogata e non puo' produrre candidati, qualunque soglia).
-    "UEFA Nations League": 2, "Africa Cup of Nations": 2,
+#    "Premier League": 2, "Bundesliga": 2, "Turkey Super Lig": 2,
+#    "Ligue 1": 2, "Eredivisie": 2, "EFL Championship": 2, "Serie B": 2,
+#    "MLS": 2, "Brasileirao": 2, "Liga MX": 2, "Saudi Pro League": 2,
+#    "Allsvenskan": 2, "Argentina Primera": 2, "Austrian Bundesliga": 2,
+#    "Eliteserien": 2, "J1 League": 2, "K League 1": 2,
+#    "Scottish Premiership": 2, "Superliga Danimarca": 2,
+#    "Swiss Super League": 2,
+#    "UEFA Nations League": 2, "Africa Cup of Nations": 2,
+    # Nazionali CORE dal 29/09/2026 (il gate le ammette: mai dormienti a
+    # 30gg, lezione del 24/09).
+    "UEFA Nations League": 7, "Africa Cup of Nations": 7,
     # ogni 3 giorni: leghe NON ammesse ma con mercato liquido (telemetria/CLV)
-    "Serie A": 3, "La Liga": 3,
-    # ogni 7 giorni: coppe europee + mercati maggiori extra-Europa
+    "Serie A": 7, "La Liga": 7,
+    # ⚠️ 30/09/2026 — ROTAZIONE TAGLIATA A 7 GIORNI (decisa dal proprietario
+    # per far entrare l'oracolo a linea totals/spreads nel budget crediti):
+    # le 22 leghe ammesse erano a 2gg (370.6 crediti/mese), ora 7gg
+    # (~169/mese). Le odds nascono 1-3 giorni prima del kickoff: a 7gg una
+    # lega interrogata il giorno X vede le partite fino a X+7 e NON perde il
+    # weekend X+4 (il difetto del 24/09 nasceva dalla COMBINAZIONE finestra
+    # 7gg + rotazione 30gg, non dalla rotazione 7gg in se'). Il credito
+    # risparmiato paga il follow-the-money dell'oracolo a linea
+    # (`fetch_line_odds`: 2 crediti extra x lega con pick OU/AH in gioco,
+    # tetto ORACLE_BUDGET_DAY). Costo totale del profilo: ~349/460 (test
+    # `test_budget_mensile_piano_free`). Profilo PRECEDENTE (2gg):
+    #   "Premier League": 2, "Bundesliga": 2, "Turkey Super Lig": 2,
+    #   "Ligue 1": 2, "Eredivisie": 2, "EFL Championship": 2, "Serie B": 2,
+    #   "MLS": 2, "Brasileirao": 2, "Liga MX": 2, "Saudi Pro League": 2,
+    #   "Allsvenskan": 2, "Argentina Primera": 2, "Austrian Bundesliga": 2,
+    #   "Eliteserien": 2, "J1 League": 2, "K League 1": 2,
+    #   "Scottish Premiership": 2, "Superliga Danimarca": 2,
+    #   "Swiss Super League": 2, "UEFA Nations League": 2,
+    #   "Africa Cup of Nations": 2, "Serie A": 3, "La Liga": 3,
+    "Premier League": 7, "Bundesliga": 7, "Turkey Super Lig": 7,
+    "Ligue 1": 7, "Eredivisie": 7, "EFL Championship": 7, "Serie B": 7,
+    "MLS": 7, "Brasileirao": 7, "Liga MX": 7, "Saudi Pro League": 7,
+    "Allsvenskan": 7, "Argentina Primera": 7, "Austrian Bundesliga": 7,
+    "Eliteserien": 7, "J1 League": 7, "K League 1": 7,
+    "Scottish Premiership": 7, "Superliga Danimarca": 7,
+    "Swiss Super League": 7,
+    # ogni 7 giorni: coppe europee (restano nel profilo 25/09)
     "Champions League": 7, "Europa League": 7,
-    # ogni 30 giorni (dormienti a settembre, riattivare a ottobre): coppe
-    # nazionali, campionati secondari, resto del mondo e nazionali
+    # ogni 30 giorni (dormienti): coppe nazionali, campionati secondari,
+    # resto del mondo e nazionali
     "Conference League": 30, "Coppa Italia": 30, "Copa del Rey": 30,
     "Coupe de France": 30, "DFB Pokal": 30, "FA Cup": 30, "EFL Cup": 30,
     "Primeira Liga": 30, "Veikkausliiga": 30,
@@ -467,13 +524,23 @@ def _env(name):
         if k.strip() == name: return v.strip()
     return ""
 
-def _get_odds(sport, frm, to):
-    cache_file = CACHE_DIR / f"toa_{sport}.json"
+def _get_odds(sport, frm, to, *, markets="h2h", cache_prefix="toa_", ttl_s=None):
+    """Quote the-odds-api per UNA lega, con cache su `<prefix><sport>.json`.
+
+    `markets` default "h2h" (1 credito/chiamata): e' il percorso della
+    rotazione di ricerca, INVARIATO dal 09/09, cache `toa_<sport>.json`.
+    `fetch_line_odds` passa `markets="h2h,totals,spreads"` (3 crediti) con
+    prefisso cache `toao_` e TTL propri: mai mescolare le due cache (forme
+    diverse nello stesso file renderebbero ambiguo il payload per i
+    consumatori h2h-only).
+    """
+    cache_file = CACHE_DIR / f"{cache_prefix}{sport}.json"
+    if ttl_s is None:
+        ttl_s = interval_for_sport(sport) * 86400
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            ttl = interval_for_sport(sport) * 86400
-            if time.time() - data.get("ts", 0) < ttl:
+            if time.time() - data.get("ts", 0) < ttl_s:
                 return data.get("payload", []), data.get("remaining", 999)
         except Exception: pass
     key = _env("ODDS_API_KEY")
@@ -487,12 +554,13 @@ def _get_odds(sport, frm, to):
         logger.info(f"Crediti bassi: {sport} saltata per risparmio crediti")
         return [], 0
     try:
-        # SOLO h2h: the-odds-api addebita markets x regions per chiamata
-        # (h2h,totals = 2 crediti). Il mercato totals (Over/Under) e'
-        # escluso dalle selezioni dal 06/09: richiederlo e' puro spreco
-        # (tripwire test_ou_exclusion.test_odds_request_solo_h2h).
+        # NOTA CREDITI (30/09): la rotazione di ricerca resta `markets="h2h"`
+        # (1 credito/chiamata). I mercati totals/spreads dell'oracolo a linea
+        # passano SOLO da `fetch_line_odds` (follow-the-money: si pagano solo
+        # le leghe con pick OU/AH in gioco) — triplicarli qui farebbe salire
+        # la fattoria completa a ~938 crediti/mese (out del tetto 460).
         r = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport}/odds", params={
-            "apiKey": key, "regions": "eu", "markets": "h2h",
+            "apiKey": key, "regions": "eu", "markets": markets,
             "oddsFormat": "decimal", "commenceTimeFrom": frm, "commenceTimeTo": to,
         }, timeout=30)
         remaining = int(r.headers.get("x-requests-remaining", 999))
@@ -508,7 +576,49 @@ def _get_odds(sport, frm, to):
     cache_file.write_text(json.dumps({"ts": time.time(), "payload": payload,
                                       "remaining": remaining,
                                       "remaining_ts": time.time()}))
-    logger.info(f"the-odds-api {sport}: {len(payload)} match | crediti residui: {remaining}")
+    logger.info(f"the-odds-api {sport} ({markets}): {len(payload)} match | "
+                f"crediti residui: {remaining}")
+    return payload, remaining
+
+
+def fetch_line_odds(sport, frm, to):
+    """Quote `h2h,totals,spreads` per UNA lega (oracolo a linea, 3 crediti).
+
+    Follow-the-money (30/09/2026): chiamata fatta SOLO per le leghe con pick
+    OU/AH aperti in finestra d'ordine (`line_oracle.ensure_oracle_payload`),
+    budget giornaliero dedicato (`ORACLE_BUDGET_DAY`) e cache separata
+    `toao_<sport>.json` (TTL 24h). Ritorna `(payload, remaining)`.
+    """
+    # Budget giornaliero dedicato: l'oracolo a linea NON puo' sfinire la
+    # stessa risorsa (crediti) della ricerca — un tetto proprio rende il
+    # costo massimo misurabile a prescindere da quante leghe abbiano pick.
+    global _oracle_req_day
+    _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _oracle_req_day.get("day") != _today:
+        _oracle_req_day = {"day": _today, "n": 0}
+    if _oracle_req_day["n"] >= ORACLE_BUDGET_DAY:
+        logger.info("oracolo a linea: budget giornaliero %s esaurito (%s "
+                    "leghe), rinvio a domani", ORACLE_BUDGET_DAY,
+                    _oracle_req_day["n"])
+        return [], 999
+    if not ORACLE_ENABLED:
+        return [], 999
+    # Pre-check cache: un HIT di cache NON consuma budget (zero spesa = zero
+    # costo; il contatore conta SOLE le chiamate realmente fatte). La regola
+    # di freschezza e' la STESSA di `_get_odds` (TTL letto a runtime).
+    cache_file = CACHE_DIR / f"{ORACLE_CACHE_PREFIX}{sport}.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text())
+            if time.time() - data.get("ts", 0) < ORACLE_CACHE_TTL_S:
+                return data.get("payload", []), data.get("remaining", 999)
+        except Exception:
+            pass
+    payload, remaining = _get_odds(sport, frm, to, markets=ORACLE_MARKETS_LIST,
+                                   cache_prefix=ORACLE_CACHE_PREFIX,
+                                   ttl_s=ORACLE_CACHE_TTL_S)
+    if payload or remaining != 999:
+        _oracle_req_day["n"] += 1
     return payload, remaining
 
 def fetch_odds(sport=None, commence_time_from=None, commence_time_to=None, **kwargs):

@@ -203,6 +203,104 @@ def h2h_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
     return out if all(e in out for e in wanted) else None
 
 
+def totals_odds_of(bookmaker: Dict[str, Any], line: float
+                   ) -> Optional[Dict[str, float]]:
+    """Quote Over/Under di Pinnacle ALLA LINEA richiesta ({"Over": q, "Under": q}).
+
+    Fail-closed: servono ENTRAMBI i lati alla STESSA linea (un solo lato
+    non si puo' de-vigare) con prezzi > 1.0. Il `point` del payload (2.5,
+    3.25...) e' confrontato con tolleranza 1e-6: i quarter-line (2.25,
+    2.75) arrivano come valori frazionari e un confronto esatto su float
+    li perderebbe.
+    """
+    if not isinstance(bookmaker, dict):
+        return None
+    out: Dict[str, float] = {}
+    for mkt in bookmaker.get("markets") or []:
+        if not isinstance(mkt, dict) or mkt.get("key") != "totals":
+            continue
+        try:
+            point = float(mkt.get("point"))
+        except (TypeError, ValueError):
+            continue
+        if abs(point - float(line)) > 1e-6:
+            continue
+        for o in mkt.get("outcomes") or []:
+            if not isinstance(o, dict):
+                continue
+            try:
+                price = float(o.get("price"))
+            except (TypeError, ValueError):
+                continue
+            if price <= 1.0:
+                continue
+            name = _cf(o.get("name"))
+            if name.startswith("over"):
+                out["Over"] = price
+            elif name.startswith("under"):
+                out["Under"] = price
+    return out if ("Over" in out and "Under" in out) else None
+
+
+def spreads_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
+                    home_line: float) -> Optional[Dict[str, float]]:
+    """Quote Asian Handicap di Pinnacle al lato CASA con linea `home_line`.
+
+    `home_line` e' la linea vista da `teamOne` (es. -0.75 per "Home -0.75"),
+    la STESSA convenzione di `multi_market.sx_line_of_esito`/`order_target`.
+    Nel payload the-odds-api gli esiti spreads sono identificati da NOME
+    SQUADRA + `point`: l'esito di casa ha `point = home_line` e nome della
+    squadra di casa, il trasferta `point = -home_line`. Matching: nome
+    (case-fold, con ripiego su contenimento per le varianti) + linea; se i
+    nomi non combaciano MA le due linee sono speculari e DISTINTE, decide
+    il punto (difesa per forme di payload diverse). Fail-closed su ENTRAMBI
+    i lati con prezzi > 1.0; a linea 0 le linee coincidono e decide SOLO il
+    nome (mai un lato assegnato a caso).
+    """
+    if not isinstance(bookmaker, dict):
+        return None
+    h, a = _cf(home), _cf(away)
+    if not h or not a:
+        return None
+    line = float(home_line)
+    out: Dict[str, float] = {}
+    fallback_home: Optional[float] = None
+    fallback_away: Optional[float] = None
+    for mkt in bookmaker.get("markets") or []:
+        if not isinstance(mkt, dict) or mkt.get("key") != "spreads":
+            continue
+        for o in mkt.get("outcomes") or []:
+            if not isinstance(o, dict):
+                continue
+            try:
+                price = float(o.get("price"))
+                point = float(o.get("point"))
+            except (TypeError, ValueError):
+                continue
+            if price <= 1.0:
+                continue
+            name = _cf(o.get("name"))
+            name_home = name == h or (h in name) or (name in h)
+            name_away = name == a or (a in name) or (name in a)
+            if name_home and abs(point - line) <= 1e-6:
+                out["Home"] = price
+            elif name_away and abs(point + line) <= 1e-6:
+                out["Away"] = price
+            # Difesa per payload senza nomi utilizzabili: linee speculari
+            # DISTINTE identificano i lati dal punto (a linea 0 sono uguali:
+            # resta fail-closed).
+            if abs(line) > 1e-9:
+                if abs(point - line) <= 1e-6 and fallback_home is None:
+                    fallback_home = price
+                if abs(point + line) <= 1e-6 and fallback_away is None:
+                    fallback_away = price
+    if "Home" not in out and fallback_home is not None \
+            and fallback_away is not None:
+        out["Home"] = fallback_home
+        out["Away"] = fallback_away
+    return out if ("Home" in out and "Away" in out) else None
+
+
 def _find_match(payload: Sequence[Dict[str, Any]], home: str, away: str
                 ) -> Optional[Dict[str, Any]]:
     """La partita del payload con ENTRAMBE le squadre (case-fold, spazi)."""
@@ -349,6 +447,23 @@ def true_probabilities(odds_map: Dict[str, float], *,
     if not result:
         return None
     return result
+
+
+def line_probabilities(quotes: Dict[str, float],
+                       *, devig_method: Optional[str] = None
+                       ) -> Optional[Dict[str, Any]]:
+    """De-vig a 2 esiti per i mercati A LINEA (OU/AH): {lato: p, overround}.
+
+    Il gate top-down compara la quota del segnale con la p_true del lato
+    GIOCATO ('Over 2.5' -> 'Over'; 'Home -0.75' -> 'Home'): due esiti basta
+    e il de-vig e' ESATTO (su un binario il margine e' ripartito interamente
+    fra i due). Delega a `market_calib.market_implied` (stesso metodo del
+    progetto: power). None se manca un lato o i prezzi sono degeneri:
+    mai un oracolo distorto (fail-closed come `h2h_odds_of`).
+    """
+    if not quotes or len(quotes) != 2:
+        return None
+    return true_probabilities(quotes, method=devig_method, min_outcomes=2)
 
 
 def fair_odds(true_probs: Dict[str, Any]) -> Dict[str, float]:
@@ -1002,3 +1117,193 @@ if __name__ == "__main__":                                    # pragma: no cover
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     raise SystemExit(main())
+
+
+# ---------------------------------------------------------------------------
+# 5. ORACOLO A LINEA (30/09/2026): p_true per i mercati a linea (OU/AH)
+# ---------------------------------------------------------------------------
+# Senza questo blocco ogni pick a linea muore con `no_oracle`: il gate che
+# governa il denaro legge `probs.get(pick["esito_key"])` dove l'esito e'
+# 'Over 2.5' / 'Home -0.75' — chiavi che un oracolo 1X2 non ha mai. La
+# p_true arriva dai mercati `totals`/`spreads` di Pinnacle, letti dalle
+# cache `toao_<sport>.json` che `odds_api.fetch_line_odds` scarica SOLO per
+# le leghe con pick in gioco (follow-the-money, budget dedicato).
+
+
+def h2h_cache_is_stale(home: str, away: str, *,
+                       cache_dir: Optional[Path] = None,
+                       now: Optional[float] = None) -> bool:
+    """True se ESISTE una cache h2h (`toa_*.json`) fresca che contiene la
+    partita ma Pinnacle NON ha gli esiti completi (e la cache e' dentro
+    `CACHE_MAX_AGE_H`): la lega e' coperta ma l'oracolo non c'e' ANCORA.
+
+    Distingue 'la verita' serve ma non e' stata pagata' (il motivo del gate
+    diventa `linea`: si puo' scaricare con `fetch_line_odds`) da 'la partita
+    non e' nel payload di nessuna cache' (no_oracle secco, non recuperabile
+    a credito). Fail-closed: qualunque errore -> False (il chiamante resta
+    sul motivo certo no_oracle).
+    """
+    folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
+    ts_now = time.time() if now is None else float(now)
+    h, a = _cf(home), _cf(away)
+    if not h or not a:
+        return False
+    try:
+        paths = sorted(folder.glob("toa_*.json"),
+                       key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+                       reverse=True)
+    except Exception:
+        return False
+    for path in paths:
+        data = _read_cache(path)
+        if not isinstance(data, dict):
+            continue
+        age_h = (ts_now - float(data.get("ts") or 0)) / 3600.0
+        if age_h > CACHE_MAX_AGE_H:
+            continue
+        payload = (data or {}).get("payload") or []
+        for match in payload:
+            if not isinstance(match, dict):
+                continue
+            mh = _cf(match.get("home_team"))
+            ma = _cf(match.get("away_team"))
+            if (not mh or not ma) or (h not in mh and mh not in h) \
+                    or (a not in ma and ma not in a):
+                continue
+            if oracle_quotes([match], match.get("home_team") or "",
+                             match.get("away_team") or ""):
+                return False    # l'oracolo 1X2 c'e': non e' questo il problema
+            return True         # cache fresca, partita presente, oracolo assente
+    return False
+
+
+def _ou_label(line: float) -> str:
+    """Linea OU in formato ledger ('2.5' -> '2.5', '2.25' -> '2.25').
+
+    `:g` perche' il ledger scrive la linea SENZA zeri inutili
+    (`multi_market.ledger_esito` usa `{value:g}`).
+    """
+    return f"{float(line):g}"
+
+
+def _ah_label(home_line: float) -> str:
+    """Linea AH della GAMBA CASA in formato SX (sempre con segno esplicito
+    per i positivi: la convenzione del ledger e' 'Home -0.75'/'Home +0.25').
+    """
+    v = float(home_line)
+    return f"{v:+g}" if abs(v) >= 1e-9 else "0"
+
+
+def line_true_probs(home: str, away: str, *, market_type: str,
+                    line: float, cache_dir: Optional[Path] = None,
+                    sport_key: Optional[str] = None,
+                    devig_method: Optional[str] = None,
+                    now: Optional[float] = None
+                    ) -> Optional[Dict[str, Any]]:
+    """p_true {"Over"/"Under" (OU) oppure "Home"/"Away" (AH)} da Pinnacle.
+
+    De-vig a 2 esiti (`line_probabilities`) del mercato a linea della
+    partita (match per sottostinga case-insensitive, entrambe le squadre
+    sulla STESSA riga — come `load_oracle`). AH: la linea del payload e'
+    quella del lato CASA (convenzione SX = `sx_line_of_esito`).
+
+    Fail-closed (None): cache assente/stantia (> `CACHE_MAX_AGE_H` ore),
+    partita non trovata, Pinnacle senza ENTRAMBI i lati alla linea, de-vig
+    impossibile. ZERO crediti: legge solo le cache gia' scaricate.
+    """
+    mt = str(market_type or "").strip().upper()
+    if mt not in ("OU", "AH"):
+        return None
+    if not (line == line) or not (abs(float(line)) < float("inf")):  # NaN/inf
+        return None
+    folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
+    # Prefisso della cache oracolo: costante GEMELLA di `odds_api.
+    # ORACLE_CACHE_PREFIX` (import pigro con fallback al letterale — il
+    # tripwire `test_prefisso_cache_gemello` pretende che coincidano).
+    try:
+        import odds_api as _oa
+        prefix = getattr(_oa, "ORACLE_CACHE_PREFIX", "toao_")
+    except Exception:                                            # pragma: no cover
+        prefix = "toao_"
+    if sport_key:
+        paths = [folder / f"{prefix}{sport_key}.json"]
+    else:
+        folder_glob = sorted(folder.glob(
+            f"{prefix}*.json"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+            reverse=True)
+        paths = folder_glob
+    ts_now = time.time() if now is None else float(now)
+    h, a = _cf(home), _cf(away)
+    if not h or not a:
+        return None
+    for path in paths:
+        data = _read_cache(path)
+        if not isinstance(data, dict):
+            continue
+        age_h = (ts_now - float(data.get("ts") or 0)) / 3600.0
+        if age_h > CACHE_MAX_AGE_H:
+            continue
+        payload = (data or {}).get("payload") or []
+        for match in payload:
+            if not isinstance(match, dict):
+                continue
+            mh = _cf(match.get("home_team"))
+            ma = _cf(match.get("away_team"))
+            # Match per SOTTOSTRINGA (come `load_oracle`): mai l'incrocio.
+            if (not mh or not ma) or (h not in mh and mh not in h) \
+                    or (a not in ma and ma not in a):
+                continue
+            for bm in match.get("bookmakers") or []:
+                if not isinstance(bm, dict) or canonical_book(bm) != PRIMARY_BOOK:
+                    continue
+                if mt == "OU":
+                    quotes = totals_odds_of(bm, float(line))
+                    if quotes:
+                        probs = line_probabilities(quotes,
+                                                   devig_method=devig_method)
+                        if probs:
+                            return probs
+                else:
+                    quotes = spreads_odds_of(bm, home, away, float(line))
+                    if quotes:
+                        probs = line_probabilities(quotes,
+                                                   devig_method=devig_method)
+                        if probs:
+                            return probs
+    return None
+
+
+def line_oracle_probs(pick: Dict[str, Any],
+                      cache_dir: Optional[Path] = None,
+                      devig_method: Optional[str] = None,
+                      now: Optional[float] = None
+                      ) -> Optional[Dict[str, Any]]:
+    """p_true per un pick a linea del ledger (ponte verso il gate top-down:
+    il chiamante e' il MODULO che orchestra le puntate, qui non si importa
+    nulla di esecutivo — la direzione resta chiamante -> oracolo).
+
+    Ricostruisce (market_type, linea) dall'esito di ledger con
+    `multi_market.order_target` — l'UNICA fonte della convenzione (esito
+    'Over 2.5' -> ("OU", 2.5, over); 'Home -0.75' -> ("AH", -0.75, home);
+    mai una seconda implementazione che divergerebbe). Il ritorno porta
+    anche `line_key` (lato puro) per la lettura del gate.
+    """
+    try:
+        from multi_market import order_target
+    except Exception as exc:                                     # pragma: no cover
+        logger.warning("pinnacle_oracle: multi_market non disponibile (%s)", exc)
+        return None
+    target = order_target({"mercato": pick.get("mercato") or pick.get("market"),
+                           "esito_key": pick.get("esito_key") or pick.get("esito")})
+    if not target or target.get("line") is None:
+        return None
+    probs = line_true_probs(pick.get("home") or "", pick.get("away") or "",
+                            market_type=str(target.get("market_type") or ""),
+                            line=float(target["line"]),
+                            cache_dir=cache_dir, devig_method=devig_method,
+                            now=now)
+    if probs:
+        probs = dict(probs)
+        probs["line_key"] = str(target.get("side") or "")
+    return probs

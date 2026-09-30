@@ -150,6 +150,14 @@ export default defineRailway(() => {
       TEST_NOTIFY_KEY: preserve(),
       TOP_DOWN_EV: preserve(),
       TOP_DOWN_MARGIN: preserve(),
+      // Oracolo a linea OU/AH (30/09/2026, `line_oracle.py`): follow-the-
+      // money — totals/spreads Pinnacle SOLO per le leghe con pick a linea
+      // in gioco (3 crediti/chiamata, budget giornaliero dedicato). Senza
+      // preserve(), un `config apply` distruggerebbe gli override operativi.
+      ORACLE_ENABLED: preserve(),
+      ORACLE_BUDGET_DAY: preserve(),
+      ORACLE_PICK_WINDOW_H: preserve(),
+      ORACLE_LEAGUES_PER_PASS: preserve(),
     },
   });
 

@@ -2552,6 +2552,38 @@ async def tennis_lane_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error("tennis_lane_job: scan (%s)", e)
 
 
+async def line_oracle_job(context: ContextTypes.DEFAULT_TYPE):
+    """Oracolo a linea OU/AH (30/09/2026): follow-the-money, budget dedicato.
+
+    Scarica `markets=h2h,totals,spreads` di Pinnacle (the-odds-api, 3 crediti
+    a chiamata) SOLO per le leghe con pick OU/AH aperti in finestra d'ordine:
+    senza questo payload ogni pick a linea muore con `no_oracle` (il gate
+    top-down legge un oracolo 1X2 che non ha mai le chiavi 'Over 2.5' /
+    'Home -0.75'). Cache separata `toao_<sport>.json` (TTL 24h), budget
+    giornaliero `ORACLE_BUDGET_DAY` (default 12 leghe = 36 crediti max/giorno),
+    hard-stop crediti rispettato. `ORACLE_ENABLED=0` spegne tutto. Fail-safe:
+    un errore non ferma il bot.
+    """
+    if os.getenv("ORACLE_ENABLED", "1").strip().lower() in ("0", "false", "no"):
+        return
+    loop = asyncio.get_running_loop()
+
+    def _pass():
+        import line_oracle
+        return line_oracle.ensure_oracle_payloads()
+
+    try:
+        res = await loop.run_in_executor(_scan_executor, _pass)
+    except Exception as e:
+        logger.error("line_oracle_job: %s", e)
+        return
+    if res.get("fetched") or res.get("errors"):
+        logger.info("line_oracle_job: leghe %s, fetch %s, skip %s, errori %s, "
+                    "richieste oggi %s", res.get("leagues"),
+                    res.get("fetched"), res.get("skipped"),
+                    res.get("errors"), res.get("requests_today"))
+
+
 async def btts_watch_job(context: ContextTypes.DEFAULT_TYPE = None):
     """Sorveglianza GRATUITA del mercato BTTS su SX Bet (25/09/2026).
 
@@ -2899,6 +2931,12 @@ def main() -> None:
         # popola: e' il campanello che riapre il refactoring.
         job_queue.run_repeating(btts_watch_job, interval=24 * 3600,
                                 first=1800,
+                                job_kwargs={"max_instances": 1})
+        # Oracolo a linea OU/AH (30/09/2026): follow-the-money. Ogni 30'
+        # scarica totals/spreads SOLO per le leghe con pick a linea in gioco
+        # (budget dedicato 12 leghe/giorno): e' il pezzo che sblocca l'AH/OU
+        # dal no_oracle del gate top-down. ORACLE_ENABLED=0 per spegnerlo.
+        job_queue.run_repeating(line_oracle_job, interval=1800, first=270,
                                 job_kwargs={"max_instances": 1})
         # Revisioni umane (15/09): i verdetti `review` della catena diventano
         # prompt Telegram con bottoni. Frequenza 5 min (non c'e' fretta: il

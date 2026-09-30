@@ -40,14 +40,42 @@ def _match():
 
 
 def test_odds_request_solo_h2h():
-    """La richiesta quote the-odds-api NON deve mai includere il mercato
-    totals: the-odds-api addebita markets x regions (h2h,totals = 2
-    crediti/call) e l'OU e' escluso dalle selezioni dal 06/09."""
+    """La ROTAZIONE DI RICERCA the-odds-api resta `markets="h2h"` (1 credito).
+
+    ⚠️ AGGIORNATO 30/09/2026 (decisione del proprietario: tagliare la
+    rotazione per far entrare totals,spreads nel budget). Il veto originale
+    del 06/09 nasceva dal doppio addebito `h2h,totals` sulla rotazione: il
+    nuovo design NON tocca la rotazione (che resta h2h-only) e porta i
+    mercati totals/spreads su una CHIAMATA ORACOLO SEPARATA e budgettizzata
+    (`odds_api.fetch_line_odds`, follow-the-money: solo leghe con pick OU/AH
+    in gioco, cache `toao_*`, budget `ORACLE_BUDGET_DAY`). Cio' che NON deve
+    mai tornare: la rotazione con `h2h,totals` (2 crediti su OGNI chiamata
+    di ricerca) e il mercato totals come selezione di `fixture_engine`.
+    """
     src = Path(fixture_engine.__file__).parent / "odds_api.py"
     body = src.read_text()
-    assert '"markets": "h2h"' in body
+    # la rotazione di ricerca resta h2h (default di `_get_odds`)
+    assert '"markets": "h2h",' in body or 'markets: str = "h2h"' in body \
+        or 'markets="h2h"' in body
     assert '"markets": "h2h,totals"' not in body
-    assert 'markets=totals' not in body
+    assert 'markets="h2h,totals",\n            "oddsFormat"' not in body
+    # i mercati dell'oracolo a linea vivono SOLO nella chiamata dedicata
+    assert 'ORACLE_MARKETS_LIST = "h2h,totals,spreads"' in body
+    assert 'def fetch_line_odds' in body
+    # il chiamante dell'oracolo passa la lista DEDICATA, non la stringa della
+    # rotazione
+    assert 'markets=ORACLE_MARKETS_LIST' in body
+
+
+def test_oracle_a_linea_budget_e_cache_dedicate():
+    """L'oracolo a linea ha budget e cache PROPRI (non sfinisce la ricerca)."""
+    import odds_api
+    assert odds_api.ORACLE_MARKETS_LIST == "h2h,totals,spreads"
+    assert odds_api.ORACLE_BUDGET_DAY >= 1
+    assert odds_api.ORACLE_CACHE_TTL_S == 86400
+    assert odds_api.ORACLE_CACHE_PREFIX == "toao_"
+    # la cache oracolo NON e' la cache di ricerca
+    assert odds_api.ORACLE_CACHE_PREFIX != ""
 
 
 def _run(monkeypatch):

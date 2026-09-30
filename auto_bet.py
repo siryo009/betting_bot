@@ -329,6 +329,28 @@ def _top_down_load(home: str, away: str):
     return po.load_oracle(home, away, cache_dir=_TOP_DOWN_CACHE_DIR)
 
 
+def _h2h_cache_stantia(pick: dict) -> bool:
+    """True se la cache h2h del pick ESISTE ma e' stantia (> CACHE_MAX_AGE_H).
+
+    Distingue 'Pinnacle non ha la partita' (nessuna cache la contiene:
+    no_oracle, non e' recuperabile) da 'la cache e' vecchia' (il match c'e'
+    ma fuori finestra: l'oracolo a linea puo' arrivare col refresh
+    follow-the-money della lega). Fail-closed su errore di lettura: False
+    (il motivo resta no_oracle, che e' la condizione certa).
+    """
+    try:
+        import pinnacle_oracle as po
+        from config import DATA_DIR
+        from pathlib import Path
+        folder = (Path(_TOP_DOWN_CACHE_DIR) if _TOP_DOWN_CACHE_DIR
+                  else Path(DATA_DIR))
+        return bool(po.h2h_cache_is_stale(pick.get("home") or "",
+                                          pick.get("away") or "",
+                                          cache_dir=folder))
+    except Exception:
+        return False
+
+
 def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
     """Valutazione TOP-DOWN di un candidato: EV contro l'ORACOLO Pinnacle.
 
@@ -364,14 +386,57 @@ def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
         quota = float(pick.get("quota") or 0)
         if quota <= 1.0:
             return {"ok": False, "reason": "quota non valida"}
+        # Mercati A LINEA (30/09/2026): l'oracolo 1X2 non ha mai le chiavi
+        # 'Over 2.5' / 'Home -0.75'. Prima del fail-closed si tenta l'oracolo
+        # a linea (Pinnacle totals/spreads dalle cache follow-the-money);
+        # se esiste SOLO l'1X2 e la sua cache e' STANTIA, il pick cade con
+        # motivo DICHIARATO `linea` (la verita' serve, non c'e' ancora: si
+        # paga la fetch della lega e l'oracolo arriva al giro dopo) invece
+        # di un no_oracle che nasconderebbe la causa.
+        mercato = str(pick.get("mercato") or "").upper()
+        if mercato in ("OU", "AH"):
+            lp = None
+            try:
+                lp = po.line_oracle_probs(pick, cache_dir=_TOP_DOWN_CACHE_DIR)
+            except Exception as exc:
+                logger.debug("oracolo a linea non disponibile (%s)", exc)
+            if lp:
+                _lato = str(lp.pop("line_key", "") or "")
+                if _lato:
+                    # Lato della convenzione SX ('over'/'under'/'home'/'away')
+                    # -> etichetta del de-vig binario ('Over'/'Under'/
+                    # 'Home'/'Away'). Sconosciuto = chiave non trovata ->
+                    # p_true 0 -> rami no_oracle/linea (mai un lato a caso).
+                    _lato = {"over": "Over", "under": "Under",
+                             "home": "Home", "away": "Away"}.get(
+                        _lato.lower(), _lato)
+                    probs = dict(lp)
+                    probs["__key"] = _lato
         if not probs:
+            # Nessuna verita' (ne' 1X2 ne' a linea): se la cache h2h copre la
+            # lega ma e' STANTIA, la causa e' dichiarata ('linea': la verita'
+            # serve e si puo' pagare con fetch_line_odds); altrimenti e' il
+            # no_oracle secco (partita fuori dai payload: non recuperabile).
+            if mercato in ("OU", "AH") and _h2h_cache_stantia(pick):
+                return {"ok": False, "reason": "linea",
+                        "detail": "oracolo a linea non ancora scaricato per "
+                                  "questa lega (cache h2h stantia): serve "
+                                  "fetch_line_odds (follow-the-money)"}
             return {"ok": False, "reason": "no_oracle",
                     "detail": "Pinnacle assente/incompleto/stantio "
                               "(fail-closed: senza verita' non si decide)"}
-        p_true = float(probs.get(pick.get("esito_key")) or 0)
+        _esito_key = str(pick.get("esito_key") or "")
+        if probs.get("__key"):
+            _esito_key = str(probs["__key"])
+        p_true = float(probs.get(_esito_key) or 0)
         if not (0.0 < p_true <= 1.0):
+            if mercato in ("OU", "AH") and _h2h_cache_stantia(pick):
+                return {"ok": False, "reason": "linea",
+                        "detail": "oracolo a linea non ancora scaricato per "
+                                  "questa lega (cache h2h stantia): serve "
+                                  "fetch_line_odds (follow-the-money)"}
             return {"ok": False, "reason": "no_oracle",
-                    "detail": f"esito '{pick.get('esito_key')}' senza "
+                    "detail": f"esito '{_esito_key}' senza "
                               "probabilita' fair"}
         ev = p_true * (quota - 1.0) - (1.0 - p_true)
         true_odd = 1.0 / p_true
