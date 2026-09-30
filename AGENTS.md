@@ -7058,3 +7058,58 @@ sorgenti di rete PRIMA di girare. Senza `LIVE_INTEL=0` il `DataAgent` faceva
 **scraping reale di FBref** e la diagnostica moriva a meta' scenario C; ora
 imposta `LIVE_INTEL=0` **e** `ESPORTS_LIVE=0` e completa in ~45s con
 **A-H tutti bloccanti**.
+
+#### Probe end-to-end reale dell'oracolo eSports (30/09/2026, 00:56 UTC)
+
+Prova eseguita sul container con la chiave vera (`railway run --service
+betting_bot`), **misurata in quota** con `/account` prima e dopo (endpoint non
+metered). Esito:
+
+```
+eventi SX       : {valorant: 1, dota2: 5, lol: 1}        (discovery, gratis)
+fixtures valorant: status=200 righe=6
+   Vitality vs LOUD | 2026-09-30T09:00:00.000Z          <- e' l'evento SX
+aggancio SX->OddsPapi: Team Vitality vs Loud <-> Vitality vs LOUD  ✅
+ORACOLO         : ok=False, richieste=1,
+                  "nessun Match Winner completo per 'pinnacle'"
+QUOTA           : 42/250 -> 44/250 (probe: 2 richieste)
+```
+
+**Le tre conclusioni che contano.**
+1. **La catena funziona end-to-end con la chiave vera**: discovery SX → fixture
+   OddsPapi → aggancio per NOME → chiamata odds → verdetto. Non e' "corsia
+   rotta": e' la corsia che **rifiuta di inventare** un verdetto.
+2. **Pinnacle non ha pubblicato** il Match Winner di quell'evento alle 00:56 UTC
+   per un match delle **09:00 UTC** (8h prima). Fail-closed come da progetto.
+3. La fixture ESISTE su OddsPapi e i nomi agganciano (`Vitality` vs `LOUD` ↔
+   `Team Vitality` vs `Loud`, via `team_names.same_team`).
+
+**⚠️ GAP STRUTTURALE TROVATO (da decidere, non corretto)**: il TTL dei
+`no_oracle` (`ODDS_MISS_TTL_MIN` 60 min) e' **piu' lungo della finestra
+eseguibile**. La finestra ordini e' T-120..T-50 (`T60_WINDOW_MIN_MIN/MAX_MIN`),
+quindi l'ultima interrogazione utile e' a ~T-50. Con TTL 60min: un miss a
+T-120 viene ritentato a T-60 e poi **mai piu'** entro la finestra → se Pinnacle
+pubblica a T-45 il pick **non viene mai visto**, anche col budget intatto.
+Combinato col tetto di 6 richieste/giorno, la copertura realistica e' di **1-2
+eventi al giorno**, e solo se lo sharp pubblica prima di T-50.
+
+**Numeri per decidere** (tetto free 250/mese = ~8,3/giorno):
+- 6/giorno = 180/mese (attuale, margine ampio);
+- 8/giorno = 240/mese (al limite ma dentro il piano);
+- copertura di UN evento a granularita' 15' su T-180..T-50 = ~9 richieste:
+  insostenibile. Servono finestra piu' stretta (T-120..T-50) e TTL-miss corto.
+Opzioni sul tavolo: alzare `ESPORTS_REQ_BUDGET_DAY` a 8, stringere
+`ESPORTS_ORACLE_WINDOW_H` a ~1h, abbassare `ESPORTS_ODDS_MISS_TTL_MIN` a ~10-20
+min. **Nessuna applicata**: e' una scelta di quota/strategia del proprietario.
+
+**Quota OddsPapi al 30/09 00:56 UTC: 44/250 usate (residuo 206)** — di cui 6
+consumate dal primo ciclo di produzione della corsia e 9 dalle diagnostiche di
+questa verifica. Il consumo reale di un giorno "normale" a corsia dormiente e'
+**0**.
+
+**Lezione di metodo (errore mio, non del codice)**: `esports_oracle.fixtures()`
+estrae GIA' le righe in `fixtures` del dict di ritorno; leggere
+`(r.get("payload") or {}).get("fixtures")` da' **sempre 0 righe** e sembra che
+il provider non abbia dati. Il probe ha cosi' prodotto **due falsi negativi**
+("lol: 0", "dota2: 0") prima che la misura corretta dicesse 4 e 7. Un
+diagnostico che legge la chiave sbagliata accusa il sistema esterno.
