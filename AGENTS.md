@@ -7113,3 +7113,84 @@ estrae GIA' le righe in `fixtures` del dict di ritorno; leggere
 il provider non abbia dati. Il probe ha cosi' prodotto **due falsi negativi**
 ("lol: 0", "dota2: 0") prima che la misura corretta dicesse 4 e 7. Un
 diagnostico che legge la chiave sbagliata accusa il sistema esterno.
+
+### Copertura eSports: TTL/finestra allineati + esecuzione estesa a T-15 (30/09/2026)
+
+Direttiva del proprietario: chiudere il gap per "intercettare i drop tardivi di
+Pinnacle senza bruciare il budget a vuoto". **Due premesse della direttiva sono
+state verificate e corrette PRIMA di applicare** (le risposte sono state date
+via `ask_user`):
+
+**1) Il nome dell'env era sbagliato.** La direttiva indicava
+`ESPORTS_ORACLE_WINDOW_HOURS`; il codice legge **`ESPORTS_ORACLE_WINDOW_H`**.
+Il nome sbagliato sarebbe stato un **no-op silenzioso** (e sarebbe comparso
+come "1 to destroy" nel `config plan`, non essendo dichiarato nella IaC).
+Imposto il nome corretto.
+
+**2) La finestra eseguibile in produzione era T-120..T-50, non "l'ultima ora".**
+Verificato: `T60_WINDOW_MIN_MIN=120` (env), `T60_WINDOW_MAX_MIN` assente →
+default 50, `T60_EXECUTION_ONLY` → ON. Con quei valori i ritentativi a
+T-45/T-30/T-15 che la direttiva voleva "utili" **non potevano diventare
+ordini**: `t60_window` li classificava `missed` e il giro loggava "solo
+scansione, nessun ordine". Sarebbero state **3 richieste su 4 bruciate** —
+l'esatto contrario dell'obiettivo.
+
+**Scelte del proprietario**: (a) **estendere l'esecuzione fino a T-15** invece
+di rinunciare ai ritentativi tardivi; (b) **TTL-miss 15 minuti**.
+
+**Configurazione finale (code default = env, zero drift).**
+
+| parametro | prima | ora | perche' |
+|---|---|---|---|
+| `ESPORTS_ODDS_MISS_TTL_MIN` | 60 | **15** | in una finestra di 1h i ritentativi erano 2 (T-60, T-0): un drop a T-45 non si vedeva mai |
+| `ORACLE_WINDOW_H_DEFAULT` | 3h | **1h** | a pagamento solo dentro l'ora finale |
+| `REQ_BUDGET_DAY` | 6 | **8** | 4 richieste/evento → 8 copre ~2 eventi/giorno (240/mese su 250) |
+| `T60_WINDOW_MAX_MIN` | 50 | **15** | rende ORDINABILI T-45/T-30/T-15; **coincide con `MIN_MINUTES_TO_START` (15)**, il pavimento che salta comunque le partite imminenti |
+
+**Aggiunto (non richiesto, ma necessario all'obiettivo)**: `picks()` processa
+gli eventi in **ordine di kickoff crescente**. `discover()` li restituiva in
+ordine di catalogo SX e col budget scarso (8 richieste, 4 per evento) il primo
+evento incontrato consumava la quota: un evento lontano avrebbe tolto la
+copertura proprio a quello che stava per iniziare.
+
+**Verifica in produzione (deploy `caa9c5ba`, 30/09 01:25 UTC)**:
+```
+finestra esecutiva: T-120 .. T-15  (execution_only True, allineata al pavimento)
+oracolo eSports   : finestra 1.0h | TTL-miss 15min | budget 8 (240/mese) | pacing 2.5s
+conseguenza       : 4 ritentativi utili per evento -> 2.0 eventi coperti al giorno
+adesso            : 0/7 eventi in finestra oracolo -> zero richieste, costo 0
+```
+`/api/health` 200 · quota the-odds-api 325 · `overdue_orphans` 0 · 0
+ERROR/Traceback · cicli `auto_bet` puliti (equity 33.55, esposizione 0.00/13.42).
+
+**⚠️ Trap chiusa**: `T60_WINDOW_MAX_MIN` **non era dichiarata in `preserve()`**
+(solo `T60_KILL_WALLET_USDC` e `T60_WINDOW_MIN_MIN` lo erano). Impostandola su
+Railway senza dichiararla, il `config plan` avrebbe segnalato "1 to destroy" e
+un futuro `config apply` l'avrebbe cancellata: la finestra sarebbe tornata a
+T-50 **in silenzio**, riportando i ritentativi tardivi a bruciare quota. Ora è
+dichiarata e `railway config plan` risponde **"already up to date"** (0 to add,
+0 to change, 0 to destroy).
+
+**⚠️ Due guardie che ora COINCIDONO** (`T60_WINDOW_MAX_MIN` ==
+`MIN_MINUTES_TO_START` == 15): la chiusura della finestra e il pavimento
+anti-ordine-a-partita-imminente sono lo stesso istante. Se in futuro si volesse
+ordinare sotto T-15 bisogna **abbassare entrambe**, e il test
+`test_chiusura_allineata_al_pavimento_assoluto` lo segnala.
+
+**Test aggiornati di proposito** (una soglia cambiata senza test è un
+cambiamento silenzioso): `test_t60_breakers.TestFinestraT60.test_classificazione_finestra`
+asserisce la politica NUOVA per intero, con il **bordo BRACKETTATO**
+(`+16` = `within`, `+14` = `missed`) e non asserito esatto: `t60_window`
+ricalcola il suo `now`, quindi a `+15` esatti i microsecondi trascorsi lo
+portano sotto soglia (deterministicamente flaky — stessa lezione delle date
+relative del 15/09 e del 17/09). Il test del cablaggio
+(`test_dispatch_in_finestra_ordina`) ora esercita **la fascia nuova (+20)**, che
+è il caso che il cambio doveva rendere ordinabile; `test_dispatch_fuori_finestra_non_ordina`
+usa `+10` (sotto la chiusura). Nuovi:
+`test_chiusura_allineata_al_pavimento_assoluto`,
+`test_ttl_miss_tarato_sulla_finestra` (difende i **default dichiarati** e
+l'invariante "almeno 3 ritentativi per evento"),
+`test_budget_copre_due_eventi`, `test_budget_va_all_evento_piu_vicino` (il
+catalogo SX mette il lontano per primo: senza l'ordinamento il pick sarebbe
+del lontano). `verify_guardrails.py`: dicitura dello scenario G aggiornata a
+T-120..T-15; **A–H tutti bloccano**.
