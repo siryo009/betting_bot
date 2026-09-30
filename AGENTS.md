@@ -7602,3 +7602,103 @@ da `value_filter.EV_MIN`, soglie 0.045/0.025/0.125), `test_decision_pipeline`
 `decision`+settlement+API+report, piu` i test delle modifiche), `compileall` OK,
 **0 marker di conflitto**. Nessuna env nuova introdotta → nessuna modifica a
 `.railway/railway.ts`.
+
+### Oracolo a linea OU/AH follow-the-money + verifica log post-deploy (30/09/2026, notte)
+
+Tre richieste del proprietario eseguite in sequenza: (1) verifica log dei testi
+"EV 2.5%" e ciclo auto_bet pulito; (2) misura con gate_audit+significance
+dell'impatto della soglia 2.5% su calcio/OU-AH/tennis; (3) implementazione della
+riduzione della rotazione quote per far entrare totals,spreads nel budget
+crediti e sbloccare l'oracolo AH/OU. Commit `2fa7248` + fix `5d7b605`, deploy
+SUCCESS su entrambi i servizi.
+
+**1) VERIFICA LOG (600 righe, 17:36-17:44 UTC).** Ciclo `auto_bet` PULITO:
+`bankroll LIVE = equity 33.55 USDC (disponibile 33.55 + in gioco 0.00)`,
+esposizione aperta `0.00/13.42 USDC su 0 ordini (cap 40%, stake fisso 1.50)`,
+`nessuna puntata (live) — 0 candidati giocabili`, **0 ERROR/Traceback** (solo i
+7 WARNING noti `sx_signals: settlement — leghe non mappate`). Un pick tennis
+valutato e rimandato con `fuori finestra T-60 (before)`: corsia viva, nessun
+errore. I testi EV NON compaiono nei log perche' la riga strategia e' a DEBUG
+e non c'erano rifiuti EV in finestra → verifica via `railway ssh`:
+`SAMPLE_REJECT: EV troppo basso (2.1% < 2.5%)` — il testo dice **2.5%**, non
+"2%" (il fix `:g` del 30/09 funziona).
+
+**2) MISURA IMPATTO SOGLIA 2.5% vs 2.0% (gate_audit sui 229 segnali aperti,
+sul container, iniettando `vf.EV_MIN`/`tl.EV_MIN`).** Candidati IDENTICI nei
+due casi: ledger 3 CANDIDATE (tutti OU), tennis 1 CANDIDATE/104 lati,
+**LOST_candidati_2.0_vs_2.5 = 0**. Nessun segnale nella banda (2.0%, 2.5%]:
+la soglia piu' severa NON ha perso alcun candidato sul mercato corrente.
+Distribution: 1X2 35 REJECT_EV / OU 17 EV+3 CAND+86 OTHER / AH 12 EV+68
+OTHER / TENNIS 1 EV+7 OTHER. `CREDITS: 297` al momento della misura.
+NB `significance.py` NON e' stato eseguito di proposito: misura i campioni
+CHIUSI (nei quali la soglia non e' mai cambiata retroattivamente — le righe
+porteranno per sempre lo status dell'era in cui sono nate), quindi su questa
+domanda non aggiunge nulla rispetto a gate_audit.
+
+**3) ORACOLO A LINEA — IMPLEMENTATO (decisione "tagliare la rotazione").**
+the-odds-api addebita `markets x regions`: mettere totals,spreads sulla
+rotazione triplicava ogni chiamata (370.6 -> ~938/mese, fuori dal tetto anche
+tagliando). Design FOLLOW-THE-MONEY scelto (si paga solo dove c'e' denaro):
+- `odds_api.fetch_line_odds(sport, frm, to)`: seconda chiamata
+  `markets=h2h,totals,spreads` (3 crediti) SOLO per le leghe con pick OU/AH
+  in finestra d'ordine; cache SEPARATA `toao_<sport>.json` (TTL 24h); budget
+  giornaliero dedicato `ORACLE_BUDGET_DAY` (default **2 leghe/giorno** = 6
+  crediti = 180/mese); il consumo contatore conta SOLO le chiamate vere (un
+  cache-hit NON consuma budget); hard-stop crediti e `should_query_sport`
+  rispettati; `ORACLE_ENABLED=0` spegne tutto.
+- `SPORTS_INTERVAL_DAYS` TAGLIATO: le 22 leghe ammesse 2gg -> **7gg** e
+  Serie A/La Liga 3gg -> 7gg (370.6 -> ~169 crediti/mese). Costo totale
+  profilo ~349/460 (test `test_budget_mensile_piano_free` esteso: rotazione +
+  oracolo). NB: il difetto "zero candidati" del 24/09 nasceva dalla
+  combinazione finestra 7gg + rotazione 30gg, non dalla rotazione 7gg: la
+  lega interrogata il giorno X vede le partite fino a X+7.
+- `pinnacle_oracle`: `totals_odds_of`/`spreads_odds_of` (matching NOME+POINT
+  con fallback linea speculare; fail-closed a linea 0 senza nomi),
+  `line_probabilities` (de-vig a 2 esiti delegato a `market_calib`),
+  `line_true_probs`/`line_oracle_probs` (p_true per il pick: esito ledger
+  'Over 2.5'/'Home -0.75' -> (mercato, linea, lato) via
+  `multi_market.order_target` — UNA sola definizione della convenzione),
+  `h2h_cache_is_stale` (distingue "cache stantia, linea da pagare" da
+  "partita assente dai payload").
+- `auto_bet._top_down_eval`: i pick OU/AH provano PRIMA l'oracolo a linea
+  (chiave lato mappata over/under/home/away -> Over/Under/Home/Away);
+  senza verita' disponibile il skip dichiara il nuovo motivo **`linea`**
+  (recuperabile con la fetch della lega) invece del no_oracle secco che
+  nascondeva la causa.
+- `line_oracle.py` (nuovo) + `bot.line_oracle_job` ogni 30' (`first=270`):
+  `line_picks()` riusa ESATTAMENTE la selezione della corsia d'ordine
+  (`multi_market.live_picks`, lega -> sport key via
+  `sx_signals.league_to_sport`), `leagues_needing_fetch()` salta le cache
+  fresche, `ensure_oracle_payloads()` fetcha con budget; CLI `--dry-run`
+  (mostra le leghe senza spendere); fail-safe totale.
+- IaC: `ORACLE_ENABLED`, `ORACLE_BUDGET_DAY`, `ORACLE_PICK_WINDOW_H`,
+  `ORACLE_LEAGUES_PER_PASS` in `preserve()` (servizio api).
+- Tripwire aggiornati: `test_ou_exclusion.test_odds_request_solo_h2h` ora
+  verifica che la ROTAZIONE resti h2h-only E che l'oracolo viva nella
+  chiamata dedicata (veto del 06/09 intatto: la rotazione non paga mai 2
+  crediti); `test_leghe_ammesse_mai_dormienti` pretende l'uguaglianza a 7gg;
+  `test_budget_mensile_piano_free` conta rotazione+oracolo.
+- **BUG trovato sul campo (fix `5d7b605`)**: nel payload the-odds-api il
+  campo `point` sta sull'OUTCOME, non sull'oggetto mercato (verificato su
+  `toao_soccer_uefa_nations_league.json` reale): il primo estrattore trovava
+  `point: None` a livello mercato e scartava tutte le linee.
+
+**4) VERIFICA IN PRODUZIONE (end-to-end, reale).** `railway ssh` →
+`ensure_oracle_payloads()`: fetch vera di `soccer_uefa_nations_league`
+(**8 eventi Pinnacle, 3 crediti spesi: 293 -> 290**, cache `toao_*` scritta,
+`requests_today 1`). Cross-check linee: i 3 pick AH in finestra (Israel
+Home +0.5, Denmark Home +1, Greece Home +1.5) restano MISS ma è il
+**fail-closed corretto**: Pinnacle pubblica main lines ±0.25/±0.5 mentre SX
+quota ±0.5/±1/±1.5 — l'oracolo rifiuta la linea SX che non corrisponde alla
+linea Pinnacle (mai un verdetto sulla linea sbagliata). Su Israel–Kosovo lo
+sharp non ha (ancora) pubblicato spreads/totals. Il ciclo è COMPLETO e
+funzionante: quando le linee coincidono (le quarter-line SX esistono anche
+su Pinnacle) la p_true arriva al gate e l'ordine parte.
+
+**5) Test**: `test_line_oracle.py` **33 verdi** (budget/cache dedicate,
+follow-the-money, estrattori, gate con skip `linea`, tripwire IaC/import
+leggero/senza ordini/senza formule copiate); lotti verdi: odds_api +
+ou_exclusion + pinnacle_api + top_down + multi_market + t60_breakers +
+line_oracle (**311 passed**), auto_bet x2 + capital_enclosure +
+exposure_gate, bot + secret_hygiene + gate_audit, verify_guardrails
+**A-H tutti bloccano** (exit 0), compileall OK, 0 marker di conflitto.
