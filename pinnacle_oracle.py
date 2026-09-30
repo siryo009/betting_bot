@@ -207,11 +207,13 @@ def totals_odds_of(bookmaker: Dict[str, Any], line: float
                    ) -> Optional[Dict[str, float]]:
     """Quote Over/Under di Pinnacle ALLA LINEA richiesta ({"Over": q, "Under": q}).
 
-    Fail-closed: servono ENTRAMBI i lati alla STESSA linea (un solo lato
-    non si puo' de-vigare) con prezzi > 1.0. Il `point` del payload (2.5,
-    3.25...) e' confrontato con tolleranza 1e-6: i quarter-line (2.25,
-    2.75) arrivano come valori frazionari e un confronto esatto su float
-    li perderebbe.
+    ⚠️ FORMA DEL PAYLOAD (verificata su dati reali, 30/09): nel mercato
+    `totals` di the-odds-api il campo `point` (2.5, 3.25...) sta sull'
+    OUTCOME, non sull'oggetto mercato — il lettore che cercava il punto a
+    livello mercato trovava None e scartava TUTTE le linee. Fail-closed:
+    servono ENTRAMBI i lati alla STESSA linea (un solo lato non si puo'
+    de-vigare) con prezzi > 1.0; confronto con tolleranza 1e-6 (i
+    quarter-line 2.25/2.75 sono frazionari).
     """
     if not isinstance(bookmaker, dict):
         return None
@@ -219,20 +221,15 @@ def totals_odds_of(bookmaker: Dict[str, Any], line: float
     for mkt in bookmaker.get("markets") or []:
         if not isinstance(mkt, dict) or mkt.get("key") != "totals":
             continue
-        try:
-            point = float(mkt.get("point"))
-        except (TypeError, ValueError):
-            continue
-        if abs(point - float(line)) > 1e-6:
-            continue
         for o in mkt.get("outcomes") or []:
             if not isinstance(o, dict):
                 continue
             try:
                 price = float(o.get("price"))
+                point = float(o.get("point"))
             except (TypeError, ValueError):
                 continue
-            if price <= 1.0:
+            if price <= 1.0 or abs(point - float(line)) > 1e-6:
                 continue
             name = _cf(o.get("name"))
             if name.startswith("over"):
@@ -249,8 +246,10 @@ def spreads_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
     `home_line` e' la linea vista da `teamOne` (es. -0.75 per "Home -0.75"),
     la STESSA convenzione di `multi_market.sx_line_of_esito`/`order_target`.
     Nel payload the-odds-api gli esiti spreads sono identificati da NOME
-    SQUADRA + `point`: l'esito di casa ha `point = home_line` e nome della
-    squadra di casa, il trasferta `point = -home_line`. Matching: nome
+    SQUADRA + `point` SULL'OUTCOME (il mercato non porta il punto — forma
+    verificata su dati reali, 30/09): l'esito di casa ha `point =
+    home_line` e nome della squadra di casa, il trasferta `point =
+    -home_line`. Matching: nome
     (case-fold, con ripiego su contenimento per le varianti) + linea; se i
     nomi non combaciano MA le due linee sono speculari e DISTINTE, decide
     il punto (difesa per forme di payload diverse). Fail-closed su ENTRAMBI
