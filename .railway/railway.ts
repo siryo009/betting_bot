@@ -33,6 +33,11 @@ export default defineRailway(() => {
       BOOK_FLOW_MIN_SIZE_USDC: preserve(),
       BOOK_FLOW_STATE: preserve(),
       CHIEF_EXECUTION: preserve(),
+      // Direttiva "Sblocco Totale LIVE" (30/09/2026): shadow mode SPENTA in
+      // produzione. I due interruttori restano dichiarati cosi' `config apply`
+      // non li distrugge e l'operatore puo' riaccenderli per una misura.
+      CHIEF_SHADOW_ENABLED: preserve(),
+      DECISION_SHADOW: preserve(),
       DECISION_SHADOW_PERSIST: preserve(),
       ENABLE_LIVE_OU: preserve(),
       EXA_API_KEY: preserve(),
@@ -126,6 +131,21 @@ export default defineRailway(() => {
       // Railway: senza, un `config apply` la distruggerebbe.
       T60_WINDOW_MAX_MIN: preserve(),
       TENNIS_SANDBOX_ENABLED: preserve(),
+      // Corsia TENNIS (30/09/2026, `tennis_lane.py`): interruttore, identita'
+      // SX (sport 6 / type 52), soglia EV PROPRIA (2.5%), finestra, budget
+      // richieste the-odds-api (1 credito/torneo con cache scaduta) e stato.
+      // Gli ORDINI sono nella corsia LIVE di `auto_bet` (`_tennis_picks`).
+      TENNIS_LANE: preserve(),
+      TENNIS_EV_MIN: preserve(),
+      TENNIS_HOURS_AHEAD: preserve(),
+      TENNIS_MAX_MARKETS: preserve(),
+      TENNIS_MIN_INV_SUM: preserve(),
+      TENNIS_MAX_INV_SUM: preserve(),
+      TENNIS_ORACLE_TTL_MIN: preserve(),
+      TENNIS_REQ_BUDGET_DAY: preserve(),
+      TENNIS_ORACLE_CACHE: preserve(),
+      TENNIS_LANE_STATE: preserve(),
+      TENNIS_JOB_INTERVAL_MIN: preserve(),
       TEST_NOTIFY_KEY: preserve(),
       TOP_DOWN_EV: preserve(),
       TOP_DOWN_MARGIN: preserve(),

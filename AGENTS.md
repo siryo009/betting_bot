@@ -7446,3 +7446,101 @@ top-down compra **sul tennis non esiste**: accendere la corsia LIVE tennis
 avrebbe prodotto **ZERO ordini** a qualunque soglia >= 1%, a fronte di un costo
 in crediti e codice. **Misurare prima ha evitato un no-op costoso** — la stessa
 lezione del 22/09 e del 25/09.
+
+### Sblocco LIVE Tennis + Audit filtri (30/09/2026, sera)
+
+**Direttiva**: sblocco totale LIVE senza shadow/paper; conferma `AUTO_BET_MODE=live`
+e ordini reali per Calcio/eSports a EV >= 2.5%; corsia Tennis LIVE; oracolo per le
+main lines AH/OU; smoke test dell'oracolo H2H + audit telemetrico dei filtri con
+tre bucket (`REJECT_EV_BELOW_THRESHOLD`, `REJECT_NO_LIQUIDITY`, `REJECT_CODE_FLAG`).
+
+**1) STATO LIVE CONFERMATO (verificato il 30/09, non asserito).**
+`AUTO_BET_MODE=live`, `EXECUTION_PROVIDER=sxbet`, `dry_run=false`, wallet SX
+**equity 33.5535 USDC** (33.5535 liberi + 0.00 in gioco), `STAKE_CAP_HARD=0`,
+`ENABLE_LIVE_OU=1` (autorizzato; il gate di prontezza decide), `T60_*` ai valori
+del 30/09. Nessun `AUTO_BET_DRY_RUN`: non esiste `PAPER_TRADING` (0 occorrenze
+nel repo). Progetto Railway `creative-vibrancy` / servizio `betting_bot`, Online.
+
+**2) SHADOW MODE SPENTA (direttiva "elimina ogni shadow").** Su Railway:
+`DECISION_SHADOW=0` e `CHIEF_SHADOW_ENABLED=0` (erano default ON). La shadow era
+una misura PARALLELA che non toccava gli ordini: spegnerla soddisfa la direttiva
+ma **rinuncia** al registro `decision/compare` (costo dichiarato, non nascosto).
+`DECISION_SHADOW_PERSIST` resta `1` ma e' inerte con la shadow spenta.
+Entrambi dichiarati in `preserve()` di `.railway/railway.ts` (config plan:
+**already up to date**, 0 to destroy).
+
+**3) CORSIA TENNIS LIVE (`tennis_lane.py` + `auto_bet._tennis_picks`).**
+- `auto_bet`: nuova `_tennis_picks()` (fail-safe -> []) che entra nel board
+  **solo in `mode == "live"`**, come la corsia eSports.
+- **GATE**: il top-down Pinnacle 1X2 ora esenta ANCHE `TENNIS` oltre a `ML`
+  (`not in ("ML", "TENNIS")`): i loro esiti non sono un 1X2 e il gate li
+  ucciderebbe con `no_oracle`.
+- **ORDINE**: `_live_fill` riconosce il tennis e usa `market_id`/`selection_id`
+  GIA' nel pick, senza ri-risolvere. Motivo: la struttura SX del tennis e' **UN
+  mercato per match** coi lati sulle chiavi 1/2, mentre `resolve_moneyline_market`
+  cerca un mercato per SQUADRA (struttura eSports). Fail-closed se l'identita'
+  manca: mai un ordine sul lato sbagliato.
+- Job `bot.tennis_lane_job` ogni 6h (`TENNIS_JOB_INTERVAL_MIN=360`): aggiorna le
+  cache dell'oracolo (1 credito/torneo scaduto, budget 8/giorno + hard-stop) e
+  registra la telemetria (`predictions` mercato `TENNIS`, `match_id` `sx-tennis-*`
+  -> settlement SX-native GRATIS). Gli ORDINI restano nella corsia 60s di auto_bet.
+- Env in `preserve()`: `TENNIS_LANE` (=1 su Railway), `TENNIS_EV_MIN` (0.025),
+  `TENNIS_HOURS_AHEAD`, `TENNIS_MAX_MARKETS`, `TENNIS_MIN/MAX_INV_SUM`,
+  `TENNIS_ORACLE_TTL_MIN`, `TENNIS_REQ_BUDGET_DAY`, `TENNIS_ORACLE_CACHE`,
+  `TENNIS_LANE_STATE`, `TENNIS_JOB_INTERVAL_MIN`.
+
+**4) SMOKE TEST ORACOLO H2H/TENNIS — 40 test verdi, TUTTI OFFLINE.** Nuovo
+`test_tennis_lane.py`: de-vig a 2 esiti (`power` alza il favorito, somma fair = 1,
+overround misurato), un solo esito -> `None` (mai de-vigare a meta'), forma 1X2
+di default che rifiuta 2 quote (fail-closed incrociato), quote assenti/degeneri,
+ed **edge cases**: cache stantia, partita sospesa senza entrambe le quote,
+book vuoto/sottile, `inv_sum` fuori banda, kickoff fuori finestra, provider giu'.
+Coperti anche discovery (chiavi 1/2), gate EV 2.5%, telemetria su ledger
+temporaneo, budget, `refresh_oracle`, e i tripwire (nessun percorso d'ordine nel
+modulo, import leggero, esenzione gate).
+
+**5) AUDIT FILTRI BLOCCANTI — `gate_audit.py` (nuovo, sola lettura + discovery
+SX pubblica gratuita).** Applica i **gate di PRODUZIONE** ai candidati CORRENTI e
+classifica ogni scarto, partita per partita, con i tre bucket richiesti + **un
+quarto DICHIARATO** (`REJECT_OTHER_STRATEGY`) e `NO_ORACLE` (non uno scarto).
+
+**Esito REALE (30/09, oracolo tennis online, 3 tornei, 3 crediti, remaining 313):**
+
+| corsia | valutati | EV_BELOW | NO_LIQUIDITY | CODE_FLAG | OTHER_STRATEGY | CANDIDATE | NO_ORACLE |
+|---|---|---|---|---|---|---|---|
+| TENNIS | 104 | **104** | 0 | **0** | 0 | 0 | 6 |
+| FOOTBALL_LEDGER | 75 | 41 | 0 | **0** | 33 | **1** | 0 |
+
+- **Tennis**: EV massimo misurato **+0.717%** su 104 lati: sotto la soglia 2.5%
+  -> **104/104 REJECT_EV_BELOW_THRESHOLD**. Conferma la misura del 30/09 mattina
+  (max +0.69%): il prezzo SX tennis e' allineato a Pinnacle, il ritardo non c'e'.
+  La corsia resta **ARMATA** e spara al primo disallineamento >= 2.5%.
+- **Calcio (ledger aperto)**: 33 `REJECT_OTHER_STRATEGY` — **tutti per LEGA**
+  (Champions League 8, Superettan 5, Brazil Serie B 5, Libertadores 3, Primeira
+  Liga 2, quota >1.8 in 2); 41 per EV<2%. **1 candidato**: Inter vs Cagliari
+  1X2 `1` @1.60 **EV +4.00%**.
+- **`REJECT_CODE_FLAG = 0`**: nessun flag paper/shadow/sim spegne una corsia.
+  **`REJECT_NO_LIQUIDITY = 0`**: la liquidita' non e' il collo di bottiglia.
+- ⚠️ Il collo di bottiglia reale e' la **soglia/EV + il gate di lega**, non i
+  flag: il tennis per EV (mercato allineato), il calcio per lega+EV.
+
+**6) ORACOLO MAIN LINES AH/OU — NON completato, con motivo MISURATO.**
+Il gate top-down in `run_today_bets` esenta oggi solo `ML` (poi `TENNIS`): i pick
+`OU`/`AH` passano da `_top_down_eval`, che legge un oracolo **1X2**
+(`probs.get("Over 2.5")` -> assente) -> **`no_oracle`** su ogni pick a linea.
+L'oracolo a LINEA vero richiede i mercati `totals,spreads` di Pinnacle: the-odds-api
+addebita `markets x regions`, quindi aggiungerli **triplica** il costo della
+rotazione (370.6 -> ~1112 crediti/mese sul tetto 500) e rompe il tripwire
+`test_ou_exclusion.test_odds_request_solo_h2h`. **Decisione richiesta al
+proprietario**: (a) tagliare la rotazione per far stare il budget, (b) passare a
+un piano a pagamento, oppure (c) dichiarare l'esenzione dei mercati a linea dal
+gate 1X2 (nessun oracolo sharp: si tornerebbe al modello Poisson). Nessuna delle
+tre e' stata applicata: e' una scelta di budget, non un dettaglio tecnico.
+
+**7) TEST.** `test_tennis_lane.py` **40 verdi**; regressioni verdi: top_down +
+esports_lane + favourites_only + t60_breakers (184), auto_bet x2 +
+capital_enclosure + exposure_gate, bot + tennis_lane + esports_lane,
+value_filter + risk_guards + league_gate + market_calib + predictions +
+sx_signals + decision_shadow + decision_compare + liquidity_monitor.
+`verify_guardrails.py`: **A-H tutti bloccano**. `railway config plan`: **0 to
+destroy**. `compileall` OK, 0 marker di conflitto.

@@ -143,6 +143,13 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     monkeypatch.setenv("ESPORTS_LIVE", "0")
     monkeypatch.setenv("ESPORTS_CACHE", str(tmp_path / "esports_state.json"))
     monkeypatch.setenv("ESPORTS_MIN_INTERVAL_S", "0")   # pacing: niente attese
+    # Corsia TENNIS (30/09/2026, telemetria): stato e cache dell'oracolo nella
+    # tmp. Senza isolamento un `scan()` di test scriverebbe il file di stato e
+    # (soprattutto) le cache `toa_tennis_*.json` nella cartella dati REALE, da
+    # cui la corsia di produzione le leggerebbe come fresche: un test non deve
+    # poter cambiare cio' che la produzione vede.
+    monkeypatch.setenv("TENNIS_LANE_STATE", str(tmp_path / "tennis_state.json"))
+    monkeypatch.setenv("TENNIS_ORACLE_CACHE", str(tmp_path / "tennis_oracle"))
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di
     # MODULO e sopravvive fra i test dello stesso processo, mentre il ledger
     # no (ogni test ha il suo DB temporaneo). Senza reset un caso che semina

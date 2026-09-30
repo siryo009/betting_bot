@@ -33,5 +33,10 @@ data/intel/
 downloaded_files/
 # Cache/budget della corsia eSports (stato di runtime: va sul volume, non in git)
 data/esports/
+# Corsia TENNIS (30/09/2026): stato/budget della corsia e cache dell'oracolo
+# Pinnacle a 2 esiti (`toa_tennis_*.json`). Sono dati di runtime, ricostruibili
+# con `tennis_lane.py --refresh`: non vanno in git.
+data/tennis_lane/
+data/toa_tennis_*.json
 # Log della diagnostica dei guardrail (`verify_guardrails.py`)
 guardrails_output.log

@@ -1422,6 +1422,37 @@ def _esports_picks() -> list[dict]:
     return picks
 
 
+def _tennis_picks() -> list[dict]:
+    """Corsia TENNIS: candidati +EV dall'oracolo Pinnacle a 2 esiti (30/09/2026).
+
+    Direttiva "Sblocco Totale LIVE": il tennis e' in **Denaro Reale**, senza
+    flag di simulazione. La corsia (`tennis_lane`) fa discovery SX (sport 6,
+    type 52: un mercato per match, lati sulle chiavi 1/2), aggancia l'oracolo
+    Pinnacle a 2 esiti dalle cache gia' scaricate (0 crediti) e calcola l'EV
+    contro la probabilita' fair de-vigata, con la soglia PROPRIA del tennis
+    (`tennis_lane.EV_MIN`, default 2.5% -> env `TENNIS_EV_MIN`).
+
+    E' SOLO una fonte di candidati: stake fisso, recinto 40%/30%, T-60,
+    liquidita', dedup e gate di mercato restano quelli del giro, applicati a
+    valle. Il pick porta `market_id`/`selection_id` di SX (l'ordine non deve
+    ri-risolvere il mercato: la struttura a UN mercato per match non e' quella
+    del moneyline eSports, fatta di un mercato per SQUADRA).
+
+    Fail-safe: qualunque errore (o corsia spenta) ritorna [] — una classe di
+    rischio nuova non deve poter fermare le puntate di calcio/eSports.
+    """
+    try:
+        import tennis_lane
+        picks = tennis_lane.picks()
+    except Exception as e:
+        logger.warning("auto_bet: corsia tennis non disponibile (%s)", e)
+        return []
+    if picks:
+        logger.info("auto_bet: %d pick tennis dall'oracolo Pinnacle a 2 esiti",
+                    len(picks))
+    return picks
+
+
 def _top_down_picks() -> list[dict]:
     """Corsia TOP-DOWN LIVE: candidati 1X2 senza il filtro bottom-up.
 
@@ -2164,8 +2195,27 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
         logger.warning("auto_bet: pick eSports %s senza il lato da comprare, "
                        "salto (fail-closed)", pick.get("match_id"))
         return None
+    # Corsia TENNIS (30/09/2026): il pick porta GIA' market_id/selection_id di
+    # SX. La struttura del tennis e' UN mercato per match coi lati sulle chiavi
+    # 1/2: non si puo' ri-risolvere con `resolve_moneyline_market` (che cerca
+    # un mercato per SQUADRA, come gli eSports) ne' col resolver 1X2. Fail-closed
+    # se l'identita' del mercato non c'e': meglio nessun ordine che uno sul
+    # lato sbagliato.
+    is_tennis = str(pick.get("mercato") or "").upper() == "TENNIS"
+    mkt = None
+    if is_tennis:
+        mid_t = str(pick.get("market_id") or "").strip()
+        sel_t = pick.get("selection_id")
+        if not mid_t or sel_t not in (1, 2, "1", "2"):
+            logger.warning("auto_bet: pick tennis %s senza market_id/selection "
+                           "validi, salto (fail-closed)", pick.get("match_id"))
+            return None
+        mkt = {"market_id": mid_t, "selection_id": int(sel_t),
+               "event_name": f"{pick.get('home')} vs {pick.get('away')}",
+               "label": str(pick.get("team") or ""),
+               "market_type": "ML", "line": None, "provider": "sxbet"}
     target = None
-    if str(pick.get("mercato") or "").upper() in ("OU", "AH"):
+    if not is_tennis and str(pick.get("mercato") or "").upper() in ("OU", "AH"):
         try:
             from multi_market import order_target
             target = order_target(pick)
@@ -2177,7 +2227,9 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
                         pick.get("esito_key"))
             return None
     try:
-        if is_ml:
+        if mkt is not None:
+            pass                      # tennis: identita' gia' nel pick
+        elif is_ml:
             mkt = ee.resolve_moneyline_market(
                 prov, pick["home"], pick["away"], pick["team"],
                 pick.get("commence"))
@@ -2535,6 +2587,10 @@ def run_today_bets(stake_eur: float | None = None,
     # ordine reale: in SIM si brucerebbe la quota per del paper trading.
     if mode == "live":
         board = board + _esports_picks()
+        # Corsia TENNIS (30/09/2026): Denaro Reale, oracolo a 2 esiti. Con la
+        # misura di oggi (EV massimo +0.72% su 104 lati) la soglia 2.5% non
+        # produce ordini: la corsia e' ARMATA e spara al primo disallineamento.
+        board = board + _tennis_picks()
     # DEDUP CROSS-CORSIA per (match_id, esito): la stessa riga del ledger puo'
     # arrivare da due corsie (value pick + corsia top-down) e il dedup sul
     # ledger (bet_exists_open) NON vede ancora l'ordine della prima: senza
@@ -2573,8 +2629,13 @@ def run_today_bets(stake_eur: float | None = None,
         # non sono un 1X2: applicare anche il gate Pinnacle la ucciderebbe con
         # `no_oracle` su ogni pick, perche' `load_oracle` legge le cache del
         # CALCIO dove gli eSports non esistono.
+        # I mercati con ORACOLO PROPRIO (eSports `ML`, tennis `TENNIS`) non
+        # passano dal gate 1X2 di Pinnacle: i loro esiti non sono un 1X2 e il
+        # gate li ucciderebbe con `no_oracle`. Il tennis aggancia la cache per
+        # NOMI giocatore con la forma a 2 esiti (gia' nella sua corsia).
         if (TOP_DOWN_EV and mode == "live"
-                and str(pick.get("mercato") or "1X2").upper() != "ML"):
+                and str(pick.get("mercato") or "1X2").upper()
+                not in ("ML", "TENNIS")):
             verdict = _top_down_eval(pick, league=pick.get("league"))
             if not verdict.get("ok"):
                 logger.info("auto_bet: %s (%s) top-down SKIP [%s]: %s",

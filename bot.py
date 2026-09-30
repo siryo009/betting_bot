@@ -2515,6 +2515,43 @@ async def multi_market_job(context: ContextTypes.DEFAULT_TYPE):
                 len(found), live_n)
 
 
+async def tennis_lane_job(context: ContextTypes.DEFAULT_TYPE):
+    """Corsia TENNIS (30/09/2026): oracolo a 2 esiti + telemetria.
+
+    Il ciclo dell'ordine vero e' in `auto_bet` (`_tennis_picks`, corsia LIVE:
+    il tennis e' in Denaro Reale). Questo job fa i due pezzi che non hanno
+    senso a ogni giro da 60s: (1) aggiorna le cache dell'oracolo Pinnacle a 2
+    esiti — **1 credito per torneo con cache scaduta**, budget giornaliero e
+    hard-stop; (2) registra la telemetria nel ledger (`predictions` mercato
+    `TENNIS`, `match_id` `sx-tennis-*`: il settlement SX-native la salda
+    GRATIS). `TENNIS_LANE=0` spegne tutto. Fail-safe: un errore non ferma il
+    bot.
+    """
+    try:
+        import tennis_lane
+    except Exception as e:                                       # pragma: no cover
+        logger.error("tennis_lane_job: modulo non disponibile (%s)", e)
+        return
+    if not tennis_lane.enabled():
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        refreshed = await loop.run_in_executor(_scan_executor,
+                                               tennis_lane.refresh_oracle)
+        logger.info("tennis_lane_job: oracolo — tornei %s, scaricati %s, "
+                    "richieste oggi %s", refreshed.get("keys"),
+                    refreshed.get("fetched"), refreshed.get("requests_today"))
+    except Exception as e:
+        logger.error("tennis_lane_job: refresh oracolo (%s)", e)
+    try:
+        res = await loop.run_in_executor(_scan_executor, tennis_lane.scan)
+        logger.info("tennis_lane_job: %s match, %s candidati, %s registrati",
+                    res.get("events"), res.get("candidates"),
+                    res.get("registered"))
+    except Exception as e:
+        logger.error("tennis_lane_job: scan (%s)", e)
+
+
 async def btts_watch_job(context: ContextTypes.DEFAULT_TYPE = None):
     """Sorveglianza GRATUITA del mercato BTTS su SX Bet (25/09/2026).
 
@@ -2841,6 +2878,14 @@ def main() -> None:
         # shadow. MM_ENABLED=0 per spegnerla senza toccare il 1X2.
         job_queue.run_repeating(multi_market_job, interval=_sx_min * 60,
                                 first=150,
+                                job_kwargs={"max_instances": 1})
+        # Corsia TENNIS (30/09/2026): oracolo a 2 esiti + telemetria. Ogni 6h
+        # (l'oracolo ha TTL 12h e 3 tornei attivi: ~6 crediti/giorno). Gli
+        # ORDINI tennis sono nella corsia LIVE di auto_bet (`_tennis_picks`),
+        # quindi questo job non decide nulla sul denaro.
+        _tennis_min = max(60, int(os.getenv("TENNIS_JOB_INTERVAL_MIN", "360")))
+        job_queue.run_repeating(tennis_lane_job, interval=_tennis_min * 60,
+                                first=330,
                                 job_kwargs={"max_instances": 1})
         # Copertura intelligente (26/09): ogni 15' (stesso intervallo dello
         # scan multi-mercato) valuta le posizioni LIVE aperte e piazza le
