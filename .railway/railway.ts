@@ -78,6 +78,26 @@ export default defineRailway(() => {
       ODDSPAPI_BASE: preserve(),
       ODDSPAPI_BOOK: preserve(),
       ESPORTS_DEVIG_METHOD: preserve(),
+      // Corsia eSports (30/09/2026, `esports_lane.py`): interruttore,
+      // identita' dei mercati SX (sport 9 / type 52), finestra, volumi e
+      // BUDGET richieste OddsPapi (piano free 250/mese: senza il tetto
+      // giornaliero il giro ogni 60s esaurirebbe la quota in poche ore).
+      ESPORTS_LIVE: preserve(),
+      ESPORTS_SX_SPORT_ID: preserve(),
+      ESPORTS_SX_TYPE_ID: preserve(),
+      ESPORTS_HOURS_AHEAD: preserve(),
+      ESPORTS_MAX_EVENTS: preserve(),
+      ESPORTS_MAX_MARKETS: preserve(),
+      ESPORTS_REQ_BUDGET_DAY: preserve(),
+      // Fascia quota della corsia eSports: se assente vale quella della
+      // strategia di calcio (1.30-1.80, letta da `value_filter`), quindi
+      // `config apply` non deve poterla distruggere se viene impostata.
+      ESPORTS_ODDS_MIN: preserve(),
+      ESPORTS_ODDS_MAX: preserve(),
+      ESPORTS_FIXTURES_TTL_MIN: preserve(),
+      ESPORTS_ODDS_TTL_MIN: preserve(),
+      ESPORTS_ODDS_MISS_TTL_MIN: preserve(),
+      ESPORTS_CACHE: preserve(),
       OPEN_EXPOSURE_CAP_PCT: preserve(),
       ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),

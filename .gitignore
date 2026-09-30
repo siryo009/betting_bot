@@ -31,3 +31,7 @@ data/decision/
 data/intel/
 # artefatti del plugin SeleniumBase (non e' una dipendenza del progetto)
 downloaded_files/
+# Cache/budget della corsia eSports (stato di runtime: va sul volume, non in git)
+data/esports/
+# Log della diagnostica dei guardrail (`verify_guardrails.py`)
+guardrails_output.log

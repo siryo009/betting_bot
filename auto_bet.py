@@ -1386,6 +1386,34 @@ def _multi_market_picks() -> list[dict]:
     return picks
 
 
+def _esports_picks() -> list[dict]:
+    """Corsia eSports: candidati +EV dall'oracolo OddsPapi (30/09/2026).
+
+    Gli eSports non sono visibili al percorso calcio (la discovery di
+    `sx_signals`/`multi_market` e' `sportIds=5`) e **the-odds-api non li ha**:
+    senza un oracolo esterno il gate top-down risponderebbe `no_oracle` su ogni
+    riga. La corsia `esports_lane` fa discovery SX (sport 9, type 52), aggancia
+    la fixture OddsPapi e calcola l'EV contro le probabilita' fair de-vigate di
+    Pinnacle — con la STESSA soglia del calcio (`value_filter.EV_MIN`, importata).
+
+    E' SOLO una fonte di candidati: stake fisso, recinto 40%/30%, T-60,
+    liquidita', dedup e gate di mercato restano quelli del giro, applicati a
+    valle. Nessuna scrittura di ledger qui (e' `run_today_bets` che salva).
+
+    Fail-safe: qualunque errore (o corsia spenta) ritorna [] — una classe di
+    rischio nuova non deve poter fermare le puntate di calcio.
+    """
+    try:
+        import esports_lane
+        picks = esports_lane.picks()
+    except Exception as e:
+        logger.warning("auto_bet: corsia eSports non disponibile (%s)", e)
+        return []
+    if picks:
+        logger.info("auto_bet: %d pick eSports dall'oracolo OddsPapi", len(picks))
+    return picks
+
+
 def _top_down_picks() -> list[dict]:
     """Corsia TOP-DOWN LIVE: candidati 1X2 senza il filtro bottom-up.
 
@@ -2120,6 +2148,14 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
     # mercati binari "X vs Not X"): servono TYPE ID e LINEA, quindi un
     # resolver dedicato. Fail-closed: se il pick non e' riconducibile a un
     # mercato a linea NON si indovina — nessun ordine.
+    # Corsia eSports (30/09/2026): mercato binario 2 VIE (type 52) sullo sport
+    # 9. Si compra il lato `team`, risolto per NOME e non per "1"/"2": su SX
+    # l'esito 1|2 e' una convenzione del 1X2 e non esiste per un moneyline.
+    is_ml = str(pick.get("mercato") or "").upper() == "ML"
+    if is_ml and not str(pick.get("team") or "").strip():
+        logger.warning("auto_bet: pick eSports %s senza il lato da comprare, "
+                       "salto (fail-closed)", pick.get("match_id"))
+        return None
     target = None
     if str(pick.get("mercato") or "").upper() in ("OU", "AH"):
         try:
@@ -2133,7 +2169,11 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
                         pick.get("esito_key"))
             return None
     try:
-        if target is not None:
+        if is_ml:
+            mkt = ee.resolve_moneyline_market(
+                prov, pick["home"], pick["away"], pick["team"],
+                pick.get("commence"))
+        elif target is not None:
             mkt = ee.resolve_market_for(
                 prov, pick["home"], pick["away"], target["market_type"],
                 target["line"], target["side"], pick.get("commence"))
@@ -2482,6 +2522,11 @@ def run_today_bets(stake_eur: float | None = None,
     board = _today_value_picks() + _multi_market_picks()
     if mode == "live" and TOP_DOWN_EV and TOP_DOWN_BYPASS:
         board = board + _top_down_picks()
+    # Corsia eSports (30/09/2026): SOLO LIVE. L'oracolo costa quota OddsPapi
+    # (250 richieste/mese) e il suo unico scopo e' decidere il PREZZO di un
+    # ordine reale: in SIM si brucerebbe la quota per del paper trading.
+    if mode == "live":
+        board = board + _esports_picks()
     # DEDUP CROSS-CORSIA per (match_id, esito): la stessa riga del ledger puo'
     # arrivare da due corsie (value pick + corsia top-down) e il dedup sul
     # ledger (bet_exists_open) NON vede ancora l'ordine della prima: senza
@@ -2516,7 +2561,12 @@ def run_today_bets(stake_eur: float | None = None,
         # storica del segnale per non cambiare era al ledger che alimenta
         # ML/CLV (lezione 22/09: il campione si misura, non si riscrive);
         # l'oracolo governa il denaro reale.
-        if TOP_DOWN_EV and mode == "live":
+        # La corsia eSports porta il PROPRIO oracolo (OddsPapi) e i suoi esiti
+        # non sono un 1X2: applicare anche il gate Pinnacle la ucciderebbe con
+        # `no_oracle` su ogni pick, perche' `load_oracle` legge le cache del
+        # CALCIO dove gli eSports non esistono.
+        if (TOP_DOWN_EV and mode == "live"
+                and str(pick.get("mercato") or "1X2").upper() != "ML"):
             verdict = _top_down_eval(pick, league=pick.get("league"))
             if not verdict.get("ok"):
                 logger.info("auto_bet: %s (%s) top-down SKIP [%s]: %s",

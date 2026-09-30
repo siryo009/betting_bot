@@ -49,6 +49,18 @@ os.environ.pop("SETTLEMENT_PAUSED", None)
 # Feed di mercato OFF: questa diagnostica non deve toccare la rete (il gate
 # vero e' coperto da `test_decision_feed.py` e da `python -m decision feed`).
 os.environ["DECISION_FEED_ENABLED"] = "0"
+# INTEL LIVE OFF (30/09/2026): gli scraper reali di `live_intel` (FBref,
+# DuckDuckGo) partono dal DataAgent del ciclo Chief e rendevano questa
+# diagnostica LENTA e dipendente dalla rete — misurato: il processo moriva a
+# meta' dello scenario C proprio durante lo scraping FBref (i guardrail non
+# erano in errore, semplicemente non arrivavano mai alla fine). E' la stessa
+# protezione che `conftest.py` applica ai test: senza rete, il verdetto e'
+# deterministico e gli scenari A-H si leggono in pochi secondi.
+os.environ["LIVE_INTEL"] = "0"
+# Corsia eSports OFF: le sue letture (discovery SX + oracolo OddsPapi) sono
+# rete reale e quota a consumo. Questa diagnostica misura i GUARDRAIL, non il
+# flusso eSports (coperto da `test_esports_lane.py` con provider finti).
+os.environ["ESPORTS_LIVE"] = "0"
 
 # --- Cattura dei log --------------------------------------------------------
 _RECORDS: list[str] = []

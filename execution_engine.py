@@ -1034,6 +1034,11 @@ class SxBetProvider(ExecutionProvider):
                         # fail-closed.
                         "market_type_id": type_id,
                         "line": _catalogue_line(m),
+                        # Etichetta di lega/torneo della fonte (`leagueLabel`).
+                        # Serve alla corsia eSports per sapere QUALE gioco si
+                        # sta comprando: senza, un'etichetta SX non mappata non
+                        # sarebbe distinguibile da un titolo riconosciuto.
+                        "league_label": m.get("leagueLabel"),
                         "main_line": bool(m.get("mainLine")),
                         # Nomi squadre/esiti del market (per la risoluzione
                         # match -> mercato in auto_bet: su SX il 1X2 e' spezzato
@@ -1384,7 +1389,8 @@ _TIE_LABELS = {"tie", "draw", "the draw", "pareggio", "x"}
 
 #: Etichette leggibili dei type id SX (1 = 1X2, 2 = Over/Under,
 #: 3 = Asian Handicap): il label deve restare umano per la diagnosi.
-_TYPE_LABELS = {"1": "1X2", "2": "Over/Under", "3": "Asian Handicap"}
+_TYPE_LABELS = {"1": "1X2", "2": "Over/Under", "3": "Asian Handicap",
+                "52": "Moneyline (2 vie)"}
 
 #: Linea di un mercato del catalogo: dal NOME dell'esito quando c'e'
 #: ('Over 2.5' / 'Cagliari -0.75' — la fonte piu' affidabile osservata), in
@@ -1669,6 +1675,69 @@ def resolve_market_for(provider, home: str, away: str, market_type: str,
                 "label": f"{wanted_type} {float(mline):g}",
                 "market_type": wanted_type, "line": float(mline),
                 "provider": pname}
+    return None
+
+
+def resolve_moneyline_market(provider, home: str, away: str, team: str,
+                             kickoff_iso: Optional[str] = None,
+                             window_hours: float = 6.0,
+                             max_results: int = 400,
+                             sport_id: str = "9",
+                             type_id: str = "52") -> Optional[Dict]:
+    """Mercato 2 VIE (moneyline) dell'evento: BACK sull'esito `team`.
+
+    Corsia eSports (30/09/2026). Su SX un mercato binario e' "X vs Not X" e
+    `outcomeOne` E' il lato che si compra con selection 1 — la stessa
+    semantica del 1X2 spezzato in 3 mercati — ma qui i lati sono DUE (niente
+    pareggio): un mercato per squadra. Si sceglie il mercato il cui
+    `outcomeOne` aggancia la squadra da comprare.
+
+    Fail-closed (nessun ordine se qualcosa non torna): provider non sxbet,
+    `team` che non e' nessuno dei due partecipanti, evento non univoco,
+    `outcomeOne` che non aggancia la squadra richiesta. **Mai indovinare il
+    lato**: un incrocio sbagliato comprerebbe l'esito dell'avversario, e il
+    P/L non lo direbbe finche' il conteggio non torna.
+    """
+    pname = str(getattr(provider, "name", "")).lower()
+    if pname != "sxbet":
+        logger.warning("resolve_moneyline_market: provider '%s' non "
+                       "supportato (solo sxbet)", pname or "?")
+        return None
+    hk, ak, tk = _name_key(home), _name_key(away), _name_key(team)
+    if not tk or (_name_sim(tk, hk) < 0.82 and _name_sim(tk, ak) < 0.82):
+        # La squadra da comprare deve essere una delle due dell'evento: se non
+        # lo e' la richiesta stessa e' incoerente (fail-closed).
+        logger.warning("resolve_moneyline_market: '%s' non e' un partecipante "
+                       "di %s vs %s", team, home, away)
+        return None
+    kick = _parse_kickoff(kickoff_iso)
+    try:
+        markets = provider.list_market_catalogue(
+            event_type_ids=(str(sport_id),),
+            market_type_ids=(str(type_id),),
+            max_results=max_results)
+    except Exception as e:
+        logger.warning("resolve_moneyline_market: discovery sport %s type %s "
+                       "fallita: %s", sport_id, type_id, e)
+        return None
+    if not markets:
+        return None
+    event_markets = _unique_event_markets(markets, home, away, kick,
+                                          window_hours=window_hours)
+    if event_markets is None:
+        return None
+    for m in event_markets:
+        if str(m.get("market_type_id") or "") != str(type_id):
+            continue
+        if m.get("line") is not None:
+            continue                    # il moneyline non ha linea
+        if _name_sim(_name_key(m.get("outcome_one_name")), tk) >= 0.82:
+            return {"market_id": m["market_id"], "selection_id": 1,
+                    "event_name": m.get("event_name"),
+                    "label": str(m.get("outcome_one_name") or team),
+                    "market_type": "ML", "line": None,
+                    "sport_id": str(sport_id), "market_type_id": str(type_id),
+                    "provider": pname}
     return None
 
 

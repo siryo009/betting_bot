@@ -565,6 +565,53 @@ def oracle(payload: Any, *, home: str = "", away: str = "",
     return out
 
 
+def match_fixture(title_or_id: Any, home: str, away: str, *,
+                  fixtures_rows: Optional[List[Dict[str, Any]]] = None,
+                  http_get: Optional[HttpGet] = None,
+                  key: Optional[str] = None,
+                  now: Optional[datetime] = None
+                  ) -> Optional[Dict[str, Any]]:
+    """Fixture OddsPapi CORRISPONDENTE a (home, away) per il titolo.
+
+    E' il ponte fra i due mondi: SX Bet scrive i partecipanti sul mercato,
+    OddsPapi li scrive sulla fixture. Il confronto usa
+    `team_names.same_team` (deterministico, mai fuzzy) e ammette
+    l'inversione casa/trasferta.
+
+    Fail-closed: None se il titolo non e' riconosciuto, se la lettura
+    fallisce, se NON esiste una fixture corrispondente o se ne esistono
+    DUE. Con piu' candidati non si sceglie "il piu' simile": si rifiuta.
+    Agganciare la fixture sbagliata comprerebbe l'esito di un'altra partita,
+    ed e' un errore che non si vede nel P/L finche' non e' tardi.
+
+    `fixtures_rows` e' iniettabile: la corsia passa le righe GIA' lette
+    (cache/budget) senza rifare la richiesta.
+    """
+    if fixtures_rows is None:
+        res = fixtures(title_or_id, http_get=http_get, key=key, now=now)
+        if not res.get("ok"):
+            return None
+        fixtures_rows = res.get("fixtures") or []
+    found: List[Dict[str, Any]] = []
+    for fx in fixtures_rows or []:
+        if not isinstance(fx, dict):
+            continue
+        n1 = str(fx.get("participant1Name") or "").strip()
+        n2 = str(fx.get("participant2Name") or "").strip()
+        if not (n1 and n2):
+            continue
+        if ((_same_team(n1, home) and _same_team(n2, away))
+                or (_same_team(n1, away) and _same_team(n2, home))):
+            found.append(fx)
+    if len(found) != 1:
+        if len(found) > 1:
+            logger.warning("esports_oracle: %d fixture per %s vs %s — "
+                           "aggancio rifiutato (ambiguo)", len(found),
+                           home, away)
+        return None
+    return found[0]
+
+
 def oracle_for_fixture(fixture: Dict[str, Any], *, home: str = "", away: str = "",
                        bookmaker: str = ORACLE_BOOK,
                        http_get: Optional[HttpGet] = None,

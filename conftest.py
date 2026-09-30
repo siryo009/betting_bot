@@ -135,6 +135,13 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # test la riaccende esplicitamente, non scrive comunque sul volume).
     monkeypatch.setenv("LIVE_INTEL", "0")
     monkeypatch.setenv("LIVE_INTEL_CACHE", str(tmp_path / "intel"))
+    # Corsia eSports (30/09/2026) SPENTA e cache nella tmp: accesa di default,
+    # `auto_bet` chiamerebbe la discovery pubblica di SX Bet e l'oracolo
+    # OddsPapi a OGNI giro — nei test sarebbe rete reale e consumo di quota
+    # (250/mese) per misurare altro. I test della corsia la accendono da se',
+    # con provider e `http_get` iniettati.
+    monkeypatch.setenv("ESPORTS_LIVE", "0")
+    monkeypatch.setenv("ESPORTS_CACHE", str(tmp_path / "esports_state.json"))
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di
     # MODULO e sopravvive fra i test dello stesso processo, mentre il ledger
     # no (ogni test ha il suo DB temporaneo). Senza reset un caso che semina
