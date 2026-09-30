@@ -431,6 +431,28 @@ class TestPicks:
         assert el.picks(provider=prov, http_get=http) == []
         assert http.calls == 0
 
+    def test_summary_dichiara_gli_eventi_entro_la_finestra_oracolo(self,
+                                                                   monkeypatch):
+        """Due conteggi DISTINTI: discovery (24h, gratis) e finestra oracolo.
+
+        Senza il secondo la corsia DORMIENTE (nessun evento vicino: zero
+        richieste e **zero costo**, silenzio voluto nei log) sarebbe
+        indistinguibile da una corsia rotta.
+        """
+        prov, http = self._setup()              # evento a +4h
+        monkeypatch.setenv("ESPORTS_ORACLE_WINDOW_H", "1")
+        s = el.summary(provider=prov, http_get=http)
+        assert s["events_in_window"] == 1
+        assert s["events_in_oracle_window"] == []
+        assert "entro la finestra oracolo" in el.format_report(s)
+        assert http.calls == 0                  # dormiente = nessuna spesa
+
+        monkeypatch.setenv("ESPORTS_ORACLE_WINDOW_H", "24")
+        s2 = el.summary(provider=prov, http_get=http)
+        assert len(s2["events_in_oracle_window"]) == 1
+        assert s2["events_in_oracle_window"][0]["home"] == "T1 Alpha"
+        assert s2["events_in_oracle_window"][0]["title"] == "lol"
+
     def test_pacing_distanzia_le_chiamate(self, monkeypatch):
         """Il free tier limita al minuto: senza pacing si prendono 429."""
         sleeps: list[float] = []

@@ -701,11 +701,21 @@ def summary(*, provider: Any = None, http_get: Any = None) -> dict:
 
     Serve a distinguere "accesa che non trova nulla" da "rotta": i titoli
     riconosciuti, gli eventi in finestra e le richieste consumate sono tutti
-    dichiarati. Sola lettura, fail-safe.
+    dichiarati. Fail-safe (nessuna eccezione al chiamante).
+
+    ⚠️ **NON e' gratis**: `picks()` interroga l'oracolo (a pagamento) per gli
+    eventi dentro la finestra. La chiamata e' gratuita solo quando nessun
+    evento e' vicino al kickoff — cioe' proprio quando non c'e' nulla da
+    misurare. Su un ambiente a quota scarsa va eseguita con giudizio.
     """
     state, healthy = _load_state()
     state = _roll_day(state)
     events = discover(provider=provider)
+    # Eventi ENTRATI nella finestra dell'oracolo: e' il numero che distingue la
+    # corsia DORMIENTE (nessun evento vicino: zero richieste, zero costo) dalla
+    # corsia che lavora. Il silenzio nel log e' voluto quando questo e' 0.
+    horizon = _now() + timedelta(hours=oracle_window_h())
+    in_oracle = [e for e in events if e["kickoff"] <= horizon]
     found = picks(provider=provider, http_get=http_get)
     return {
         "enabled": enabled(),
@@ -714,6 +724,10 @@ def summary(*, provider: Any = None, http_get: Any = None) -> dict:
         "oracle_window_h": oracle_window_h(),
         "min_interval_s": min_interval_s(),
         "events_in_window": len(events),
+        "events_in_oracle_window": [
+            {"home": e["team_one"], "away": e["team_two"],
+             "kickoff": e["kickoff"].isoformat(),
+             "title": eo_title(e.get("league_label"))} for e in in_oracle],
         "oracle_titles": sorted({eo_title(e.get("league_label"))
                                  or f"?({e.get('league_label')})"
                                  for e in events}),
@@ -734,7 +748,10 @@ def format_report(s: dict) -> str:
              f"   interruttore: {'ON' if s.get('enabled') else 'OFF'}"
              f" | finestra {s.get('hours_ahead')}h"
              f" | fascia {s.get('price_band')}"
-             f" | eventi in finestra: {s.get('events_in_window')}",
+             f" | eventi in finestra: {s.get('events_in_window')}"
+             f" | di cui entro la finestra oracolo "
+             f"({s.get('oracle_window_h')}h): "
+             f"{len(s.get('events_in_oracle_window') or [])}"
              f"   titoli: {', '.join(s.get('oracle_titles') or []) or 'nessuno'}",
              f"   richieste OddsPapi oggi: {s.get('requests_today')}/"
              f"{s.get('request_budget')}"
