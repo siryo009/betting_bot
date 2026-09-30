@@ -158,17 +158,25 @@ def is_sharp(bookmaker: Any) -> bool:
     return any(s in name for s in SHARP_BOOKS)
 
 
-def h2h_odds_of(bookmaker: Dict[str, Any], home: str, away: str
+def h2h_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
+                *, outcomes: Tuple[str, ...] = OUTCOMES
                 ) -> Optional[Dict[str, float]]:
-    """Quote 1X2 di UN bookmaker del payload. None se incomplete.
+    """Quote del mercato testa-a-testa di UN bookmaker. None se incomplete.
 
-    FAIL-CLOSED su tre esiti: per de-vigare un 1X2 servono TUTTI E TRE. Con due
-    su tre il margine dell'esito mancante verrebbe attribuito agli altri e la
-    probabilita' "vera" risulterebbe sbagliata **senza che nulla lo dica** —
+    FAIL-CLOSED su TUTTI gli esiti attesi: per de-vigare servono completi. Con
+    due su tre il margine dell'esito mancante verrebbe attribuito agli altri e
+    la probabilita' "vera" risulterebbe sbagliata **senza che nulla lo dica** —
     meglio nessun oracolo che un oracolo distorto.
+
+    `outcomes` e' la forma del mercato: i tre esiti 1X2 di default (calcio:
+    comportamento INVARIATO) oppure due esiti (`("1", "2")`) per i mercati
+    testa-a-testa SENZA pareggio — tennis ed eSports (30/09/2026). Il chiamante
+    DICHIARA la forma: non si deduce dal payload, perche' un 1X2 a cui il book
+    ha pubblicato solo due quote non deve passare per un mercato a due esiti.
     """
     if not isinstance(bookmaker, dict):
         return None
+    wanted = tuple(outcomes)
     h, a = _cf(home), _cf(away)
     out: Dict[str, float] = {}
     for mkt in bookmaker.get("markets") or []:
@@ -190,7 +198,7 @@ def h2h_odds_of(bookmaker: Dict[str, Any], home: str, away: str
                 out["2"] = price
             elif name in ("draw", "pareggio", "x"):
                 out["X"] = price
-    return out if len(out) == 3 else None
+    return out if all(e in out for e in wanted) else None
 
 
 def _find_match(payload: Sequence[Dict[str, Any]], home: str, away: str
@@ -234,11 +242,13 @@ def canonical_book(bookmaker: Any) -> Optional[str]:
 
 
 def book_quotes(match: Dict[str, Any], home: str, away: str,
-                book: str = PRIMARY_BOOK) -> Optional[Dict[str, float]]:
-    """Quote 1X2 di UNA fonte specifica per la partita. None se incomplete.
+                book: str = PRIMARY_BOOK, *,
+                outcomes: Tuple[str, ...] = OUTCOMES
+                ) -> Optional[Dict[str, float]]:
+    """Quote di UNA fonte specifica per la partita. None se incomplete.
 
-    Fail-closed su tre esiti (vedi `h2h_odds_of`). Funzione PURA: nessuna
-    rete, nessun credito, nessuna scrittura.
+    Fail-closed su TUTTI gli esiti attesi (vedi `h2h_odds_of`). Funzione PURA:
+    nessuna rete, nessun credito, nessuna scrittura.
     """
     if not isinstance(match, dict):
         return None
@@ -247,15 +257,16 @@ def book_quotes(match: Dict[str, Any], home: str, away: str,
             continue
         if canonical_book(bm) != book:
             continue
-        got = h2h_odds_of(bm, home, away)
+        got = h2h_odds_of(bm, home, away, outcomes=outcomes)
         if got:
             return got
     return None
 
 
-def pinnacle_quotes(payload: Sequence[Dict[str, Any]], home: str, away: str
+def pinnacle_quotes(payload: Sequence[Dict[str, Any]], home: str, away: str,
+                    *, outcomes: Tuple[str, ...] = OUTCOMES
                     ) -> Optional[Dict[str, float]]:
-    """Quote 1X2 di Pinnacle per UNA partita del payload. None se assenti.
+    """Quote di Pinnacle per UNA partita del payload. None se assenti.
 
     Resta **specifica su Pinnacle** (la fonte primaria): le altre fonti del
     consenso si estraggono con `oracle_quotes`/`book_quotes`.
@@ -263,14 +274,15 @@ def pinnacle_quotes(payload: Sequence[Dict[str, Any]], home: str, away: str
     match = _find_match(payload, home, away)
     if match is None:
         return None
-    return book_quotes(match, home, away, PRIMARY_BOOK)
+    return book_quotes(match, home, away, PRIMARY_BOOK, outcomes=outcomes)
 
 
-def oracle_quotes(payload: Sequence[Dict[str, Any]], home: str, away: str
+def oracle_quotes(payload: Sequence[Dict[str, Any]], home: str, away: str,
+                  *, outcomes: Tuple[str, ...] = OUTCOMES
                   ) -> Dict[str, Dict[str, float]]:
-    """{fonte: quote 1X2} per OGNI fonte sharp completa sulla partita.
+    """{fonte: quote} per OGNI fonte sharp completa sulla partita.
 
-    Chiavi in `CONSENSUS_BOOKS`. Solo le fonti con TUTTI E TRE gli esiti
+    Chiavi in `CONSENSUS_BOOKS`. Solo le fonti con TUTTI gli esiti attesi
     (fail-closed come `h2h_odds_of`): una fonte parziale non entra nel
     consenso. `{}` se la partita non c'e' o nessuna fonte sharp e' completa.
     """
@@ -284,7 +296,7 @@ def oracle_quotes(payload: Sequence[Dict[str, Any]], home: str, away: str
         book = canonical_book(bm)
         if not book or book in out:
             continue
-        got = h2h_odds_of(bm, home, away)
+        got = h2h_odds_of(bm, home, away, outcomes=outcomes)
         if got:
             out[book] = got
     return out
@@ -312,15 +324,18 @@ def iter_pinnacle_markets(payload: Sequence[Dict[str, Any]]
 # ---------------------------------------------------------------------------
 
 def true_probabilities(odds_map: Dict[str, float], *,
-                       method: Optional[str] = None
+                       method: Optional[str] = None,
+                       min_outcomes: int = 3
                        ) -> Optional[Dict[str, Any]]:
-    """Quote Pinnacle -> probabilita' fair (somma 1) + `overround`.
+    """Quote sharp -> probabilita' fair (somma 1) + `overround`.
 
     Delega a `market_calib.market_implied` (metodi: power / multiplicative /
-    shin). Richiede **almeno 3 esiti**: su un 1X2 de-vigare 2 quote su 3
-    sposterebbe sugli altri il margine dell'esito mancante.
+    shin). Richiede **almeno `min_outcomes` esiti**: su un 1X2 de-vigare 2 quote
+    su 3 sposterebbe sugli altri il margine dell'esito mancante. `min_outcomes`
+    e' 3 di default (calcio, INVARIATO) e 2 per i mercati testa-a-testa senza
+    pareggio (tennis: due esiti, `("1", "2")`).
     """
-    if not odds_map or len(odds_map) < 3:
+    if not odds_map or len(odds_map) < int(min_outcomes):
         return None
     try:
         from market_calib import market_implied
@@ -357,8 +372,8 @@ def fair_odds(true_probs: Dict[str, Any]) -> Dict[str, float]:
 # 2b. CONSENSO MULTI-ORACOLO (26/09/2026)
 # ---------------------------------------------------------------------------
 
-def _aggregate(fairs: Sequence[Dict[str, float]], method: str
-               ) -> Dict[str, float]:
+def _aggregate(fairs: Sequence[Dict[str, float]], method: str, *,
+               outcomes: Tuple[str, ...] = OUTCOMES) -> Dict[str, float]:
     """Media (o mediana) per esito delle probabilita' fair, RINORMALIZZATA.
 
     Ogni fonte somma gia' 1 per costruzione (de-vig); l'aggregato di piu'
@@ -366,7 +381,7 @@ def _aggregate(fairs: Sequence[Dict[str, float]], method: str
     a costo zero contro arrotondamenti e fonti parziali.
     """
     out: Dict[str, float] = {}
-    for esito in OUTCOMES:
+    for esito in tuple(outcomes):
         vals = [float(f[esito]) for f in fairs if esito in f]
         if not vals:
             continue
@@ -382,7 +397,8 @@ def _consensus_result(fair: Dict[str, float], *, sources: Sequence[str],
                       method: str, validated: Optional[bool],
                       fallback: Optional[str],
                       agreement_pp: Optional[float] = None,
-                      overrounds: Optional[Sequence[float]] = None
+                      overrounds: Optional[Sequence[float]] = None,
+                      outcomes: Tuple[str, ...] = OUTCOMES
                       ) -> Dict[str, Any]:
     """Struttura del consenso: esiti numerici + METADATI di servizio.
 
@@ -391,7 +407,7 @@ def _consensus_result(fair: Dict[str, float], *, sources: Sequence[str],
     calcolo di EV o di true-odd.
     """
     out: Dict[str, Any] = {e: round(float(fair[e]), 6)
-                           for e in OUTCOMES if e in fair}
+                           for e in tuple(outcomes) if e in fair}
     ov = [float(x) for x in (overrounds or [])]
     out["overround"] = round(sum(ov) / len(ov), 5) if ov else None
     out["sources"] = list(sources)
@@ -407,13 +423,19 @@ def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
                             method: Optional[str] = None,
                             devig_method: Optional[str] = None,
                             validator_tolerance: Optional[float] = None,
-                            enabled: Optional[bool] = None
+                            enabled: Optional[bool] = None,
+                            outcomes: Tuple[str, ...] = OUTCOMES
                             ) -> Optional[Dict[str, Any]]:
     """Probabilita' "vera" di CONSENSO dalle fonti sharp disponibili.
 
-    Ogni fonte con 1X2 completo viene de-vigata (`true_probabilities`, stessa
-    formula del progetto: nessun doppio standard) e le probabilita' fair
-    vengono aggregate:
+    `outcomes` e' la FORMA del mercato: i tre esiti 1X2 di default (calcio,
+    comportamento INVARIATO) oppure due esiti (`("1", "2")`) per i mercati
+    testa-a-testa senza pareggio (tennis/eSports). La forma governa de-vig,
+    aggregazione e validatore: mai dedotta dal payload.
+
+    Ogni fonte con il mercato completo viene de-vigata (`true_probabilities`,
+    stessa formula del progetto: nessun doppio standard) e le probabilita'
+    fair vengono aggregate:
       - benchmark = Pinnacle + Betfair Exchange (aggregato per esito);
       - Matchbook = validatore: entra nell'aggregato SOLO se la sua fair resta
         entro `validator_tolerance` dal benchmark; se diverge troppo viene
@@ -436,6 +458,12 @@ def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
         m = "mean"
     tol = (VALIDATOR_TOLERANCE if validator_tolerance is None
            else float(validator_tolerance))
+    wanted = tuple(outcomes)
+    n_wanted = len(wanted)
+    if n_wanted < 2:
+        logger.warning("pinnacle_oracle: forma di mercato con %d esiti — "
+                       "serve almeno 2", n_wanted)
+        return None
 
     fairs: Dict[str, Dict[str, float]] = {}
     overrounds: List[float] = []
@@ -443,12 +471,12 @@ def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
         odds = quotes_by_book.get(book)
         if not odds:
             continue
-        probs = true_probabilities(odds, method=devig)
+        probs = true_probabilities(odds, method=devig, min_outcomes=n_wanted)
         if not probs:
             continue
-        fair = {e: float(probs[e]) for e in OUTCOMES if e in probs}
+        fair = {e: float(probs[e]) for e in wanted if e in probs}
         total = sum(fair.values())
-        if len(fair) != 3 or total <= 0:
+        if len(fair) != n_wanted or total <= 0:
             continue
         fairs[book] = {k: v / total for k, v in fair.items()}
         if probs.get("overround") is not None:
@@ -460,7 +488,7 @@ def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
         only = PRIMARY_BOOK if PRIMARY_BOOK in fairs else next(iter(fairs))
         return _consensus_result(fairs[only], sources=[only], method="single",
                                  validated=None, fallback="consensus_disabled",
-                                 overrounds=overrounds)
+                                 overrounds=overrounds, outcomes=wanted)
 
     base_books = [b for b in (PRIMARY_BOOK, BENCHMARK_BOOK) if b in fairs]
     used = list(base_books)
@@ -477,10 +505,10 @@ def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
             only = next(iter(fairs))
             used = [only]
             fallback = f"single_source:{only}"
-    base = _aggregate([fairs[b] for b in base_books or used], m)
+    base = _aggregate([fairs[b] for b in base_books or used], m, outcomes=wanted)
     if VALIDATOR_BOOK in fairs and VALIDATOR_BOOK not in used and base:
         val = fairs[VALIDATOR_BOOK]
-        dev = max(abs(val[e] - base.get(e, 0.0)) for e in OUTCOMES)
+        dev = max(abs(val[e] - base.get(e, 0.0)) for e in wanted)
         agreement_pp = round(dev * 100.0, 2)
         if dev <= tol:
             used.append(VALIDATOR_BOOK)
@@ -491,7 +519,7 @@ def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
                 "pinnacle_oracle: validatore %s in disaccordo (%.1fpp > "
                 "%.1fpp) — ESCLUSO dal consenso", VALIDATOR_BOOK,
                 dev * 100.0, tol * 100.0)
-    final = _aggregate([fairs[b] for b in used], m)
+    final = _aggregate([fairs[b] for b in used], m, outcomes=wanted)
     if not final:
         return None
     if fallback is None and len(used) == 1:
@@ -499,7 +527,7 @@ def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
                     else f"single_source:{used[0]}")
     return _consensus_result(final, sources=used, method=m, validated=validated,
                              fallback=fallback, agreement_pp=agreement_pp,
-                             overrounds=overrounds)
+                             overrounds=overrounds, outcomes=wanted)
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +595,9 @@ def _read_cache(path: Path) -> Optional[Dict[str, Any]]:
 def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
                 cache_dir: Optional[Path] = None,
                 devig_method: Optional[str] = None,
-                now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+                now: Optional[float] = None,
+                outcomes: Tuple[str, ...] = OUTCOMES
+                ) -> Optional[Dict[str, Any]]:
     """Probabilita' "vera" (di CONSENSO) per esito per UNA partita, dalle cache.
 
     E' il punto di aggancio della fase 2: il giro ordini chiede QUI la
@@ -586,12 +616,22 @@ def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
     ENTRAMBE nella stessa riga del payload.
 
     Fail-closed: None se la partita non e' nel payload, se NESSUNA fonte
-    sharp ha i TRE esiti (de-vig su 2 su 3 distorcerrebbe l'oracolo) o se la
-    cache e' piu' vecchia di `CACHE_MAX_AGE_H` — un oracolo stantio non e' il
-    mercato.
+    sharp ha TUTTI gli esiti attesi (de-vig su 2 su 3 distorcerebbe l'oracolo)
+    o se la cache e' piu' vecchia di `CACHE_MAX_AGE_H` — un oracolo stantio non
+    e' il mercato.
+
+    **`outcomes` = la FORMA del mercato** (30/09/2026): i tre esiti 1X2 di
+    default (calcio: percorso INVARIATO) oppure due esiti (`("1", "2")`) per i
+    testa-a-testa SENZA pareggio — tennis (SX sportId 6, type 52) ed eSports.
+    La forma la DICHIARA il chiamante: non si deduce, altrimenti un 1X2 a cui
+    il book ha pubblicato due quote passerebbe per un mercato a due esiti. Con
+    `outcomes=("1","2")` l'aggancio della partita resta per NOMI (i due
+    partecipanti devono combaciare sulla STESSA riga): non serve alcuna mappa
+    torneo -> chiave sport, sono i nomi a fare da ponte — utile perche' le
+    chiavi tennis della the-odds-api cambiano a ogni torneo.
 
     Args:
-        home, away: nomi squadre del segnale (the-odds-api).
+        home, away: nomi squadre/giocatori del segnale (the-odds-api).
         sport_key: opzionale, restringe la lettura a UNA cache
             (`toa_<sport_key>.json`). None = ricerca su tutte, dalla piu'
             recente (una squadra puo' comparire in due competizioni).
@@ -626,10 +666,12 @@ def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
                 continue
             by_book = oracle_quotes([match],
                                     match.get("home_team") or "",
-                                    match.get("away_team") or "")
+                                    match.get("away_team") or "",
+                                    outcomes=outcomes)
             if not by_book:
                 continue               # fail-closed: nessuna fonte completa
-            probs = consensus_probabilities(by_book, devig_method=devig_method)
+            probs = consensus_probabilities(by_book, devig_method=devig_method,
+                                            outcomes=outcomes)
             if probs:
                 return probs
     return None

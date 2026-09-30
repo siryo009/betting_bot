@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -709,3 +710,135 @@ class TestProbeLive:
         # se la lega ha partite, l'oracolo deve estrarle davvero
         if res["payload"]:
             assert hits, "payload non vuoto ma nessun 1X2 Pinnacle completo"
+
+
+# ---------------------------------------------------------------------------
+# FORMA DEL MERCATO a DUE ESITI (30/09/2026)
+# ---------------------------------------------------------------------------
+# Il gate dell'oracolo era cablato sui TRE esiti 1X2 (`OUTCOMES`): sui mercati
+# testa-a-testa SENZA pareggio (tennis SX sportId 6 type 52, eSports) non
+# poteva MAI produrre una probabilita' fair, quindi ogni candidato moriva con
+# `no_oracle`. La forma ora la DICHIARA il chiamante (`outcomes=`), con i tre
+# esiti 1X2 come default: il calcio deve restare identico bit per bit.
+
+def _tennis_match(home, away, books, kickoff="2026-10-01T02:00:00Z"):
+    return {"id": f"t-{home}", "sport_key": "tennis_atp_china_open",
+            "commence_time": kickoff, "home_team": home, "away_team": away,
+            "bookmakers": books}
+
+
+def _write_cache(folder: Path, sport_key: str, payload, ts=None):
+    """Scrive una cache `toa_<sport>.json` nella forma letta da `load_oracle`."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"toa_{sport_key}.json"
+    path.write_text(json.dumps({"ts": time.time() if ts is None else ts,
+                                "payload": payload, "remaining": 100}),
+                    encoding="utf-8")
+    return path
+
+
+class TestFormaDueEsiti:
+    TWO = ("1", "2")
+
+    def _payload_2vie(self):
+        return [_tennis_match("Felix Auger-Aliassime", "Karen Khachanov", [
+            _book("pinnacle", "Pinnacle", "Felix Auger-Aliassime",
+                  "Karen Khachanov", (1.66, None, 2.34)),
+        ])]
+
+    def test_calcio_invariato_col_default_a_tre_esiti(self):
+        """La generalizzazione NON deve cambiare il percorso del calcio."""
+        match = _payload()[0]
+        quotes = po.pinnacle_quotes(_payload(), "Atlanta United", "Toronto FC")
+        assert quotes == {"1": 1.75, "X": 3.60, "2": 4.50}
+        probs = po.true_probabilities(quotes)          # default: 3 esiti
+        assert set(k for k in probs if k != "overround") == {"1", "X", "2"}
+        assert probs["1"] == pytest.approx(0.5483404337)
+        assert quotes == po.h2h_odds_of(match["bookmakers"][0],
+                                       "Atlanta United", "Toronto FC")
+
+    def test_default_a_tre_esiti_rifiuta_un_mercato_a_due(self):
+        payload = self._payload_2vie()
+        assert po.pinnacle_quotes(payload, "Felix Auger-Aliassime",
+                                  "Karen Khachanov") is None
+        assert po.oracle_quotes(payload, "Felix Auger-Aliassime",
+                                "Karen Khachanov") == {}
+
+    def test_due_esiti_estrae_e_de_viga(self):
+        payload = self._payload_2vie()
+        quotes = po.oracle_quotes(payload, "Felix Auger-Aliassime",
+                                  "Karen Khachanov", outcomes=self.TWO)
+        assert list(quotes) == ["pinnacle"]
+        assert quotes["pinnacle"] == {"1": 1.66, "2": 2.34}
+        probs = po.true_probabilities(quotes["pinnacle"], min_outcomes=2)
+        assert set(k for k in probs if k != "overround") == {"1", "2"}
+        # il de-vig di un mercato a due vie somma 1 come un 1X2
+        assert probs["1"] + probs["2"] == pytest.approx(1.0)
+        # togliere il vig ABBASSA la probabilita' implicita...
+        assert probs["1"] < 1.0 / 1.66
+        # ...e il metodo "power" (default di progetto) alza il FAVORITO
+        # rispetto al proporzionale: e' la correzione del favourite-longshot
+        # bias, la stessa che il calcio usa da sempre.
+        prop = po.true_probabilities(quotes["pinnacle"], min_outcomes=2,
+                                     method="multiplicative")
+        assert probs["1"] > prop["1"]
+
+    def test_consenso_a_due_vie(self):
+        payload = self._payload_2vie()
+        by_book = po.oracle_quotes(payload, "Felix Auger-Aliassime",
+                                   "Karen Khachanov", outcomes=self.TWO)
+        cons = po.consensus_probabilities(by_book, outcomes=self.TWO)
+        assert cons["fallback"] == "pinnacle_only"
+        assert cons["n_sources"] == 1
+        assert cons["1"] + cons["2"] == pytest.approx(1.0, abs=1e-5)
+        # senza `outcomes` la stessa partita non produce oracolo (3 esiti attesi)
+        assert po.consensus_probabilities(by_book) is None
+
+    def test_fail_closed_su_mercato_a_due_incompleto(self):
+        partial = [_tennis_match("A Player", "B Player", [
+            _book("pinnacle", "Pinnacle", "A Player", "B Player",
+                  (1.50, None, None)),          # un solo esito su due
+        ])]
+        assert po.oracle_quotes(partial, "A Player", "B Player",
+                                outcomes=self.TWO) == {}
+
+    def test_forma_a_un_esito_rifiutata(self):
+        payload = self._payload_2vie()
+        by_book = po.oracle_quotes(payload, "Felix Auger-Aliassime",
+                                   "Karen Khachanov", outcomes=self.TWO)
+        assert po.consensus_probabilities(by_book, outcomes=("1",)) is None
+
+    def test_gate_ev_a_due_vie(self):
+        probs = po.true_probabilities({"1": 1.66, "2": 2.34}, min_outcomes=2)
+        rows = po.ev_gate(probs, {"1": 1.85, "2": 2.20})
+        by_esito = {r["esito"]: r for r in rows}
+        # fair 1 = 0.5888 -> quota equa 1.698; a 1.85 l'EV e' positivo
+        assert by_esito["1"]["trigger"] is True
+        assert by_esito["1"]["ev"] > 0
+        assert by_esito["2"]["trigger"] is False
+        assert set(by_esito) == {"1", "2"}       # nessun esito inventato
+
+    def test_load_oracle_due_vie_dalla_cache(self, tmp_path):
+        _write_cache(tmp_path, "tennis_atp_china_open", self._payload_2vie())
+        probs = po.load_oracle("Felix Auger-Aliassime", "Karen Khachanov",
+                               cache_dir=tmp_path, outcomes=self.TWO)
+        assert probs is not None
+        assert probs["1"] + probs["2"] == pytest.approx(1.0, abs=1e-5)
+        # col default (3 esiti) la stessa cache NON produce oracolo
+        assert po.load_oracle("Felix Auger-Aliassime", "Karen Khachanov",
+                              cache_dir=tmp_path) is None
+
+    def test_aggancio_per_nomi_senza_mappa_torneo(self, tmp_path):
+        """Il ponte sono i NOMI: la chiave sport puo' chiamarsi come vuole."""
+        _write_cache(tmp_path, "tennis_wta_china_open", self._payload_2vie())
+        assert po.load_oracle("Felix Auger-Aliassime", "Karen Khachanov",
+                              cache_dir=tmp_path, outcomes=self.TWO) is not None
+        # nomi diversi: nessun aggancio (mai fuzzy sui partecipanti)
+        assert po.load_oracle("Jannik Sinner", "Carlos Alcaraz",
+                              cache_dir=tmp_path, outcomes=self.TWO) is None
+
+    def test_cache_stantia_resta_fail_closed_anche_a_due_vie(self, tmp_path):
+        _write_cache(tmp_path, "tennis_atp_china_open", self._payload_2vie(),
+                     ts=time.time() - 48 * 3600)
+        assert po.load_oracle("Felix Auger-Aliassime", "Karen Khachanov",
+                              cache_dir=tmp_path, outcomes=self.TWO) is None

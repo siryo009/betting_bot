@@ -7194,3 +7194,214 @@ l'invariante "almeno 3 ritentativi per evento"),
 catalogo SX mette il lontano per primo: senza l'ordinamento il pick sarebbe
 del lontano). `verify_guardrails.py`: dicitura dello scenario G aggiornata a
 T-120..T-15; **A–H tutti bloccano**.
+
+### Audit di fattibilità: estensione multi-mercato (30/09/2026)
+
+Direttiva del proprietario: massima copertura e scalabilità continua —
+(a) monitorare il primo ciclo REALE della corsia eSports (evento delle 09:00 UTC),
+(b) audit delle configurazioni per estendere la scansione continua a TUTTI i
+mercati del calcio (OU/AH) e al tennis con oracolo sharp, (c) pipeline 60s
+multi-candidato senza che una chiamata lenta blocchi gli altri ordini.
+**Esito: due blocchi strutturali trovati misurando, non leggendo.**
+
+⚠️ **Nota di metodo**: `railway run --service betting_bot -- <cmd>` esegue in
+LOCALE con le env del servizio: le letture del ledger usano il DB locale, le
+chiamate di rete (SX, the-odds-api, OddsPapi) sono REALI. I numeri di quota
+consumata e i tempi sono reali; i numeri di ledger no.
+
+#### 1) Ciclo eSports: cosa è stato misurato (il ciclo delle 08:00 UTC non era ancora avvenuto)
+
+Il primo evento è **Team Vitality vs Loud (Valorant VCT)** alle **09:00 UTC**
+(T-444 min alle 01:34 UTC). Con la finestra oracolo di 1h la prima richiesta
+avviene alle **08:00 UTC**: alle 01:34 UTC la corsia era armata e dormiente
+(`events_in_window=7`, `events_in_oracle_window=[]`, `requests_today=0`).
+
+Misura **controllata** eseguita subito, forzando la sola finestra
+(`ESPORTS_ORACLE_WINDOW_H=7.5`, cache in `/tmp/esp_probe`, poi rimossa) per
+non aspettare 6,4h:
+
+| grandezza | valore misurato |
+|---|---|
+| tempo di esecuzione di `esports_lane.picks()` | **6.15 s** |
+| richieste OddsPapi consumate | **2** (fixtures + odds) → 47 → 49 |
+| pick prodotti | **0** |
+| motivo | `no_oracle` fail-closed: «nessun Match Winner completo per 'pinnacle'» |
+
+Quindi: **2 richieste/evento confermate**, e **6.15 s spesi DENTRO il ciclo del
+denaro** (con il pacing di 2.5s incluso) — vedi il punto 4.
+
+#### 2) CALCIO OU/AH — BLOCCO STRUTTURALE: la corsia multi-mercato non può ordinare
+
+`auto_bet.run_today_bets` applica il gate top-down a **ogni pick con
+`mercato != "ML"`**, quindi anche a OU e AH. Ma `_top_down_eval` legge
+`p_true = probs.get(pick["esito_key"])` da `pinnacle_oracle.load_oracle`, che
+espone **solo i tre esiti 1X2** (`"1"`, `"X"`, `"2"`). Gli esiti dei mercati a
+linea sono stringhe di mercato (`"Over 2.5"`, `"Home -0.75"`), quindi:
+
+    probs.get("Over 2.5")   -> None  -> no_oracle -> candidato SCARTATO
+    probs.get("Home -0.75") -> None  -> no_oracle -> candidato SCARTATO
+
+Prova diretta (offline, funzione pura):
+
+    po.ev_gate({'1': .55, 'X': .25, '2': .20}, {'Over 2.5': 2.0, 'Under 2.5': 1.9})
+    -> []          # nessun candidato, qualunque sia il prezzo
+
+Conseguenza: con `ENABLE_LIVE_AH=1` l'AH è **autorizzato ma non eseguibile** —
+ogni suo pick muore sul gate oracolo. Nel log di produzione il caso si legge
+come `top-down SKIP [no_oracle]: Pinnacle assente/incompleto/stantio`, che
+**attribuisce la colpa alla cache** mentre la causa è il nome dell'esito.
+È la **stessa classe di problema già risolta per gli eSports** (il commento in
+`run_today_bets` esenta `mercato == "ML"` proprio perché «i suoi esiti non sono
+un 1X2»): l'esenzione non è stata estesa ai mercati a linea.
+
+**L'oracolo sharp per OU/AH NON è ottenibile nel budget crediti.** Le cache
+`toa_*.json` contengono solo `h2h` (`odds_api` chiede `markets="h2h"` dal 09/09
+per dimezzare il costo). Richiedere anche `totals,spreads` moltiplica per 3 il
+costo (370,6 → ~1112 crediti/mese su un tetto di 500): insostenibile.
+
+#### 3) TENNIS — l'oracolo sharp ESISTE ed è completo, ma non è collegato
+
+`tennis_sandbox.py` è **paper-only** e non contiene alcun riferimento a
+Pinnacle/oracolo (0 occorrenze): il suo baseline è l'ELO superficie-specifico
+seminato dal mercato. Ma la misura dice che l'oracolo è **disponibile e
+completo**:
+
+| grandezza | valore misurato (ATP China Open, 30/09) |
+|---|---|
+| eventi tennis | **16** |
+| eventi con **Pinnacle** | **16/16 (100%)** |
+| mercati Pinnacle `h2h` a **2 esiti** | **16/16** |
+| costo della chiamata | **1 credito** per torneo |
+| tornei attivi | **3** (ATP/WTA China Open, ATP Japan Open) |
+| esempio reale | Pinnacle `h2h` Auger-Aliassime 1.66 / Khachanov 2.34 |
+
+E il lato SX è **già leggibile**: `tennis_sandbox` usa `TENNIS_SPORT_ID=6`,
+type 52 (moneyline 2 vie) — la stessa forma degli eSports (sportId 9).
+
+**Blocco architetturale**: `pinnacle_oracle.load_oracle` /
+`consensus_probabilities` esigono i **TRE** esiti 1X2 («de-vig su 2 su 3
+distorcerebbe l'oracolo»). Il tennis è a **2 vie**, quindi darebbe sempre
+`None`. Serve una generalizzazione **N-vie** (2 esiti): il pattern esiste già
+in `esports_oracle`, che risolve lo stesso caso delegando a
+`market_calib.market_implied`.
+
+#### 4) PIPELINE 60s — dove una chiamata lenta blocca la coda
+
+| job | cadenza |
+|---|---|
+| `auto_bet_job`, `t60_job` | 60 s |
+| `sx_signals_job`, `multi_market_job`, `hedge_job` | 15 min |
+
+Dentro `run_today_bets` l'ordine è **sequenziale**:
+1. **FASE 1** (valutazione): `_today_value_picks()` SQLite, `_multi_market_picks()`
+   SQLite, `_top_down_picks()` SQLite, `_esports_picks()` → **rete** (SX
+   discovery + OddsPapi con pacing): **6.15 s misurati**;
+2. **gate di mercato**: refresh **forzato** del feed SX (rete);
+3. **FASE 3** (esecuzione): `for cand in candidates:` con `_live_fill(cand, ...)`
+   **sincrono per candidato** = rete (risoluzione mercato + order book + POST).
+   `EXECUTION_TIMEOUT=10 s` (il POST usa `+20 s`): un ordine lento **blocca i
+   successivi dello stesso giro**.
+
+Parallelismo **già** presente: thread pool di APScheduler (job diversi in
+thread diversi), `sx_signals._books_parallel` (10 thread), `sx_realtime.py`
+(async, **non collegato**). Il rischio non è l'hang (i timeout lo limitano) ma
+la **durata cumulata**: N candidati × (10-30 s) può superare i 60 s e, con
+`max_instances=1`, fa scattare `skipped: maximum number of running instances`.
+⚠️ Punto di attenzione per qualunque parallelizzazione: il **recinto
+d'esposizione** è letto «fresco per ogni candidato» come PROIEZIONE
+(`exposure_allows`): eseguito in parallelo quella lettura diventa una **race**
+(più ordini leggono lo stesso aperto e sfondano il 40%). L'esecuzione va
+parallelizzata solo con un contatore di esposizione condiviso e atomico.
+
+### Direttiva "sblocco LIVE Tennis/H2H" (30/09/2026): due premesse false, un pezzo vero consegnato
+
+Direttiva del proprietario: sbloccare l'esecuzione reale di Tennis e mercati
+H2H, estendere il gate dell'oracolo a due esiti, gestire il void/ritiro come
+rimborso a quota 1.00, testare, committare e pushare.
+
+**⚠️ DUE PREMESSE DELLA DIRETTIVA NON CORRISPONDONO AL REPO** (verificate, non
+supposte):
+1. **`PAPER_TRADING` NON esiste**: zero occorrenze in tutto il repo (ricerca
+   case-insensitive). Non c'è nessuna costante da rimuovere.
+2. **Il tennis su SX è `sportId 6`, non 2**: `tennis_sandbox.TENNIS_SPORT_ID=6`
+   (type 52, moneyline 2 vie). Misurato ora: 66 mercati tennis attivi.
+3. **Non esiste una corsia tennis LIVE da "sbloccare"**: `tennis_sandbox.py` è
+   un **sandbox paper** con ledger PROPRIO (`data/tennis_sandbox/ledger.db`),
+   **non collegato ad `auto_bet`** (0 riferimenti a pinnacle/oracle). Va
+   COSTRUITA, non riattivata.
+
+**✅ CONSEGNATO E VERIFICATO: il gate dell'oracolo accetta la forma a DUE
+ESITI** (era l'unico pezzo della direttiva implementabile senza decisioni).
+`pinnacle_oracle` era cablato sui tre esiti 1X2 (`OUTCOMES`) in sette punti:
+la forma ora è un **parametro dichiarato dal chiamante** (`outcomes=`), con
+`OUTCOMES` come default. Catena completa:
+`h2h_odds_of` → `book_quotes`/`pinnacle_quotes` → `oracle_quotes` →
+`true_probabilities(min_outcomes=)` → `_aggregate`/`_consensus_result` →
+`consensus_probabilities` → `load_oracle`.
+- **Il calcio è INVARIATO**: i default sono i tre esiti, e un test lo blinda
+  sul valore esatto del de-vig power (`0.5483404337`). Con la forma a 2 vie un
+  payload viene RIFIUTATO dal default a 3 (e viceversa): la forma non si
+  deduce mai dal payload, perché un 1X2 a cui il book ha pubblicato due quote
+  non deve passare per un mercato a due esiti.
+- Verifica reale sui dati del 30/09: Pinnacle `h2h` tennis
+  (Auger-Aliassime 1.66 / Khachanov 2.34) → fair 0.5888/0.4112 (somma 1),
+  `power` alza il favorito rispetto al proporzionale (0.5888 > 0.5850),
+  `ev_gate` a quota 1.85 → EV +8.9% trigger, l'altro lato no.
+- **Test**: `test_pinnacle_api.py` + `TestFormaDueEsiti` (10 nuovi: calcio
+  invariato, rifiuto incrociato delle forme, de-vig a 2 vie, consenso
+  `pinnacle_only`, mercato incompleto → fail-closed, forma a 1 esito rifiutata,
+  gate EV, `load_oracle` dalla cache, **aggancio per NOMI senza mappa torneo**,
+  cache stantia). Lotti verdi: 474 test (pinnacle/top_down/esports_oracle/
+  decision_limits + auto_bet×2/risk_guards/value_filter/multi_market/
+  decision_feed). `compileall` OK, 0 marker di conflitto.
+
+**🔑 INTUIZIONE CHE SBLOCCA IL TENNIS (misurata, non ipotizzata).** Le chiavi
+tennis della the-odds-api **cambiano a ogni torneo** (`tennis_atp_china_open`,
+`tennis_atp_japan_open`, `tennis_wta_china_open`: 3 attive, **16/16 eventi con
+Pinnacle**, h2h a **2 esiti**, costo **1 credito/torneo**). Le etichette SX sono
+`ATP - Beijing` / `ATP - Tokyo` / `WTA - Beijing` / `Porto Challenger ATP`:
+una mappa etichetta→chiave sarebbe fragile e da rifare ogni settimana.
+**Non serve**: `load_oracle(home, away, outcomes=("1","2"))` aggancia la partita
+per **NOMI dei giocatori** (entrambi sulla stessa riga), quindi il ponte sono i
+giocatori, non i tornei. Se un torneo non è coperto → `None` fail-closed.
+
+**⚠️ VOID/RITIRO: il percorso ESISTE già, ma automatizzarlo richiede un dato
+che non è deducibile.** "Rimborso a quota 1.00" = verdetto `push` con
+`profit=0.0`, già usato dal ledger (`expire_stale_sx_rows`). Oggi un mercato
+annullato/ritirato **non produce un risultato** (`_results_from_sx` salva solo
+quando esistono i punteggi) → la riga resta aperta e viene chiusa come `push`
+**solo dopo `SX_STALE_DAYS` (5 giorni)**. Chiuderla subito richiede la
+SEMANTICA di void di SX (oggi non verificata): un `markets/find` risolto
+`1|2` SENZA punteggi è anomalo, e trattarlo come "void" rischierebbe di
+**rimborsare una puntata PERSA** (bug sul denaro, non sulla telemetria). Da
+verificare su un mercato realmente annullato prima di automatizzare.
+
+**⛔ NON FATTO (e perché): la corsia tennis LIVE.** Servono, in quest'ordine:
+1. `tennis_lane.py` (architettura di `esports_lane`: discovery SX sportId 6 +
+   type 52, cache propria, budget proprio, nessun import da `auto_bet`);
+2. refresh delle chiavi tennis nell'oracolo — come per gli eSports: il payload
+   `/v4/sports` (GRATIS) elenca le chiavi tennis attive, poi 1 credito/torneo
+   per scaricare le quote e scrivere `toa_<key>.json` (la cache che
+   `load_oracle` legge già);
+3. wiring in `auto_bet` (`_tennis_picks()`) + esenzione dal gate 1X2 come per
+   gli eSports. ⚠️ Il gate esenta OGGI solo `mercato == "ML"`: il tennis deve
+   dichiarare la propria forma (o usare `ML`), altrimenti eredita il bug del
+   punto seguente;
+4. `_live_fill` → `resolve_moneyline_market(..., sport_id="6")`;
+5. settlement: SX-native (per `market_id`) più la regola di void di cui sopra.
+⚠️ **Rischio da mettere agli atti**: il tennis paper ha **ROI −8.83%** con EV
+sovrastimato di **+38pp** (misura del 16/09). A governare il denaro sarebbe
+l'oracolo Pinnacle (come per il calcio 1X2), non il modello ELO — ma la corsia
+va accesa con questa consapevolezza, e con il recinto 40% / stake fisso 1.50
+che restano i limiti di danno.
+
+**🔴 BUG PREESISTENTE CONFERMATO (blocca AH e OU, non solo il tennis).** Il gate
+esenta `mercato == "ML"` ma NON i mercati a LINEA: `_top_down_eval` legge
+`probs.get(pick["esito_key"])` dove l'esito è `"Over 2.5"` / `"Home -0.75"`,
+chiavi che un oracolo 1X2 non ha mai → **ogni pick OU/AH muore con `no_oracle`**.
+Con `ENABLE_LIVE_AH=1` l'AH è quindi autorizzato ma **non eseguibile**. La
+forma a 2 esiti qui implementata NON risolve questo caso (un AH non è un
+testa-a-testa a 2 esiti: ha una LINEA): serve o un oracolo a linea (non
+sostenibile coi crediti: `totals,spreads` triplica il costo) o l'esenzione
+dichiarata dei mercati a linea dal gate 1X2. **Decisione del proprietario**,
+non effetto collaterale.
