@@ -94,6 +94,10 @@ export default defineRailway(() => {
       // `config apply` non deve poterla distruggere se viene impostata.
       ESPORTS_ODDS_MIN: preserve(),
       ESPORTS_ODDS_MAX: preserve(),
+      // Finestra dell'oracolo e pacing: su eSports Pinnacle pubblica tardivo e
+      // il free tier limita le chiamate al minuto (429 = richiesta persa).
+      ESPORTS_ORACLE_WINDOW_H: preserve(),
+      ESPORTS_MIN_INTERVAL_S: preserve(),
       ESPORTS_FIXTURES_TTL_MIN: preserve(),
       ESPORTS_ODDS_TTL_MIN: preserve(),
       ESPORTS_ODDS_MISS_TTL_MIN: preserve(),

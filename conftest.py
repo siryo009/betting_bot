@@ -142,6 +142,7 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # con provider e `http_get` iniettati.
     monkeypatch.setenv("ESPORTS_LIVE", "0")
     monkeypatch.setenv("ESPORTS_CACHE", str(tmp_path / "esports_state.json"))
+    monkeypatch.setenv("ESPORTS_MIN_INTERVAL_S", "0")   # pacing: niente attese
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di
     # MODULO e sopravvive fra i test dello stesso processo, mentre il ledger
     # no (ogni test ha il suo DB temporaneo). Senza reset un caso che semina

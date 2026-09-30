@@ -80,6 +80,12 @@ def _cache_in_tmp(tmp_path, monkeypatch):
     # progetto e i test non arriverebbero mai al percorso da misurare. Il
     # trasporto e' comunque iniettato: nessuna rete.
     monkeypatch.setenv("ODDSPAPI_KEY", "fake/offline-esports-lane-key")
+    # Pacing OFF: senza rete non c'e' un limite al minuto da rispettare, e
+    # l'attesa reale renderebbe i test lenti senza verificare nulla.
+    monkeypatch.setenv("ESPORTS_MIN_INTERVAL_S", "0")
+    # Finestra oracolo larga: gli eventi dei test sono a +4h e devono essere
+    # interrogati (la finestra produttiva e' 3h, coperta da un test dedicato).
+    monkeypatch.setenv("ESPORTS_ORACLE_WINDOW_H", "24")
     yield
 
 
@@ -165,6 +171,24 @@ class TestStato:
         assert el._fresh(old, 10, now=now) is False
         assert el._fresh({}, 10, now=now) is False
         assert el._fresh({"ts": "nonsense"}, 10, now=now) is False
+
+    def test_finestra_oracolo_e_pacing_da_env(self, monkeypatch):
+        # La fixture autouse imposta questi env per TUTTI i test (finestra
+        # larga, pacing off): qui si parte dai DEFAULT, quindi vanno tolti.
+        monkeypatch.delenv("ESPORTS_ORACLE_WINDOW_H", raising=False)
+        monkeypatch.delenv("ESPORTS_MIN_INTERVAL_S", raising=False)
+        assert el.oracle_window_h() == el.ORACLE_WINDOW_H_DEFAULT
+        assert el.min_interval_s() == el.MIN_INTERVAL_S_DEFAULT
+        monkeypatch.setenv("ESPORTS_ORACLE_WINDOW_H", "1.5")
+        monkeypatch.setenv("ESPORTS_MIN_INTERVAL_S", "4")
+        assert el.oracle_window_h() == 1.5
+        assert el.min_interval_s() == 4.0
+
+    def test_env_numerica_impossibile_torna_al_default(self, monkeypatch):
+        monkeypatch.setenv("ESPORTS_ORACLE_WINDOW_H", "molto")
+        monkeypatch.setenv("ESPORTS_MIN_INTERVAL_S", "-3")
+        assert el.oracle_window_h() == el.ORACLE_WINDOW_H_DEFAULT
+        assert el.min_interval_s() == 0.0     # negativo -> 0, mai un'attesa
 
     def test_ttl_diverso_per_oracolo_e_mancato(self):
         """Un "no_oracle" e' temporaneo (Pinnacle pubblica tardivo): TTL corto."""
@@ -396,6 +420,41 @@ class TestPicks:
         assert el.picks(provider=prov, http_get=http) == []
         assert http.calls == 0
 
+    def test_oracolo_non_interrogato_fuori_finestra(self, monkeypatch):
+        """Evento lontano: discovery si', oracolo NO (quota non sprecata).
+
+        Su eSports Pinnacle pubblica tardivo: chiedere ore prima significa
+        pagare una richiesta per un "non ancora".
+        """
+        monkeypatch.setenv("ESPORTS_ORACLE_WINDOW_H", "1")
+        prov, http = self._setup()          # evento a +4h
+        assert el.picks(provider=prov, http_get=http) == []
+        assert http.calls == 0
+
+    def test_pacing_distanzia_le_chiamate(self, monkeypatch):
+        """Il free tier limita al minuto: senza pacing si prendono 429."""
+        sleeps: list[float] = []
+        import time as _time
+        monkeypatch.setenv("ESPORTS_MIN_INTERVAL_S", "2.5")
+        monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+        # prima chiamata: nessuna attesa (nessun precedente)
+        el._LAST_CALL[0] = 0.0
+        monkeypatch.setattr(_time, "monotonic", lambda: 100.0)
+        el._pace()
+        assert sleeps == []
+        # seconda ravvicinata: attende il residuo
+        monkeypatch.setattr(_time, "monotonic", lambda: 100.5)
+        el._pace()
+        assert sleeps and abs(sleeps[-1] - 2.0) < 0.01
+
+    def test_pace_disattivabile(self, monkeypatch):
+        calls = []
+        import time as _time
+        monkeypatch.setenv("ESPORTS_MIN_INTERVAL_S", "0")
+        monkeypatch.setattr(_time, "sleep", lambda s: calls.append(s))
+        el._pace()
+        assert calls == []
+
     def test_corsia_spenta(self, monkeypatch):
         monkeypatch.setenv("ESPORTS_LIVE", "0")
         prov, http = self._setup()
@@ -597,7 +656,8 @@ class TestTripwire:
                      "ESPORTS_MAX_MARKETS", "ESPORTS_REQ_BUDGET_DAY",
                      "ESPORTS_FIXTURES_TTL_MIN", "ESPORTS_ODDS_TTL_MIN",
                      "ESPORTS_ODDS_MISS_TTL_MIN", "ESPORTS_CACHE",
-                     "ESPORTS_ODDS_MIN", "ESPORTS_ODDS_MAX"):
+                     "ESPORTS_ODDS_MIN", "ESPORTS_ODDS_MAX",
+                     "ESPORTS_ORACLE_WINDOW_H", "ESPORTS_MIN_INTERVAL_S"):
             assert name in iac, name
 
     def test_guardrail_offline(self):

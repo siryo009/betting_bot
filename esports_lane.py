@@ -38,6 +38,14 @@ dichiarate in `summary()`:
 - **tetto giornaliero** (`ESPORTS_REQ_BUDGET_DAY`, default 6 ≈ 180/mese). Le
   richieste si contano PRIMA di farle: oltre il tetto la corsia si ferma e lo
   dichiara, non prova e fallisce;
+- **finestra dell'oracolo** (`ESPORTS_ORACLE_WINDOW_H`, default 3h): a
+  pagamento si va solo per gli eventi VICINI al fischio d'inizio. Discovery e
+  fascia quota restano a 24h perche' sono gratuite, ma interrogare Pinnacle
+  ore prima significa pagare una richiesta per un "non ancora" — e su eSports
+  lo sharp pubblica tardivo, quindi la finestra larga produce solo costi;
+- **pacing** (`ESPORTS_MIN_INTERVAL_S`, default 2.5s): il free tier limita le
+  chiamate al MINUTO. Misurato in produzione il 30/09: senza distanziamento la
+  corsia prende **HTTP 429** e la richiesta e' persa (quota pagata, zero dati).
 - **fail-closed sul contatore corrotto**: un file di stato illeggibile NON
   autorizza una raffica — il ciclo si considera a budget esaurito e lo stato
   viene ricostruito (cosi' si auto-ripara al giro dopo).
@@ -100,6 +108,11 @@ MAX_EVENTS = int(os.getenv("ESPORTS_MAX_EVENTS", "20"))
 MAX_MARKETS = int(os.getenv("ESPORTS_MAX_MARKETS", "120"))
 
 # --- Budget OddsPapi (piano free: 250 richieste/mese) ----------------------
+#: Default dichiarati (letti a RUNTIME dalle funzioni sotto: parametri
+#: operativi come questi si tarano senza redeploy, e un valore letto all'import
+#: non sarebbe ne' tarabile ne' testabile).
+ORACLE_WINDOW_H_DEFAULT = 3.0
+MIN_INTERVAL_S_DEFAULT = 2.5
 REQ_BUDGET_DAY = int(os.getenv("ESPORTS_REQ_BUDGET_DAY", "6"))
 FIXTURES_TTL_MIN = float(os.getenv("ESPORTS_FIXTURES_TTL_MIN", "720"))
 ODDS_TTL_MIN = float(os.getenv("ESPORTS_ODDS_TTL_MIN", "360"))
@@ -117,6 +130,36 @@ def enabled() -> bool:
     """Interruttore della corsia (`ESPORTS_LIVE=0` per spegnerla)."""
     return os.getenv("ESPORTS_LIVE", "1").strip().lower() not in (
         "0", "false", "off", "no")
+
+
+def _num_env(name: str, default: float) -> float:
+    """Numero da env, letto a RUNTIME. Valore impossibile -> default."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        logger.warning("esports_lane: %s non numerico, uso %s", name, default)
+        return float(default)
+
+
+def oracle_window_h() -> float:
+    """Ore dal kickoff entro cui si interroga l'oracolo (a pagamento).
+
+    Su eSports Pinnacle pubblica TARDIVO: chiedere le sue quote 4 ore prima
+    significa spendere una richiesta per un "non ancora" e poi ripagarla col
+    TTL corto. Discovery e fascia quota restano a 24h (sono gratis); a
+    pagamento si va solo dove il verdetto e' possibile.
+    """
+    return max(0.0, _num_env("ESPORTS_ORACLE_WINDOW_H", ORACLE_WINDOW_H_DEFAULT))
+
+
+def min_interval_s() -> float:
+    """Distanza minima fra due richieste OddsPapi (secondi).
+
+    Il piano free limita le chiamate al MINUTO: misurato il 29/09 e di nuovo
+    in produzione il 30/09, due chiamate ravvicinate prendono 429 e la
+    richiesta e' persa (quota pagata, zero dati).
+    """
+    return max(0.0, _num_env("ESPORTS_MIN_INTERVAL_S", MIN_INTERVAL_S_DEFAULT))
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +229,28 @@ def budget_left(state: dict, *, healthy: bool = True) -> int:
     if not healthy:
         return 0
     return max(0, int(REQ_BUDGET_DAY) - int(state.get("requests") or 0))
+
+
+#: Istante dell'ultima richiesta OddsPapi (pacing fra chiamate consecutive).
+_LAST_CALL = [0.0]
+
+
+def _pace() -> None:
+    """Attesa fra due richieste OddsPapi (429 = richiesta persa).
+
+    Il limite del free tier e' al MINUTO, quindi il distanziamento e' l'unico
+    modo per NON sprecare quota: senza, la corsia brucia le richieste in una
+    raffica e il provider le rifiuta. `ESPORTS_MIN_INTERVAL_S=0` disattiva
+    (usato dai test, che non hanno rete da rispettare).
+    """
+    gap = min_interval_s()
+    if gap <= 0:
+        return
+    import time
+    wait = gap - (time.monotonic() - _LAST_CALL[0])
+    if wait > 0:
+        time.sleep(wait)
+    _LAST_CALL[0] = time.monotonic()
 
 
 def _fresh(entry: Any, ttl_min: float, now: Optional[datetime] = None) -> bool:
@@ -374,6 +439,7 @@ def _cached_fixtures(state: dict, title: str, *, http_get: Any = None,
     if not budget_ok:
         return None
     import esports_oracle as eo
+    _pace()
     res = eo.fixtures(title, http_get=http_get)
     state["requests"] = int(state.get("requests") or 0) + int(
         res.get("requests") or 0)
@@ -408,6 +474,7 @@ def _cached_oracle(state: dict, fixture: dict, home: str, away: str, *,
     if not budget_ok:
         return None
     import esports_oracle as eo
+    _pace()
     res = eo.oracle_for_fixture(fixture, home=home, away=away,
                                 http_get=http_get)
     state["requests"] = int(state.get("requests") or 0) + int(
@@ -475,6 +542,7 @@ def picks(*, provider: Any = None, http_get: Any = None,
     out: List[dict] = []
     try:
         events = discover(provider=provider)
+        oracle_horizon = _now() + timedelta(hours=oracle_window_h())
         for ev in events:
             import esports_oracle as eo
             title = eo.title_of_league(ev.get("league_label"))
@@ -486,6 +554,14 @@ def picks(*, provider: Any = None, http_get: Any = None,
                             "titolo, salto %s vs %s",
                             ev.get("league_label"), ev.get("team_one"),
                             ev.get("team_two"))
+                continue
+            if ev["kickoff"] > oracle_horizon:
+                # Discovery e fascia sono gratis, l'oracolo no: su eSports lo
+                # sharp pubblica tardivo, quindi interrogarlo ore prima
+                # significa pagare per un "non ancora".
+                logger.debug("esports_lane: %s vs %s oltre la finestra "
+                             "oracolo (%.1fh), nessuna richiesta",
+                             ev["team_one"], ev["team_two"], oracle_window_h())
                 continue
             if not budget_left(state, healthy=healthy):
                 logger.info("esports_lane: budget OddsPapi esaurito per oggi "
@@ -635,6 +711,8 @@ def summary(*, provider: Any = None, http_get: Any = None) -> dict:
         "enabled": enabled(),
         "sx_sport_id": SX_SPORT_ID, "sx_type_id": SX_TYPE_ID,
         "hours_ahead": HOURS_AHEAD,
+        "oracle_window_h": oracle_window_h(),
+        "min_interval_s": min_interval_s(),
         "events_in_window": len(events),
         "oracle_titles": sorted({eo_title(e.get("league_label"))
                                  or f"?({e.get('league_label')})"
