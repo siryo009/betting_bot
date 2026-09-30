@@ -324,16 +324,37 @@ class TestCB4Liquidita:
 
 
 class TestFinestraT60:
-    """Strategia T-60: decisione esecutiva SOLO in finestra T-60..T-50."""
+    """Strategia T-60: decisione esecutiva in finestra T-120..T-15.
+
+    La CHIUSURA e' scesa da T-50 a T-15 il 30/09/2026 (direttiva del
+    proprietario): l'oracolo eSports ritenta a T-60/T-45/T-30/T-15 e senza
+    allungare l'esecuzione quei tentativi consumerebbero quota per pick che
+    questo gate rifiuterebbe come `missed`. Il test asserisce la politica
+    NUOVA per intero: un ulteriore spostamento deve rompere qui.
+    """
 
     def test_classificazione_finestra(self):
         now = datetime.now(timezone.utc)
         assert auto_bet.t60_window(now + timedelta(minutes=90)) == "before"
         assert auto_bet.t60_window(now + timedelta(minutes=55)) == "within"
         assert auto_bet.t60_window(now + timedelta(minutes=52)) == "within"
-        assert auto_bet.t60_window(now + timedelta(minutes=30)) == "missed"
+        # Fascia resa ordinabile il 30/09 (era `missed`):
+        assert auto_bet.t60_window(now + timedelta(minutes=45)) == "within"
+        assert auto_bet.t60_window(now + timedelta(minutes=30)) == "within"
+        # Il bordo NON si asserisce esatto: `t60_window` ricalcola il suo
+        # `now`, quindi a +15 esatti i microsecondi trascorsi lo portano
+        # sotto soglia (deterministicamente flaky). Si BRACKETTA il valore:
+        # +16 dentro, +14 fuori -> la chiusura e' 15.
+        assert auto_bet.t60_window(now + timedelta(minutes=16)) == "within"
+        assert auto_bet.t60_window(now + timedelta(minutes=14)) == "missed"
         assert auto_bet.t60_window(now - timedelta(minutes=5)) == "missed"
         assert auto_bet.t60_window(None) == "unknown"
+
+    def test_chiusura_allineata_al_pavimento_assoluto(self):
+        """Le due guardie COINCIDONO: se la chiusura scendesse sotto
+        `MIN_MINUTES_TO_START` l'esecuzione tenterebbe ordini che l'altra
+        guardia salta comunque (lavoro sprecato e log contraddittori)."""
+        assert auto_bet.T60_WINDOW_MAX_MIN == auto_bet.MIN_MINUTES_TO_START
 
     def test_dispatch_fuori_finestra_non_ordina(self, temp_db, monkeypatch):
         _live_mode(monkeypatch)
@@ -343,17 +364,21 @@ class TestFinestraT60:
         _seed_validated_decision(mid="early",
                                  kickoff=datetime.now(timezone.utc)
                                  + timedelta(hours=3))
+        # +10 e' SOTTO la chiusura (T-15 dal 30/09, era T-50): resta fail-closed.
         _seed_validated_decision(mid="late",
                                  kickoff=datetime.now(timezone.utc)
-                                 + timedelta(minutes=20))
+                                 + timedelta(minutes=10))
         assert auto_bet.t60_dispatch_pending(bankroll=34.0) == []
         assert calls == []
 
     def test_dispatch_in_finestra_ordina(self, temp_db, monkeypatch):
         _live_mode(monkeypatch)
+        # +20: la fascia NUOVA aperta il 30/09 (era `missed` con la chiusura a
+        # T-50). E' il caso che il cambio di politica doveva rendere ordinabile,
+        # quindi e' quello che il test del cablaggio deve esercitare.
         _seed_validated_decision(mid="ok",
                                  kickoff=datetime.now(timezone.utc)
-                                 + timedelta(minutes=55))
+                                 + timedelta(minutes=20))
         monkeypatch.setattr(auto_bet, "_live_fill",
                             lambda pick, stake, floor: {
                                 "ok": True, "market_id": "mx",

@@ -120,6 +120,11 @@ export default defineRailway(() => {
       SX_PRIVATE_KEY: preserve(),
       T60_KILL_WALLET_USDC: preserve(),
       T60_WINDOW_MIN_MIN: preserve(),
+      // Chiusura della finestra esecutiva (30/09/2026): con la corsia eSports
+      // (oracolo tardivo) l'esecuzione deve poter arrivare fino a T-15, quando
+      // arrivano i ritentativi utili. Dichiarata perche' e' impostata su
+      // Railway: senza, un `config apply` la distruggerebbe.
+      T60_WINDOW_MAX_MIN: preserve(),
       TENNIS_SANDBOX_ENABLED: preserve(),
       TEST_NOTIFY_KEY: preserve(),
       TOP_DOWN_EV: preserve(),

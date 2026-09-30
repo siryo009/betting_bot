@@ -196,6 +196,30 @@ class TestStato:
         assert el._ttl_for({"ok": False}) == el.ODDS_MISS_TTL_MIN
         assert el.ODDS_MISS_TTL_MIN < el.ODDS_TTL_MIN
 
+    def test_ttl_miss_tarato_sulla_finestra(self):
+        """TTL-miss e finestra sono una COPPIA: 15min in 1h = 4 tentativi.
+
+        30/09/2026: con TTL 60min dentro una finestra di 1h i ritentativi
+        erano DUE e un drop pubblicato a T-45 non veniva mai visto. Il test
+        difende i DEFAULT dichiarati (non l'env, che i test sovrascrivono):
+        allungare il TTL o stringere la finestra deve rompere qui.
+        """
+        assert el.ODDS_MISS_TTL_MIN == 15
+        tentativi = el.ORACLE_WINDOW_H_DEFAULT * 60.0 / el.ODDS_MISS_TTL_MIN
+        assert tentativi >= 3, (
+            "TTL-miss troppo lungo per la finestra oracolo: i drop tardivi di "
+            "Pinnacle verrebbero persi")
+
+    def test_budget_copre_due_eventi(self):
+        """Il tetto giornaliero deve coprire ~2 eventi (obiettivo 30/09).
+
+        4 richieste per evento nella finestra utile: il tetto e' 8.
+        """
+        assert el.REQ_BUDGET_DAY == 8
+        richieste_per_evento = (
+            el.ORACLE_WINDOW_H_DEFAULT * 60.0 / el.ODDS_MISS_TTL_MIN)
+        assert el.REQ_BUDGET_DAY / richieste_per_evento >= 2.0
+
     def test_interruttore(self, monkeypatch):
         assert el.enabled() is True
         monkeypatch.setenv("ESPORTS_LIVE", "0")
@@ -430,6 +454,40 @@ class TestPicks:
         prov, http = self._setup()          # evento a +4h
         assert el.picks(provider=prov, http_get=http) == []
         assert http.calls == 0
+
+    def test_budget_va_all_evento_piu_vicino(self, monkeypatch):
+        """Budget scarso -> si processa PRIMA l'evento che sta per iniziare.
+
+        Con 4 richieste per evento e 8 al giorno, un evento lontano che le
+        consuma toglierebbe la copertura proprio a quello ordinabile. Il
+        catalogo SX NON e' ordinato per kickoff: qui il piu' LONTANO e' primo
+        in lista, quindi senza l'ordinamento il pick sarebbe del lontano.
+        """
+        monkeypatch.setenv("ESPORTS_ORACLE_WINDOW_H", "1")
+        monkeypatch.setattr(el, "REQ_BUDGET_DAY", 2)   # fixtures + 1 evento
+        now = datetime.now(timezone.utc)
+        far = now + timedelta(minutes=55)
+        near = now + timedelta(minutes=50)
+        markets = [
+            _market("m-far1", "Far Alpha", "Far Beta", "Far Alpha",
+                    kickoff=far, event_id="ev-far"),
+            _market("m-far2", "Far Alpha", "Far Beta", "Far Beta",
+                    kickoff=far, event_id="ev-far"),
+            _market("m-near1", "Near Alpha", "Near Beta", "Near Alpha",
+                    kickoff=near, event_id="ev-near"),
+            _market("m-near2", "Near Alpha", "Near Beta", "Near Beta",
+                    kickoff=near, event_id="ev-near"),
+        ]
+        prov = FakeSx(markets, {"m-far1": _book(), "m-far2": _book(),
+                                "m-near1": _book(), "m-near2": _book()})
+        http = FakeHttp(
+            fixtures=[{"fixtureId": "f1", "participant1Name": "Near Alpha",
+                       "participant2Name": "Near Beta",
+                       "participant1Id": "p1", "participant2Id": "p2"}],
+            odds=_odds_payload(1.45, 2.85))
+        out = el.picks(provider=prov, http_get=http)
+        assert [p["home"] for p in out] == ["Near Alpha"], (
+            "il budget e' finito sull'evento lontano")
 
     def test_summary_dichiara_gli_eventi_entro_la_finestra_oracolo(self,
                                                                    monkeypatch):

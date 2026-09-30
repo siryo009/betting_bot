@@ -182,7 +182,15 @@ STAKE_CAP_HARD = os.getenv("STAKE_CAP_HARD", "1").strip().lower() \
 # classificati dai giri normali (che restano ogni 60s), la decisione
 # esecutiva arriva alla T-60.
 T60_WINDOW_MIN_MIN = float(os.getenv("T60_WINDOW_MIN_MIN", "60"))   # apertura (minuti al kickoff)
-T60_WINDOW_MAX_MIN = float(os.getenv("T60_WINDOW_MAX_MIN", "50"))   # chiusura (fail-closed: oltre, non si ordina)
+# CHIUSURA (minuti al kickoff). 15 dal 30/09/2026 (era 50): l'esecuzione
+# arriva fino a T-15 per rendere ORDINABILI i ritentativi tardivi dell'oracolo
+# eSports: Pinnacle pubblica tardi sugli eSports. Il TTL-miss (15min) e la finestra
+# dell'oracolo (1h) sono tarati su QUESTO bordo: con la chiusura a T-50 i
+# tentativi a T-45/T-30/T-15 avrebbero consumato quota per pick che il gate
+# T-60 avrebbe poi rifiutato come `missed` (budget bruciato a vuoto).
+# ⚠️ Il pavimento assoluto resta `MIN_MINUTES_TO_START` (15 min), che salta
+# comunque le partite che stanno per iniziare: le due guardie COINCIDONO.
+T60_WINDOW_MAX_MIN = float(os.getenv("T60_WINDOW_MAX_MIN", "15"))   # chiusura (fail-closed: oltre, non si ordina)
 # CB1 — HARD CAP PER ORDINE: NESSUN calcolo dinamico (Kelly incluso) puo'
 # produrre uno stake sopra questo tetto: viene SORSCRITTO. Il proprietario
 # ha scelto 1.00 USDC (17/09): e' il minimo ordine eseguibile dell'exchange

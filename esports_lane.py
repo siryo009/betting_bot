@@ -34,11 +34,17 @@ dichiarate in `summary()`:
 - **cache su disco** con TTL: fixtures per titolo, odds per fixture. Gli
   esiti NEGATIVI (`no_oracle`) hanno un TTL CORTO e separato, perche' su
   eSports Pinnacle pubblica tardivo: un "non ancora" va ritentato, non
-  congelato per 6 ore come una probabilita' vera;
-- **tetto giornaliero** (`ESPORTS_REQ_BUDGET_DAY`, default 6 ≈ 180/mese). Le
-  richieste si contano PRIMA di farle: oltre il tetto la corsia si ferma e lo
-  dichiara, non prova e fallisce;
-- **finestra dell'oracolo** (`ESPORTS_ORACLE_WINDOW_H`, default 3h): a
+  congelato per ore come una probabilita' vera. **15 minuti** (30/09/2026),
+  tarati sulla finestra ordini T-120..T-15: danno quattro tentativi utili per
+  evento (T-60, T-45, T-30, T-15) invece di due;
+- **tetto giornaliero** (`ESPORTS_REQ_BUDGET_DAY`, default 8 = 240/mese, il
+  piano free ne ha 250). Le richieste si contano PRIMA di farle: oltre il
+  tetto la corsia si ferma e lo dichiara, non prova e fallisce. Con 4 richieste
+  per evento il tetto copre **~2 eventi al giorno**;
+- **priorita' agli eventi PIU' VICINI**: il budget e' scarso, quindi gli
+  eventi si processano in ordine di kickoff crescente. Un evento lontano che
+  consuma le richieste toglierebbe la copertura a quello che sta per iniziare;
+- **finestra dell'oracolo** (`ESPORTS_ORACLE_WINDOW_H`, default 1h): a
   pagamento si va solo per gli eventi VICINI al fischio d'inizio. Discovery e
   fascia quota restano a 24h perche' sono gratuite, ma interrogare Pinnacle
   ore prima significa pagare una richiesta per un "non ancora" — e su eSports
@@ -111,12 +117,20 @@ MAX_MARKETS = int(os.getenv("ESPORTS_MAX_MARKETS", "120"))
 #: Default dichiarati (letti a RUNTIME dalle funzioni sotto: parametri
 #: operativi come questi si tarano senza redeploy, e un valore letto all'import
 #: non sarebbe ne' tarabile ne' testabile).
-ORACLE_WINDOW_H_DEFAULT = 3.0
+ORACLE_WINDOW_H_DEFAULT = 1.0
 MIN_INTERVAL_S_DEFAULT = 2.5
-REQ_BUDGET_DAY = int(os.getenv("ESPORTS_REQ_BUDGET_DAY", "6"))
+REQ_BUDGET_DAY = int(os.getenv("ESPORTS_REQ_BUDGET_DAY", "8"))
 FIXTURES_TTL_MIN = float(os.getenv("ESPORTS_FIXTURES_TTL_MIN", "720"))
 ODDS_TTL_MIN = float(os.getenv("ESPORTS_ODDS_TTL_MIN", "360"))
-ODDS_MISS_TTL_MIN = float(os.getenv("ESPORTS_ODDS_MISS_TTL_MIN", "60"))
+#: TTL di un esito NEGATIVO (`no_oracle`). 15 minuti (era 60) — direttiva
+#: 30/09/2026, dopo la misura sul campo: Pinnacle pubblica TARDIVO e la
+#: finestra ordini e' T-120..T-15, quindi con TTL 60min i ritentativi erano
+#: DUE (T-60, T-0) e un drop pubblicato a T-45 non veniva mai visto. Con 15min
+#: i tentativi utili diventano QUATTRO (T-60, T-45, T-30, T-15) e ogni evento
+#: costa 4 richieste -> il tetto di 8/giorno copre ~2 eventi.
+#: ⚠️ TTL e finestra sono una COPPIA: allungare l'uno senza l'altro o brucia
+#: quota (ritentativi fuori dalla finestra ordini) o perde i drop tardivi.
+ODDS_MISS_TTL_MIN = float(os.getenv("ESPORTS_ODDS_MISS_TTL_MIN", "15"))
 
 CACHE_PATH = Path(os.getenv(
     "ESPORTS_CACHE", str(DATA_DIR / "esports" / "lane_state.json")))
@@ -460,9 +474,10 @@ def _cached_oracle(state: dict, fixture: dict, home: str, away: str, *,
                    budget_ok: bool = True) -> Optional[dict]:
     """Probabilita' fair 2 vie per la fixture (cache, poi UNA richiesta).
 
-    Gli esiti negativi si rinfrescano molto piu' spesso (`ODDS_MISS_TTL_MIN`):
-    su eSports Pinnacle pubblica tardivo, quindi un "non ancora" e' uno stato
-    temporaneo — congelarlo 6 ore significherebbe perdere l'intera finestra.
+    Gli esiti negativi si rinfrescano molto piu' spesso (`ODDS_MISS_TTL_MIN`,
+    15 minuti): su eSports Pinnacle pubblica tardivo, quindi un "non ancora" e'
+    uno stato temporaneo — congelarlo per ore significherebbe perdere l'intera
+    finestra ordini.
     """
     fid = str((fixture or {}).get("fixtureId")
               or (fixture or {}).get("fixture_id") or "").strip()
@@ -542,6 +557,11 @@ def picks(*, provider: Any = None, http_get: Any = None,
     out: List[dict] = []
     try:
         events = discover(provider=provider)
+        # PRIORITA' AL PIU' VICINO (30/09/2026): il budget e' la risorsa scarsa
+        # (8 richieste/giorno, ~4 per evento) e gli eventi arrivano in ordine di
+        # catalogo SX. Processandoli per kickoff crescente la quota va a chi sta
+        # per iniziare — l'unico che puo' ancora diventare un ordine.
+        events = sorted(events, key=lambda e: e["kickoff"])
         oracle_horizon = _now() + timedelta(hours=oracle_window_h())
         for ev in events:
             import esports_oracle as eo

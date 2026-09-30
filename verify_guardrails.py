@@ -18,8 +18,8 @@ Scenari:
                                   (lega) restano
   E. Liquidita' SX             -> book sottile: ordine rifiutato (no slippage)
   F. Lega STRATEGY_LEAGUES     -> campionati non vincenti mai candidati
-  G. Circuit breakers T-60     -> finestra T-60..T-50, CB1 cap per ordine,
-                                  CB2 kill switch patrimoniale 30 USDC
+  G. Circuit breakers T-60     -> finestra esecutiva T-120..T-15, CB1 cap per
+                                  ordine, CB2 kill switch patrimoniale 30 USDC
   H. Recinto esposizione       -> 8 ordini aperti (40% impegnato): l'Advisor
                                   respinge i nuovi piani, il giro non ordina
 
@@ -492,7 +492,9 @@ def main() -> int:
         f"  {DIM}│ (alert CB2 intercettato) {reason}{RESET}")
     auto_bet._execution_mode = lambda allow_sim=True: "sim"
 
-    # G1 — FINESTRA T-60: il giro esecutivo ordina SOLO fra T-60 e T-50.
+    # G1 — FINESTRA T-60: il giro esecutivo ordina SOLO dentro la finestra
+    # esecutiva (T-120..T-15 dal 30/09: la chiusura e' scesa da T-50 per
+    # rendere ordinabili i ritentativi tardivi dell'oracolo eSports).
     _seed("t60-nofin", "Osasuna", 1.65, 0.58, 0.07)   # kickoff a +3h
     auto_bet.T60_EXECUTION_ONLY = True
     mark = len(_RECORDS)
