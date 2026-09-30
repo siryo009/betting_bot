@@ -146,6 +146,7 @@ export default defineRailway(() => {
       TENNIS_ORACLE_CACHE: preserve(),
       TENNIS_LANE_STATE: preserve(),
       TENNIS_JOB_INTERVAL_MIN: preserve(),
+      TENNIS_DISCOVERY_TTL_S: preserve(),
       TEST_NOTIFY_KEY: preserve(),
       TOP_DOWN_EV: preserve(),
       TOP_DOWN_MARGIN: preserve(),

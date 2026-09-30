@@ -272,6 +272,24 @@ class TestDiscovery:
     def test_provider_giu_fail_safe(self):
         assert tl.discover(provider=FakeSx([], {}, fail=True)) == []
 
+    def test_memo_discovery_evita_la_rete(self):
+        # Con provider=None e memo fresco `discover` NON costruisce il provider
+        # (nessuna rete): e' il comportamento che protegge l'API pubblica SX dal
+        # giro ordini ogni 60s.
+        import time
+        tl.reset_cache()
+        row = {"market_id": "0x1", "team_one": "A", "team_two": "B",
+               "sides": [], "kickoff": None}
+        tl._DISCOVERY_MEMO.update({
+            "key": f"{tl.SX_SPORT_ID}|{tl.SX_TYPE_ID}|{tl.HOURS_AHEAD}|"
+                   f"{tl.MAX_MARKETS}",
+            "ts": time.time(), "rows": [row]})
+        got = tl.discover()
+        assert got and got[0]["market_id"] == "0x1"
+        assert got[0] is not row                  # copia, non l'oggetto interno
+        tl.reset_cache()
+        assert tl.discover(provider=FakeSx([], {})) == []
+
 
 # ---------------------------------------------------------------------------
 # 4. PICKS: gate EV 2.5%

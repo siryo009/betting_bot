@@ -150,6 +150,11 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # poter cambiare cio' che la produzione vede.
     monkeypatch.setenv("TENNIS_LANE_STATE", str(tmp_path / "tennis_state.json"))
     monkeypatch.setenv("TENNIS_ORACLE_CACHE", str(tmp_path / "tennis_oracle"))
+    # Memo di discovery a livello di MODULO: senza reset un caso "trovato"
+    # resterebbe in cache per i test successivi (stesso processo) e la
+    # discovery sembrerebbe vuota/piena in base all'ultimo test eseguito.
+    import tennis_lane as _tl
+    _tl.reset_cache()
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di
     # MODULO e sopravvive fra i test dello stesso processo, mentre il ledger
     # no (ogni test ha il suo DB temporaneo). Senza reset un caso che semina

@@ -86,6 +86,21 @@ MAX_INV_SUM = float(os.getenv("TENNIS_MAX_INV_SUM", "1.08"))
 ORACLE_TTL_MIN = float(os.getenv("TENNIS_ORACLE_TTL_MIN", "720"))
 REQ_BUDGET_DAY = int(os.getenv("TENNIS_REQ_BUDGET_DAY", "8"))
 
+#: TTL della DISCOVERY SX (order book). Il giro ordini gira ogni 60s e la
+#: discovery legge ~50 order book per volta: senza memo sarebbero ~3000
+#: richieste/ora sull'API pubblica per un prezzo usato SOLO dal gate EV (il
+#: prezzo d'ordine viene riletto vivo al momento dell'ordine). Default 5 minuti.
+DISCOVERY_TTL_S = float(os.getenv("TENNIS_DISCOVERY_TTL_S", "300"))
+
+_DISCOVERY_MEMO: Dict[str, Any] = {"key": None, "ts": 0.0, "rows": []}
+
+
+def reset_cache() -> None:
+    """Azzera la memo di discovery (usata dai test e a cambio finestra)."""
+    _DISCOVERY_MEMO["key"] = None
+    _DISCOVERY_MEMO["ts"] = 0.0
+    _DISCOVERY_MEMO["rows"] = []
+
 #: Ledger/keyword tennis nel payload the-odds-api.
 TENNIS_KEY_PREFIX = "tennis_"
 ODDS_BASE = os.getenv("TENNIS_ODDS_BASE", "https://api.the-odds-api.com/v4")
@@ -335,6 +350,16 @@ def discover(provider: Any = None) -> List[dict]:
     except Exception as exc:                                   # pragma: no cover
         logger.warning("tennis_lane: dipendenze non disponibili (%s)", exc)
         return []
+    # Memo di discovery (vedi `DISCOVERY_TTL_S`): il prezzo d'ordine viene
+    # riletto vivo al momento dell'ordine, quindi un memo breve non puo' far
+    # comprare a un prezzo stantio — evita solo di interrogare l'exchange 60
+    # volte l'ora per un dato che decide soltanto il gate EV.
+    _key = f"{SX_SPORT_ID}|{SX_TYPE_ID}|{HOURS_AHEAD}|{MAX_MARKETS}"
+    _now_ts = time.time()
+    if (provider is None and _DISCOVERY_MEMO.get("key") == _key
+            and _now_ts - float(_DISCOVERY_MEMO.get("ts") or 0)
+            < float(DISCOVERY_TTL_S)):
+        return [dict(r) for r in _DISCOVERY_MEMO.get("rows") or []]
     prov = provider
     if prov is None:
         try:
@@ -415,6 +440,10 @@ def discover(provider: Any = None) -> List[dict]:
             "depth": round(sum(s["depth"] for s in sides), 2),
             "inv_sum": round(inv, 4),
         })
+    if provider is None:
+        _DISCOVERY_MEMO["key"] = _key
+        _DISCOVERY_MEMO["ts"] = _now_ts
+        _DISCOVERY_MEMO["rows"] = out
     return out
 
 
