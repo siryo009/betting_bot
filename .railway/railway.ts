@@ -2,11 +2,26 @@ import { defineRailway, fn, github, preserve, project, service, volume } from "r
 
 export default defineRailway(() => {
   const betting_botVolume = volume("betting_bot-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: "sfo", sizeMB: 500 });
+  // 01/10/2026 — SBLOCCO ORDINI SX: il container in `sfo` (US) riceve 403 da
+  // SX Bet su /orders-v3 ("SX Bet is not available in the United States or
+  // other prohibited jurisdictions"). La vecchia infrastruttura girava in
+  // `ams` (Amsterdam) e da li' gli ordini passavano (bet #41 del 15/09).
+  // Questo volume e' la destinazione della migrazione: si crea PRIMA, si
+  // copiano i dati, poi si sposta il servizio (il vecchio volume resta
+  // dichiarato finche' la migrazione non e' verificata, cosi' `config apply`
+  // non lo distrugge).
+  const betting_botVolumeAms = volume("betting_bot-volume-ams", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: "ams", sizeMB: 500 });
+  // ⚠️ REGIONE `ams` (Amsterdam) OBBLIGATORIA dal 01/10/2026: da `sfo` (US)
+  // SX Bet risponde 403 su /orders-v3 ("not available in the United States")
+  // e il bot non piazza NESSUN ordine. Il volume attivo e' la copia in `ams`;
+  // `betting_bot-volume` (sfo) resta dichiarato solo come rete di sicurezza
+  // della migrazione: NON rimuoverlo dalla lista risorse finche' la copia in
+  // ams non e' considerata definitiva (rimuoverlo la DISTRUGGE).
   const betting_bot = service("betting_bot", {
     source: github("siryo009/betting_bot", { checkSuites: false }),
-    replicas: { "sfo": 1 },
+    replicas: { "ams": 1 },
     networking: { privateNetworkEndpoint: "bettingbot" },
-    volumeMounts: { "/app/data": betting_botVolume },
+    volumeMounts: { "/app/data": betting_botVolumeAms },
     // ⚠️ Ogni variabile impostata da dashboard/CLI DEVE restare dichiarata con
     // preserve(): `railway config apply` distrugge cio' che non trova nel
     // file. La rigenerazione del 27/09 (`config pull`) aveva perso queste
@@ -196,6 +211,6 @@ export default defineRailway(() => {
   });
 
   return project("creative-vibrancy", {
-    resources: [betting_bot, betting_botVolume, surebet, surebetData],
+    resources: [betting_bot, betting_botVolume, betting_botVolumeAms, surebet, surebetData],
   });
 });
