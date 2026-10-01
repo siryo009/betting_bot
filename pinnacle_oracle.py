@@ -70,7 +70,7 @@ import os
 import statistics
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from config import DATA_DIR, load_dotenv
 
@@ -1193,6 +1193,76 @@ def _ah_label(home_line: float) -> str:
     return f"{v:+g}" if abs(v) >= 1e-9 else "0"
 
 
+def _oracle_fixture_books(home: str, away: str, *,
+                          cache_dir: Optional[Path] = None,
+                          sport_key: Optional[str] = None,
+                          now: Optional[float] = None
+                          ) -> Optional[List[Dict[str, Any]]]:
+    """Bookmaker Pinnacle della partita dalle cache oracolo (0 crediti).
+
+    UNICA lettura-cache del percorso a LINEA: la usano `line_true_probs` (il
+    p_true di UNA linea) e `oracle_lines` (l'elenco delle linee prezzabili).
+    Due letture separate divergerebbero (finestra di freschezza, matching dei
+    nomi, `canonical_book`), quindi la logica sta qui una volta sola.
+
+    Ritorna:
+      - `None` -> la partita NON e' in nessuna cache fresca: oracolo IGNOTO,
+        non si puo' concludere ne' "prezzabile" ne' "non prezzabile";
+      - lista (eventualmente VUOTA) -> la partita c'e'; la lista porta i
+        bookmaker Pinnacle trovati (vuota = partita presente ma Pinnacle non
+        ha ancora pubblicato). La distinzione conta: un "non prezzato" su un
+        oracolo NOTO e' un'informazione, su un oracolo ignoto e' rumore.
+    """
+    folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
+    # Prefisso della cache oracolo: costante GEMELLA di `odds_api.
+    # ORACLE_CACHE_PREFIX` (import pigro con fallback al letterale — il
+    # tripwire `test_prefisso_cache_gemello` pretende che coincidano).
+    try:
+        import odds_api as _oa
+        prefix = getattr(_oa, "ORACLE_CACHE_PREFIX", "toao_")
+    except Exception:                                            # pragma: no cover
+        prefix = "toao_"
+    if sport_key:
+        paths = [folder / f"{prefix}{sport_key}.json"]
+    else:
+        try:
+            paths = sorted(folder.glob(f"{prefix}*.json"),
+                           key=lambda p: (p.stat().st_mtime
+                                          if p.exists() else 0.0),
+                           reverse=True)
+        except Exception:                                        # pragma: no cover
+            return None
+    ts_now = time.time() if now is None else float(now)
+    h, a = _cf(home), _cf(away)
+    if not h or not a:
+        return None
+    found = False
+    books: List[Dict[str, Any]] = []
+    for path in paths:
+        data = _read_cache(path)
+        if not isinstance(data, dict):
+            continue
+        age_h = (ts_now - float(data.get("ts") or 0)) / 3600.0
+        if age_h > CACHE_MAX_AGE_H:
+            continue
+        for match in (data or {}).get("payload") or []:
+            if not isinstance(match, dict):
+                continue
+            mh = _cf(match.get("home_team"))
+            ma = _cf(match.get("away_team"))
+            # Match per SOTTOSTRINGA (come `load_oracle`): mai l'incrocio.
+            if (not mh or not ma) or (h not in mh and mh not in h) \
+                    or (a not in ma and ma not in a):
+                continue
+            found = True
+            for bm in match.get("bookmakers") or []:
+                if not isinstance(bm, dict):
+                    continue
+                if canonical_book(bm) == PRIMARY_BOOK:
+                    books.append(bm)
+    return books if found else None
+
+
 def line_true_probs(home: str, away: str, *, market_type: str,
                     line: float, cache_dir: Optional[Path] = None,
                     sport_key: Optional[str] = None,
@@ -1215,62 +1285,82 @@ def line_true_probs(home: str, away: str, *, market_type: str,
         return None
     if not (line == line) or not (abs(float(line)) < float("inf")):  # NaN/inf
         return None
-    folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
-    # Prefisso della cache oracolo: costante GEMELLA di `odds_api.
-    # ORACLE_CACHE_PREFIX` (import pigro con fallback al letterale — il
-    # tripwire `test_prefisso_cache_gemello` pretende che coincidano).
-    try:
-        import odds_api as _oa
-        prefix = getattr(_oa, "ORACLE_CACHE_PREFIX", "toao_")
-    except Exception:                                            # pragma: no cover
-        prefix = "toao_"
-    if sport_key:
-        paths = [folder / f"{prefix}{sport_key}.json"]
-    else:
-        folder_glob = sorted(folder.glob(
-            f"{prefix}*.json"),
-            key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
-            reverse=True)
-        paths = folder_glob
-    ts_now = time.time() if now is None else float(now)
-    h, a = _cf(home), _cf(away)
-    if not h or not a:
+    books = _oracle_fixture_books(home, away, cache_dir=cache_dir,
+                                  sport_key=sport_key, now=now)
+    if not books:
         return None
-    for path in paths:
-        data = _read_cache(path)
-        if not isinstance(data, dict):
-            continue
-        age_h = (ts_now - float(data.get("ts") or 0)) / 3600.0
-        if age_h > CACHE_MAX_AGE_H:
-            continue
-        payload = (data or {}).get("payload") or []
-        for match in payload:
-            if not isinstance(match, dict):
+    for bm in books:
+        if mt == "OU":
+            quotes = totals_odds_of(bm, float(line))
+        else:
+            quotes = spreads_odds_of(bm, home, away, float(line))
+        if quotes:
+            probs = line_probabilities(quotes, devig_method=devig_method)
+            if probs:
+                return probs
+    return None
+
+
+def oracle_lines(home: str, away: str, *, market_type: str,
+                 cache_dir: Optional[Path] = None,
+                 sport_key: Optional[str] = None,
+                 now: Optional[float] = None) -> Optional[Set[float]]:
+    """Linee che l'oracolo Pinnacle PREZZA per la partita (0 crediti).
+
+    PERCHE' ESISTE (fix linee 01/10/2026). SX Bet quota MOLTE linee
+    (AH +0.5/+1/+1.5..., OU 1.5/2/2.5/3/3.5...) mentre Pinnacle, via
+    the-odds-api, pubblica tipicamente la sola linea MAIN: un pick su una
+    linea che l'oracolo non prezza non potra' MAI diventare un ordine, perche'
+    il gate top-down e' fail-closed (`linea`/`no_oracle`). Sapere IN ANTICIPO
+    quali linee sono prezzabili permette di SCEGLIERE quella giusta al momento
+    della selezione, invece di scoprire il disallineamento all'ordine.
+
+    Ritorna `None` se la partita non e' in nessuna cache fresca (oracolo
+    IGNOTO: nessuna conclusione possibile), altrimenti un `set` (eventualmente
+    vuoto): per l'OU le linee dei `totals`, per l'AH le linee del lato CASA
+    (la convenzione di `spreads_odds_of`/`sx_line_of_esito`); se il payload
+    ha le squadre invertite la linea dell'altro lato viene ribaltata di segno,
+    cosi' il confronto col ledger resta corretto.
+    """
+    mt = str(market_type or "").strip().upper()
+    if mt not in ("OU", "AH"):
+        return None
+    books = _oracle_fixture_books(home, away, cache_dir=cache_dir,
+                                 sport_key=sport_key, now=now)
+    if books is None:
+        return None
+    h, a = _cf(home), _cf(away)
+    lines: Set[float] = set()
+    for bm in books:
+        for mkt in bm.get("markets") or []:
+            if not isinstance(mkt, dict):
                 continue
-            mh = _cf(match.get("home_team"))
-            ma = _cf(match.get("away_team"))
-            # Match per SOTTOSTRINGA (come `load_oracle`): mai l'incrocio.
-            if (not mh or not ma) or (h not in mh and mh not in h) \
-                    or (a not in ma and ma not in a):
+            key = str(mkt.get("key") or "").lower()
+            if mt == "OU" and key != "totals":
                 continue
-            for bm in match.get("bookmakers") or []:
-                if not isinstance(bm, dict) or canonical_book(bm) != PRIMARY_BOOK:
+            if mt == "AH" and key != "spreads":
+                continue
+            for o in mkt.get("outcomes") or []:
+                if not isinstance(o, dict):
+                    continue
+                try:
+                    price = float(o.get("price"))
+                    point = float(o.get("point"))
+                except (TypeError, ValueError):
+                    continue
+                if price <= 1.0:
                     continue
                 if mt == "OU":
-                    quotes = totals_odds_of(bm, float(line))
-                    if quotes:
-                        probs = line_probabilities(quotes,
-                                                   devig_method=devig_method)
-                        if probs:
-                            return probs
-                else:
-                    quotes = spreads_odds_of(bm, home, away, float(line))
-                    if quotes:
-                        probs = line_probabilities(quotes,
-                                                   devig_method=devig_method)
-                        if probs:
-                            return probs
-    return None
+                    lines.add(point)
+                    continue
+                name = _cf(o.get("name"))
+                if h and name and (name == h or name in h or h in name):
+                    lines.add(point)
+                elif a and name and (name == a or name in a or a in name):
+                    # Squadre invertite nel payload: la linea vista da casa
+                    # e' l'opposta di quella dell'altro lato.
+                    lines.add(-point)
+    return lines
 
 
 def line_oracle_probs(pick: Dict[str, Any],

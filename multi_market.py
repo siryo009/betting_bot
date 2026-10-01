@@ -72,7 +72,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from market_calib import MARKET_EDGE_STRONG, market_implied
 from poisson_engine import ah_outcome_probs, expected_goals, ou_outcome_probs
@@ -1051,7 +1051,79 @@ def _lam_for(match_id: str, home: str, away: str) -> Tuple[float, float]:
     return expected_goals(home, away)
 
 
-def _ledger_rows(cands: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _line_priceable(home: str, away: str, market_type: str,
+                    line: float) -> bool:
+    """True se l'oracolo prezza QUESTA linea (o se l'oracolo e' IGNOTO).
+
+    Distinzione voluta: `oracle_lines` ritorna `None` quando la partita non e'
+    in nessuna cache fresca (nessuna conclusione possibile) e un `set`
+    quando la partita c'e'. Solo nel secondo caso un "assente" e' una
+    informazione: la' il pick viene scartato, perche' sappiamo che l'oracolo
+    non lo prezza. Con l'oracolo ignoto NON si blocca qui — la decisione
+    definitiva resta al gate top-down di `auto_bet` (`linea`/`no_oracle`),
+    cosi' il comportamento di oggi non cambia in peggio per una cache che
+    arrivera' al prossimo fetch.
+    """
+    try:
+        import pinnacle_oracle as po
+        known = po.oracle_lines(home or "", away or "",
+                                market_type=market_type)
+    except Exception as exc:                                     # pragma: no cover
+        logger.debug("multi_market: oracolo linee non disponibile (%s)", exc)
+        return True
+    if known is None:
+        return True
+    return any(abs(float(line) - ln) < 1e-6 for ln in known)
+
+
+def _oracle_lines_for(fixture: Dict[str, Any],
+                      market_type: str) -> Optional[Set[float]]:
+    """Linee che l'oracolo prezza per la fixture (`None` = oracolo IGNOTO).
+
+    Import PIGRO di `pinnacle_oracle` (che resta il padrone della lettura
+    delle cache) e fail-open sull'errore: la corsia multi-mercato non deve
+    poter fermare il giro per un problema dell'oracolo — la decisione
+    definitiva resta al gate top-down, che e' fail-closed.
+    """
+    try:
+        import pinnacle_oracle as po
+        return po.oracle_lines(fixture.get("home") or "",
+                               fixture.get("away") or "",
+                               market_type=market_type)
+    except Exception as exc:                                     # pragma: no cover
+        logger.debug("multi_market: oracolo linee non disponibile (%s)", exc)
+        return None
+
+
+def _prefer_oracle_lines(fixture: Dict[str, Any], market_type: str,
+                         groups: List[List[Dict[str, Any]]]
+                         ) -> List[List[Dict[str, Any]]]:
+    """Tra i gruppi giocabili, preferisce quelli che l'ORACOLO puo' prezzare.
+
+    Fix linee (01/10/2026): SX quota molte linee (AH +0.5/+1/+1.5, OU
+    1.5/2/2.5/3/3.5) mentre Pinnacle pubblica tipicamente la sola MAIN; un
+    pick su una linea non prezzata non potra' mai diventare un ordine (il
+    gate top-down risponde `linea`). Preferire le linee prezzabili evita di
+    registrare come giocabile un candidato che non lo e'.
+
+    CONSERVATIVO per costruzione: se l'oracolo e' IGNOTO per la partita (nessuna
+    cache fresca) l'ordine resta quello di prima (`_group_rank`: linea main,
+    poi liquidita'); se l'oracolo e' NOTO ma NESSUN gruppo e' prezzabile si
+    torna comunque all'ordine di prima, senza scartare nulla — la telemetria
+    del ledger resta completa e a impedire l'ordine ci pensa `live_picks`
+    (fail-closed).
+    """
+    known = _oracle_lines_for(fixture, market_type)
+    if not known:
+        return groups
+    preferred = [g for g in groups
+                 if any(abs(float(c.get("line") or 0.0) - ln) < 1e-6
+                        for c in g for ln in known)]
+    return preferred or groups
+
+
+def _ledger_rows(fixture: Dict[str, Any],
+                 cands: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Righe da registrare in `predictions` (le sole linee che contano).
 
     Il ledger delle previsioni e' fatto per i segnali AZIONABILI: registrare
@@ -1071,7 +1143,8 @@ def _ledger_rows(cands: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         playable = [g for g in groups if any(c.get("playable") for c in g)]
         if playable:
-            out.extend(playable[0])
+            out.extend(_prefer_oracle_lines(fixture, market_type,
+                                            playable)[0])
         else:
             best = max(groups, key=lambda g: max(float(c["ev"]) for c in g))
             out.append(max(best, key=lambda c: float(c["ev"])))
@@ -1083,7 +1156,7 @@ def _persist(fixture: Dict[str, Any], cands: Sequence[Dict[str, Any]]) -> int:
     written = 0
     try:
         from tracker import save_prediction
-        for cand in _ledger_rows(cands):
+        for cand in _ledger_rows(fixture, cands):
             save_prediction(fixture["id"], cand["mercato"], cand["esito_key"],
                             cand["quota"], cand["prob"], cand["ev"],
                             market_prob=cand.get("market_prob"),
@@ -1210,6 +1283,17 @@ def live_picks(*, hours: float = HOURS_AHEAD,
         if target is None or target.get("line") is None:
             logger.info("multi_market: skip %s %s (mercato/linea non "
                         "riconoscibili per l'ordine)", match_id, esito)
+            continue
+        # FIX linee (01/10/2026): un pick su una linea che l'oracolo NON prezza
+        # non puo' diventare un ordine — il gate top-down risponderebbe `linea`
+        # e il pick resterebbe in coda a ogni giro. Fail-closed, ma SOLO quando
+        # l'oracolo e' NOTO: con la cache assente/stantia non si conclude nulla
+        # e la decisione resta al gate a valle (che e' fail-closed pure lui).
+        market_upper = str(mercato).upper()
+        if not _line_priceable(home, away, market_upper, float(target["line"])):
+            logger.info("multi_market: skip %s %s (l'oracolo non prezza la "
+                        "linea %s del mercato %s)", match_id, esito,
+                        target["line"], market_upper)
             continue
         out.append({
             "match_id": match_id, "home": home, "away": away,

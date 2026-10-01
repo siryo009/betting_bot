@@ -150,6 +150,14 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # poter cambiare cio' che la produzione vede.
     monkeypatch.setenv("TENNIS_LANE_STATE", str(tmp_path / "tennis_state.json"))
     monkeypatch.setenv("TENNIS_ORACLE_CACHE", str(tmp_path / "tennis_oracle"))
+    # Cache dell'oracolo a LINEA (01/10/2026): `multi_market` sceglie le linee
+    # OU/AH in base a cio' che Pinnacle prezza (`pinnacle_oracle.oracle_lines`,
+    # lettura delle cache `toao_*.json`). Senza isolamento un `live_picks()` di
+    # test leggerebbe le cache REALI del volume (o, peggio, un test potrebbe
+    # scriverle e cambiare cio' che la produzione vede): la cartella dati
+    # dell'oracolo va nella tmp di ogni test.
+    import pinnacle_oracle as _po
+    monkeypatch.setattr(_po, "DATA_DIR", tmp_path)
     # Memo di discovery a livello di MODULO: senza reset un caso "trovato"
     # resterebbe in cache per i test successivi (stesso processo) e la
     # discovery sembrerebbe vuota/piena in base all'ultimo test eseguito.

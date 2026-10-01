@@ -180,9 +180,14 @@ export default defineRailway(() => {
       ODDS_API_KEY: preserve(),
       QUOTAVERACE_BOT_TOKEN: preserve(),
       SUREBET_BUDGET: "100",
-      // Settembre 2026: solo MLB (in stagione). Riattivare
-      // "basketball_nba,baseball_mlb" il 1° ottobre (inizio stagione NBA).
-      SUREBET_SPORTS: "baseball_mlb",
+      // 01/10/2026: ripristinata la coppia della stagione invernale — NBA al
+      // via (verificata `active: true` su /v4/sports) accanto a MLB. Costo:
+      // ~4 fetch/sport/giorno col TTL 6h qui sotto (~8 crediti/giorno in
+      // totale). Se il credit watchdog segnala pressione: prima si alza
+      // SUREBET_ODDS_TTL (12h = meta' del costo), poi si toglie MLB a fine
+      // stagione — MAI toccare la rotazione value, che e' la corsia del
+      // denaro.
+      SUREBET_SPORTS: "basketball_nba,baseball_mlb",
       SUREBET_ODDS_TTL: "21600",
       SUREBET_MIN_REMAINING: "50",
       SUREBET_MIN_MARGIN: "0.005",

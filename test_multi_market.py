@@ -314,6 +314,17 @@ def _seed_prediction(match_id, mercato, esito, quota=1.70, status="value",
                             status=status)
 
 
+def _cand(market_type, line, selection, *, playable=True, ev=0.05):
+    """Candidato nella forma prodotta da `analyze_fixture` (solo i campi usati)."""
+    return {"fixture_id": FIXTURE, "market_type": market_type,
+            "mercato": market_type, "line": float(line),
+            "selection": selection,
+            "esito_key": mm.ledger_esito(market_type, selection, line),
+            "quota": 1.70, "price": 1.70, "prob": 0.62, "ev": ev,
+            "playable": playable,
+            "status": "value" if playable else "rejected"}
+
+
 class TestCorsiaOrdini:
     def test_ah_live_e_ou_shadow(self, db, monkeypatch):
         monkeypatch.setattr(mm, "ENABLE_LIVE_AH", True)
@@ -364,6 +375,200 @@ class TestCorsiaOrdini:
         pick = mm.live_picks()[0]
         # 'Away +0.75' -> linea SX -0.75 (punto di vista di teamOne).
         assert pick["market_line"] == -0.75 and pick["order_side"] == "away"
+
+
+# ---------------------------------------------------------------------------
+# 5a-bis. Fix linee (01/10/2026): si sceglie la linea che l'ORACOLO prezza
+# ---------------------------------------------------------------------------
+#
+# SX quota MOLTE linee (AH +0.5/+1/+1.5, OU 1.5/2/2.5/3/3.5) mentre Pinnacle
+# pubblica tipicamente la sola MAIN: un pick su una linea non prezzata non
+# poteva MAI diventare un ordine (il gate top-down risponde `linea`). Qui si
+# verifica (a) il lettore delle linee prezzabili, (b) la preferenza nella
+# scelta della linea del ledger, (c) il gate fail-closed della corsia ordini.
+
+ORACLE_SPORT = "soccer_italy_serie_a"
+
+
+def _write_oracle_cache(tmp_path, *, totals=(), spreads=(), home=HOME,
+                        away=AWAY, sport=ORACLE_SPORT, age_h=0.0,
+                        with_pinnacle=True):
+    """Cache oracolo finta (`toao_*.json`) con i mercati Pinnacle della partita.
+
+    `spreads` sono le linee del lato CASA (convenzione SX): l'esito di
+    trasferta porta il punto opposto, come nel payload reale.
+    """
+    import json
+    import time
+    markets = []
+    if totals:
+        outcomes = [{"name": "Over", "price": 1.95, "point": float(l)}
+                    for l in totals]
+        outcomes += [{"name": "Under", "price": 1.95, "point": float(l)}
+                     for l in totals]
+        markets.append({"key": "totals", "outcomes": outcomes})
+    if spreads:
+        outcomes = []
+        for l in spreads:
+            outcomes.append({"name": home, "price": 1.90, "point": float(l)})
+            outcomes.append({"name": away, "price": 1.90, "point": -float(l)})
+        markets.append({"key": "spreads", "outcomes": outcomes})
+    books = ([{"key": "pinnacle", "title": "Pinnacle", "markets": markets}]
+             if with_pinnacle else [])
+    payload = [{"home_team": home, "away_team": away, "bookmakers": books}]
+    path = tmp_path / f"toao_{sport}.json"
+    path.write_text(json.dumps({"ts": time.time() - age_h * 3600.0,
+                                "payload": payload}))
+    return path
+
+
+class TestLettoreLineeOracle:
+    """`pinnacle_oracle.oracle_lines`: quali linee l'oracolo SA prezzare."""
+
+    def test_ou_linee_dei_totali(self, tmp_path):
+        import pinnacle_oracle as po
+        _write_oracle_cache(tmp_path, totals=(2.5, 3.0))
+        assert po.oracle_lines(HOME, AWAY, market_type="OU") == {2.5, 3.0}
+
+    def test_ah_linee_del_lato_casa(self, tmp_path):
+        import pinnacle_oracle as po
+        _write_oracle_cache(tmp_path, spreads=(0.5, 1.0))
+        assert po.oracle_lines(HOME, AWAY, market_type="AH") == {0.5, 1.0}
+
+    def test_ah_esito_del_lato_trasferta_ribalta_il_segno(self, tmp_path):
+        """Un esito spreads intestato alla TRASFERTA vale la linea ribaltata.
+
+        Nel payload reale gli esiti `spreads` portano NOME SQUADRA + punto
+        (forma verificata il 30/09): se compare solo il lato trasferta, la
+        linea vista da CASA e' l'opposta. Senza il ribaltamento il confronto
+        col ledger sarebbe sbagliato di segno — e il pick finirebbe su una
+        linea che l'oracolo, di fatto, non prezza.
+        """
+        import json
+        import time
+        import pinnacle_oracle as po
+        payload = [{"home_team": HOME, "away_team": AWAY, "bookmakers": [
+            {"key": "pinnacle", "title": "Pinnacle", "markets": [
+                {"key": "spreads", "outcomes": [
+                    {"name": AWAY, "price": 1.90, "point": 0.5}]}]}]}]
+        (tmp_path / f"toao_{ORACLE_SPORT}.json").write_text(
+            json.dumps({"ts": time.time(), "payload": payload}))
+        assert po.oracle_lines(HOME, AWAY, market_type="AH") == {-0.5}
+
+    def test_oracolo_ignoto_senza_cache(self, tmp_path):
+        """Nessuna cache fresca -> None (IGNOTO, MAI un set vuoto)."""
+        import pinnacle_oracle as po
+        assert po.oracle_lines(HOME, AWAY, market_type="OU") is None
+
+    def test_partita_assente_dalla_cache(self, tmp_path):
+        import pinnacle_oracle as po
+        _write_oracle_cache(tmp_path, totals=(2.5,), home="Inter", away="Milan")
+        assert po.oracle_lines(HOME, AWAY, market_type="OU") is None
+
+    def test_partita_presente_ma_pinnacle_assente(self, tmp_path):
+        """Partita nota ma Pinnacle non pubblica -> set VUOTO, non None.
+
+        La distinzione e' il cuore del fix: un "non prezzato" su un oracolo
+        NOTO e' un'informazione (il pick si scarta), su un oracolo ignoto
+        sarebbe rumore.
+        """
+        import pinnacle_oracle as po
+        _write_oracle_cache(tmp_path, totals=(2.5,), with_pinnacle=False)
+        assert po.oracle_lines(HOME, AWAY, market_type="OU") == set()
+
+    def test_cache_stantia_non_conta(self, tmp_path):
+        import pinnacle_oracle as po
+        _write_oracle_cache(tmp_path, totals=(2.5,), age_h=100.0)
+        assert po.oracle_lines(HOME, AWAY, market_type="OU") is None
+
+    def test_mercato_non_a_linea(self, tmp_path):
+        import pinnacle_oracle as po
+        _write_oracle_cache(tmp_path, totals=(2.5,))
+        assert po.oracle_lines(HOME, AWAY, market_type="1X2") is None
+
+    def test_concordia_con_line_true_probs(self, tmp_path):
+        """Le due letture (elenco linee / p_true di UNA linea) concordano.
+
+        E' il tripwire contro la duplicazione: entrambe passano da
+        `_oracle_fixture_books`, quindi non possono divergere.
+        """
+        import pinnacle_oracle as po
+        _write_oracle_cache(tmp_path, totals=(2.5, 3.0))
+        lines = po.oracle_lines(HOME, AWAY, market_type="OU")
+        for line in sorted(lines):
+            assert po.line_true_probs(HOME, AWAY, market_type="OU",
+                                      line=line) is not None
+        assert po.line_true_probs(HOME, AWAY, market_type="OU", line=9.5) is None
+
+
+class TestPreferenzaLineeOracle:
+    """Selezione della linea: prima quelle che l'oracolo prezza, poi il resto."""
+
+    def test_line_priceable_oracolo_ignoto_non_blocca(self, tmp_path, monkeypatch):
+        """Oracolo IGNOTO -> True: la decisione resta al gate a valle.
+
+        Fail-closed solo quando SI SA che l'oracolo non prezza la linea.
+        """
+        assert mm._line_priceable(HOME, AWAY, "AH", 1.5) is True
+        _write_oracle_cache(tmp_path, spreads=(0.5,))
+        assert mm._line_priceable(HOME, AWAY, "AH", 0.5) is True
+        assert mm._line_priceable(HOME, AWAY, "AH", 1.5) is False
+
+    def test_preferisce_il_gruppo_prezzabile(self, tmp_path):
+        _write_oracle_cache(tmp_path, totals=(3.0,))
+        g25 = [_cand("OU", 2.5, "over"), _cand("OU", 2.5, "under")]
+        g30 = [_cand("OU", 3.0, "over"), _cand("OU", 3.0, "under")]
+        out = mm._prefer_oracle_lines({"home": HOME, "away": AWAY}, "OU",
+                                      [g25, g30])
+        assert out == [g30]
+
+    def test_oracolo_ignoto_nessuna_preferenza(self, tmp_path):
+        g25 = [_cand("OU", 2.5, "over"), _cand("OU", 2.5, "under")]
+        g30 = [_cand("OU", 3.0, "over"), _cand("OU", 3.0, "under")]
+        assert mm._prefer_oracle_lines({"home": HOME, "away": AWAY}, "OU",
+                                       [g25, g30]) == [g25, g30]
+
+    def test_nessun_gruppo_prezzabile_non_scarta(self, tmp_path):
+        """Oracolo NOTO senza linee utili: l'ordine di prima resta.
+
+        Conservativo di proposito: la telemetria del ledger non si perde, a
+        impedire l'ordine ci pensa `live_picks`.
+        """
+        _write_oracle_cache(tmp_path, totals=(9.5,))
+        g25 = [_cand("OU", 2.5, "over"), _cand("OU", 2.5, "under")]
+        g30 = [_cand("OU", 3.0, "over"), _cand("OU", 3.0, "under")]
+        assert mm._prefer_oracle_lines({"home": HOME, "away": AWAY}, "OU",
+                                       [g25, g30]) == [g25, g30]
+
+    def test_ledger_registra_la_linea_prezzabile(self, tmp_path):
+        """`_ledger_rows` sceglie il gruppo prezzabile invece del primo."""
+        _write_oracle_cache(tmp_path, totals=(3.0,))
+        fixture = {"id": FIXTURE, "home": HOME, "away": AWAY,
+                   "commence": "2030-01-01T20:00:00Z", "league": "Premier League"}
+        cands = [_cand("OU", 2.5, "over"), _cand("OU", 2.5, "under"),
+                 _cand("OU", 3.0, "over"), _cand("OU", 3.0, "under")]
+        rows = mm._ledger_rows(fixture, cands)
+        assert [r["line"] for r in rows] == [3.0, 3.0]
+
+    def test_live_picks_scarta_la_linea_non_prezzata(self, db, monkeypatch,
+                                                    tmp_path):
+        """Il gate fail-closed: con l'oracolo NOTO si ordina solo la sua linea."""
+        monkeypatch.setattr(mm, "ENABLE_LIVE_AH", True)
+        monkeypatch.setattr(mm, "ENABLE_LIVE_OU", False)
+        _write_oracle_cache(tmp_path, spreads=(0.5,))
+        _seed_prediction(FIXTURE, "AH", "Home +0.5")
+        _seed_prediction("sx-9", "AH", "Home +1.5")
+        picks = mm.live_picks()
+        assert [p["match_id"] for p in picks] == [FIXTURE]
+        assert picks[0]["market_line"] == 0.5
+
+    def test_live_picks_non_blocca_con_oracolo_ignoto(self, db, monkeypatch,
+                                                      tmp_path):
+        """Senza cache non si conclude nulla: la corsia resta come prima."""
+        monkeypatch.setattr(mm, "ENABLE_LIVE_AH", True)
+        monkeypatch.setattr(mm, "ENABLE_LIVE_OU", False)
+        _seed_prediction(FIXTURE, "AH", "Home +1.5")
+        assert [p["match_id"] for p in mm.live_picks()] == [FIXTURE]
 
 
 # ---------------------------------------------------------------------------
