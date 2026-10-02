@@ -8169,3 +8169,118 @@ multi_market+bot+decision_pipeline+limits+compare (~260),
 sx_signals+esports_lane+t60_breakers+league_gate+secret_hygiene+
 railway_drift+settlement_watchdog+decision_shadow (~330).
 `compileall` OK, 0 marker di conflitto.
+
+### Suite analitica offline: stress-test, CLV/Brier, tuning Steam Move (02/10/2026)
+
+Direttiva del proprietario: tre tool **offline** che misurino le performance
+reali, stressino il bankroll ed evitino l'overfitting, **senza appesantire il
+runtime del container Railway**.
+
+**VINCOLI RISPETTATI**: (1) tutto in `scripts/` — `run_all.py`, `bot.py`,
+`auto_bet.py` e gli altri moduli del loop **non cambiano di una riga**;
+(2) `optuna` **non entra nel Dockerfile** → file separato
+`requirements-scripts.txt`, e i tre script funzionano anche senza (fallback
+random, sempre dichiarato nel report); (3) ogni formula arriva dal modulo di
+produzione, mai ricopiata; (4) i test stanno in `scripts/test_*.py` e pytest
+li raccoglie gia' (`testpaths = .`).
+
+**1) `scripts/stress_test_bankroll.py` — Monte Carlo, PoR e MaxDD sul recinto.**
+100.000 simulazioni per scenario su una griglia di quote (1.30 → 2.50).
+Le costanti del recinto sono **LETTE** da `auto_bet`
+(`fixed_order_stake`, `ORDER_MAX_STAKE_USDC`, `OPEN_EXPOSURE_CAP_PCT`) con
+`source` dichiarato (`auto_bet` o `default`): copiarle le farebbe divergere al
+primo ritocco di una soglia. `max_concurrent = floor(equity x 40% / 1.50)` →
+con 30.40 USDC di equity **8 ordini** (la direttiva del 28/09).
+Campionamento per **round** di `max_concurrent` puntate contemporanee
+(P/L del round = `vinte x stake x quota - k x stake`) con tabella
+inverse-CDF quantizzata e buffer `float32` preallocati: **0.776 s per
+100k x 500** (la prima versione, a matrice di Bernoulli, ne impiegava 19.5 s:
+"sotto il secondo" era un requisito esplicito della direttiva).
+Output: Win Rate di pareggio, `ruin_pct`, `inoperable_pct`, MaxDD
+medio/p95/worst, equity finale p5/mean/p95.
+⚠️ **Lettura onesta del primo giro** (edge 0, equity 30.40): `ruin_pct` **0.000%
+su tutte le quote** e non e' una buona notizia — col vincolo "nessun ordine
+sotto lo stake" l'equity non può azzerarsi, quindi la rovina e' strutturalmente
+impossibile a queste dimensioni. Il numero informativo e' `inoperable_pct`
+(**8.4%** a 1.30 fino a **46.3%** a 2.50: quante simulazioni restano senza
+capitale per scommettere) e il MaxDD (medio 52→77%, p95 96.7→99.1%).
+
+**2) `scripts/clv_brier_analytics.py` — CLV % e Brier Score dal ledger.**
+Connessione in **sola lettura** (`file:...?mode=ro`: il test tenta una
+`UPDATE` e pretende che SQLite la rifiuti), zero rete, zero crediti, zero ordini.
+- **CLV**: grezzo e vig-free (`market_calib.clv_raw` / `clv_vig_free`, mai
+  ricopiate) con la **provenienza della closing dichiarata** per campione
+  (`pinnacle` > `bookmaker` > `snapshot_sharp` > prezzo di `bets`): un CLV
+  senza la sua fonte non e' verificabile. Raggruppa per sport
+  (calcio/tennis/esports) e mercato.
+- **Brier del MODELLO**: `predictions.prob` contro `esito_finale`, con i
+  `push` **esclusi** (non hanno esito binario: contarli falserebbe la
+  calibrazione).
+- **Brier del DE-VIGGING**: la closing sharp de-vigata sugli **stessi** dati
+  con `shin`/`power`/`multiplicative` + `z` di Shin medio. E' la misura che
+  decide se il de-vig Shin del 02/10 e' quello giusto.
+- **Fail-closed**: per de-vigare un 1X2 servono **tutti e tre** gli esiti (con
+  2 su 3 il margine verrebbe attribuito in silenzio agli altri due).
+
+**3) `scripts/tune_steam_params.py` — tuning dei parametri Steam Move.**
+Spazio di ricerca = 3 parametri (`move_pct`, `window_min`, `min_window_min`),
+con default **letti** da `steam_move.config()`. `STEAM_MOVE_DEDUP_MIN` e' **escluso
+di proposito**: filtra le SCRITTURE degli snapshot, quindi sulla storia gia'
+registrata non ha alcun effetto — ottimizzarlo significherebbe muovere un
+parametro che la funzione obiettivo non vede e l'ottimizzatore restituirebbe
+un valore casuale spacciato per "ottimo" (il report lo dichiara con il motivo).
+Evento = **PRIMO** trigger della serie (nessun look-ahead); CLV via
+`clv_raw`; ROI con la quota **presa dal ledger** e MAI col prezzo sharp
+(simulare il fill su Pinnacle produrrebbe un ROI finto ≈ -vig).
+Il trigger sull'**ULTIMO** snapshot viene scartato e contato a parte
+(`skipped_no_closing`): li' il CLV e' 0 per costruzione, non perche' il
+segnale non valga.
+Anti-overfitting: fold **temporali** contigui, media dei fold **meno** la
+penalita' di stabilita' sullo scarto fra fold, pavimento `--min-trades`,
+verifica out-of-sample sull'ultimo fold, e `--min-events` sotto il quale la
+ricerca **non parte**. Optuna TPE (seed fisso) se installata, altrimenti random
+con seed fisso: il report dichiara **sempre** il motore. Stampa i comandi
+`railway variables --set` ma **non imposta nulla** (tripwire: nessun
+`os.environ`, nessun `subprocess`, nessuna scrittura).
+
+**DIFETTI REALI trovati scrivendo i test** (nessuno dei tre tool e' andato in
+produzione, quindi nessuno ha toccato il denaro):
+1. **`search` riportava i parametri campionati, non quelli valutati**: il
+   punteggio era calcolato sui parametri **clampati** (`min_window_min <=
+   window_min`) mentre il consiglio ripubblicava i valori grezzi → chi applicava
+   l'env otteneva una configurazione **mai misurata** (es. `MIN_WINDOW=12.36`
+   con `WINDOW=11.85`). Ora i parametri riportati sono sempre quelli
+   effettivamente valutati.
+2. **I loader non tolleravano lo schema precedente**: una `SELECT` che nomina
+   una colonna non ancora migrata faceva rispondere `_rows` con `[]`
+   (fail-safe silenzioso) → su un DB di un deploy precedente la diagnostica
+   riportava "zero campioni" invece di "colonna assente". Ora ogni `SELECT` e'
+   costruita sull'**intersezione delle colonne esistenti** (`predictions.league`
+   nasce solo il 22/09, `settled_at` prima ancora).
+3. **Numeri arrotondati nel `--json`**: `summarize`/`brier_score` arrotondavano
+   a 3/5 decimali, quindi l'output non era confrontabile (a 1e-6) con la
+   formula di `market_calib` che lo genera. L'arrotondamento e' ora **solo di
+   stampa** (`:.3f` nel report), il dato resta a piena precisione.
+4. **Sharpe esplosivo su serie degenere**: CLV costante → `std ~1e-17` →
+   rapporto ~1e15 che domina la ricerca. `SHARPE_MIN_STD = 1e-6`: sotto, il
+   campione degenere vale 0.
+
+**Test**: **140 verdi**, tutti OFFLINE (DB SQLite temporanei, zero rete /
+crediti / ordini) — 30 `stress_test_bankroll`, 49 `clv_brier_analytics`,
+61 `tune_steam_params`. Incluse la prova che la connessione `mode=ro` **rifiuta**
+una scrittura e il subprocess che verifica che importare gli script **non
+carichi** tracker/bot/auto_bet. `compileall` OK, 0 marker di conflitto,
+`railway config plan`: **already up to date** (nessuna env nuova).
+
+**Limiti dichiarati (misurati, non ipotizzati)**: il **DB locale non puo'
+misurare niente** — `bets` 0, `match_results` 0, `clv_history` 0 e gli unici
+`price_snapshots` hanno bookmaker finti `BookA`/`BookB`. I tre script girano e
+degradano **dichiarando il motivo** (`--book BookA` mostra 2 campioni CLV), ma
+le misure reali vanno lette sul volume di produzione. `tune_steam_params` su
+quel DB ha **14 serie** (< `--min-events 30`): la ricerca **non parte** e lo
+dice, invece di restituire un numero inventato.
+
+**Uso** (tutti con `--db`, default `tracker.DB_PATH`):
+`venv/bin/python scripts/stress_test_bankroll.py`,
+`venv/bin/python scripts/clv_brier_analytics.py --since 2026-09-19`,
+`venv/bin/python scripts/tune_steam_params.py --trials 500 --folds 4`.

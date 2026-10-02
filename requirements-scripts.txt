@@ -1,0 +1,17 @@
+# Dipendenze degli SCRIPT OFFLINE in `scripts/` — NON del container.
+#
+# ⚠️ Questo file NON e' installato dal Dockerfile: in produzione (`run_all.py` /
+# bot / web_api) vale `requirements.txt`. Gli script in `scripts/` girano a
+# mano su una copia del ledger, quindi le loro dipendenze non devono entrare
+# nell'immagine (peso, superficie di attacco e — soprattutto — nessun rischio
+# di far divergere il runtime dalla configurazione misurata).
+#
+# Installazione:
+#   venv/bin/python -m pip install -r requirements-scripts.txt
+#
+# Se `optuna` non e' installata gli script funzionano lo stesso:
+# `tune_steam_params.py` degrada a ricerca random con seed fisso (stesso spazio
+# di ricerca, stesse guardie anti-overfitting) e DICHIARA nel report quale
+# motore ha girato. La dipendenza e' un'ottimizzazione della qualita' della
+# ricerca (TPE), non un requisito di funzionamento.
+optuna>=4.0.0
