@@ -25,7 +25,8 @@ Cosa fa:
    crediti; fail-closed senza chiave.
 2. `discover()` — match SX tennis in finestra (lettura PUBBLICA: zero chiavi,
    zero crediti, zero ordini).
-3. `picks()` — per ogni match: oracolo a 2 esiti + gate EV.
+3. `picks()` — per ogni match: oracolo a 2 esiti + gate EV + **fascia quota
+   `TENNIS_ODDS_MIN`-`TENNIS_ODDS_MAX`** (1.30-2.50 dal 02/10/2026).
 4. `scan()` — registra la telemetria nel ledger (`predictions`, mercato
    `TENNIS`) con `match_id` `sx-tennis-<hash>`: il prefisso `sx-` fa si' che il
    settlement SX-native esistente (`sx_signals._results_from_sx`) la saldi
@@ -75,6 +76,35 @@ MAX_MARKETS = int(os.getenv("TENNIS_MAX_MARKETS", "300"))
 #: soglia PROPRIA e dichiarata (il calcio resta a `value_filter.EV_MIN`), cosi'
 #: il valore si legge da un solo posto e si cambia senza toccare il codice.
 EV_MIN = float(os.getenv("TENNIS_EV_MIN", "0.025"))
+
+#: Fascia quota della corsia (02/10/2026). E' PROPRIA del tennis e piu' larga
+#: di quella calcistica 1.30-1.80 (`value_filter`): qui si seleziona su
+#: ENTRAMBI i lati di un mercato a 2 vie, e il lato sfavorito di un match
+#: equilibrato vale spesso 1.80-2.50. Oltre la banda non c'e' un edge da
+#: comprare, solo varianza: un EV alto su un longshot e' quasi sempre rumore
+#: del book (stessa lezione del `MAX_ODDS` dei surebet).
+#: MISURA che l'ha motivata — i 7 ordini reali piazzati dal 01/10 (P/L
+#: -6,75 USDC, ROI -75,0%, hit 1/6): 5 delle 6 sconfitte erano a quota >= 2,42
+#: con punte a 17,02. Con questa banda sarebbero passati 2 ordini su 7
+#: (+0,75 e -1,50 = -0,75 netto invece di -6,75).
+ODDS_MIN = float(os.getenv("TENNIS_ODDS_MIN", "1.30"))
+ODDS_MAX = float(os.getenv("TENNIS_ODDS_MAX", "2.50"))
+
+
+def in_odds_band(price: Any) -> bool:
+    """True se la quota e' nella fascia giocabile della corsia tennis.
+
+    UNICO punto di verita' della fascia: la corsia ordini la riusa come difesa
+    in profondita' (`auto_bet._tennis_picks`), cosi' il limite non puo' vivere
+    in due posti e divergere. Fail-closed: una quota non numerica (o assente)
+    NON e' nella banda.
+    """
+    try:
+        value = float(price)
+    except (TypeError, ValueError):
+        return False
+    return ODDS_MIN <= value <= ODDS_MAX
+
 
 #: Coerenza del mercato: 1/prezzo_1 + 1/prezzo_2 su un exchange ~1. Fuori banda
 #: il book e' sporco e l'EV finto e' un artefatto aritmetico (stessa lezione
@@ -485,6 +515,18 @@ def picks(*, provider: Any = None, http_get: Any = None) -> List[dict]:
                              if s["key"] == row["esito"]), None)
                 if side is None:
                     continue
+                price = float(row["price"])
+                # Fascia quota PRIMA di costruire il pick: una quota fuori
+                # banda non e' un candidato, quindi non puo' ne' essere
+                # registrata nel ledger ne' diventare un ordine. Lo scarto e'
+                # loggato (un gate silenzioso e' un bug).
+                if not in_odds_band(price):
+                    logger.info(
+                        "tennis_lane: skip %s vs %s -> %s @ %.2f "
+                        "(fuori fascia quota %.2f-%.2f)",
+                        ev["team_one"], ev["team_two"], side["team"],
+                        price, ODDS_MIN, ODDS_MAX)
+                    continue
                 p_true = float(row["prob"])
                 m_prob = None
                 try:
@@ -501,7 +543,7 @@ def picks(*, provider: Any = None, http_get: Any = None) -> List[dict]:
                     "league": ev.get("league_label") or "",
                     "mercato": MARKET, "esito_key": row["esito"],
                     "esito_raw": side["team"], "team": side["team"],
-                    "quota": float(row["price"]), "price": float(row["price"]),
+                    "quota": price, "price": price,
                     "market_id": ev["market_id"],
                     "selection_id": int(row["esito"]),
                     "p_true": p_true, "true_odd": row["true_odd"],
@@ -515,7 +557,7 @@ def picks(*, provider: Any = None, http_get: Any = None) -> List[dict]:
                 logger.info("tennis_lane: %s vs %s -> %s @ %.2f EV %+.2f%% "
                             "(p_fair %.3f, quota equa %.3f) [telemetria]",
                             ev["team_one"], ev["team_two"], side["team"],
-                            float(row["price"]), float(row["ev"]) * 100.0,
+                            price, float(row["ev"]) * 100.0,
                             p_true, row["true_odd"])
     except Exception as exc:
         logger.warning("tennis_lane: corsia non disponibile (%s)", exc)
@@ -587,6 +629,7 @@ def summary() -> dict:
     out: dict = {"enabled": enabled(), "market": MARKET,
                  "sx_sport_id": SX_SPORT_ID, "sx_type_id": SX_TYPE_ID,
                  "ev_min": EV_MIN, "hours_ahead": HOURS_AHEAD,
+                 "odds_min": ODDS_MIN, "odds_max": ODDS_MAX,
                  "oracle_ttl_min": ORACLE_TTL_MIN,
                  "request_budget": REQ_BUDGET_DAY,
                  "requests_today": 0, "keys_cached": 0,

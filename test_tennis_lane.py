@@ -335,6 +335,104 @@ class TestPicks:
 
 
 # ---------------------------------------------------------------------------
+# 4-bis. FASCIA QUOTA della corsia (02/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestFasciaQuota:
+    """Il longshot non e' un edge, e' varianza: la banda vale PRIMA del pick.
+
+    Misura che l'ha motivata: 7 ordini reali piazzati dal 01/10, P/L -6,75
+    USDC, ROI -75,0%, hit 1/6 — 5 delle 6 sconfitte a quota >= 2,42 con punte
+    a 17,02.
+    """
+
+    @pytest.mark.parametrize("price,expected", [
+        (1.30, True), (1.85, True), (2.42, True), (2.50, True),
+        (1.29, False), (2.51, False), (4.28, False), (17.02, False),
+        (1.0, False), (0.0, False), (-1.0, False),
+        ("1.85", True), ("17.02", False),
+        (None, False), ("", False), ("abc", False),
+    ])
+    def test_banda(self, price, expected):
+        assert tl.in_odds_band(price) is expected
+
+    def test_estremi_inclusivi(self):
+        # I bordi sono INCLUSI: una soglia e' una decisione, non un intervallo
+        # aperto per caso.
+        assert tl.in_odds_band(tl.ODDS_MIN) is True
+        assert tl.in_odds_band(tl.ODDS_MAX) is True
+
+    def test_longshot_scartato_prima_del_pick(self, monkeypatch):
+        _write_cache(monkeypatch, _oracle_payload())
+        # 2.60 con l'oracolo a 1.66 e' un candidato +EV enorme (EV ~ +56%) e
+        # inv_sum 1.0096 (book coerente): senza la banda sarebbe un pick.
+        assert tl.picks(provider=_event_provider(2.60, 1.60)) == []
+
+    def test_controllo_dentro_banda_stesso_gruppo(self, monkeypatch):
+        # Controprova: la STESSA struttura a 2.40 (inv_sum 1.0417) produce il
+        # candidato. Prova che e' la FASCIA a scartare, non l'EV o il book.
+        _write_cache(monkeypatch, _oracle_payload())
+        out = tl.picks(provider=_event_provider(2.40, 1.60))
+        assert len(out) == 1 and out[0]["quota"] == pytest.approx(2.40)
+
+    @pytest.mark.parametrize("longshot,counterpart", [
+        (2.60, 1.60), (4.28, 1.31), (17.02, 1.07),
+    ])
+    def test_quote_reali_degli_ordini_perse(self, monkeypatch, longshot,
+                                            counterpart):
+        # Sono le quote dei 5 ordini persi (4,28 / 4,32 / 4,97 / 5,59 / 17,02).
+        _write_cache(monkeypatch, _oracle_payload())
+        assert tl.picks(provider=_event_provider(longshot, counterpart)) == []
+
+    def test_banda_personalizzata(self, monkeypatch):
+        _write_cache(monkeypatch, _oracle_payload())
+        monkeypatch.setattr(tl, "ODDS_MAX", 3.00)
+        out = tl.picks(provider=_event_provider(2.60, 1.60))
+        assert len(out) == 1 and out[0]["quota"] == pytest.approx(2.60)
+
+    def test_banda_impossibile_nessun_candidato(self, monkeypatch):
+        _write_cache(monkeypatch, _oracle_payload())
+        monkeypatch.setattr(tl, "ODDS_MIN", 99.0)
+        monkeypatch.setattr(tl, "ODDS_MAX", 100.0)
+        assert tl.picks(provider=_event_provider(1.85, 2.20)) == []
+
+    def test_fascia_da_env(self):
+        # La banda si legge dall'env (default 1.30 / 2.50).
+        code = ("import os; os.environ['TENNIS_ODDS_MIN']='1.50'; "
+                "os.environ['TENNIS_ODDS_MAX']='3.10'; "
+                "import tennis_lane as t; print(t.ODDS_MIN, t.ODDS_MAX)")
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, cwd=".")
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "1.5 3.1", r.stdout
+
+    def test_default_dichiarati_nel_sorgente(self):
+        from pathlib import Path
+        src = Path("tennis_lane.py").read_text(encoding="utf-8")
+        assert 'os.getenv("TENNIS_ODDS_MIN", "1.30")' in src
+        assert 'os.getenv("TENNIS_ODDS_MAX", "2.50")' in src
+
+    def test_summary_espone_la_banda(self, monkeypatch):
+        _write_cache(monkeypatch, _oracle_payload())
+        s = tl.summary()
+        assert s["odds_min"] == tl.ODDS_MIN
+        assert s["odds_max"] == tl.ODDS_MAX
+
+    def test_la_banda_non_registra_telemetria_fuori_fascia(self, monkeypatch,
+                                                           temp_db):
+        # Un longshot scartato dalla banda NON deve nemmeno entrare nel ledger:
+        # una riga a quota 17 nel ledger inquina la calibrazione della corsia.
+        _write_cache(monkeypatch, _oracle_payload())
+        res = tl.scan(provider=_event_provider(17.02, 1.07))
+        assert res["candidates"] == 0 and res["registered"] == 0
+        import tracker
+        conn = tracker._get_conn()
+        n = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+        conn.close()
+        assert n == 0
+
+
+# ---------------------------------------------------------------------------
 # 5. SCAN: telemetria nel ledger (nessun ordine)
 # ---------------------------------------------------------------------------
 
@@ -471,10 +569,53 @@ class TestCablaggioAutoBet:
         import sys
         import auto_bet
         fake = type(sys)("tennis_lane")
-        fake.picks = lambda: [{"match_id": "sx-tennis-0x1", "mercato": "TENNIS"}]
+        fake.ODDS_MIN, fake.ODDS_MAX = 1.30, 2.50
+        fake.in_odds_band = lambda p: True
+        fake.picks = lambda: [{"match_id": "sx-tennis-0x1", "mercato": "TENNIS",
+                               "quota": 1.85}]
         monkeypatch.setitem(sys.modules, "tennis_lane", fake)
         out = auto_bet._tennis_picks()
         assert out and out[0]["mercato"] == "TENNIS"
+
+    def test_difesa_in_profondita_scarta_il_longshot(self, monkeypatch):
+        # Anche se la corsia a monte consegnasse un pick fuori fascia, la corsia
+        # ORDINI non deve poterlo piazzare (invariante del denaro).
+        import sys
+        import auto_bet
+        fake = type(sys)("tennis_lane")
+        fake.ODDS_MIN, fake.ODDS_MAX = 1.30, 2.50
+        fake.in_odds_band = lambda p: 1.30 <= float(p) <= 2.50
+        fake.picks = lambda: [
+            {"match_id": "sx-tennis-0xok", "mercato": "TENNIS", "quota": 2.40},
+            {"match_id": "sx-tennis-0xbad", "mercato": "TENNIS", "quota": 17.02},
+        ]
+        monkeypatch.setitem(sys.modules, "tennis_lane", fake)
+        out = auto_bet._tennis_picks()
+        assert [p["quota"] for p in out] == [2.40]
+
+    def test_difesa_in_profondita_fail_closed(self, monkeypatch):
+        # Gate non valutabile (corsia che non espone la banda) -> NESSUN ordine
+        # per questa classe di rischio, mai un pick non controllato.
+        import sys
+        import auto_bet
+        fake = type(sys)("tennis_lane")
+        fake.picks = lambda: [{"match_id": "sx-tennis-0x1", "mercato": "TENNIS",
+                               "quota": 1.85}]
+        monkeypatch.setitem(sys.modules, "tennis_lane", fake)
+        assert auto_bet._tennis_picks() == []
+
+    def test_quota_propagata_dal_pick(self, monkeypatch):
+        # Il pick esporta la quota sia come `quota` sia come `price`: la difesa
+        # in profondita' legge l'una o l'altra senza dipendere dal nome.
+        import sys
+        import auto_bet
+        fake = type(sys)("tennis_lane")
+        fake.ODDS_MIN, fake.ODDS_MAX = 1.30, 2.50
+        fake.in_odds_band = lambda p: 1.30 <= float(p) <= 2.50
+        fake.picks = lambda: [{"match_id": "sx-tennis-0x1", "mercato": "TENNIS",
+                               "price": 1.85}]
+        monkeypatch.setitem(sys.modules, "tennis_lane", fake)
+        assert len(auto_bet._tennis_picks()) == 1
 
     def test_gate_1x2_esenta_i_mercati_con_oracolo_proprio(self):
         # Il gate Pinnacle 1X2 non deve toccare ML (eSports) ne' TENNIS: i loro

@@ -158,11 +158,15 @@ export default defineRailway(() => {
       T60_WINDOW_MAX_MIN: preserve(),
       TENNIS_SANDBOX_ENABLED: preserve(),
       // Corsia TENNIS (30/09/2026, `tennis_lane.py`): interruttore, identita'
-      // SX (sport 6 / type 52), soglia EV PROPRIA (2.5%), finestra, budget
-      // richieste the-odds-api (1 credito/torneo con cache scaduta) e stato.
-      // Gli ORDINI sono nella corsia LIVE di `auto_bet` (`_tennis_picks`).
+      // SX (sport 6 / type 52), soglia EV PROPRIA (2.5%), FASCIA QUOTA della
+      // corsia (1.30-2.50 dal 02/10/2026: oltre la banda il longshot non e' un
+      // edge ma varianza — riapplicata anche in `auto_bet._tennis_picks`),
+      // finestra, budget richieste the-odds-api (1 credito/torneo con cache
+      // scaduta) e stato. Gli ORDINI sono nella corsia LIVE di `auto_bet`.
       TENNIS_LANE: preserve(),
       TENNIS_EV_MIN: preserve(),
+      TENNIS_ODDS_MIN: preserve(),
+      TENNIS_ODDS_MAX: preserve(),
       TENNIS_HOURS_AHEAD: preserve(),
       TENNIS_MAX_MARKETS: preserve(),
       TENNIS_MIN_INV_SUM: preserve(),

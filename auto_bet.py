@@ -1503,7 +1503,11 @@ def _tennis_picks() -> list[dict]:
     type 52: un mercato per match, lati sulle chiavi 1/2), aggancia l'oracolo
     Pinnacle a 2 esiti dalle cache gia' scaricate (0 crediti) e calcola l'EV
     contro la probabilita' fair de-vigata, con la soglia PROPRIA del tennis
-    (`tennis_lane.EV_MIN`, default 2.5% -> env `TENNIS_EV_MIN`).
+    (`tennis_lane.EV_MIN`, default 2.5% -> env `TENNIS_EV_MIN`) e la **fascia
+    quota della corsia** (`tennis_lane.ODDS_MIN/ODDS_MAX`, 1.30-2.50 -> env
+    `TENNIS_ODDS_MIN`/`TENNIS_ODDS_MAX`), riapplicata QUI come difesa in
+    profondita': il longshot non e' un edge, e' varianza (misura 02/10:
+    ROI -75% su 7 ordini, 5 delle 6 sconfitte a quota >= 2,42).
 
     E' SOLO una fonte di candidati: stake fisso, recinto 40%/30%, T-60,
     liquidita', dedup e gate di mercato restano quelli del giro, applicati a
@@ -1520,6 +1524,22 @@ def _tennis_picks() -> list[dict]:
     except Exception as e:
         logger.warning("auto_bet: corsia tennis non disponibile (%s)", e)
         return []
+    # Difesa in profondita' (02/10/2026): la FASCIA QUOTA e' un invariante del
+    # DENARO, non una cortesia della corsia a monte. Se il gate di `tennis_lane`
+    # cambiasse (o un chiamante passasse pick propri), la corsia ordini non deve
+    # poter piazzare un longshot. Fail-closed: se il gate non e' valutabile, NON
+    # si ordina nulla per questa classe di rischio.
+    try:
+        kept = [p for p in picks
+                if tennis_lane.in_odds_band(p.get("quota") or p.get("price"))]
+    except Exception as e:
+        logger.warning("auto_bet: gate quota tennis non valutabile (%s)", e)
+        return []
+    if len(kept) != len(picks):
+        logger.warning(
+            "auto_bet: %d pick tennis scartati fuori fascia quota %.2f-%.2f",
+            len(picks) - len(kept), tennis_lane.ODDS_MIN, tennis_lane.ODDS_MAX)
+    picks = kept
     if picks:
         logger.info("auto_bet: %d pick tennis dall'oracolo Pinnacle a 2 esiti",
                     len(picks))
