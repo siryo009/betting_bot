@@ -7951,3 +7951,114 @@ verdi su `market_shadow` (33), `decision_market`+`decision_market_multi`+
 `market_quotes_store`+`decision_pipeline` (349), `multi_market`+
 `secure_logging`+`secret_hygiene`+`surebet_engine` (165), `bot`+`sx_signals`
 (33), `railway_drift_check` (29).
+
+### Sessione 02/10/2026: salute produzione (AMS) + report ordini 7gg + shadow mercati SX + fascia quota tennis
+
+**Contesto**: sessione di salute/diagnostica sul container AMS dopo il cutover
+del 01/10, con attivazione della telemetria shadow dei mercati SX non
+calcistici, il fix di un difetto reale sulla corsia tennis e il report degli
+ordini reali degli ultimi 7 giorni.
+
+#### 1) SALUTE PRODUZIONE (container AMS, sola lettura)
+- Deploy pre-sessione `b96c79d2` SUCCESS; egress container **`152.55.184.117`
+  | Amsterdam NL | AS400940 Railway** (il geo-blocco SX degli USA e' risolto dal
+  cutover AMS del 01/10, commit `7994a42`). `/api/health` **200**.
+- DB `/app/data/quotaverace.db` ~**3,95 MB**: `quick_check` e `integrity_check`
+  = **ok**, `journal_mode delete`, nessun sidecar WAL/journal pendente.
+  Volume `/app/data` ~**207M/434M (49%)**; volume **sfo** `betting_bot-volume`
+  = **detached**, ready, **backup passivo** (NON rimuoverlo prima di 48-72h dal
+  01/10: rimuoverlo lo distrugge).
+- Log hygiene: **0 ERROR/Traceback**. WARNING noti e dichiarati:
+  `pinnacle_oracle: validatore matchbook in disaccordo (9.9pp > 5.0pp) —
+  ESCLUSO dal consenso`; `sx_signals: settlement — leghe non mappate a
+  SPORTS_MAP`; `skipped: maximum number of running instances` (anti-sovrapposizione
+  voluta).
+- Env viste su `/proc/1/environ` (PID 1 = `python run_all.py`):
+  `AUTO_BET_MODE=live`, `EXECUTION_PROVIDER=sxbet`, `STAKE_CAP_HARD=0`,
+  `T60_KILL_WALLET_USDC=25`, `T60_WINDOW_MIN_MIN=120`, `T60_WINDOW_MAX_MIN=15`,
+  `ENABLE_LIVE_OU=1`, `TENNIS_LANE=1`, `ORACLE_BUDGET_DAY=3`,
+  `ORACLE_LEAGUES_PER_PASS=6`, `SETTLEMENT_HEAL_INTERVAL_HOURS=48`,
+  `ESPORTS_ORACLE_WINDOW_H=1`.
+- Wallet a fine sessione: **equity 30.4083** (28.9083 liberi + 1.50 in gioco);
+  CB2 (25 USDC) non armato; recinto 40% = 12.16 → 8 ordini da 1.50.
+
+#### 2) REPORT ORDINI ULTIMI 7 GIORNI (25/09 → 02/10, fonte log Railway)
+- **221 POST cel `/orders-v3`**; **accettati 126 (57,0%)**; **403 = 95**, tutti
+  il **01/10 00:00-02:00 UTC** (blocco geo USA **prima** del cutover AMS). Dopo
+  il cutover: **126/126 = 100% accettati**.
+- Dei 126 accettati: **FULLY_FILLED 7**, **CANCELLED 119** — tutte
+  `cancelReason=NO_LIQUIDITY` (IOC senza controparte al prezzo richiesto: il
+  nuovo collo di bottiglia e' la **liquidita' SX**, non piu' un blocco).
+- Stake fisso 1,50 → capitale 10,50 USDC; 6/7 saldate: **1 vinta (+0,75)**, 5
+  perse (−1,50) → **P/L −6,75 USDC, ROI −75,0%, hit 1/6**; 1 aperta.
+- **Distribuzione: 100% TENNIS** (Moneyline 2 vie). Match: Nishikori-Tiafoe,
+  Fritz-Munar, Faria-Fery. Quote **1,4981 → 17,0213** (media 5,73).
+- **Causa del ROI −75%**: `tennis_lane.py` applicava solo `EV_MIN` **senza
+  fascia quota** → 5/6 sconfitte a quota >= 2,42, con una punta a **17,02**
+  (longshot senza edge: il valore elevato del ROI negativo lo conferma).
+
+#### 3) TELEMETRIA SHADOW ATTIVATA (`SHADOW_MARKET_ENABLED=1`, commit `20e46d6`)
+- Env impostata su Railway (`railway variables --service betting_bot --set
+  SHADOW_MARKET_ENABLED=1 --skip-deploys`) e verificata su `/proc/1/environ` = `1`.
+  `SHADOW_SPORTS`/`SHADOW_TYPES` **non impostate** → valgono i default di codice
+  (sports `1`,`8`; types 28/342/226 = famiglia "including overtime").
+- **Verifica dello scrivente** (DB `mode=ro`): `market_quotes` con
+  `gateway_id='sxbet-shadow'` = **62 quote** (erano 54 nel batch storico delle
+  02:27 dello stesso giorno: l'upsert ha aggiunto 8 quote nuove). Righe:
+  `('sxbet-shadow','AH_OT',26, ...14:47:10)`, `ML_OT` 14, `OU_OT` 22 — accanto
+  alle corsie normali `('sxbet-multi','AH',976)` e `('sxbet-multi','OU',1572)`.
+- **Vincolo del proprietario rispettato** (scrittura SOLO su `market_quotes`):
+  `predictions` con mercato in (`OU_OT`,`AH_OT`,`ML_OT`) = **0**. Le `predictions`
+  totali (518 → 520) crescono per `multi_market`, non per lo shadow.
+- Log del primo ciclo reale (14:47:09-14:47:10): `market_shadow: 936 mercati
+  scartati in discovery`, `31 mercati -> 62 quote salvate (0 scartate, 7
+  fixture)`, `market_shadow_job: 31 mercati letti, 62 quote su market_quotes
+  (predictions intatte)`.
+
+#### 4) FIX CRITICO FASCIA QUOTA TENNIS (commit `591643c`, deploy `73463d6c`)
+- `tennis_lane.py`: nuove costanti `ODDS_MIN` (env `TENNIS_ODDS_MIN`, default
+  **1.30**) e `ODDS_MAX` (env `TENNIS_ODDS_MAX`, default **2.50**); nuova
+  **`in_odds_band(price)`** = UNICO punto di verita' (fail-closed su `None`/
+  non-numerico; bordi **inclusivi**); gate dentro `picks()` **PRIMA** di
+  costruire il pick, con log `tennis_lane: skip ... (fuori fascia quota
+  1.30-2.50)`; `quota`/`price` costruite dalla variabile `price`;
+  `summary()` espone `odds_min`/`odds_max`; docstring aggiornata.
+- `auto_bet._tennis_picks()` (~riga 1498): **difesa in profondita'** che
+  riapplica `in_odds_band()` su `p.get("quota") or p.get("price")`, log
+  `N pick tennis scartati fuori fascia quota`, e **fail-closed** (`[]`) se il
+  gate non e' valutabile (una riga storica fuori banda non puo' mai diventare
+  un ordine).
+- `.railway/railway.ts`: `TENNIS_ODDS_MIN` e `TENNIS_ODDS_MAX` dichiarate
+  `preserve()` (~righe 164-166).
+- **Verifica post-deploy sul container**: `TENNIS_ODDS_MIN/MAX = 1.3 2.5` e
+  `in_odds_band` → `1.29 F | 1.30 T | 1.85 T | 2.40 T | 2.50 T | 2.51 F |
+  4.28 F | 17.02 F | None F | "abc" F`.
+  ⚠️ Nella finestra di log osservata il job tennis aveva **0 candidati**, quindi
+  la riga `fuori fascia quota` reale non e' ancora comparsa: la logica e' coperta
+  dai test e dalla verifica diretta di `in_odds_band`.
+- **Test**: `test_tennis_lane.py` **72 verdi** (+23: classe `TestFasciaQuota`
+  parametrizzata + 4 in `TestCablaggioAutoBet`). Lotti verdi: tennis/esports/
+  top_down/railway_drift (203), value_filter/risk_guards/favourites_only/
+  league_gate/market_shadow/secret_hygiene, auto_bet/capital_enclosure,
+  auto_bet_live/exposure_gate (52), t60_breakers (38), bot (26). `compileall`
+  OK, 0 marker di conflitto, `git status` pulito dopo il commit.
+- Push `20e46d6..591643c` su `origin/main` → deploy **`73463d6c` SUCCESS**.
+
+#### 5) NOTE OPERATIVE (procedure verificate sul campo)
+- **SSH al container nuovo**: `railway ssh --service betting_bot` funziona
+  SOLO con un agente SSH contenente la SOLA chiave nuova
+  (`eval $(ssh-agent -s); ssh-add ~/.ssh/id_ed25519_railway`); altrimenti
+  atterra sull'agente dell'account vecchio (`siryochy/quotaverace`) e **ignora
+  il comando**. Output su stderr: `Using SSH key from agent: betting-bot-debug`.
+- **Le env NON arrivano nella shell SSH**: leggerle da `/proc/1/environ`
+  (PID 1 = `python run_all.py`).
+- `railway logs --lines` max ~5000 e retention CLI ~5h; per finestre ampie usare
+  l'agente dei log: `ssh -T get-logs@railway.new -- --projectId ... --serviceId
+  ... --startDate ... --endDate ... --types deploy --filter "orders-v3"
+  --limit 500` (max 500 righe per chiamata).
+- `railway run --service X -- <cmd>` esegue in LOCALE con le env del servizio.
+- **SX Bet non espone uno storico ordini utilizzabile**: `/orders-v3`
+  restituisce solo gli ordini aperti; `GET /orders` → 400 "OrderBook V2 is no
+  longer supported"; `/user/orders[-v3]` → 400 "address must be a valid
+  address". La tabella `bets` registra per design solo i **riempimenti**
+  (fail-closed): il conteggio dei POST va letto dai **log**.
