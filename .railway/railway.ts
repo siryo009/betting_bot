@@ -140,6 +140,21 @@ export default defineRailway(() => {
       PINNACLE_CONSENSUS: preserve(),
       PINNACLE_CONSENSUS_METHOD: preserve(),
       PINNACLE_VALIDATOR_TOLERANCE: preserve(),
+      // De-vig dell'oracolo (02/10/2026): default di codice = "shin" (Shin
+      // 1992/93, parametro z di denaro informato). Rollback a "power" con
+      // questa env, senza redeploy di codice.
+      PINNACLE_DEVIG_METHOD: preserve(),
+      PINNACLE_CACHE_MAX_AGE_H: preserve(),
+      // Steam move sullo sharp (02/10/2026, `steam_move.py`): ΔQ/Δt della
+      // quota Pinnacle sugli ultimi 15-30', crollo >= 4% = priorita'
+      // d'esecuzione prima che SX riallinei. Senza preserve(), un `config
+      // apply` distruggerebbe gli override operativi.
+      STEAM_MOVE_ENABLED: preserve(),
+      STEAM_MOVE_PCT: preserve(),
+      STEAM_MOVE_WINDOW_MIN: preserve(),
+      STEAM_MOVE_MIN_WINDOW_MIN: preserve(),
+      STEAM_MOVE_BOOK: preserve(),
+      STEAM_MOVE_DEDUP_MIN: preserve(),
       QUOTAVERACE_BOT_TOKEN: preserve(),
       SETTLEMENT_HEAL_INTERVAL_HOURS: preserve(),
       SMART_HEDGING: preserve(),

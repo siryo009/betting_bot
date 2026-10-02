@@ -30,7 +30,7 @@ Metodi di devig supportati:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # --- Soglie di mercato (ricerca: servono almeno 3-5 punti percentuali
 # --- di edge vs la closing line perche' il valore non sia rumore)
@@ -220,18 +220,24 @@ def devig_power(probs: List[float], max_iter: int = 100) -> List[float]:
     return [f / total for f in fair]
 
 
-def _shin_fair(ps: List[float], max_iter: int = 200) -> List[float]:
-    """Risolve il modello di Shin (1993) per la distribuzione fair.
+def shin_devig(ps: List[float], max_iter: int = 200) -> Tuple[List[float], float]:
+    """Modello di Shin (1993): ritorna (probabilita' fair, parametro z).
 
-    z rappresenta la proporzione di insider nel mercato; la formula e':
-        p_fair = (sqrt(z^2 + 4*(1-z)*p^2) - z) / (2*(1-z))
-    con z tale che somma(p_fair) = 1. Aggressivo sul longshot bias.
+    z e' la quota di denaro INFORMATO presente nel mercato (0 = mercato senza
+    insider, cioe' il de-vig proporzionale; -> 1 = mercato quasi tutto
+    informato). Si risolve per bisezione imponendo somma(p_fair) = 1 con:
+        p_fair_i = (sqrt(z^2 + 4*(1-z)*p_i^2) - z) / (2*(1-z))
+    Il modello corregge il **favourite-longshot bias** in modo piu' deciso del
+    `power`: il margine viene attribuito quasi tutto ai longshot, quindi il
+    favorito sale e lo sfavorito scende. z e' ESPOSTO (non solo consumato)
+    perche' e' la misura diagnostica del modello: un z alto dice che il
+    mercato e' guidato da denaro informato.
     """
     n = len(ps)
     if n == 0:
-        return []
+        return [], 0.0
     if n == 1:
-        return [1.0]
+        return [1.0], 0.0
 
     def _fair_for_z(z: float) -> List[float]:
         denom = 2.0 * (1.0 - z) if z < 1.0 else 1e-9
@@ -249,11 +255,17 @@ def _shin_fair(ps: List[float], max_iter: int = 200) -> List[float]:
             lo = z
         else:
             hi = z
-    fair = _fair_for_z((lo + hi) / 2.0)
+    z_star = (lo + hi) / 2.0
+    fair = _fair_for_z(z_star)
     total = sum(fair)
     if total <= 0:
-        return devig_multiplicative(ps)
-    return [f / total for f in fair]
+        return devig_multiplicative(ps), 0.0
+    return [f / total for f in fair], z_star
+
+
+def _shin_fair(ps: List[float], max_iter: int = 200) -> List[float]:
+    """Solo la distribuzione fair di Shin (retrocompatibilita')."""
+    return shin_devig(ps, max_iter=max_iter)[0]
 
 
 def devig(odds: List[float], method: str = "power") -> List[float]:
@@ -269,6 +281,22 @@ def devig(odds: List[float], method: str = "power") -> List[float]:
     if method == "shin":
         return _shin_fair(probs)
     return devig_power(probs)
+
+
+def devig_with_z(odds: List[float],
+                 method: str = "power") -> Tuple[List[float], Optional[float]]:
+    """Come `devig` ma espone anche il parametro z del modello di Shin.
+
+    z e' `None` per i metodi che non lo hanno (power/multiplicative): un
+    valore inventato sarebbe peggio di nessun valore. Unico punto di verita'
+    del calcolo di z (i chiamanti NON ricopiano la formula).
+    """
+    probs = [1.0 / o for o in odds if o and o > 1.0]
+    if not probs:
+        return [], None
+    if method == "shin":
+        return shin_devig(probs)
+    return devig(odds, method=method), None
 
 
 def market_implied(odds_map: Dict[str, float],

@@ -374,7 +374,7 @@ class TestTrueProbability:
             pytest.approx(1.0, abs=1e-9)
 
     def test_power_corregge_il_favourite_longshot_bias(self):
-        """E' la ragione per cui il default e' `power`.
+        """Il devig power corregge il bias dando piu' credito al favorito.
 
         Il devig power non "alza" la probabilita' del favorito rispetto a
         quella implicita grezza (il vig va comunque tolto): alza la sua QUOTA
@@ -387,10 +387,45 @@ class TestTrueProbability:
         assert power["1"] < 1.0 / PINNACLE["1"]  # il vig e' comunque tolto
         assert abs(power["1"] - 0.5483) < 5e-4   # valore misurato
 
-    def test_default_e_power_coerente_con_il_progetto(self):
+    def test_default_e_shin_coerente_con_il_progetto(self):
+        """Dal 02/10/2026 il default dell'ORACOLO e' Shin (1992/93).
+
+        La formula vive SOLO in `market_calib`: qui si sceglie il metodo, la
+        coerenza col modulo e' la prova che non esiste una seconda copia.
+        """
         from market_calib import market_implied
-        assert po.DEVIG_METHOD == "power"
-        assert po.true_probabilities(PINNACLE) == market_implied(PINNACLE)
+        assert po.DEVIG_METHOD == "shin"
+        assert po.true_probabilities(PINNACLE) == \
+            market_implied(PINNACLE, method="shin")
+        # rollback a una env (nessun redeploy di codice)
+        assert po.DEVIG_METHOD in ("shin", "power", "multiplicative")
+
+    def test_shin_corregge_il_bias_piu_del_power(self):
+        """Shin e' piu' deciso del power sul favourite-longshot bias.
+
+        Entrambi tolgono il vig, ma Shin attribuisce il margine quasi tutto
+        agli sfavoriti: il longshot scende SOTTO il power, il favorito sale
+        SOPRA. E' l'effetto richiesto dalla direttiva (probabilita' reali
+        piu' precise per il calcolo dell'EV).
+        """
+        shin = po.true_probabilities(PINNACLE, method="shin")
+        power = po.true_probabilities(PINNACLE, method="power")
+        prop = po.true_probabilities(PINNACLE, method="multiplicative")
+        assert prop["2"] > power["2"] > shin["2"]     # longshot: mult > power > shin
+        assert prop["1"] < power["1"] < shin["1"]     # favorito: mult < power < shin
+        assert shin["1"] < 1.0 / PINNACLE["1"]        # il vig e' comunque tolto
+        for method in ("shin", "power"):
+            probs = po.true_probabilities(PINNACLE, method=method)
+            assert sum(v for k, v in probs.items() if k != "overround") == \
+                pytest.approx(1.0, abs=1e-9)
+
+    def test_shin_su_mercato_a_due_esiti(self):
+        """Anche sui testa-a-testa (tennis/eSports) Shin e' definito e somma 1."""
+        two = {"1": 1.66, "2": 2.34}
+        probs = po.true_probabilities(two, method="shin", min_outcomes=2)
+        assert probs is not None
+        assert probs["1"] + probs["2"] == pytest.approx(1.0, abs=1e-9)
+        assert probs["1"] > 1.0 / two["1"] / (1 / two["1"] + 1 / two["2"])
 
     def test_metodo_shin_accettato(self):
         probs = po.true_probabilities(PINNACLE, method="shin")
@@ -422,6 +457,82 @@ class TestTrueProbability:
         assert po.fair_odds({"1": 1.2, "X": 0.0, "2": None}) == {}
         assert po.fair_odds({}) == {}
         assert po.fair_odds(None) == {}
+
+
+# ---------------------------------------------------------------------------
+# 2b. SHIN (1992/93): parametro z e probabilità "pulite"
+# ---------------------------------------------------------------------------
+
+class TestShinZ:
+    """Il parametro z e' ESPOSTO, non solo consumato: e' la misura diagnostica
+    del denaro informato presente nel mercato sharp."""
+
+    def test_z_calcolato_su_un_mercato_completo(self):
+        z = po.shin_z(PINNACLE)
+        assert z is not None and 0.0 <= z < 1.0
+        # valore misurato su un 1X2 Pinnacle tipico (~7.5% denaro informato)
+        assert z == pytest.approx(0.075, abs=0.01)
+
+    def test_z_su_mercato_a_due_esiti(self):
+        z = po.shin_z({"1": 1.66, "2": 2.34}, min_outcomes=2)
+        assert z is not None and 0.0 <= z < 1.0
+
+    def test_z_fail_closed_su_mercato_incompleto(self):
+        assert po.shin_z({"1": 1.75, "X": 3.6}) is None      # 2 su 3
+        assert po.shin_z({}) is None
+        assert po.shin_z(None) is None
+        # a 2 esiti serve dichiarare la forma: il default e' 3 (calcio)
+        assert po.shin_z({"1": 1.66, "2": 2.34}) is None
+
+    def test_z_nullo_per_i_metodi_che_non_lo_hanno(self):
+        from market_calib import devig_with_z
+        fair, z = devig_with_z([1.75, 3.6, 4.5], method="power")
+        assert fair and z is None
+        fair, z = devig_with_z([1.75, 3.6, 4.5], method="multiplicative")
+        assert fair and z is None
+
+    def test_z_coerente_col_de_vig_di_market_calib(self):
+        """Nessuna formula copiata: z e' quello di `market_calib.shin_devig`."""
+        from market_calib import shin_devig
+        fair, z = shin_devig([1.0 / o for o in PINNACLE.values()])
+        assert z == pytest.approx(po.shin_z(PINNACLE), abs=1e-6)
+        assert abs(sum(fair) - 1.0) < 1e-12
+
+    def test_il_consenso_espone_metodo_e_z(self):
+        match = po._find_match(_payload(), "Atlanta United", "Toronto FC")
+        probs = po.consensus_probabilities(po.oracle_quotes(
+            [match], "Atlanta United", "Toronto FC"))
+        assert probs["devig_method"] == "shin"
+        assert probs["shin_z"] is not None
+
+    def test_metadati_di_shin_non_entrano_in_ev_o_true_odd(self):
+        match = po._find_match(_payload(), "Atlanta United", "Toronto FC")
+        probs = po.consensus_probabilities(po.oracle_quotes(
+            [match], "Atlanta United", "Toronto FC"))
+        assert set(po.fair_odds(probs)) == {"1", "X", "2"}
+        rows = po.ev_gate(probs, {"1": 1.9, "X": 3.4, "2": 4.4})
+        assert {r["esito"] for r in rows} == {"1", "X", "2"}
+
+    def test_odds_pinnacle_dalla_cache(self, tmp_path):
+        """`pinnacle_odds_from_cache` = prezzo GREZZO dello sharp (per il ΔQ/Δt).
+
+        Non e' un oracolo: nessun de-vig, solo la quota pubblicata + il ts
+        della cache. E' il ponte che lo steam move usa per lo storico.
+        """
+        cache = tmp_path / "toa_soccer_usa_mls.json"
+        cache.write_text(json.dumps({"ts": time.time(), "payload": _payload()}),
+                         encoding="utf-8")
+        got = po.pinnacle_odds_from_cache("Atlanta United", "Toronto FC",
+                                          cache_dir=tmp_path)
+        assert got is not None
+        assert got["odds"] == PINNACLE
+        assert got["sport_key"] == "soccer_usa_mls"
+        # nessun Pinnacle completo -> None (fail-closed)
+        assert po.pinnacle_odds_from_cache("Inter Miami", "New York City",
+                                           cache_dir=tmp_path) is None
+        # partita assente dalle cache -> None (mai inventare uno sharp)
+        assert po.pinnacle_odds_from_cache("Bologna", "Torino",
+                                           cache_dir=tmp_path) is None
 
 
 # ---------------------------------------------------------------------------
@@ -753,7 +864,13 @@ class TestFormaDueEsiti:
         assert quotes == {"1": 1.75, "X": 3.60, "2": 4.50}
         probs = po.true_probabilities(quotes)          # default: 3 esiti
         assert set(k for k in probs if k != "overround") == {"1", "X", "2"}
-        assert probs["1"] == pytest.approx(0.5483404337)
+        # il DEFAULT e' shin (02/10): il valore atteso e' quello di market_calib
+        from market_calib import market_implied
+        assert probs["1"] == pytest.approx(
+            market_implied(quotes, method=po.DEVIG_METHOD)["1"])
+        # il percorso del calcio resta quello a 3 esiti anche col power
+        assert po.true_probabilities(quotes, method="power")["1"] == \
+            pytest.approx(0.5483404337)
         assert quotes == po.h2h_odds_of(match["bookmakers"][0],
                                        "Atlanta United", "Toronto FC")
 

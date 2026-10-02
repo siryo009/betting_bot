@@ -48,6 +48,13 @@ from datetime import datetime, timedelta, timezone
 
 from config import DATA_DIR
 
+try:                    # STEAM MOVE (02/10/2026): priorita' d'esecuzione
+    import steam_move   # import leggero: nessuna rete, nessun ordine
+    _STEAM_IMPORT_ERROR: "str | None" = None
+except Exception as _steam_exc:                            # pragma: no cover
+    steam_move = None
+    _STEAM_IMPORT_ERROR = f"{type(_steam_exc).__name__}: {_steam_exc}"
+
 logger = logging.getLogger("auto_bet")
 
 BET_STAKE_DEFAULT_EUR = 5.0
@@ -2929,6 +2936,36 @@ def run_today_bets(stake_eur: float | None = None,
                          identity.get("source"), identity.get("validated"))
             return []
         logger.info("auto_bet: feed di mercato ok — %s", gate_reason)
+
+    # --- STEAM MOVE (02/10/2026): priorita' d'esecuzione ---
+    # Misura il ΔQ/Δt dello sharp (Pinnacle) sugli ultimi 15-30' e marca i
+    # candidati il cui prezzo sharp e' CROLLATO (> soglia, default 4%): il
+    # denaro informato sta entrando, quindi il prezzo SX non ancora riallineato
+    # va eseguito PER PRIMO. La coda viene riordinata (sort STABILE: l'ordine
+    # EV resta intatto dentro i due gruppi). Fail-safe: un errore di telemetria
+    # non ferma il giro ne' cambia l'ordine.
+    if candidates and steam_move is not None:
+        try:
+            _steam_n = steam_move.annotate(candidates)
+            if _steam_n:
+                candidates = steam_move.sort_for_execution(candidates)
+                for _c in candidates[:max(1, _steam_n)]:
+                    if not _c.get("steam_move"):
+                        continue
+                    _info = _c.get("steam_move_info") or {}
+                    logger.warning(
+                        "auto_bet: STEAM MOVE su %s (%s, %s): sharp %s -> %s "
+                        "= %+.2f%% in %.0f' — eseguito per PRIMO (il ritardo "
+                        "SX si chiude presto)",
+                        _c.get("match_id"), _c.get("esito_key"),
+                        _c.get("mercato"), _info.get("first_price"),
+                        _info.get("last_price"), float(_info.get("move_pct") or 0.0),
+                        float(_info.get("span_minutes") or 0.0))
+                logger.info("auto_bet: %d candidati steam move su %d — "
+                            "riordinati in testa alla coda", _steam_n,
+                            len(candidates))
+        except Exception as _exc:
+            logger.debug("auto_bet: steam move non valutato (%s)", _exc)
 
     # --- FASE 2: risk capping (correlazione + esposizione totale) ---
     # Calcola esposizione corrente

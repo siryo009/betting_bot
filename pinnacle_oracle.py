@@ -114,13 +114,16 @@ SHARP_BOOKS: Tuple[str, ...] = ("pinnacle", "betfair", "matchbook")
 #: di EV/true-odd (una lista o un booleano non hanno un inverso).
 _META_KEYS = frozenset({"overround", "sources", "n_sources",
                         "consensus_method", "validated", "fallback",
-                        "agreement_pp"})
+                        "agreement_pp", "devig_method", "shin_z"})
 
-#: Metodo di de-vig. Default = quello del progetto (`market_calib.devig`), per
-#: non introdurre una seconda convenzione: "power" corregge il
-#: favourite-longshot bias. "shin" e "multiplicative" restano disponibili
-#: (override con `PINNACLE_DEVIG_METHOD` o per chiamata).
-DEVIG_METHOD: str = os.getenv("PINNACLE_DEVIG_METHOD", "power")
+#: Metodo di de-vig. Dal 02/10/2026 il default e' **Shin (1993)**: pulisce le
+#: quote sharp di Pinnacle tenendo conto del denaro INFORMATO presente nel
+#: mercato (parametro z) e corregge il favourite-longshot bias in modo piu'
+#: deciso del `power`. La formula vive SOLO in `market_calib.shin_devig`:
+#: qui si sceglie il metodo, non lo si riscrive. Rollback a una env:
+#: `PINNACLE_DEVIG_METHOD=power` (o `multiplicative`).
+DEVIG_METHOD: str = (os.getenv("PINNACLE_DEVIG_METHOD", "shin").strip().lower()
+                     or "shin")
 
 #: --- CONFIGURAZIONE DEL CONSENSO -----------------------------------------
 #: `PINNACLE_CONSENSUS=0` ripristina la Pinnacle-secca (rollback a una env).
@@ -448,6 +451,32 @@ def true_probabilities(odds_map: Dict[str, float], *,
     return result
 
 
+def shin_z(odds_map: Dict[str, float], *, min_outcomes: int = 3
+           ) -> Optional[float]:
+    """Parametro z di Shin (1992/93) per un mercato sharp: nulla o un numero.
+
+    NULLA se il mercato non e' completo (`min_outcomes`), se `market_calib`
+    non e' disponibile o se il de-vig fallisce: un valore inventato sarebbe
+    peggio di nessun valore. Delega a `market_calib.devig_with_z` — la
+    formula di z vive in UN solo posto e i chiamanti non la ricopiano.
+    """
+    if not odds_map or len(odds_map) < int(min_outcomes):
+        return None
+    try:
+        from market_calib import devig_with_z
+    except Exception as exc:                                    # pragma: no cover
+        logger.debug("pinnacle_oracle: market_calib non disponibile (%s)", exc)
+        return None
+    try:
+        fair, z = devig_with_z([float(v) for v in odds_map.values()],
+                               method="shin")
+    except Exception:
+        return None
+    if not fair or z is None:
+        return None
+    return round(float(z), 6)
+
+
 def line_probabilities(quotes: Dict[str, float],
                        *, devig_method: Optional[str] = None
                        ) -> Optional[Dict[str, Any]]:
@@ -514,13 +543,17 @@ def _consensus_result(fair: Dict[str, float], *, sources: Sequence[str],
                       fallback: Optional[str],
                       agreement_pp: Optional[float] = None,
                       overrounds: Optional[Sequence[float]] = None,
-                      outcomes: Tuple[str, ...] = OUTCOMES
+                      outcomes: Tuple[str, ...] = OUTCOMES,
+                      devig_method: Optional[str] = None,
+                      shin_z_value: Optional[float] = None
                       ) -> Dict[str, Any]:
     """Struttura del consenso: esiti numerici + METADATI di servizio.
 
     I metadati stanno nelle stesse chiavi ma sono dichiarati in `_META_KEYS`,
     quindi `fair_odds`/`ev_gate` li saltano e non possono mai finire in un
-    calcolo di EV o di true-odd.
+    calcolo di EV o di true-odd. `devig_method` e `shin_z` rendono ISPEZIONABILE
+    la pulizia applicata alle quote sharp: un z alto = mercato guidato da
+    denaro informato.
     """
     out: Dict[str, Any] = {e: round(float(fair[e]), 6)
                            for e in tuple(outcomes) if e in fair}
@@ -532,6 +565,8 @@ def _consensus_result(fair: Dict[str, float], *, sources: Sequence[str],
     out["validated"] = validated
     out["fallback"] = fallback
     out["agreement_pp"] = agreement_pp
+    out["devig_method"] = devig_method
+    out["shin_z"] = shin_z_value
     return out
 
 
@@ -600,11 +635,24 @@ def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
     if not fairs:
         return None
 
+    # z di Shin: misurato sulla fonte PRIMARIA disponibile (Pinnacle quando
+    # c'e'), cosi' il numero e' confrontabile fra giri. Solo con devig shin.
+    z_value: Optional[float] = None
+    if devig == "shin":
+        for book in CONSENSUS_BOOKS:
+            odds = quotes_by_book.get(book)
+            if not odds:
+                continue
+            z_value = shin_z(odds, min_outcomes=n_wanted)
+            if z_value is not None:
+                break
+
     if not enabled:
         only = PRIMARY_BOOK if PRIMARY_BOOK in fairs else next(iter(fairs))
         return _consensus_result(fairs[only], sources=[only], method="single",
                                  validated=None, fallback="consensus_disabled",
-                                 overrounds=overrounds, outcomes=wanted)
+                                 overrounds=overrounds, outcomes=wanted,
+                                 devig_method=devig, shin_z_value=z_value)
 
     base_books = [b for b in (PRIMARY_BOOK, BENCHMARK_BOOK) if b in fairs]
     used = list(base_books)
@@ -643,7 +691,8 @@ def consensus_probabilities(quotes_by_book: Dict[str, Dict[str, float]], *,
                     else f"single_source:{used[0]}")
     return _consensus_result(final, sources=used, method=m, validated=validated,
                              fallback=fallback, agreement_pp=agreement_pp,
-                             overrounds=overrounds, outcomes=wanted)
+                             overrounds=overrounds, outcomes=wanted,
+                             devig_method=devig, shin_z_value=z_value)
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +757,43 @@ def _read_cache(path: Path) -> Optional[Dict[str, Any]]:
     return data
 
 
+def _iter_cached_matches(home: str, away: str, *, cache_dir: Optional[Path] = None,
+                         sport_key: Optional[str] = None,
+                         now: Optional[float] = None):
+    """Genera `(match, data, path)` per la partita nelle cache FRESCHE.
+
+    UNICO punto di scansione del percorso a costo zero (nome squadre per
+    sottostringa + controllo di freschezza): `load_oracle` e
+    `pinnacle_odds_from_cache` non possono divergere su COME si trova la
+    partita. Ordinamento per cache piu' recente.
+    """
+    folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
+    paths = ([folder / f"toa_{sport_key}.json"] if sport_key
+             else _cache_candidates(folder))
+    ts_now = time.time() if now is None else float(now)
+    h, a = _cf(home), _cf(away)
+    if not h or not a:
+        return
+    for path in paths:
+        data = _read_cache(path)
+        if not isinstance(data, dict):
+            continue
+        age_h = (ts_now - float(data.get("ts") or 0)) / 3600.0
+        if age_h > CACHE_MAX_AGE_H:
+            continue
+        for match in (data.get("payload") or []):
+            if not isinstance(match, dict):
+                continue
+            mh = _cf(match.get("home_team"))
+            ma = _cf(match.get("away_team"))
+            # Match per SOTTOSTRINGA, entrambe le squadre sulla STESSA riga
+            # (mai l'incrocio: due partite diverse non si fondono).
+            if (not mh or not ma) or (h not in mh and mh not in h) \
+                    or (a not in ma and ma not in a):
+                continue
+            yield match, data, path
+
+
 def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
                 cache_dir: Optional[Path] = None,
                 devig_method: Optional[str] = None,
@@ -753,43 +839,45 @@ def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
             recente (una squadra puo' comparire in due competizioni).
         devig_method: override puntuale del metodo (default DEVIG_METHOD).
     """
-    folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
-    if sport_key:
-        paths = [folder / f"toa_{sport_key}.json"]
-    else:
-        paths = _cache_candidates(folder)
-    ts_now = time.time() if now is None else float(now)
-    h, a = _cf(home), _cf(away)
-    if not h or not a:
-        return None
-    for path in paths:
-        data = _read_cache(path)
-        if not isinstance(data, dict):
-            continue
-        age_h = (ts_now - float(data.get("ts") or 0)) / 3600.0
-        if age_h > CACHE_MAX_AGE_H:
-            continue
-        payload = (data or {}).get("payload") or []
-        for match in payload:
-            if not isinstance(match, dict):
-                continue
-            mh = _cf(match.get("home_team"))
-            ma = _cf(match.get("away_team"))
-            # Match per SOTTOSTRINGA, entrambe le squadre sulla STESSA riga
-            # (mai l'incrocio: due partite diverse non si fondono).
-            if (not mh or not ma) or (h not in mh and mh not in h) \
-                    or (a not in ma and ma not in a):
-                continue
-            by_book = oracle_quotes([match],
-                                    match.get("home_team") or "",
-                                    match.get("away_team") or "",
-                                    outcomes=outcomes)
-            if not by_book:
-                continue               # fail-closed: nessuna fonte completa
-            probs = consensus_probabilities(by_book, devig_method=devig_method,
-                                            outcomes=outcomes)
-            if probs:
-                return probs
+    for match, _data, _path in _iter_cached_matches(
+            home, away, cache_dir=cache_dir, sport_key=sport_key, now=now):
+        by_book = oracle_quotes([match],
+                                match.get("home_team") or "",
+                                match.get("away_team") or "",
+                                outcomes=outcomes)
+        if not by_book:
+            continue                   # fail-closed: nessuna fonte completa
+        probs = consensus_probabilities(by_book, devig_method=devig_method,
+                                        outcomes=outcomes)
+        if probs:
+            return probs
+    return None
+
+
+def pinnacle_odds_from_cache(home: str, away: str,
+                             sport_key: Optional[str] = None, *,
+                             cache_dir: Optional[Path] = None,
+                             now: Optional[float] = None,
+                             outcomes: Tuple[str, ...] = OUTCOMES
+                             ) -> Optional[Dict[str, Any]]:
+    """Quote GREZZE di Pinnacle per la partita, dalle cache. **0 crediti.**
+
+    NON e' un oracolo: nessun de-vig, nessuna probabilita'. Restituisce il
+    prezzo PUBBLICATO dallo sharp (con il `ts` della cache e la chiave sport)
+    per registrare lo STORICO dei prezzi e misurare il movimento
+    (steam move). Fail-closed: None se la partita non c'e' in nessuna cache
+    fresca o se Pinnacle non ha TUTTI gli esiti attesi.
+    """
+    for match, data, path in _iter_cached_matches(
+            home, away, cache_dir=cache_dir, sport_key=sport_key, now=now):
+        odds = book_quotes(match, match.get("home_team") or "",
+                           match.get("away_team") or "", PRIMARY_BOOK,
+                           outcomes=outcomes)
+        if odds:
+            stem = path.stem[len("toa_"):] if path.stem.startswith("toa_") \
+                else path.stem
+            return {"odds": {k: float(v) for k, v in odds.items()},
+                    "ts": data.get("ts"), "sport_key": stem}
     return None
 
 

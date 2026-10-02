@@ -134,6 +134,19 @@ cd webapp && npm run build            # build Next.js
    13/09 un conflitto di merge committato in `auto_bet.py` ha messo giù
    l'INTERA produzione (502, bot fermo, zero settlement) e nessuno se ne e'
    accorto per ore. I test vanno eseguiti PRIMA del push.
+9. **Commit DOCUMENTALI — policy ufficiale "Opzione 3: accetta il rebuild
+   automatico"** (decisione del proprietario, 02/10/2026). Un commit che tocca
+   SOLO documentazione (AGENTS.md, README, commenti) si fa con un normale
+   `git push` su `main`: il marker `[skip ci]` nel messaggio puo' restare come
+   tentativo, ma **NON ferma Railway** (verificato: il deployment
+   `95a32732-4023-43a5-8234-671f61f9701f` ha `commitMessage` con `[skip ci]`
+   ed e' partito comunque, SUCCESS + health 200). Se Railway builda, il
+   rebuild (~5 min) e' **accettato**: rolling deploy, zero attrito.
+   **Perche' NON si usano branch temporanei ne' l'auto-deploy disattivato a
+   mano**: sono due meccanismi che si possono dimenticare nello stato sbagliato
+   (branch mai mergiato, auto-deploy rimasto spento prima di una patch vera) e
+   farebbero piu' danno di cinque minuti di build. Il rischio umano si elimina
+   con una regola semplice, non con un interruttore in piu'.
 
 ## Segreti: vault cifrato (`secrets/`)
 
@@ -8062,3 +8075,97 @@ ordini reali degli ultimi 7 giorni.
   longer supported"; `/user/orders[-v3]` → 400 "address must be a valid
   address". La tabella `bets` registra per design solo i **riempimenti**
   (fail-closed): il conteggio dei POST va letto dai **log**.
+
+### Enhancement matematico: de-vig Shin + Steam Move (02/10/2026)
+
+Direttiva del proprietario: (1) pulire le quote sharp di Pinnacle col
+**Metodo di Shin (1992/93)** — parametro `z` di denaro informato — per il
+calcolo dell'EV; (2) tracciare il **ΔQ/Δt** della quota Pinnacle sui 15-30'
+e marcare gli **steam move** (crollo > 4%) per dare priorita' d'esecuzione;
+(3) documentare la policy dei commit documentali. Le due conferme chieste al
+proprietario sono state date prima di scrivere codice: **Shin come default
+dell'oracolo** e **steam a 4% / finestra 30' / span minimo 15'**.
+
+**1) IL DE-VIG DI SHIN ESISTEVA GIA' — trovato PRIMA di scrivere.**
+`market_calib` aveva `_shin_fair` + `devig(method="shin")` dal primo giorno
+(era documentato in testa al modulo). La regola di progetto "ogni formula in
+un solo posto" ha quindi trasformato la direttiva in **due soli interventi**:
+- **`market_calib.shin_devig(probs) -> (fair, z)`**: la formula esistente, con
+  il parametro `z` finalmente **esposto** (era calcolato e buttato via).
+  `_shin_fair` ora delega (retrocompatibilita' senza seconda copia) e il nuovo
+  **`devig_with_z(odds, method)`** e' l'unico punto di verita' di `z`.
+- **`pinnacle_oracle.DEVIG_METHOD` da `power` a `shin`** (default di codice,
+  rollback a una env `PINNACLE_DEVIG_METHOD=power`). Nuovo `shin_z(odds_map,
+  min_outcomes=)` che delega a `devig_with_z`, e il consenso espone
+  `devig_method` + `shin_z` nei metadati (aggiunti a `_META_KEYS`: non possono
+  finire in un calcolo di EV o di true-odd, tripwire dedicato).
+
+**Misura dell'impatto (fatta PRIMA di cambiare il default)**: Shin e' piu'
+deciso del power sul favourite-longshot bias — favorito **+0.7pp**
+(0.5483 -> 0.5550 su un 1X2 tipico), longshot **-0.5pp**, mercato lopsided
+**+0.8pp** sul favorito. Il percorso a 3 esiti del calcio resta INVARIATO nella
+forma (la generalizzazione a 2 esiti del 30/09 non e' toccata).
+
+**2) STEAM MOVE — il ΔQ/Δt vive dove vive lo STORICO.**
+⚠️ `market_quotes` **non ha storico** (e' un upsert sulla chiave
+`(fixture_id, market_type, line_key, selection)`): il ΔQ/Δt non si puo'
+calcolare da li'. Lo storico dei prezzi del progetto e' `price_snapshots`
+(`line_movement`), che ha gia' la colonna `bookmaker`: e' li' che va
+registrato lo sharp, **senza creare una terza tabella**.
+- `line_movement.record_snapshot` accetta `recorded_at` (iniettabile nei test);
+  `get_snapshots` accetta il filtro `bookmaker` (lo storico di una fonte non
+  inquina il movimento di un'altra).
+- **`steam_move.py` (nuovo)**: `record_sharp_snapshot` (delega a
+  `line_movement`, dedup sui prezzi identici ravvicinati — il giro gira ogni
+  60s), `delta_q_dt` (finestra 15-30', `span_minutes` REALE), `detect`
+  (crollo `<= -4%` -> `steam_move/priority`), `annotate` + `sort_for_execution`
+  (gli steam in testa alla coda, **sort stabile**: l'ordine EV resta intatto
+  nei due gruppi). Il ponte con l'oracolo e' il nuovo
+  **`pinnacle_oracle.pinnacle_odds_from_cache`** (prezzo GREZZO, non de-vigato:
+  0 crediti, cache della rotazione quote), con la scansione cache estratta in
+  `_iter_cached_matches` (un solo punto: `load_oracle` e il nuovo helper non
+  possono divergere su COME si trova la partita).
+- **Perche' ha senso**: crollo dello sharp = il denaro informato entra su
+  quell'esito, la probabilita' "vera" sale e il prezzo SX (non ancora
+  riallineato) e' un valore che si sta chiudendo -> si esegue **per primo**.
+- **Fail-safe totale**: `annotate`/`detect`/`delta_q_dt` non propagano mai
+  un'eccezione (un problema di telemetria non ferma un giro puntate) e un
+  errore di lettura non e' mai indistinguibile da "nessun movimento"
+  (`reason` machine-readable: `no_data`, `no_sharp_cache`, `span_too_short`,
+  `no_drop`, `steam_down`, `unsupported_market`, `read_error`).
+- **OU/AH esclusi di proposito**: l'esito e' una LINEA e la corrispondenza con
+  lo sharp non e' diretta -> `unsupported_market` invece di un marcatore
+  sbagliato. Coperti: `1X2` (3 esiti) e `TENNIS`/`ML` (2 esiti).
+- **Wiring**: in `auto_bet.run_today_bets`, dopo il gate di mercato e prima
+  della FASE 2 — `steam_move.annotate(candidates)` + `sort_for_execution`, con
+  log WARNING per ogni steam e doppia cintura `try/except`.
+- Env (tutte in `preserve()` di `.railway/railway.ts` accanto a
+  `PINNACLE_DEVIG_METHOD`/`PINNACLE_CACHE_MAX_AGE_H`): `STEAM_MOVE_ENABLED`,
+  `STEAM_MOVE_PCT` (0.04), `STEAM_MOVE_WINDOW_MIN` (30), 
+  `STEAM_MOVE_MIN_WINDOW_MIN` (15), `STEAM_MOVE_BOOK` (pinnacle),
+  `STEAM_MOVE_DEDUP_MIN` (5). Valori impossibili -> default con warning;
+  negativi -> rialzati al minimo (una guardia non si spegne con un env
+  sbagliato).
+
+**3) POLICY COMMIT DOCUMENTALI (regola 9, "Opzione 3").** Scritta in
+"Convenzioni e regole d'oro": un commit solo-documentale va con un normale
+`git push`; `[skip ci]` NON ferma Railway (verificato sul deployment
+`95a32732`), e il rebuild ~5 min e' **accettato**. Motivo dichiarato: branch
+temporanei e auto-deploy spento a mano sono meccanismi che si possono
+**dimenticare nello stato sbagliato**.
+
+**Test**: `test_steam_move.py` **53 verdi** (config/default/env impossibili,
+forma del mercato, dedup dello storico, ΔQ/Δt con span e finestra, verdetto,
+ponte oracolo con cache finta, marcatore + ordinamento stabile, report/CLI,
+tripwire "nessun ordine/nessuna scrittura/nessuna formula copiata/import
+leggero/IaC dichiarata", wiring). `test_pinnacle_api.py` aggiornato: 
+`test_default_e_shin_coerente_con_il_progetto` (sostituisce l'assert sul power),
+`test_shin_corregge_il_bias_piu_del_power`, `test_shin_su_mercato_a_due_esiti`,
+`TestShinZ` (7 test) e `test_odds_pinnacle_dalla_cache`.
+Regressioni verdi: pinnacle+steam+line_movement+market_calib (260),
+top_down+line_oracle+tennis_lane+esports_oracle (312),
+auto_bet x2+capital_enclosure+favourites_only+risk_guards (130),
+multi_market+bot+decision_pipeline+limits+compare (~260),
+sx_signals+esports_lane+t60_breakers+league_gate+secret_hygiene+
+railway_drift+settlement_watchdog+decision_shadow (~330).
+`compileall` OK, 0 marker di conflitto.

@@ -50,11 +50,14 @@ def _ensure_table(conn):
 
 def record_snapshot(match_id: str, esito: str, price: float,
                     bookmaker: str = "", market_prob: float = None,
-                    conn=None) -> None:
+                    conn=None, recorded_at: str = None) -> None:
     """Registra uno snapshot di prezzo per un match+esito.
 
     Chiamata ad ogni analisi di _analyze_match per costruire lo storico
-    dei movimenti di linea.
+    dei movimenti di linea. `bookmaker` distingue la FONTE del prezzo (es.
+    'pinnacle' per lo sharp, vuoto per il prezzo SX del segnale): lo storico
+    di una fonte non deve inquinare il movimento di un'altra.
+    `recorded_at` e' iniettabile per i test (default: adesso).
     """
     own_conn = conn is None
     if own_conn:
@@ -62,7 +65,7 @@ def record_snapshot(match_id: str, esito: str, price: float,
         conn = _get_conn()
     try:
         _ensure_table(conn)
-        now = datetime.now().isoformat()
+        now = recorded_at or datetime.now().isoformat()
         conn.execute(
             "INSERT INTO price_snapshots (match_id, esito, price, "
             "bookmaker, market_prob, recorded_at) VALUES (?,?,?,?,?,?)",
@@ -74,45 +77,45 @@ def record_snapshot(match_id: str, esito: str, price: float,
 
 
 def get_snapshots(match_id: str, esito: str = None,
-                  since_minutes: int = None) -> List[Dict]:
+                  since_minutes: int = None,
+                  bookmaker: str = None) -> List[Dict]:
     """Recupera gli snapshot per un match (e opzionalmente un esito).
 
     Se since_minutes e' specificato, filtra solo gli ultimi N minuti.
+    Se bookmaker e' specificato, filtra la FONTE del prezzo (es. 'pinnacle'):
+    lo storico di una fonte non deve inquinare il movimento di un'altra.
     """
     from tracker import _get_conn
     conn = _get_conn()
     try:
         _ensure_table(conn)
+        _bk = " AND bookmaker=?" if bookmaker is not None else ""
         if esito:
+            base = ("SELECT price, bookmaker, market_prob, recorded_at "
+                    "FROM price_snapshots WHERE match_id=? AND esito=?" + _bk)
+            params: list = [match_id, esito]
+            if bookmaker is not None:
+                params.append(bookmaker)
             if since_minutes:
                 cutoff = (datetime.now() - timedelta(minutes=since_minutes)
                           ).isoformat()
-                rows = conn.execute(
-                    "SELECT price, bookmaker, market_prob, recorded_at "
-                    "FROM price_snapshots WHERE match_id=? AND esito=? "
-                    "AND recorded_at >= ? ORDER BY recorded_at",
-                    (match_id, esito, cutoff)).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT price, bookmaker, market_prob, recorded_at "
-                    "FROM price_snapshots WHERE match_id=? AND esito=? "
-                    "ORDER BY recorded_at",
-                    (match_id, esito)).fetchall()
+                base += " AND recorded_at >= ?"
+                params.append(cutoff)
+            rows = conn.execute(base + " ORDER BY recorded_at",
+                                tuple(params)).fetchall()
         else:
+            base = ("SELECT match_id, esito, price, bookmaker, market_prob, "
+                    "recorded_at FROM price_snapshots WHERE match_id=?" + _bk)
+            params = [match_id]
+            if bookmaker is not None:
+                params.append(bookmaker)
             if since_minutes:
                 cutoff = (datetime.now() - timedelta(minutes=since_minutes)
                           ).isoformat()
-                rows = conn.execute(
-                    "SELECT match_id, esito, price, bookmaker, market_prob, "
-                    "recorded_at FROM price_snapshots WHERE match_id=? "
-                    "AND recorded_at >= ? ORDER BY recorded_at",
-                    (match_id, cutoff)).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT match_id, esito, price, bookmaker, market_prob, "
-                    "recorded_at FROM price_snapshots WHERE match_id=? "
-                    "ORDER BY recorded_at",
-                    (match_id,)).fetchall()
+                base += " AND recorded_at >= ?"
+                params.append(cutoff)
+            rows = conn.execute(base + " ORDER BY recorded_at",
+                                tuple(params)).fetchall()
         return [dict(zip(
             ["match_id", "esito", "price", "bookmaker", "market_prob",
              "recorded_at"] if not esito else
