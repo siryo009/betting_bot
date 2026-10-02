@@ -8284,3 +8284,53 @@ dice, invece di restituire un numero inventato.
 `venv/bin/python scripts/stress_test_bankroll.py`,
 `venv/bin/python scripts/clv_brier_analytics.py --since 2026-09-19`,
 `venv/bin/python scripts/tune_steam_params.py --trials 500 --folds 4`.
+
+### Notifiche/formattazione: bankroll reale, orario IT, stop sandbox tennis e riepilogo ieri (02/10/2026)
+
+Direttiva del proprietario su notifiche e formattazione. Quattro interventi su
+`bot.py`, tutti con fail-safe e test in `test_bot.py` (**non committati**: il
+commit/push lo fa il proprietario).
+
+**1) Bankroll REALE nel messaggio di avvio (fine dei 100.00 hardcoded).**
+`real_bankroll_usdc() -> (float|None, base)` legge in ordine: (a) l'**EQUITY**
+del wallet SX (`auto_bet._live_wallet_snapshot`: `available + exposure`, la
+stessa base che governa Kelly/stop/recinto), (b) la **cassa ledger**
+(`adaptive_staking.bankroll_stats()["current"]`), (c) `(None, motivo)`. In
+`bot.main()` un valore None fa scrivere `⚠️ {motivo}` + `logger.error`; MAI il
+vecchio fallback fisso `BANKROLL_DEFAULT` (100.00). Header del messaggio di
+avvio cambiato in **`🤖 BOT - QUANT BETTING - SX BET`**. Il tripwire del
+crash-loop del 19/09 resta intatto (`get_bankroll()` senza argomento continua a
+valere `BANKROLL_DEFAULT` e `main()` non lo chiama).
+
+**2) Orario italiano su `✅ ORDINE FULLY_FILLED`.** Nuova
+`format_match_start(commence, *, prefix="🕒 Inizio:")`: converte l'ISO UTC in
+`Europe/Rome` con `zoneinfo` (fallback `timezone(+2)`), ritorna
+`"🕒 Inizio: HH:MM (IT)"` oppure **None** su input assente/non parsabile. Nel
+blocco FULLY_FILLED di `auto_bet_job` la riga e' inserita sotto il nome del
+match solo se non None (`_start_line`). I record di `run_today_bets` portano
+`commence` (`{**cand}` per tutte le corsie; il piano chief ha
+`"commence": kickoff`). Fix collaterale: `timezone` era usato ma **non
+importato** a livello di modulo in `bot.py` (la branca naive dava `None` per
+`NameError`): ora e' nell'import da `datetime`.
+
+**3) Sandbox Tennis: nessun invio Telegram.** `tennis_sandbox_report_job`
+(05:55 UTC) non invia piu' (gate `_notify_enabled("TENNIS_SANDBOX_NOTIFY")`,
+default spento); il testo resta calcolato e loggato. `tennis_sandbox_job`
+(scan 6h) non inviava gia' (`text` era costruito ma mai spedito): ora il
+dettaglio finisce a DEBUG e il log lo dichiara. Log/DB intatti.
+
+**4) "Riepilogo di Ieri": nessun invio Telegram.** `report_morning_job`
+(06:05 UTC) e' gated da `_notify_enabled("MORNING_REPORT_NOTIFY")` (default
+spento): il report resta calcolato e loggato. Il comando manuale `/riepilogo`
+NON e' toccato.
+
+**Helper/flag**: `_notify_enabled(env)` = True solo per `1/true/yes/on`,
+default SPENTO (riattivabile senza redeploy di codice via env omonima).
+**Test**: `test_bot.py` `TestOrarioInizioPartita` (Z/naive/invalido, messaggio
+con riga orario), `TestBankrollReale` (equity/cassa/entrambe KO, sorgente di
+`main()`), `TestNotificheDisattivate` (default spento, env ON, job tennis/report
+spente e riattivabili). Lotti verdi: test_bot (42) + auto_bet_live +
+capital_enclosure + exposure_gate + t60_breakers (161), secret_hygiene +
+reports + secure_logging + settlement_pause + favourites_only + sx_signals.
+`compileall` OK, 0 marker di conflitto. Nessuna env nuova obbligatoria
+(default "spento" da codice).

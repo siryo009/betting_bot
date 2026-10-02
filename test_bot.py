@@ -306,3 +306,192 @@ class TestBankrollAvvio:
                   and getattr(node.func, "id", "") == "get_bankroll"
                   and not node.args and not node.keywords]
         assert offese == [], f"get_bankroll() senza chat_id alle righe {offese}"
+
+
+class TestOrarioInizioPartita:
+    """Direttiva 02/10/2026: orario di inizio in ora ITALIANA.
+
+    `format_match_start` converte il timestamp UTC in Europe/Rome. Mai un
+    orario INVENTATO: un input assente o non parsabile deve dare None, cosi'
+    il chiamante omette la riga invece di stampare un valore falso.
+    """
+
+    def test_timestamp_z_convertito_in_ora_italiana(self):
+        import bot
+        assert (bot.format_match_start("2026-10-02T18:45:00Z")
+                == "🕒 Inizio: 20:45 (IT)")
+
+    def test_prefix_personalizzabile(self):
+        import bot
+        assert (bot.format_match_start("2026-10-02T18:45:00+00:00",
+                                       prefix="Kickoff:")
+                == "Kickoff: 20:45 (IT)")
+
+    def test_timestamp_naive_trattato_come_utc(self):
+        import bot
+        assert (bot.format_match_start("2026-10-02T18:45:00")
+                == "🕒 Inizio: 20:45 (IT)")
+
+    def test_input_assente_o_non_parsabile_da_none(self):
+        import bot
+        assert bot.format_match_start(None) is None
+        assert bot.format_match_start("") is None
+        assert bot.format_match_start("non-una-data") is None
+
+    def test_messaggio_fully_filled_contiene_la_riga_orario(self):
+        """Tripwire sul sorgente: la riga orario sta sotto il nome del match."""
+        import pathlib
+        import bot
+        src = pathlib.Path(bot.__file__).read_text(encoding="utf-8")
+        idx = src.index('filled = [p for p in placed')
+        blocco = src[idx:idx + 1200]
+        assert 'format_match_start(p.get("commence"))' in blocco
+        assert "_start_line" in blocco
+        assert "ORDINE FULLY_FILLED" in blocco
+
+
+class TestBankrollReale:
+    """Direttiva 02/10/2026: bankroll REALE nel messaggio di avvio.
+
+    Il vecchio fallback fisso `BANKROLL_DEFAULT` (100.00) faceva leggere un
+    patrimonio inesistente. La lettura preferisce l'EQUITY del wallet SX
+    (la stessa base che governa Kelly/stop/recinto), poi la cassa ledger;
+    se nessuna risponde il chiamante DEVE dichiararlo (valore None).
+    """
+
+    def test_usa_l_equity_del_wallet_sx(self, monkeypatch):
+        import bot
+        import auto_bet
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
+                            lambda: {"available": 26.5, "exposure": 1.5,
+                                     "equity": 28.0})
+        val, basis = bot.real_bankroll_usdc()
+        assert val == 28.0
+        assert "wallet SX" in basis and "equity" in basis
+
+    def test_fallback_sulla_cassa_ledger(self, monkeypatch):
+        import bot
+        import auto_bet
+        import adaptive_staking
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: None)
+        monkeypatch.setattr(adaptive_staking, "bankroll_stats",
+                            lambda: {"current": 27.5})
+        val, basis = bot.real_bankroll_usdc()
+        assert val == 27.5
+        assert basis == "cassa ledger"
+
+    def test_entrambe_le_fonti_falliscono_dichiara_l_errore(self, monkeypatch):
+        import bot
+        import auto_bet
+        import adaptive_staking
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: None)
+        monkeypatch.setattr(adaptive_staking, "bankroll_stats",
+                            lambda: {"current": 0.0})
+        val, basis = bot.real_bankroll_usdc()
+        assert val is None
+        assert "NON leggibile" in basis
+        # Mai il vecchio fallback fisso.
+        assert val != bot.BANKROLL_DEFAULT
+
+    def test_main_usa_il_bankroll_reale_non_il_default(self):
+        """Tripwire sul sorgente: `main()` legge il bankroll reale."""
+        import pathlib
+        import bot
+        src = pathlib.Path(bot.__file__).read_text(encoding="utf-8")
+        idx = src.index("def main()")
+        corpo = src[idx:idx + 2000]
+        assert "real_bankroll_usdc()" in corpo
+        assert "BOT - QUANT BETTING - SX BET" in corpo
+
+
+class TestNotificheDisattivate:
+    """Direttiva 02/10/2026: sandbox tennis e "Riepilogo di ieri" NON
+    inviano piu' messaggi su Telegram (log/DB restano). Riattivabili con
+    l'env corrispondente a 1.
+    """
+
+    def test_notify_enabled_default_spento(self, monkeypatch):
+        import bot
+        monkeypatch.delenv("MORNING_REPORT_NOTIFY", raising=False)
+        assert bot._notify_enabled("MORNING_REPORT_NOTIFY") is False
+
+    def test_notify_enabled_con_env_uno(self, monkeypatch):
+        import bot
+        for v in ("1", "true", "yes", "on", "ON"):
+            monkeypatch.setenv("TENNIS_SANDBOX_NOTIFY", v)
+            assert bot._notify_enabled("TENNIS_SANDBOX_NOTIFY") is True
+        monkeypatch.setenv("TENNIS_SANDBOX_NOTIFY", "0")
+        assert bot._notify_enabled("TENNIS_SANDBOX_NOTIFY") is False
+
+    def test_riepilogo_ieri_non_invia_di_default(self, monkeypatch):
+        import asyncio
+        import bot
+        monkeypatch.delenv("MORNING_REPORT_NOTIFY", raising=False)
+        monkeypatch.setattr(bot, "format_daily_report",
+                            lambda d, t: "riepilogo di test")
+        inviati = []
+
+        async def _fake(context, text):
+            inviati.append(text)
+
+        monkeypatch.setattr(bot, "_send_report_to_recipients", _fake)
+        asyncio.run(bot.report_morning_job(None))
+        assert inviati == []
+
+    def test_riepilogo_ieri_invia_con_env(self, monkeypatch):
+        import asyncio
+        import bot
+        monkeypatch.setenv("MORNING_REPORT_NOTIFY", "1")
+        monkeypatch.setattr(bot, "format_daily_report",
+                            lambda d, t: "riepilogo di test")
+        inviati = []
+
+        async def _fake(context, text):
+            inviati.append(text)
+
+        monkeypatch.setattr(bot, "_send_report_to_recipients", _fake)
+        asyncio.run(bot.report_morning_job(None))
+        assert inviati == ["riepilogo di test"]
+
+    def test_tennis_report_non_invia_di_default(self, monkeypatch):
+        import asyncio
+        import bot
+        monkeypatch.setenv("TENNIS_SANDBOX_ENABLED", "1")
+        monkeypatch.delenv("TENNIS_SANDBOX_NOTIFY", raising=False)
+        monkeypatch.setattr(bot, "_tennis_report_text", lambda: "report tennis")
+        inviati = []
+
+        async def _fake(context, text):
+            inviati.append(text)
+
+        monkeypatch.setattr(bot, "_send_report_to_recipients", _fake)
+        asyncio.run(bot.tennis_sandbox_report_job(None))
+        assert inviati == []
+
+    def test_tennis_report_invia_con_env(self, monkeypatch):
+        import asyncio
+        import bot
+        monkeypatch.setenv("TENNIS_SANDBOX_ENABLED", "1")
+        monkeypatch.setenv("TENNIS_SANDBOX_NOTIFY", "1")
+        monkeypatch.setattr(bot, "_tennis_report_text", lambda: "report tennis")
+        inviati = []
+
+        async def _fake(context, text):
+            inviati.append(text)
+
+        monkeypatch.setattr(bot, "_send_report_to_recipients", _fake)
+        asyncio.run(bot.tennis_sandbox_report_job(None))
+        assert inviati == ["report tennis"]
+
+    def test_tennis_scan_job_non_invia_mai(self):
+        """Tripwire sul sorgente: il job di scansione non invia su Telegram."""
+        import ast
+        import pathlib
+        import bot
+        tree = ast.parse(pathlib.Path(bot.__file__).read_text(encoding="utf-8"))
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.AsyncFunctionDef)
+                  and n.name == "tennis_sandbox_job")
+        corpo = ast.get_source_segment(
+            pathlib.Path(bot.__file__).read_text(encoding="utf-8"), fn) or ""
+        assert "_send_report_to_recipients" not in corpo

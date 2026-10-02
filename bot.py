@@ -3,7 +3,7 @@ import logging
 import os
 import shutil
 import sqlite3
-from datetime import time, datetime
+from datetime import time, datetime, timedelta, timezone
 
 from telegram import Update
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
@@ -710,6 +710,82 @@ def _update_results():
     # --- STEP 3: aggiorna rating ---
     compute_ratings()
     return updated, get_results_stats(), bet_settlements, sanity_alerts
+
+
+# --- Orario di inizio partita in ora ITALIANA (direttiva 02/10/2026) --------
+def format_match_start(commence, *, prefix: str = "🕒 Inizio:") -> "str | None":
+    """Riga "🕒 Inizio: HH:MM (IT)" dal timestamp UTC di inizio partita.
+
+    Converte in `Europe/Rome` con la libreria standard (`zoneinfo`): l'ora
+    legale e' gestita dal database tz, quindi la riga resta corretta anche
+    dopo il cambio d'ora (a differenza dell'`IT_OFFSET` fisso dei job, che
+    e' una scelta operativa diversa).
+
+    Ritorna None se il timestamp manca o non e' parsabile: un orario
+    INVENTATO in un messaggio operativo sarebbe peggio di nessuna riga
+    (stessa regola del bankroll di avvio).
+    """
+    if not commence:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("Europe/Rome")
+        except Exception:                 # fallback: offset fisso estivo IT
+            tz = timezone(timedelta(hours=2))
+        return f"{prefix} {dt.astimezone(tz).strftime('%H:%M')} (IT)"
+    except Exception:
+        return None
+
+
+def _notify_enabled(env_name: str) -> bool:
+    """True se la notifica Telegram `env_name` e' ATTIVA (default: spenta).
+
+    Direttiva 02/10/2026: la Sandbox Tennis e il "Riepilogo di ieri" non
+    inviano piu' messaggi su Telegram. Log, JSONL e DB restano intatti (la
+    telemetria non si perde): cambia solo la consegna. Riattivabili senza
+    toccare il codice con l'env corrispondente a 1.
+    """
+    return os.getenv(env_name, "0").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def real_bankroll_usdc() -> "tuple[float | None, str]":
+    """Bankroll REALE del conto per i messaggi di stato: (valore, base).
+
+    Ordine di lettura (mai un valore inventato):
+      1. EQUITY del wallet SX (`auto_bet._live_wallet_snapshot`): e' la
+         STESSA fonte che governa Kelly, stop-loss e recinto d'esposizione
+         — un messaggio che mostrasse un numero diverso da quello usato per
+         dimensionare gli ordini sarebbe fuorviante;
+      2. cassa del ledger (`adaptive_staking.bankroll_stats`), la base del
+         percorso SIM;
+      3. `(None, motivo)` — il chiamante DEVE dichiarare che il valore non
+         e' disponibile. Il vecchio fallback fisso `100.00` faceva leggere
+         un patrimonio che non esiste (direttiva 02/10/2026).
+    """
+    try:
+        from auto_bet import _live_wallet_snapshot
+        snap = _live_wallet_snapshot()
+        if snap:
+            equity = float(snap.get("equity") or 0.0)
+            if equity > 0:
+                return equity, (f"wallet SX — equity (disponibile "
+                                f"{snap.get('available', 0.0):.2f} + in gioco "
+                                f"{snap.get('exposure', 0.0):.2f})")
+    except Exception as e:
+        logger.warning("bankroll reale: lettura wallet SX fallita (%s)", e)
+    try:
+        from adaptive_staking import bankroll_stats
+        current = float(bankroll_stats().get("current") or 0.0)
+        if current > 0:
+            return current, "cassa ledger"
+    except Exception as e:
+        logger.warning("bankroll reale: lettura cassa fallita (%s)", e)
+    return None, "NON leggibile (wallet SX e cassa ledger non disponibili)"
 
 
 def _admin_chat_ids() -> list:
@@ -2305,10 +2381,22 @@ async def cmd_t60reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def report_morning_job(context: ContextTypes.DEFAULT_TYPE):
-    """Riepilogo del mattino (08:05 ITA): cosa è successo ieri."""
+    """Riepilogo del mattino (08:05 ITA): cosa è successo ieri.
+
+    Direttiva 02/10/2026: l'invio Telegram del "Riepilogo di Ieri" e'
+    DISATTIVATO di default. Il report resta calcolato e leggibile nei log
+    (telemetria intatta) e si riattiva con l'env `MORNING_REPORT_NOTIFY=1`.
+    Il comando manuale `/riepilogo` non e' toccato (l'utente lo invoca a
+    richiesta).
+    """
     from datetime import timedelta
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     text = format_daily_report(yesterday, "IERI")
+    if not _notify_enabled("MORNING_REPORT_NOTIFY"):
+        logger.info("Riepilogo di ieri: invio Telegram disattivato "
+                    "(MORNING_REPORT_NOTIFY=1 per riattivarlo) — %s",
+                    text.replace("\n", " | ")[:500])
+        return
     await _send_report_to_recipients(context, text)
     logger.info("Riepilogo di ieri inviato agli iscritti.")
 
@@ -2422,10 +2510,16 @@ async def auto_bet_job(context: ContextTypes.DEFAULT_TYPE):
         filled = [p for p in placed if p.get("status") == "FULLY_FILLED"
                   and p.get("mode") == "live"]
         for p in filled:
+            # Orario di inizio in ora ITALIANA (direttiva 02/10/2026). Se il
+            # timestamp manca o non e' parsabile `format_match_start` ritorna
+            # None: si omette la riga, mai un orario inventato.
+            _start = format_match_start(p.get("commence"))
+            _start_line = f"{_start}\n" if _start else ""
             msg = (f"✅ *ORDINE FULLY_FILLED*"
                    f"{' 🏛️catena Chief' if p.get('lane') == 'chief' else ''}"
                    f"\n\n"
                    f"🏟️ {p['home']} vs {p['away']}\n"
+                   f"{_start_line}"
                    f"🎯 {p['esito_key']} @ {p['price']:.2f}\n"
                    f"💰 Stake: €{p['stake']:.2f}\n"
                    f"📋 Bet ID: `{p.get('bet_id', 'N/A')}`\n"
@@ -2719,8 +2813,14 @@ async def tennis_sandbox_job(context: ContextTypes.DEFAULT_TYPE):
             f"{len(signals)} nuovi segnali +EV, {len(settled)} settlement\n\n"
             + "\n".join(rows) +
             "\n\n📌 Simulazione: nessun ordine reale, nessun costo.")
-    logger.info("tennis_sandbox_job: %d segnali, %d settlement",
+    # Direttiva 02/10/2026: nessun invio Telegram per il sandbox tennis.
+    # Il dettaglio resta nei log (telemetria intatta); per riattivare la
+    # consegna dei messaggi: env TENNIS_SANDBOX_NOTIFY=1.
+    logger.info("tennis_sandbox_job: %d segnali, %d settlement "
+                "(notifica Telegram disattivata per direttiva 02/10/2026)",
                 len(signals), len(settled))
+    logger.debug("tennis_sandbox_job dettaglio: %s",
+                 text.replace("\n", " | "))
 
 
 async def tennis_sandbox_report_job(context: ContextTypes.DEFAULT_TYPE):
@@ -2737,6 +2837,14 @@ async def tennis_sandbox_report_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error("tennis_sandbox_report_job: %s", e)
         return
     if not text:
+        return
+    # Direttiva 02/10/2026: il report sandbox tennis non si invia piu' su
+    # Telegram. Il testo resta calcolato e loggato (telemetria intatta) e
+    # l'invio si riattiva con l'env TENNIS_SANDBOX_NOTIFY=1.
+    if not _notify_enabled("TENNIS_SANDBOX_NOTIFY"):
+        logger.info("tennis_sandbox_report: invio Telegram disattivato "
+                    "(TENNIS_SANDBOX_NOTIFY=1 per riattivarlo) — %s",
+                    text.replace("\n", " | ")[:500])
         return
     await _send_report_to_recipients(context, text)
 
@@ -2817,21 +2925,30 @@ def main() -> None:
     from auto_bet import kill_switch_status, _execution_mode, t60_window
     from decision.models import Mode
     mode = os.getenv("AUTO_BET_MODE", "sim").strip().lower()
-    # Bankroll del messaggio di avvio: la cassa reale se disponibile, altrimenti
-    # il default. MAI `get_bankroll()` senza argomento (crash-loop del 19/09).
-    try:
-        from adaptive_staking import bankroll_stats
-        bankroll = float(bankroll_stats().get("current") or BANKROLL_DEFAULT)
-    except Exception:
-        bankroll = BANKROLL_DEFAULT
+    # Bankroll del messaggio di avvio: SEMPRE un valore reale (equity wallet
+    # SX in LIVE, altrimenti la cassa del ledger). Se nessuna delle due fonti
+    # risponde il messaggio DICHIARA il problema: il vecchio fallback fisso
+    # `BANKROLL_DEFAULT` (100.00) faceva leggere un patrimonio che non
+    # esisteva (direttiva 02/10/2026). MAI `get_bankroll()` senza argomento
+    # (crash-loop del 19/09/2026).
+    bankroll, bankroll_basis = real_bankroll_usdc()
+    if bankroll is None:
+        bankroll_line = f"💰 <b>Bankroll:</b> ⚠️ {bankroll_basis}"
+        logger.error("bankroll di avvio NON disponibile: %s", bankroll_basis)
+    else:
+        bankroll_line = (f"💰 <b>Bankroll:</b> {bankroll:.2f} USDC "
+                         f"<i>({bankroll_basis})</i>")
+        logger.info("bankroll reale di avvio: %.2f USDC (%s)",
+                    bankroll, bankroll_basis)
     ks = kill_switch_status()
     summary = (
-        f"🤖 <b>Bot avviato in modalità {mode.upper()}</b>\n"
+        f"🤖 <b>BOT - QUANT BETTING - SX BET</b>\n"
+        f"<b>Avviato in modalità {mode.upper()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Stato circuito:</b> {ks.get('effective', 'unknown')}\n"
         f"🔧 <b>Modalità esecuzione:</b> {_execution_mode()}\n"
         f"⏰ <b>Finestra T-60:</b> {t60_window(None)}\n"
-        f"💰 <b>Bankroll:</b> {bankroll:.2f} USDC\n"
+        f"{bankroll_line}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"✅ Sistema pronto. Primo ciclo T-60 tra 60s."
     )
