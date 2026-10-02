@@ -23,9 +23,37 @@ def test_scrub_maschera_token_telegram():
 
 
 def test_scrub_maschera_hex_key():
+    """Una chiave esadecimale CON etichetta davanti resta mascherata."""
     out = SensitiveDataFilter.scrub("key df59346f72e7c52b910f56a30f6011f4 non valida", set())
     assert "df59346f" not in out
     assert "***" in out
+    # L'etichetta resta leggibile: si maschera il valore, non il contesto.
+    assert out.startswith("key ***")
+
+
+def test_scrub_non_maschera_gli_identificatori_di_partita():
+    """Regressione 01/10/2026: gli event id di the-odds-api sono 32 hex.
+
+    Il pattern esadecimale NUDO li mascherava: nei log di `auto_bet` il match id
+    diventava `***REDACTED*** (1) @ 1.31` — un identificatore di partita (non un
+    segreto) nascosto, con i log resi illeggibili a costo zero di sicurezza.
+    """
+    match_id = "6f1d2c3b4a5968778695a4b3c2d1e0f1"      # 32 hex, NON segreto
+    msg = (f"auto_bet: {match_id} (1) @ 1.31 EV top-down -0.52% < 2.0%: "
+           "no value")
+    out = SensitiveDataFilter.scrub(msg, set())
+    assert match_id in out, out
+    assert "REDACTED" not in out
+
+
+def test_scrub_maschera_la_chiave_con_etichetta_ma_non_il_match():
+    """Stessa riga: la chiave vera sparisce, l'identificatore della partita no."""
+    row = {"match_id": "cd50cbdecb590b3b66ff69dac64b1c7d",
+           "api_key": "df59346f72e7c52b910f56a30f6011f4"}
+    out = SensitiveDataFilter.scrub(
+        f"evento {row['match_id']} api_key={row['api_key']}", set())
+    assert row["match_id"] in out
+    assert row["api_key"] not in out
 
 
 def test_scrub_maschera_valori_env():

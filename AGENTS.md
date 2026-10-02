@@ -7702,3 +7702,252 @@ ou_exclusion + pinnacle_api + top_down + multi_market + t60_breakers +
 line_oracle (**311 passed**), auto_bet x2 + capital_enclosure +
 exposure_gate, bot + secret_hygiene + gate_audit, verify_guardrails
 **A-H tutti bloccano** (exit 0), compileall OK, 0 marker di conflitto.
+
+### Diagnosi "0 candidati giocabili" + linee oracle AH/OU + NBA nel cron (01/10/2026)
+
+**Direttiva del proprietario**: analizzare orchestratore/bot, diagnosticare il
+"0 candidati", verificare l'ingestione su TUTTI gli sport (calcio, tennis,
+eSports, MLB) e produrre un piano di scaling per far partire gli ordini.
+Leve scelte via `ask_user` (multi-select): **A** (fix linee AH: selezionare solo
+le linee prezzabili dall'oracolo) e **C** (riattivare NBA nel cron surebet).
+NON scelte: B (piu' budget oracolo), D (aprire OU), E (TOP_DOWN_BYPASS),
+F (sola diagnostica). Commit `29421ec`, deploy SUCCESS.
+
+**NON c'e' blocco tecnico** (tutto verificato sul container, sola lettura):
+deploy `e2b20f3`/`29421ec` SUCCESS; `auto_bet` 72 cicli/71 min con **0 ERROR**;
+kill-switch `live` + `provider_ready: true`; `DRY_RUN False`; stake fisso 1.50;
+feed di mercato validato (42 quote SX, 0 respinte); recinto 0.00/13.42 USDC su
+0 ordini; daily/weekly stop non armati; crediti the-odds-api 290->293.
+
+**Il collo di bottiglia e' la fase FINALE: 3 cause misurate per impatto.**
+1. **Linee AH/OU non prezzabili** (difetto strutturale): SX quota
+   `Home +0.5/+1/+1.5` (AH) e `Over/Under 1.5..4.5` (OU), Pinnacle via
+   the-odds-api espone **solo la linea MAIN** (spreads ±0.25/±0.5, totals
+   2.75). `_top_down_eval` e' fail-closed -> ogni pick AH moriva con motivo
+   `linea` (285 `SKIP [linea]` su 1500 righe di log).
+2. **OU chiuso** da `ou_readiness`: 5/20 chiusure, ROI -15.66% (ledger
+   azzerato il 27/09). 8 strong_value OU generati ma in shadow: giusto cosi'
+   (soglia decisa dal proprietario, non abbassata).
+3. **Finestra T-60** (in prod `T60_WINDOW_MIN_MIN=120`, `MAX=15`): 70' utili
+   su 24h. Tutti i log sono `before`, zero `missed`/`unknown`.
+
+**Funnel completo misurato**: 1X2 = 1 candidato (Malta-Gibraltar @1.31,
+modello EV +5.4%) respinto dall'oracolo top-down (EV -0.52%); AH = 4
+candidati UEFA Nations League, tutti respinti per `linea`; OU = 8 strong_value
+in shadow; **TENNIS = 5 pick armata** con EV 2.8-18.9% e liquidita'
+66-153 USDC >= 20 richiesti (`ORACLE_*` + corsia tennis via `line_oracle`);
+eSports = 0 (Pinnacle pubblica tardi); MLB = 0 (nessuna corsia value, solo
+cron surebet). Ledger: `matches` 125, `predictions` 355 (256 aperte), `bets` 0.
+
+**Leva A — `oracle_lines` + selezione linee** (`pinnacle_oracle.py` +
+`multi_market.py`):
+- `pinnacle_oracle._oracle_fixture_books(home, away, *, cache_dir, sport_key,
+  now)` = UNICA lettura-cache del percorso a linea (ritorna `None` se la partita
+  non e' in alcuna cache fresca = oracolo IGNOTO, altrimenti la lista dei
+  bookmaker `pinnacle`, anche vuota). `line_true_probs` riscritto per usarla
+  (era duplicato).
+- `oracle_lines(home, away, *, market_type, ...) -> Optional[Set[float]]`:
+  linee `totals` (OU) o `spreads` del lato casa (AH), con ribaltamento del
+  segno se il payload ha le squadre invertite. `None` = oracolo ignoto;
+  `set()` = partita nota ma Pinnacle non pubblica nulla.
+- `multi_market._line_priceable(...)` (True se prezzabile **o** oracolo
+  IGNOTO: fail-closed solo quando l'oracolo e' NOTO) e
+  `_prefer_oracle_lines(fixture, market_type, groups)`: preferisce i gruppi la
+  cui linea e' prezzabile; `_ledger_rows` ha ora firma
+  `_ledger_rows(fixture, cands)`; `live_picks` scarta con log
+  `multi_market: skip <id> <esito> (l'oracolo non prezza la linea X ...)`.
+  **Correttezza, non volume**: il gate non registra piu' come giocabili
+  candidati non eseguibili, ma non crea pick dove Pinnacle tace.
+- `conftest.py`: `pinnacle_oracle.DATA_DIR` isolato in `tmp_path` (senza, un
+  `live_picks()` di test leggerebbe/scriverebbe le cache oracolo reali).
+- Test: `test_multi_market.py` +205 righe (`TestLettoreLineeOracle` 9 test,
+  `TestPreferenzaLineeOracle` 7 test, helper `_cand`/`_write_oracle_cache`,
+  `ORACLE_SPORT`). Bug fixati in corsa: `_ledger_rows()` chiamata senza il
+  nuovo argomento `fixture` in `_persist` (TypeError); test AH riscritto
+  (`test_ah_esito_del_lato_trasferta_ribalta_il_segno`: il match per nome
+  richiede lo stesso ordine casa/trasferta per design).
+
+**Leva C — NBA nel cron surebet**: `.railway/railway.ts`
+`SUREBET_SPORTS: "basketball_nba,baseball_mlb"` (~8 crediti/giorno) + env
+impostata su Railway (`railway variables --service surebet --set`).
+`railway config plan`: **0 to add, 0 to change, 0 to destroy**. Log post-fix:
+`run avviato (sports=basketball_nba,baseball_mlb)`.
+
+**VERIFICA POST-DEPLOY (container)**: `oracle_lines` presente e callable;
+`live_picks(hours=48)` = `[]` (i pick AH ora correttamente scartati); nei log
+il gate gira ogni ~15'/60s. Corsia tennis armata: 4-5 pick,
+`Learner Tien @1.64 EV +3.15%`, `Kei Nishikori @5.44 EV +9.47%`,
+`Aoi Ito @4.28 EV +9.80%`, `Yihan Qu @15.69 EV +18.87%` [telemetria] — tutti
+`before` (finestra T-120..T-15 non ancora aperta).
+
+**Finestre esecutive attese**: tennis con kickoff 03:10 UTC apre **01:10**,
+04:10 apre **02:10**, 06:30 apre **04:30**, 11:00 apre **09:00**.
+`required_depth(1.5)` = 20.0 USDC.
+
+**⚠️ Schema DB reale sul container (diverso da quanto assunto in altri punti)**:
+`matches` ha **`id`/`home_team`/`away_team`/`commence_time`/`league`** (NON
+`match_id`/`home`/`away`); `market_quotes` ha **`market_type`** (non `market`),
+`line`, `line_key`, `main_line`, `fixture_id`, `price`, `liquidity`;
+`match_analysis` non ha la colonna `league`.
+
+**⚠️ Nota operativa**: `_live_available_size(prov, market_id, selection_id,
+min_price)` richiede `prov` come PRIMO argomento (usa `prov.get_market_book`).
+Pinnacle pubblica tardi su eSports; il validatore Matchbook resta spesso in
+disaccordo (6.4pp > 5.0pp) e viene ESCLUSO dal consenso (warning ricorrente,
+comportamento voluto).
+
+**NON toccati** (senza decisione esplicita): EV 2.5%, fascia quota 1.30-1.80,
+`TOP_DOWN_BYPASS` (OFF), soglia `ou_readiness` (20 chiusure).
+
+#### 🔴 BLOCCO CRITICO TROVATO: SX Bet rifiuta gli ordini dall'IP USA del container (01/10/2026)
+
+**Il vero motivo di `bets = 0` dal 27/09 NON era il funnel: era un 403 di SX Bet.**
+Nei log di `auto_bet` ogni 60s: `sxbet: POST /orders-v3 -> HTTP 403 in ~110ms |
+raw: {"message":"Forbidden","statusCode":403}`. Il bot HA tentato ordini reali
+(Taylor Fritz vs Jaume Munar `2 @ 3.98`, Jaime Faria vs Arthur Fery `2 @ 2.05`)
+e TUTTI sono stati respinti dall'exchange.
+
+**Diagnosi (stessa chiave, stessi endpoint, IP diversi — test ripetibile):**
+| Da dove | `/orders-v3` | `/user/balance-v3` |
+|---|---|---|
+| Container Railway (Santa Clara, **US**) | **403 Forbidden**, body vuoto | 200 |
+| Macchina locale (Palermo, **IT**) | **400** con validazione regolare | 200 |
+
+Senza chiave `/orders-v3` risponde **401** (autenticazione); con la chiave
+dall'US risponde **403** (autorizzazione/blocco) — quindi la chiave e' valida e
+RICONOSCIUTA: e' il piazzamento a essere vietato dal paese.
+
+**Prove collaterali raccolte (tutte coerenti, nessuna ipotesi):**
+- `SX_API_KEY` len 64 sha12 `1a5b708e8e06`, `SX_PRIVATE_KEY` len 66 presenti;
+- letture autenticate OK: `/user/balance-v3` -> `availableBalance 33.5535`,
+  `wallet 0x97aE9595Ec23125eF21ff8f551f60DEc94644002`,
+  `userAddress 0x3C68Dbe192C8194b986414A2a67b786ac934a8c5`;
+- `metadata/obv3` -> `chainId 4162`, dominio EIP-712 `OBv3 Escrow` v1,
+  `verifyingContract 0x890482680C3a0116aBB003B17e7D694D13a6c1eB` (= escrow);
+- il signer EOA `0x3C68…a8c5` coincide col `userAddress` dell'account: chiave
+  privata e account sono accoppiati correttamente;
+- **body vuoto e body malformato danno ENTRAMBI 403 dall'US** e **ENTRAMBI 400
+  dall'IT**: il blocco precede la validazione del payload.
+- egress del container: `152.55.176.25 | Santa Clara US | AS400940 Railway`.
+- **Conferma dalla fonte ufficiale** (sx.bet): *"SX Bet is not available in the
+  United States or other prohibited jurisdictions."*
+
+**Causa infrastrutturale**: `.railway/railway.ts` dichiara
+`volume("betting_bot-volume", { …, region: "sfo" })` — la migrazione del 27/09
+verso il nuovo account Railway ha messo il servizio in **US West (sfo)**. Sul
+vecchio account la regione era europea: da li' gli ordini passavano (bet #41
+FULLY_FILLED del 15/09). Il blocco e' comparso con la migrazione.
+
+**Perche' le letture funzionano e gli ordini no**: gli endpoint di lettura
+(pubblici e autenticati) NON sono geo-limitati; il gateway di piazzamento
+ordini si'.
+
+**Opzioni di rimedio (nessuna applicata: decisione del proprietario):**
+1. **Verifica prima**: servizio usa-e-getta in regione EU che esegue la stessa
+   sonda (`orders: []` -> 400 invece di 403). ~15 min, zero impatto su
+   produzione, esclude che il blocco sia sui datacenter e non sulla geografia.
+2. **Migrazione del servizio+volume in EU** (es. `europe-west4`): il volume e'
+   region-locked, quindi serve un volume nuovo in EU + copia dei dati
+   (~34 MB: DB, cache, modello, ledger) + breve downtime.
+3. **Relay EU dedicato** per i soli ordini: servizio EU che inoltra il POST a
+   SX. L'ordine e' gia' firmato EIP-712, quindi il relay **non puo' alterarlo**;
+   niente migrazione del DB. Costo: un hop in piu' nel percorso del denaro.
+
+⚠️ **Regola operativa nuova**: qualunque futura migrazione di progetto/servizio
+Railway deve finire in una **regione europea**, altrimenti gli ordini SX
+smettono di funzionare (il resto — letture, settlement, surebet, Telegram —
+continua a funzionare, quindi il guasto e' **silenzioso** e si vede solo da
+`bets = 0`).
+
+### Migrazione in AMS ESEGUITA e VERIFICATA + consolidamento (01/10/2026)
+
+**Esito: il blocco geo e' RISOLTO.** La migrazione e' finita come previsto e con
+container di manutenzione (nessuna scrittura sul DB durante la copia).
+
+| passo | esito |
+|---|---|
+| volume nuovo | `volume("betting_bot-volume-ams", region:"ams", 500MB)` creato (apply `1 to add, 0 to destroy`) |
+| copia dati | 85/85 voci / 32 MB da `betting_bot-volume` (sfo), escluse `backups/` e `lost+found/`; travaso via `tar | railway ssh ... 'tar xzf - -C /app/data'` -> **86 voci, 31.3M, 5.5s** |
+| cutover | container di manutenzione (`image("alpine:3.20")` + `startCommand: sleep 86400` + volume ams), poi ripristino `source: github(...)` + `replicas: {"ams":1}` + `volumeMounts` -> ams |
+| verifica | egress **`152.55.184.117 | Amsterdam NL | AS400940 Railway`**; `/orders-v3` con body vuoto -> **HTTP 400** (validazione raggiunta, non piu' 403); health 200; `config plan: already up to date` |
+| commit | **`7994a42`** (`29421ec..7994a42`), solo `.railway/railway.ts` (18+/3-), deploy `bc04bb12` |
+
+**Il nuovo collo di bottiglia NON e' piu' un blocco**: l'ordine viene ACCETTATO
+e poi cancellato per mancanza di controparte al prezzo (IOC):
+`{"orderId":"0x…","status":"SUBMITTED","outcome":{"state":"CANCELLED","remainingAmount":"1500000","cancelReason":"NO_LIQUIDITY"}}`.
+Il volume dipende dalla liquidita' SX al prezzo richiesto. Il vecchio volume
+`sfo` resta dichiarato in `resources` come **backup passivo**: rimuoverlo lo
+DISTRUGGE, quindi si lascia li' 2-3 giorni prima del decommissionamento.
+
+**Regola permanente**: ogni migrazione di progetto/servizio Railway deve finire
+in una **regione europea** (verificata la regione con l'egress del container,
+non solo dal file IaC).
+
+#### Consolidamento memoria + 4 direttive tecniche (01/10/2026)
+
+**1) Fix cosmetico `secure_logging` (falso positivo sui match id).** Il pattern
+per le chiavi esadecimali era NUDO (`\b[0-9a-f]{32}\b`) e mascherava anche i
+normali identificatori di partita: gli **event id di the-odds-api sono
+esattamente 32 caratteri esadecimali** (`cd50cbdecb590b3b66ff69dac64b1c7d`),
+quindi i log di `auto_bet` mostravano `***REDACTED*** (1) @ 1.31` al posto del
+match id. Ora la maschera esadecimale scatta **solo con l'etichetta davanti**
+(`_HEX_LABELLED_RE`: `api_key`, `key`, `token`, `secret`, `bearer`, `password`);
+l'etichetta resta leggibile e si maschera solo il valore. I valori REALI delle
+env restano coperti da `collect_secrets()` (match sul valore esatto), ora
+esteso a `SX_API_KEY`, `SX_PRIVATE_KEY`, `ODDSPAPI_KEY`, `EXA_API_KEY` (chiavi
+che non erano coperte). Test: `test_secure_logging.py` (+3: match id non
+mascherato, chiave con etichetta mascherata sulla stessa riga).
+
+**2) Budget surebet: `SUREBET_ODDS_TTL` 6h -> 12h (43200).** Impostata su
+Railway (`railway variables --service surebet --set SUREBET_ODDS_TTL=43200`,
+verificata `=43200`) **e** allineata in `.railway/railway.ts` + nel default di
+`surebet_engine.ODDS_TTL`, cosi' un `config apply` non la riporta a 6h.
+Copertura sport INVARIATA: `basketball_nba,baseball_mlb` (nessuno sport nuovo:
+dimezza i fetch del cron senza toccare la copertura).
+
+**3) Telemetria OMbra -> SOLO `market_quotes` (`market_shadow.py`, nuovo).**
+Il contratto `decision.market.MarketType` e' stato esteso con la **famiglia
+"including overtime"** di SX, misurata sulla doc ufficiale e sul probe reale di
+Basketball (`sportId` 1) / American Football (`8`):
+
+| type id SX | nome ufficiale | mercato canonico | linee |
+|---|---|---|---|
+| **28** | Under/Over Including Overtime | `OU_OT` | si (quarter-line ammessa) |
+| **342** | Asian Handicap Including Overtime | `AH_OT` | si (quarter-line NON ammessa dalla doc) |
+| **226** | 12 Including Overtime | `ML_OT` | no |
+
+⚠️ **Sono tipi canonici SEPARATI, non un flag su OU/AH**: la chiave del ledger e'
+`(fixture_id, market_type, line_key, selection)`, quindi un OU 220.5 del tempo
+regolamentare e un OU 220.5 "inclusi supplementari" collasserebbero sulla stessa
+riga (lo stesso errore che il 18/09 si e' evitato fra linee diverse). I **bounds
+di linea sono LARGHI** (OU_OT 0.5-500, AH_OT -100..100): i limiti calcistici
+(0.5-12) respingerebbero OGNI riga di basket/NFL, cioe' la telemetria sarebbe
+muta per costruzione. **226 esce da `SX_TYPES_NOT_MODELLED`** (52, 835, 77, 63
+restano dichiarati).
+
+`market_shadow.py` fa discovery (riusa `multi_market._discover_type`, ora con
+`sport_ids` parametrico) -> order book pubblico (riuso `sx_signals._books_parallel`)
+-> contratto 2.0 (`parse_quote`) -> `tracker.save_market_quotes`.
+**Vincolo tassativo del proprietario rispettato**: scrive ESCLUSIVAMENTE su
+`market_quotes`; **nessuna riga a stake 0 su `predictions`** (inquinerebbe ROI e
+calibrazione). Il vincolo e' strutturale e verificato da tripwire (sorgente
+senza salvataggio previsioni, import leggero in sottoprocesso, nessun ordine).
+Job `bot.market_shadow_job` registrato con lo stesso intervallo dello scan SX
+(15'), **spento di default** (`SHADOW_MARKET_ENABLED=1` per accenderlo): a codice
+invariato non parte nessun ciclo. Env in `preserve()`: `SHADOW_MARKET_ENABLED`,
+`SHADOW_SPORTS`, `SHADOW_TYPES`, `SHADOW_HOURS_AHEAD`, `SHADOW_MAX_MARKETS`,
+`SHADOW_GATEWAY_ID`. CLI: `venv/bin/python market_shadow.py [--json] [--no-save]`.
+Test: `test_market_shadow.py` (**33 verdi, offline**: provider/book finti,
+zero rete/chiavi/crediti/ordini) + `test_decision_market.py` /
+`test_decision_market_multi.py` aggiornati alla famiglia OT.
+
+**4) Infrastruttura: il volume `sfo` NON si tocca.** `betting_bot-volume` (sfo,
+500 MB) resta dichiarato in `resources` come backup passivo per 2-3 giorni prima
+del decommissionamento definitivo (rimuoverlo lo distrugge).
+
+**Verifiche pre-push**: `compileall` OK, 0 marker di conflitto, `railway config
+plan` -> **already up to date** (0 to add, 0 to change, 0 to destroy), test
+verdi su `market_shadow` (33), `decision_market`+`decision_market_multi`+
+`market_quotes_store`+`decision_pipeline` (349), `multi_market`+
+`secure_logging`+`secret_hygiene`+`surebet_engine` (165), `bot`+`sx_signals`
+(33), `railway_drift_check` (29).

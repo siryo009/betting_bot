@@ -24,12 +24,25 @@ Il contratto lo rappresenta con tre aggiunte sostanziali:
     origin        "native" (la pubblica un book) o "derived" (la produce il
                   sistema) — e una quota derivata DEVE dichiarare `derived_from`.
 
-Il 1X2 e l'OU non esauriscono SX Bet: la doc ufficiale
+Le 1X2 e l'OU non esauriscono SX Bet: la doc ufficiale
 (`docs.sx.bet/api-reference/market-types`) elenca oltre 30 tipi, con la colonna
 "Has lines". Il registro tiene i type id NATIVI (1 = 1X2, 2 = OU, 3 = AH,
-17 = BTTS) e dichiara esplicitamente i tipi osservati vivi ma non modellati
-(`SX_TYPES_NOT_MODELLED`: 52, 226, 835, ...) e i mercati che su SX NON esistono
+17 = BTTS, 28/342/226 = la FAMIGLIA "including overtime" di OU/AH/12, vedi
+sotto) e dichiara esplicitamente i tipi osservati vivi ma non modellati
+(`SX_TYPES_NOT_MODELLED`: 52, 835, ...) e i mercati che su SX NON esistono
 (Double Chance, Risultato Esatto: derivati, non inventati).
+
+**La famiglia "including overtime" (01/10/2026).** I tipi SX 28
+("Under/Over Including Overtime", con linea), 342 ("Asian Handicap Including
+Overtime", con linea) e 226 ("12 Including Overtime", senza linea) sono le
+varianti con supplementari dei mercati base, e sono i tipi che SX pubblica sui
+NON-calcio (Basketball sportId 1, American Football sportId 8: misurato il
+01/10/2026 su `GET /markets/active`). Sono tipi canonici SEPARATI e non un
+flag su OU/AH: la chiave del ledger e' `(fixture_id, market_type, line_key,
+selection)`, quindi un OU 2.5 e un OU-inclusi-supplementari 2.5 collasserebbero
+sulla STESSA riga — lo stesso errore che il 18/09 si e' evitato fra linee
+diverse. Marcare lo sport e' compito del feed (`home`/`away`/`league`), non del
+tipo di mercato.
 
 I campi chiave (tutti obbligatori):
 
@@ -174,6 +187,14 @@ KEY_ALIASES = {
 #: Le chiavi sono normalizzate con `_norm_key` (minuscole, senza separatori),
 #: quindi 'Match Odds' == 'match_odds' == 'match-odds' senza doppie voci.
 MARKET_ALIASES = {
+    # Famiglia "including overtime" (SX 28/342/226): i nomi arrivano dai feed
+    # che scrivono l'etichetta per esteso invece del codice canonico.
+    "ou_ot": "OU_OT", "totals_ot": "OU_OT", "over_under_ot": "OU_OT",
+    "over_under_including_overtime": "OU_OT",
+    "ah_ot": "AH_OT", "spread_ot": "AH_OT",
+    "asian_handicap_including_overtime": "AH_OT",
+    "ml_ot": "ML_OT", "moneyline_ot": "ML_OT",
+    "12_including_overtime": "ML_OT", "moneyline_including_overtime": "ML_OT",
     "1x2": "1X2",
     "12": "1X2",
     "h2h": "1X2",
@@ -259,6 +280,15 @@ class MarketType(str, Enum):
     BOTH_TEAMS_TO_SCORE = "BTTS"
     DOUBLE_CHANCE = "DC"
     CORRECT_SCORE = "CS"
+    # -- famiglia "including overtime" (SX 28/342/226) ----------------------
+    # Stessa forma dei mercati base (esiti, linee), dominio NON calcistico:
+    # sono i tipi che SX pubblica su Basketball/American Football. Tipi
+    # canonici a se' stanti perche' la chiave del ledger include il tipo: un
+    # OU 220.5 (tempo regolamentare) e un OU-inclusi-supplementari 220.5 sono
+    # due mercati diversi e non devono sovrascriversi.
+    OVER_UNDER_OT = "OU_OT"
+    ASIAN_HANDICAP_OT = "AH_OT"
+    MONEYLINE_OT = "ML_OT"
 
 
 class MarketTypeSpec(BaseModel):
@@ -326,6 +356,36 @@ MARKET_SPECS: dict[MarketType, MarketTypeSpec] = {
         native=False, requires_score=True,
         derivable_from=(MarketType.MATCH_RESULT, MarketType.OVER_UNDER),
         note="non nativo su SX: derivato dalla distribuzione di Poisson"),
+    # -- famiglia "including overtime" (SX 28/342/226) ----------------------
+    # Limiti di linea LARGHI di proposito: questi mercati vivono su sport dove
+    # i punteggi non sono gol (basket ~150-260, basket spread fino a ~30, NFL
+    # ~35-60). I bounds di OU/AH (0.5..12) li respingerebbero TUTTI: il
+    # contratto serve anche la telemetria, e una riga rifiutata per un limite
+    # calcistico non e' un dato corretto, e' un dato perso.
+    MarketType.OVER_UNDER_OT: MarketTypeSpec(
+        market_type=MarketType.OVER_UNDER_OT,
+        label="Totale punti Over/Under (inclusi supplementari)",
+        selections=("over", "under"), has_lines=True,
+        quarter_line_eligible=True, line_bounds=(0.5, 500.0),
+        source_type_ids=(("sxbet", 28),),
+        note="SX 28 'Under/Over Including Overtime': non calcistico "
+             "(basket/NFL). Quarter-line ammessa dalla doc ufficiale"),
+    MarketType.ASIAN_HANDICAP_OT: MarketTypeSpec(
+        market_type=MarketType.ASIAN_HANDICAP_OT,
+        label="Asian Handicap (inclusi supplementari)",
+        selections=("1", "2"), has_lines=True,
+        quarter_line_eligible=False, line_bounds=(-100.0, 100.0),
+        source_type_ids=(("sxbet", 342),),
+        note="SX 342 'Asian Handicap Including Overtime'. La doc NON elenca "
+             "342 fra i tipi quarter-line eligible (2, 3, 28): una linea "
+             "quartata qui e' respinta, come dichiarato dalla fonte"),
+    MarketType.MONEYLINE_OT: MarketTypeSpec(
+        market_type=MarketType.MONEYLINE_OT,
+        label="Testa a testa 2 esiti (inclusi supplementari)",
+        selections=("1", "2"), source_type_ids=(("sxbet", 226),),
+        note="SX 226 '12 Including Overtime': moneyline SENZA pareggio "
+             "(basket/NFL). Su SX esiste anche il 52 '12' senza supplementari: "
+             "NON modellato (usato dalle corsie tennis/eSports via type id)"),
 }
 
 #: Mercati canonici ammessi dal contratto (derivato dal registro: mai a mano).
@@ -341,12 +401,18 @@ MARKET_SELECTIONS: dict[str, tuple[str, ...]] = {
     for spec in MARKET_SPECS.values() if spec.selections
 }
 
-#: Type id ufficiali SX Bet -> mercato canonico (docs.sx.bet, 18/09/2026).
+#: Type id ufficiali SX Bet -> mercato canonico (docs.sx.bet, 18/09/2026;
+#: famiglia "including overtime" aggiunta il 01/10/2026 dalla stessa doc e
+#: confermata dal probe reale su /markets/active di Basketball/American
+#: Football: tipi osservati vivi 28, 342, 226).
 SX_TYPE_IDS: dict[int, MarketType] = {
     1: MarketType.MATCH_RESULT,
     2: MarketType.OVER_UNDER,
     3: MarketType.ASIAN_HANDICAP,
     17: MarketType.BOTH_TEAMS_TO_SCORE,
+    28: MarketType.OVER_UNDER_OT,
+    226: MarketType.MONEYLINE_OT,
+    342: MarketType.ASIAN_HANDICAP_OT,
 }
 
 #: Type id SX che portano linee (colonna "Has lines" della doc ufficiale) e
@@ -362,9 +428,10 @@ SX_QUARTER_LINE_TYPES = (2, 3, 28)
 #: Verificato il 18/09/2026 su /markets/active (sportIds=5):
 #:   1 -> 1X2 (100 mercati), 2 -> OU (100), 3 -> AH (100), 52 -> 12 (100),
 #:   17 -> BTTS (0 attivi), 53/63/77/226/835 -> 0 attivi.
+#: ⚠️ 226 e' USCITO da qui il 01/10/2026: e' modellato (`MONEYLINE_OT`),
+#: insieme a 28 e 342 (famiglia "including overtime", sport non calcistici).
 SX_TYPES_NOT_MODELLED: dict[int, str] = {
-    52: "12 (senza pareggio)",
-    226: "12 con overtime",
+    52: "12 (senza pareggio) — usato dalle corsie tennis/eSports via type id",
     835: "Asian Under/Over",
     77: "Under/Over primo tempo",
     63: "12 primo tempo",
@@ -871,7 +938,9 @@ class MarketQuote(BaseModel):
         handicap e' l'opposto. Un AH con il segno sbagliato e' un esito perso
         per un motivo che non e' il calcio.
         """
-        if self.line is None or self.market != MarketType.ASIAN_HANDICAP.value:
+        if self.line is None or self.market not in (
+                MarketType.ASIAN_HANDICAP.value,
+                MarketType.ASIAN_HANDICAP_OT.value):
             return None
         return self.line if self.selection == "1" else -self.line
 
@@ -880,17 +949,21 @@ class MarketQuote(BaseModel):
         """Esito nel formato del LEDGER del progetto (`tracker`/`ml_audit`).
 
         1X2 -> '1'/'X'/'2' · OU -> 'Over 2.5' · AH -> 'Home -0.75' ·
-        BTTS -> 'Yes'/'No' · DC -> '1X'/'X2'/'12' · CS -> '3-1'.
+        BTTS -> 'Yes'/'No' · DC -> '1X'/'X2'/'12' · CS -> '3-1' ·
+        famiglia OT -> come il mercato base (OU_OT -> 'Over 220.5', AH_OT ->
+        'Home -3.5', ML_OT -> 'Home'/'Away').
         E' il ponte fra la chiave macchina (`selection`) e cio' che il resto
         del sistema gia' scrive e salda.
         """
         market = self.market_type
-        if market is MarketType.OVER_UNDER:
+        if market in (MarketType.OVER_UNDER, MarketType.OVER_UNDER_OT):
             side = "Over" if self.selection == "over" else "Under"
             return f"{side} {self.half_line_label()}"
-        if market is MarketType.ASIAN_HANDICAP:
+        if market in (MarketType.ASIAN_HANDICAP, MarketType.ASIAN_HANDICAP_OT):
             side = "Home" if self.selection == "1" else "Away"
             return f"{side} {_signed_line(self.handicap_for_selection or 0.0)}"
+        if market is MarketType.MONEYLINE_OT:
+            return "Home" if self.selection == "1" else "Away"
         if market is MarketType.BOTH_TEAMS_TO_SCORE:
             return "Yes" if self.selection == "yes" else "No"
         return self.selection_label or self.selection

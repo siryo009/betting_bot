@@ -2515,6 +2515,41 @@ async def multi_market_job(context: ContextTypes.DEFAULT_TYPE):
                 len(found), live_n)
 
 
+async def market_shadow_job(context: ContextTypes.DEFAULT_TYPE):
+    """Telemetria OMbra sui mercati SX NON calcistici (01/10/2026).
+
+    Registra i mercati Basketball/American Football (tipi SX 28/342/226,
+    famiglia "including overtime") **esclusivamente** su `market_quotes`: il
+    modello Poisson e' calcistico e questi sport non si analizzano, si
+    raccolgono per poterli misurare piu' avanti.
+
+    Vincolo tassativo del proprietario: NESSUNA riga su `predictions` (una
+    previsione a stake 0 non e' un esperimento, e' un dato falso che inquina
+    ROI e calibrazione) — il vincolo e' strutturale, non una promessa:
+    `market_shadow` non importa il salvataggio delle previsioni e un tripwire
+    lo verifica sul sorgente.
+
+    Costo: zero crediti, zero chiavi, zero ordini (solo API pubblica SX).
+    Spento di default: `SHADOW_MARKET_ENABLED=1` per attivarlo.
+    """
+    import market_shadow
+    if not market_shadow.enabled():
+        return
+    loop = asyncio.get_running_loop()
+
+    def _pass():
+        return market_shadow.run()
+
+    try:
+        summary = await loop.run_in_executor(_scan_executor, _pass)
+    except Exception as e:                       # pragma: no cover
+        logger.error("market_shadow_job: %s", e)
+        return
+    logger.info("market_shadow_job: %s mercati letti, %s quote su "
+                "market_quotes (predictions intatte)",
+                (summary or {}).get("records"), (summary or {}).get("saved"))
+
+
 async def tennis_lane_job(context: ContextTypes.DEFAULT_TYPE):
     """Corsia TENNIS (30/09/2026): oracolo a 2 esiti + telemetria.
 
@@ -2910,6 +2945,13 @@ def main() -> None:
         # shadow. MM_ENABLED=0 per spegnerla senza toccare il 1X2.
         job_queue.run_repeating(multi_market_job, interval=_sx_min * 60,
                                 first=150,
+                                job_kwargs={"max_instances": 1})
+        # Telemetria ombra mercati NON calcistici (01/10): scrive SOLO su
+        # `market_quotes` (mai predictions). Spenta di default
+        # (SHADOW_MARKET_ENABLED=1 per accenderla): a codice invariato non
+        # parte nessun ciclo e il costo resta zero.
+        job_queue.run_repeating(market_shadow_job, interval=_sx_min * 60,
+                                first=210,
                                 job_kwargs={"max_instances": 1})
         # Corsia TENNIS (30/09/2026): oracolo a 2 esiti + telemetria. Ogni 6h
         # (l'oracolo ha TTL 12h e 3 tornei attivi: ~6 crediti/giorno). Gli

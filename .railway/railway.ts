@@ -109,6 +109,17 @@ export default defineRailway(() => {
       ESPORTS_MAX_EVENTS: preserve(),
       ESPORTS_MAX_MARKETS: preserve(),
       ESPORTS_REQ_BUDGET_DAY: preserve(),
+      // Telemetria ombra mercati SX NON calcistici (01/10/2026,
+      // `market_shadow.py`): scrive ESCLUSIVAMENTE su `market_quotes` (mai
+      // `predictions`). Spenta di default; queste voci esistono perche' un
+      // `config apply` non deve distruggere l'interruttore/copertura che
+      // l'operatore imposta.
+      SHADOW_MARKET_ENABLED: preserve(),
+      SHADOW_SPORTS: preserve(),
+      SHADOW_TYPES: preserve(),
+      SHADOW_HOURS_AHEAD: preserve(),
+      SHADOW_MAX_MARKETS: preserve(),
+      SHADOW_GATEWAY_ID: preserve(),
       // Fascia quota della corsia eSports: se assente vale quella della
       // strategia di calcio (1.30-1.80, letta da `value_filter`), quindi
       // `config apply` non deve poterla distruggere se viene impostata.
@@ -202,8 +213,13 @@ export default defineRailway(() => {
       // SUREBET_ODDS_TTL (12h = meta' del costo), poi si toglie MLB a fine
       // stagione — MAI toccare la rotazione value, che e' la corsia del
       // denaro.
+      // 01/10/2026: TTL portato a 12h (era 6h) su direttiva del proprietario:
+      // dimezza i fetch del cron (2 invece di 4 per sport al giorno) e rientra
+      // nel budget dei 500 crediti/mese senza togliere sport. NB: qui il TTL e'
+      // anche quello del codice (`surebet_engine.ODDS_TTL`), quindi un
+      // `config apply` non puo' riportarlo a 6h.
       SUREBET_SPORTS: "basketball_nba,baseball_mlb",
-      SUREBET_ODDS_TTL: "21600",
+      SUREBET_ODDS_TTL: "43200",
       SUREBET_MIN_REMAINING: "50",
       SUREBET_MIN_MARGIN: "0.005",
       SUREBET_CRON_HOLD_SECONDS: preserve(),

@@ -76,7 +76,10 @@ class TestContratto:
         # Lo schema 2.0 apre il contratto a TUTTI i mercati del registro:
         # la lista non si scrive a mano (altrimenti diverge dal registro).
         assert SUPPORTED_MARKETS == tuple(m.value for m in MarketType)
-        assert {"1X2", "OU", "AH", "BTTS", "DC", "CS"} == set(SUPPORTED_MARKETS)
+        # La famiglia "including overtime" (01/10/2026) fa parte del registro:
+        # e' la lista dei mercati che il contratto sa rappresentare.
+        assert {"1X2", "OU", "AH", "BTTS", "DC", "CS",
+                "OU_OT", "AH_OT", "ML_OT"} == set(SUPPORTED_MARKETS)
 
     def test_quote_valida_normalizza(self):
         quote = parse_quote(payload(market="h2h", selection="home", odds="1.69",

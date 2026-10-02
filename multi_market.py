@@ -414,17 +414,38 @@ def _same_team(a: str, b: str) -> bool:
         return a.strip().lower() == b.strip().lower()
 
 
+def _uses_over_under_names(market_type: Any) -> bool:
+    """Il mercato e' della famiglia "totale" (esiti over/under)?
+
+    Derivato dal CONTRATTO (`decision.market.spec_for`): OU e la variante con
+    supplementari (OU_OT) condividono la lettura dei nomi ('Over 220.5'), e un
+    tipo nuovo della stessa famiglia segue da solo. Se il contratto non
+    conosce il valore si ricade sul prefisso (mai indovinare la famiglia).
+    """
+    try:
+        from decision.market import spec_for          # import pigro
+        spec = spec_for(market_type)
+    except Exception:
+        spec = None
+    if spec is not None:
+        return tuple(spec.selections) == ("over", "under")
+    return str(market_type or "").upper().startswith("OU")
+
+
 def outcome_sides(market_type: str, outcome_one: Any,
                   home: str, away: str) -> Optional[Tuple[str, str]]:
     """Esiti canonici di outcomeOne/outcomeTwo nel mercato binario SX.
 
-    OU: il nome dell'esito dice il lato ('Over 2.5' / 'Under 2.5').
-    AH: outcomeOne e' la squadra a cui si applica la linea; la selection 1 e'
-    teamOne, la 2 teamTwo. Senza riconoscimento -> None (mai indovinare).
+    TOTALE (OU / OU_OT): il nome dell'esito dice il lato ('Over 2.5' /
+    'Under 2.5') — la famiglia e' derivata dal contratto, non da una lista
+    riscritta qui.
+    SCONTRO (AH / AH_OT / ML_OT): outcomeOne e' la squadra a cui si applica la
+    linea; la selection 1 e' teamOne, la 2 teamTwo. Senza riconoscimento ->
+    None (mai indovinare).
     """
     mt = str(market_type).upper()
     o1 = str(outcome_one or "")
-    if mt == "OU":
+    if _uses_over_under_names(market_type):
         low = o1.strip().lower()
         if low.startswith("over") or " over" in low:
             return "over", "under"
@@ -497,7 +518,8 @@ def _resolve_league_label(label: str) -> str:
 
 def _discover_type(provider: Any, type_id: str,
                    max_markets: int,
-                   errors: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+                   errors: Optional[List[str]] = None,
+                   sport_ids: str = "5") -> List[Dict[str, Any]]:
     """Una pagina (o piu') di /markets/active per UN type id (come sx_signals).
 
     `errors` (opzionale): se passata, il motivo di un fallimento viene
@@ -505,11 +527,17 @@ def _discover_type(provider: Any, type_id: str,
     sorvegliati: senza di essa "il book non pubblica il mercato" e "la lettura
     e' fallita" diventano la stessa cosa (lista vuota), che e' esattamente il
     fallimento silenzioso da evitare.
+
+    `sport_ids` (01/10/2026): SX identifica lo sport con `sportIds` (5 = calcio,
+    1 = basket, 8 = football americano). Il default resta 5 (nessun chiamante
+    esistente cambia comportamento); la telemetria ombra lo usa per leggere gli
+    sport NON calcistici con la STESSA paginazione, invece di riscriverla.
     """
     out: List[Dict[str, Any]] = []
     pagination_key: Optional[str] = None
     while len(out) < max_markets:
-        params: Dict[str, Any] = {"sportIds": "5", "type": str(type_id),
+        params: Dict[str, Any] = {"sportIds": str(sport_ids),
+                                  "type": str(type_id),
                                   "pageSize": 100}
         if pagination_key:
             params["paginationKey"] = pagination_key

@@ -86,10 +86,18 @@ class TestRegistro:
         assert set(MARKET_SPECS) == set(MarketType)
 
     def test_type_id_sx_ufficiali(self):
-        """Tripwire sui type id NATIVI di SX Bet (docs.sx.bet, 18/09/2026)."""
+        """Tripwire sui type id NATIVI di SX Bet (docs.sx.bet).
+
+        La famiglia "including overtime" (28/342/226) e' stata aggiunta il
+        01/10/2026 dalla stessa doc e confermata dal probe reale su
+        /markets/active di Basketball (sportId 1) e American Football (8).
+        """
         assert SX_TYPE_IDS == {1: MarketType.MATCH_RESULT, 2: MarketType.OVER_UNDER,
                                3: MarketType.ASIAN_HANDICAP,
-                               17: MarketType.BOTH_TEAMS_TO_SCORE}
+                               17: MarketType.BOTH_TEAMS_TO_SCORE,
+                               28: MarketType.OVER_UNDER_OT,
+                               226: MarketType.MONEYLINE_OT,
+                               342: MarketType.ASIAN_HANDICAP_OT}
         for market, spec in MARKET_SPECS.items():
             ids = dict(spec.source_type_ids)
             if spec.native:
@@ -136,6 +144,42 @@ class TestRegistro:
         """Il tipo 52 e' vivo e liquido su SX: deve restare scritto cosa manca."""
         assert 52 in SX_TYPES_NOT_MODELLED and 835 in SX_TYPES_NOT_MODELLED
         assert 52 not in SX_TYPE_IDS and 17 in SX_TYPE_IDS
+
+    def test_famiglia_including_overtime_modellata(self):
+        """28/342/226 non sono piu' "non modellati": sono tipi canonici.
+
+        Il 01/10/2026 il proprietario ha chiesto la telemetria sui mercati non
+        calcistici (Basketball/NFL). I tre tipi esistono sulla doc ufficiale
+        con forma identica ai mercati base, e su SX sono VIVI: 226 esce da
+        SX_TYPES_NOT_MODELLED perche' ora il contratto lo rappresenta.
+        """
+        for type_id, market in ((28, MarketType.OVER_UNDER_OT),
+                                (342, MarketType.ASIAN_HANDICAP_OT),
+                                (226, MarketType.MONEYLINE_OT)):
+            assert SX_TYPE_IDS[type_id] is market
+            assert type_id not in SX_TYPES_NOT_MODELLED, type_id
+            assert dict(spec_for(market).source_type_ids)["sxbet"] == type_id
+
+    def test_famiglia_ot_stessa_forma_dei_mercati_base(self):
+        """OU_OT/AH_OT ereditano la forma di OU/AH; ML_OT e' 2 esiti senza linea."""
+        assert (spec_for("OU_OT").selections
+                == spec_for("OU").selections == ("over", "under"))
+        assert (spec_for("AH_OT").selections
+                == spec_for("AH").selections == ("1", "2"))
+        assert spec_for("OU_OT").has_lines and spec_for("AH_OT").has_lines
+        assert not spec_for("ML_OT").has_lines
+        assert spec_for("ML_OT").selections == ("1", "2")
+
+    def test_bounds_ot_larghi_per_gli_sport_non_calcistici(self):
+        """I bounds calcistici (0.5..12) respingerebbero OGNI riga basket/NFL.
+
+        Il basket totalizza 150-260 punti e gli spread arrivano a ~30: se il
+        contratto riusasse i limiti di OU/AH la telemetria sarebbe muta per
+        costruzione (un dato perso non e' un dato corretto).
+        """
+        assert spec_for("OU_OT").line_bounds[1] >= 300
+        assert spec_for("AH_OT").line_bounds[0] <= -50
+        assert spec_for("AH_OT").line_bounds[1] >= 50
 
     @pytest.mark.parametrize("value,expected", [
         ("AH", MarketType.ASIAN_HANDICAP), ("asian handicap", MarketType.ASIAN_HANDICAP),

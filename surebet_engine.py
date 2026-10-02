@@ -68,7 +68,7 @@ HEARTBEAT_FILE = SUREBET_DATA_DIR / "heartbeat.json"
 # vicino al tetto; il tennis (chiavi per torneo) va abilitato SOLO per i
 # tornei in corso via SUREBET_SPORTS. Sotto SUREBET_MIN_REMAINING lo
 # scanner si ferma per non intaccare il budget del value bot.
-ODDS_TTL = int(os.getenv("SUREBET_ODDS_TTL", "21600"))         # 6h per sport
+ODDS_TTL = int(os.getenv("SUREBET_ODDS_TTL", "43200"))        # 12h per sport
 SUREBET_MIN_REMAINING = int(os.getenv("SUREBET_MIN_REMAINING", "50"))
 
 # Budget per il calcolo degli stake (importo totale da distribuire)

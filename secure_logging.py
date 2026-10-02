@@ -28,6 +28,11 @@ SECRET_ENV_KEYS = (
     "ODDS_API_KEY", "API_FOOTBALL_KEY", "GITHUB_TOKEN",
     "GOOGLE_API_KEY", "SECRETS_MASTER_KEY",
     "TEST_NOTIFY_KEY", "RAILWAY_TOKEN",
+    # 01/10/2026: le chiavi di SX Bet e dei provider d'oracolo (OddsPapi/Exa)
+    # non erano coperte. Il match e' per VALORE ESATTO (nessun falso positivo
+    # possibile su nomi di partita o identificatori), quindi e' la difesa
+    # giusta dopo aver tolto la maschera generica sulle stringhe esadecimali.
+    "SX_API_KEY", "SX_PRIVATE_KEY", "ODDSPAPI_KEY", "EXA_API_KEY",
 )
 
 # Fallback: pattern di segreti riconoscibili anche se la variabile non e'
@@ -35,7 +40,24 @@ SECRET_ENV_KEYS = (
 # NB: niente \b iniziale nel token Telegram: negli URL e' attaccato a 'bot'
 # (api.telegram.org/bot<TOKEN>/getUpdates) e li' non c'e' word boundary.
 _BOT_TOKEN_RE = re.compile(r"\d{6,12}:[A-Za-z0-9_-]{25,}")  # token Telegram
-_HEX_KEY_RE = re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)     # chiavi hex 32
+
+#: Chiave esadecimale SEGNALATA da un'etichetta di credenziale.
+#:
+#: Perche' il CONTESTO e' obbligatorio (fix 01/10/2026): il pattern precedente
+#: era nudo (`\b[0-9a-f]{32}\b`) e mascherava anche i normali IDENTIFICATORI
+#: di partita — gli event id di the-odds-api sono esattamente 32 caratteri
+#: esadecimali (`cd50cbdecb590b3b66ff69dac64b1c7d`). Nei log di `auto_bet` il
+#: match id finiva come `***REDACTED*** (1) @ 1.31`, cioe' illeggibile e senza
+#: alcun guadagno di sicurezza: quel valore NON e' un segreto.
+#: I valori reali delle env restano coperti da `collect_secrets()` (match sul
+#: valore esatto); questa e' la rete per un segreto NON presente in ambiente al
+#: momento del log. Un token nudo senza etichetta non e' distinguibile da un id:
+#: preferiamo un log leggibile a una maschera che nasconde dati utili.
+_HEX_LABELLED_RE = re.compile(
+    r"\b(?P<label>api[_-]?key|apikey|key|token|secret|bearer|password|passwd)\b"
+    r"(?P<gap>\s*[:=]?\s*)(?P<hex>[0-9a-f]{32,64})\b",
+    re.IGNORECASE,
+)
 
 _REDACTED = "***REDACTED***"
 
@@ -67,9 +89,12 @@ class SensitiveDataFilter(logging.Filter):
         for s in secrets:
             if s in text:
                 text = text.replace(s, _REDACTED)
-        # Pattern generici (anche per segreti non in env al momento del log)
+        # Pattern generici (anche per segreti non in env al momento del log).
+        # La chiave esadecimale si maschera SOLO con l'etichetta davanti: senza,
+        # un event id di the-odds-api (32 hex) sparirebbe dai log (fix 01/10).
         text = _BOT_TOKEN_RE.sub(_REDACTED, text)
-        text = _HEX_KEY_RE.sub(_REDACTED, text)
+        text = _HEX_LABELLED_RE.sub(
+            lambda m: f"{m.group('label')}{m.group('gap')}{_REDACTED}", text)
         return text
 
     def filter(self, record: logging.LogRecord) -> bool:
