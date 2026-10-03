@@ -58,7 +58,17 @@ except Exception as _steam_exc:                            # pragma: no cover
 logger = logging.getLogger("auto_bet")
 
 BET_STAKE_DEFAULT_EUR = 5.0
-MIN_MINUTES_TO_START = 15
+#: Pavimento assoluto: sotto questo numero di minuti al kickoff non si ordina
+#: MAI (un ordine a partita imminente rischia di arrivare su un mercato gia'
+#: chiuso o su un prezzo non piu' rappresentativo).
+#: 03/10/2026 (direttiva del proprietario): 15 -> **5**, in COPPIA con
+#: `T60_WINDOW_MAX_MIN`. Le due guardie DEVONO restare allineate: se la
+#: chiusura della finestra scende sotto questo pavimento l'esecuzione tenta
+#: ordini che l'altra guardia salta comunque (lavoro sprecato, log
+#: contraddittori); se sale sopra, l'ultima parte della banda e' una ZONA
+#: MORTA silenziosa — esattamente il buco che la direttiva "nessuna zona
+#: d'ombra negli ultimi 10 minuti" vuole chiudere.
+MIN_MINUTES_TO_START = 5
 
 # --- Esecuzione reale via execution_engine (wiring dal 08/09) ---
 # AUTO_BET_MODE=live|real -> ordini REALI sul provider configurato
@@ -189,15 +199,17 @@ STAKE_CAP_HARD = os.getenv("STAKE_CAP_HARD", "1").strip().lower() \
 # classificati dai giri normali (che restano ogni 60s), la decisione
 # esecutiva arriva alla T-60.
 T60_WINDOW_MIN_MIN = float(os.getenv("T60_WINDOW_MIN_MIN", "60"))   # apertura (minuti al kickoff)
-# CHIUSURA (minuti al kickoff). 15 dal 30/09/2026 (era 50): l'esecuzione
-# arriva fino a T-15 per rendere ORDINABILI i ritentativi tardivi dell'oracolo
-# eSports: Pinnacle pubblica tardi sugli eSports. Il TTL-miss (15min) e la finestra
-# dell'oracolo (1h) sono tarati su QUESTO bordo: con la chiusura a T-50 i
-# tentativi a T-45/T-30/T-15 avrebbero consumato quota per pick che il gate
-# T-60 avrebbe poi rifiutato come `missed` (budget bruciato a vuoto).
-# ⚠️ Il pavimento assoluto resta `MIN_MINUTES_TO_START` (15 min), che salta
-# comunque le partite che stanno per iniziare: le due guardie COINCIDONO.
-T60_WINDOW_MAX_MIN = float(os.getenv("T60_WINDOW_MAX_MIN", "15"))   # chiusura (fail-closed: oltre, non si ordina)
+# CHIUSURA (minuti al kickoff): **5** dal 03/10/2026 (era 15, e 50 prima del
+# 30/09). Direttiva del proprietario: la banda esecutiva e' T-60..T-5 e non
+# deve avere ZONE D'OMBRA negli ultimi minuti, dove arrivano gli steam move
+# dello sharp. L'APERTURA resta 60 (T-60):
+#   T60_WINDOW_MIN_MIN = 60  ->  T60_WINDOW_MAX_MIN = 5
+# La chiusura e' DERIVATA da `MIN_MINUTES_TO_START` (unica sorgente): le due
+# guardie devono coincidere, altrimenti o si tenta l'ultima fascia.
+# ⚠️ Le env sono l'unico modo di tararla in produzione senza redeploy
+# (Railway: T60_WINDOW_MIN_MIN=60, T60_WINDOW_MAX_MIN=5).
+T60_WINDOW_MAX_MIN = float(os.getenv("T60_WINDOW_MAX_MIN",
+                                     str(MIN_MINUTES_TO_START)))   # chiusura (fail-closed: oltre, non si ordina)
 # CB1 — HARD CAP PER ORDINE: NESSUN calcolo dinamico (Kelly incluso) puo'
 # produrre uno stake sopra questo tetto: viene SORSCRITTO. Il proprietario
 # ha scelto 1.00 USDC (17/09): e' il minimo ordine eseguibile dell'exchange

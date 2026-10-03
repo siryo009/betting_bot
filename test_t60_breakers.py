@@ -324,13 +324,13 @@ class TestCB4Liquidita:
 
 
 class TestFinestraT60:
-    """Strategia T-60: decisione esecutiva in finestra T-120..T-15.
+    """Strategia T-60: decisione esecutiva in finestra T-60..T-5.
 
-    La CHIUSURA e' scesa da T-50 a T-15 il 30/09/2026 (direttiva del
-    proprietario): l'oracolo eSports ritenta a T-60/T-45/T-30/T-15 e senza
-    allungare l'esecuzione quei tentativi consumerebbero quota per pick che
-    questo gate rifiuterebbe come `missed`. Il test asserisce la politica
-    NUOVA per intero: un ulteriore spostamento deve rompere qui.
+    La CHIUSURA e' scesa a **T-5** il 03/10/2026 (direttiva del proprietario,
+    era T-15 e T-50 prima): la banda esecutiva non deve avere zone d'ombra
+    negli ultimi minuti, dove arrivano gli steam move dello sharp. Il test
+    asserisce la politica NUOVA per intero: un ulteriore spostamento deve
+    rompere qui.
     """
 
     def test_classificazione_finestra(self):
@@ -338,22 +338,34 @@ class TestFinestraT60:
         assert auto_bet.t60_window(now + timedelta(minutes=90)) == "before"
         assert auto_bet.t60_window(now + timedelta(minutes=55)) == "within"
         assert auto_bet.t60_window(now + timedelta(minutes=52)) == "within"
-        # Fascia resa ordinabile il 30/09 (era `missed`):
+        # Fascia che la direttiva 03/10 ha reso ordinabile fino a T-5:
         assert auto_bet.t60_window(now + timedelta(minutes=45)) == "within"
         assert auto_bet.t60_window(now + timedelta(minutes=30)) == "within"
+        assert auto_bet.t60_window(now + timedelta(minutes=15)) == "within"
+        assert auto_bet.t60_window(now + timedelta(minutes=10)) == "within"
         # Il bordo NON si asserisce esatto: `t60_window` ricalcola il suo
-        # `now`, quindi a +15 esatti i microsecondi trascorsi lo portano
+        # `now`, quindi a +5 esatti i microsecondi trascorsi lo portano
         # sotto soglia (deterministicamente flaky). Si BRACKETTA il valore:
-        # +16 dentro, +14 fuori -> la chiusura e' 15.
-        assert auto_bet.t60_window(now + timedelta(minutes=16)) == "within"
-        assert auto_bet.t60_window(now + timedelta(minutes=14)) == "missed"
+        # +6 dentro, +4 fuori -> la chiusura e' 5.
+        assert auto_bet.t60_window(now + timedelta(minutes=6)) == "within"
+        assert auto_bet.t60_window(now + timedelta(minutes=4)) == "missed"
         assert auto_bet.t60_window(now - timedelta(minutes=5)) == "missed"
         assert auto_bet.t60_window(None) == "unknown"
 
+    def test_apertura_a_T60 (self):
+        """L'apertura resta T-60: fuori, solo scansione (fail-closed)."""
+        assert auto_bet.T60_WINDOW_MIN_MIN == 60.0
+
     def test_chiusura_allineata_al_pavimento_assoluto(self):
-        """Le due guardie COINCIDONO: se la chiusura scendesse sotto
-        `MIN_MINUTES_TO_START` l'esecuzione tenterebbe ordini che l'altra
-        guardia salta comunque (lavoro sprecato e log contraddittori)."""
+        """Le due guardie COINCIDONO a T-5 (direttiva 03/10/2026).
+
+        Se la chiusura scendesse sotto `MIN_MINUTES_TO_START` l'esecuzione
+        tenterebbe ordini che l'altra guardia salta comunque (lavoro sprecato
+        e log contraddittori); se salisse sopra, l'ultima parte della banda
+        sarebbe una ZONA MORTA silenziosa. La costante di codice e' DERIVATA
+        dal pavimento (una sola sorgente).
+        """
+        assert auto_bet.MIN_MINUTES_TO_START == 5
         assert auto_bet.T60_WINDOW_MAX_MIN == auto_bet.MIN_MINUTES_TO_START
 
     def test_dispatch_fuori_finestra_non_ordina(self, temp_db, monkeypatch):
@@ -364,18 +376,17 @@ class TestFinestraT60:
         _seed_validated_decision(mid="early",
                                  kickoff=datetime.now(timezone.utc)
                                  + timedelta(hours=3))
-        # +10 e' SOTTO la chiusura (T-15 dal 30/09, era T-50): resta fail-closed.
+        # +3 e' SOTTO la chiusura (T-5 dal 03/10, era T-15): resta fail-closed.
         _seed_validated_decision(mid="late",
                                  kickoff=datetime.now(timezone.utc)
-                                 + timedelta(minutes=10))
+                                 + timedelta(minutes=3))
         assert auto_bet.t60_dispatch_pending(bankroll=34.0) == []
         assert calls == []
 
     def test_dispatch_in_finestra_ordina(self, temp_db, monkeypatch):
         _live_mode(monkeypatch)
-        # +20: la fascia NUOVA aperta il 30/09 (era `missed` con la chiusura a
-        # T-50). E' il caso che il cambio di politica doveva rendere ordinabile,
-        # quindi e' quello che il test del cablaggio deve esercitare.
+        # +20: dentro la banda T-60..T-5 di OGNI politica (30/09 e 03/10).
+        # E' il caso che il test del cablaggio deve esercitare.
         _seed_validated_decision(mid="ok",
                                  kickoff=datetime.now(timezone.utc)
                                  + timedelta(minutes=20))
@@ -486,16 +497,16 @@ class TestContrattoT60:
 
 
 class TestFinestraT15MercatiDerivati:
-    """I mercati DERIVATI (OU/AH) leggono la stessa costante di scansione T-15.
+    """I mercati DERIVATI (OU/AH) leggono la stessa costante di scansione.
 
-    Direttiva 30/09/2026: la chiusura della finestra esecutiva e' T-15 (era
-    T-50) e deve valere per OGNI mercato, derivati inclusi. Non bastache il
-    codice lo faccia oggi: serve che NON PUO' regredire a una costante
-    diversa per mercato (bug del 09/09: un `over` trattato come 1X2).
+    Direttiva 30/09/2026, aggiornata il 03/10/2026: la chiusura della finestra
+    esecutiva e' T-5 e deve valere per OGNI mercato, derivati inclusi. Non
+    basta che il codice lo faccia oggi: serve che NON PUO' regredire a una
+    costante diversa per mercato (bug del 09/09: un `over` trattato come 1X2).
     """
 
-    def test_costante_di_chiusura_e_t15(self):
-        assert auto_bet.T60_WINDOW_MAX_MIN == 15.0
+    def test_costante_di_chiusura_e_t5(self):
+        assert auto_bet.T60_WINDOW_MAX_MIN == 5.0
 
     def test_il_gate_finestra_e_applicato_a_ogni_mercato(self):
         """Il blocco `T60_EXECUTION_ONLY` in `run_today_bets` NON e'

@@ -280,7 +280,7 @@ def _credits_json(params=None):
     sono i numeri da guardare per capire se il budget regge fino al reset (una
     stima scritta a mano invecchia in silenzio).
     """
-    from odds_api import (CREDITS_RESET, SPORTS_MAP, credit_burn_rate,
+    from odds_api import (SPORTS_MAP, credit_burn_rate, credits_reset,
                           days_to_reset)
     import json, os, glob
     from pathlib import Path
@@ -353,7 +353,7 @@ def _credits_json(params=None):
         "remaining_min": remaining_min,
         "sports_cached": sport_count,
         "days_to_reset": reset_days,
-        "reset_date": CREDITS_RESET.strftime("%Y-%m-%d"),
+        "reset_date": credits_reset().strftime("%Y-%m-%d"),
         "estimated_daily_consumption": daily_est,
         "consumption_source": "measured" if observed is not None else "heuristic",
         "observed_window_hours": window_h,

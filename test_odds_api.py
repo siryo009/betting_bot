@@ -735,3 +735,65 @@ def test_hard_stop_settlement_controprova_sopra_soglia(monkeypatch, tmp_path):
     assert odds_api.fetch_scores("soccer_epl") == [{"id": "m2",
                                                     "completed": True}]
     assert calls["n"] == 1
+
+
+def test_credits_reset_e_calcolato_e_non_scade_col_calendario():
+    """`CREDITS_RESET` era una costante HARDCODED (01/10/2026): dal 1°
+    ottobre era nel PASSATO, quindi `days_to_reset()` valeva 0,
+    `sustainable_per_day` era None e il credit watchdog non poteva piu' dire
+    se il ritmo stava nel budget (log reale del 03/10: "reset tra 0 giorni,
+    sostenibile None/giorno"). Una degradazione SILENZIOSA che tace proprio
+    quando serve.
+
+    Il tripwire: la data si CALCOLA e cade sempre nel FUTURO. Un nuovo
+    hardcode che scade e' l'errore da non rifare (lezione delle date fisse
+    del 15/09 e del 17/09, che scadono sempre nel momento peggiore).
+    """
+    import datetime as dt
+    from datetime import timezone
+    import odds_api
+
+    # 1) Oggi (03/10/2026) il prossimo reset e' il 01/11/2026, non il 01/10.
+    now = dt.datetime(2026, 10, 3, 21, 0, tzinfo=timezone.utc)
+    assert odds_api.credits_reset(now).date().isoformat() == "2026-11-01"
+    assert odds_api.days_to_reset(now) == 28
+
+    # 2) In ogni mese, e a cavallo d'anno, senza casi speciali.
+    for mese, atteso in ((1, "2026-02-01"), (6, "2026-07-01"),
+                         (11, "2026-12-01"), (12, "2027-01-01")):
+        n = dt.datetime(2026, mese, 15, tzinfo=timezone.utc)
+        assert odds_api.credits_reset(n).date().isoformat() == atteso
+
+    # 3) Invariante anti-scadenza: il reset e' SEMPRE nel futuro.
+    assert odds_api.days_to_reset() > 0
+
+
+def test_credits_reset_resta_importabile_dai_consumatori():
+    """`web_api` importava la costante: l'alias resta e coincide col calcolo."""
+    import odds_api
+    assert odds_api.CREDITS_RESET == odds_api.credits_reset()
+
+
+def test_budget_status_torna_a_dire_quanto_e_sostenibile(monkeypatch,
+                                                         tmp_path):
+    """La conseguenza PRATICA del bug: con `days_to_reset` a 0 il campo
+    `sustainable_per_day` era None (nessun confronto possibile col ritmo).
+    Ora il watchdog torna a dire se il budget arriva al reset.
+    """
+    import datetime as dt
+    import time
+    from datetime import timezone
+    oa = _credit_env(monkeypatch, tmp_path)
+    now = time.time()
+    _credit_cache(tmp_path, "soccer_epl", 331, now - 86400)
+    _credit_cache(tmp_path, "soccer_italy_serie_a", 273, now)
+
+    st = oa.credit_budget_status(
+        now=dt.datetime(2026, 10, 3, 21, 0, tzinfo=timezone.utc))
+
+    assert st["remaining"] == 273
+    assert st["days_to_reset"] == 28            # era 0 dal 01/10
+    assert st["sustainable_per_day"] == pytest.approx(9.8, abs=0.1)  # 273/28
+    # 58/giorno esauriscono in ~4.7 giorni, molto prima del reset.
+    assert st["days_left"] == pytest.approx(4.7, abs=0.1)
+    assert st["alert"] is True

@@ -798,14 +798,35 @@ def get_quota():
 # le ultime 24h ne dicevano 58, perche' il cambio di chiave e la pausa del
 # settlement azzerano periodi interi). Qui si misura il consumo dalla
 # telemetria delle cache e si proietta la data di esaurimento.
-CREDITS_RESET = datetime(2026, 10, 1, tzinfo=timezone.utc)
+def credits_reset(now=None) -> datetime:
+    """Data del PROSSIMO reset mensile del piano (1° del mese, UTC).
+
+    Prima era una COSTANTE hardcoded (`datetime(2026, 10, 1)`): dal 1° ottobre
+    era nel PASSATO, quindi `days_to_reset()` valeva 0, `sustainable_per_day`
+    era None e il credit watchdog non poteva piu' dire se il ritmo stava nel
+    budget (log reale: "reset tra 0 giorni, sostenibile None/giorno") — una
+    degradazione SILENZIOSA della telemetria, che tace proprio quando serve.
+
+    La data si CALCOLA: cosi' non puo' scadere di nuovo col calendario (la
+    lezione delle date fisse del 15/09 e del 17/09). Il reset del piano free
+    e' il 1° del mese; `now` e' iniettabile per i test.
+    """
+    now = now or datetime.now(timezone.utc)
+    year, month = now.year, now.month + 1
+    if month > 12:
+        year, month = year + 1, 1
+    return datetime(year, month, 1, tzinfo=timezone.utc)
+
+
+# Alias retrocompatibile (importato da `web_api`): valore del PROSSIMO reset.
+CREDITS_RESET = credits_reset()
 CREDIT_BURN_WINDOW_HOURS = 48.0
 
 
 def days_to_reset(now=None) -> int:
-    """Giorni (interi) al reset mensile del piano."""
+    """Giorni (interi) al reset mensile del piano (ricalcolato a ogni call)."""
     now = now or datetime.now(timezone.utc)
-    return max(0, (CREDITS_RESET - now).days)
+    return max(0, (credits_reset(now) - now).days)
 
 
 def credit_burn_rate(window_hours: float = CREDIT_BURN_WINDOW_HOURS,

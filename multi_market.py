@@ -145,7 +145,7 @@ SOURCE = "sxbet"
 
 #: Finestra dei fixture candidati (identica a sx_signals/auto_bet: 24h).
 HOURS_AHEAD = _env_float("MM_HOURS_AHEAD", 24.0)
-MIN_MINUTES_TO_START = _env_int("MM_MIN_MINUTES_TO_START", 15)
+MIN_MINUTES_TO_START = _env_int("MM_MIN_MINUTES_TO_START", 5)
 #: 26/09/2026 (direttiva "piu' volume su AH/OU"): 400 -> 600 mercati grezzi
 #: e 12 -> 20 linee per mercato. Si allarga SOLO la COPERTURA: fascia quota,
 #: edge, EV, gate di lega e soglie di liquidita' restano quelle congelate del

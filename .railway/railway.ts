@@ -137,6 +137,10 @@ export default defineRailway(() => {
       ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),
       OU_LIVE_MIN_CLOSURES: preserve(),
+      // Oracolo top-down (25/09/2026): `PINNACLE_CONSENSUS=0` (03/10/2026)
+      // usa la SOLA Pinnacle de-vigata con Shin — Betfair e Matchbook fuori,
+      // per togliere lag e rumore dal confronto. `TOP_DOWN_BYPASS` resta 0: il
+      // filtro fascia 1.30-1.80 e' il guardrail, non un'opzione.
       PINNACLE_CONSENSUS: preserve(),
       PINNACLE_CONSENSUS_METHOD: preserve(),
       PINNACLE_VALIDATOR_TOLERANCE: preserve(),
@@ -165,11 +169,12 @@ export default defineRailway(() => {
       SX_BOOK_LEVELS_KEPT: preserve(),
       SX_PRIVATE_KEY: preserve(),
       T60_KILL_WALLET_USDC: preserve(),
+      // Finestra esecutiva T-60..T-5 (03/10/2026, direttiva del proprietario):
+      // era T-120..T-15. La banda non deve avere zone d'ombra negli ultimi
+      // minuti, dove arrivano gli steam move dello sharp. La chiusura e'
+      // allineata al pavimento assoluto `MIN_MINUTES_TO_START` (5) e le env
+      // sono l'unico modo di tararla senza redeploy.
       T60_WINDOW_MIN_MIN: preserve(),
-      // Chiusura della finestra esecutiva (30/09/2026): con la corsia eSports
-      // (oracolo tardivo) l'esecuzione deve poter arrivare fino a T-15, quando
-      // arrivano i ritentativi utili. Dichiarata perche' e' impostata su
-      // Railway: senza, un `config apply` la distruggerebbe.
       T60_WINDOW_MAX_MIN: preserve(),
       TENNIS_SANDBOX_ENABLED: preserve(),
       // Corsia TENNIS (30/09/2026, `tennis_lane.py`): interruttore, identita'
@@ -215,6 +220,10 @@ export default defineRailway(() => {
       TEST_NOTIFY_KEY: preserve(),
       TOP_DOWN_EV: preserve(),
       TOP_DOWN_MARGIN: preserve(),
+      // Corsia top-down: `0` = il filtro fascia 1.30-1.80 resta il guardrail
+      // (confermato dal proprietario il 03/10/2026: lo steam chasing su quote
+      // esterne alla banda introduce una varianza che il bankroll non regge).
+      TOP_DOWN_BYPASS: preserve(),
       // Oracolo a linea OU/AH (30/09/2026, `line_oracle.py`): follow-the-
       // money — totals/spreads Pinnacle SOLO per le leghe con pick a linea
       // in gioco (3 crediti/chiamata, budget giornaliero dedicato). Senza

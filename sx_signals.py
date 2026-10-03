@@ -86,8 +86,10 @@ MIN_EXEC_DEPTH_USDC = float(os.getenv("SX_MIN_EXEC_DEPTH_USDC", "20.0"))
 
 # --- Finestra dei match candidati ------------------------------------------
 HOURS_AHEAD = 24.0          # come auto_bet._today_value_picks (now..now+24h)
-MIN_MINUTES_TO_START = 15   # auto_bet salta comunque i match vicini: qui
+MIN_MINUTES_TO_START = 5    # auto_bet salta comunque i match vicini: qui
                             # non generiamo segnali gia' degni di salto
+                            # (5 dal 03/10/2026: la finestra esecutiva arriva
+                            # a T-5, la scansione non deve fermarsi prima)
 MAX_RAW_MARKETS = 300       # mercati binari da scansionare (100 partite)
 
 # --- Settlement nativo SX ---------------------------------------------------
