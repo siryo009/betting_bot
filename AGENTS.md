@@ -8334,3 +8334,69 @@ capital_enclosure + exposure_gate + t60_breakers (161), secret_hygiene +
 reports + secure_logging + settlement_pause + favourites_only + sx_signals.
 `compileall` OK, 0 marker di conflitto. Nessuna env nuova obbligatoria
 (default "spento" da codice).
+
+### `/stopreset` — azzeramento MANUALE dello stop-loss giornaliero (03/10/2026)
+
+**Perche'**: `auto_bet.clear_daily_stop()` esisteva per la rimozione manuale
+(dichiarato in memoria dal 21/09) ma **nessun comando Telegram la esponeva**:
+con il blocco attivo le puntate restavano ferme 24h e l'unica alternativa era
+ASPETTARE la scadenza. Con il container a -13.8% di equity e lo stop armato
+fino alle 15:34 UTC, "aspettare" era l'unica via — ora non piu'.
+
+**1) Il comando (`bot.py`)**: `cmd_stopreset`, admin-only, registrato come
+`CommandHandler("stopreset", cmd_stopreset)` accanto a `/t60reset` e
+documentato in `/help`. Due forme:
+- `/stopreset` → azzera un blocco **ATTIVO**;
+- `/stopreset stato` → solo lettura (non tocca nulla).
+Riusa la funzione di `auto_bet` (nessuna logica duplicata) e non introduce
+env.
+
+**2) TRE proprieta' che lo rendono sicuro (e che i test difendono):**
+- **Azzera SOLO un blocco attivo**: cancellare un file che contiene il solo
+  riferimento del giorno (blocco scaduto o mai scattato) azzererebbe la
+  contabilita' del giorno — la perdita accumulata sparirebbe dal confronto e
+  il -5% verrebbe misurato da capo.
+- **Dichiara il ri-armo**: il giro successivo RICREA il riferimento del giorno
+  sull'equity ATTUALE, quindi una perdita ≥ soglia (es. 1.45 USDC su 28.91) lo
+  riarma subito. "Sbloccato" non deve sembrare "rischio disattivato".
+- **Non promette una ripartenza se un'autorita' superiore tiene il giro
+  fermo**: il messaggio dichiara lo stato REALE di stop settimanale e CB2
+  (le due autorita' che precedono l'ordine nella catena `run_today_bets`) e,
+  se armate, avverte che il giro restera' comunque fermo.
+**Il blocco settimanale NON viene toccato** (`clear_weekly_stop()` non e'
+chiamato qui: e' un'autorita' distinta, si azzera solo con una scelta
+esplicita) — tripwire ast-based sul CORPO della funzione, che esclude la
+docstring (che nomina la funzione proprio per spiegare perche' non la chiama).
+
+**3) `/autobet` rimanda al comando**: con lo stop attivo la riga
+`• Stop-loss giornaliero: 🛑 ATTIVO ...` e' seguita da
+`↳ per azzerarlo subito: /stopreset` (prima l'operatore non aveva modo di
+saperlo dal bot).
+
+**4) Misura che ha motivato la prudenza (02-03/10/2026, verificata sul
+container)**: `/api/dashboard` → `auto_bets.live`: **7 puntate reali, 1 vinta /
+6 perse, stake 10.50, PnL -8.25 USDC, ROI -78.57%**; equity 33.55 → **28.91**
+(-13.8%). NON era il falso positivo del 21/09 (li' il wallet era intatto e la
+causa era il confronto equity-vs-cassa, chiuso da `BASIS_PRIORITY`): qui la
+perdita e' reale. Il breaker settimanale (rolling 7g, soglia -12%) e' coerente
+con il -13.8%, e il CB2 patrimoniale (25 USDC) lascia ~3.91 USDC di margine
+(~3 perdite piene) dall'arresto totale.
+
+**5) Nota su come si legge lo stato in produzione**: `/api/health` NON espone
+stop giornaliero/settimanale/CB2 e `railway ssh` su questo account e'
+intercettato dall'agente Railway (atterra su `railway.new` e ignora il
+comando); i due percorsi utili sono i **log** del container
+(`STOP-LOSS GIORNALIERO attivo fino a ...`, ogni 60s) e i comandi Telegram
+(`/autobet`, ora `/stopreset stato`). `railway run` NON serve per i file: gira
+in locale con le env del servizio, non sul volume.
+
+**Test**: `test_bot.py::TestStopReset` (10: azzera un blocco attivo, dichiara
+il ri-armo sull'equity attuale, non cancella il riferimento se il blocco non
+e' attivo, `/stopreset stato` non modifica nulla, non-admin bloccato, dichiara
+CB2 armato e stop settimanale armato, tripwire ast sul corpo della funzione,
+comando registrato + documentato in `/help`, `/autobet` che rimanda al
+comando) + run manuale end-to-end verificato. Lotti verdi: `test_bot` (52),
+risk_guards + auto_bet_live + capital_enclosure + exposure_gate + t60_breakers
+(140), secret_hygiene + settlement_pause + order_watch + decision_pipeline.
+`compileall` OK, 0 marker di conflitto. Nessuna env nuova → nessuna modifica a
+`.railway/railway.ts`.

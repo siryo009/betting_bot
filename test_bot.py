@@ -495,3 +495,227 @@ class TestNotificheDisattivate:
         corpo = ast.get_source_segment(
             pathlib.Path(bot.__file__).read_text(encoding="utf-8"), fn) or ""
         assert "_send_report_to_recipients" not in corpo
+
+
+class TestStopReset:
+    """`/stopreset` — azzeramento MANUALE dello stop-loss giornaliero.
+
+    Direttiva 03/10/2026: `auto_bet.clear_daily_stop()` esisteva per la
+    rimozione manuale ma nessun comando Telegram la esponeva; con il blocco
+    attivo le puntate restavano ferme 24h e l'unica alternativa era
+    aspettare. Questi test difendono le TRE proprieta' che rendono il
+    comando sicuro: azzera solo un blocco ATTIVO, dichiara il ri-armo sul
+    nuovo riferimento, e non promette una ripartenza se un'autorita'
+    superiore (stop settimanale / CB2) tiene comunque il giro fermo.
+    """
+
+    ADMIN = 7718157436
+
+    def _update(self, chat_id=None):
+        update = MagicMock()
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+        update.effective_chat = MagicMock()
+        update.effective_chat.id = self.ADMIN if chat_id is None else chat_id
+        return update
+
+    def _context(self, *args):
+        context = MagicMock()
+        context.args = list(args)
+        return context
+
+    def _arm_daily(self, money_back=True):
+        """Scrive un blocco ATTIVO (come in produzione il 02/10)."""
+        import json
+        from datetime import datetime, timedelta, timezone
+        import auto_bet
+        now = datetime.now(timezone.utc)
+        auto_bet.DAILY_STOP_FILE.write_text(json.dumps({
+            "day": now.date().isoformat(),
+            "start_bankroll": 33.5535,
+            "stopped_until": (now + timedelta(hours=12)).isoformat()
+            if money_back else None,
+            "stopped_at": now.isoformat(),
+            "basis_key": "live_equity",
+            "reason": "equity wallet -13.8% dall'inizio giornata "
+                      "(valore 28.91)",
+        }), encoding="utf-8")
+
+    def _text(self, update):
+        args, kwargs = update.message.reply_text.await_args
+        return args[0] if args else kwargs.get("text")
+
+    def _patch_wallet(self, monkeypatch, equity=None):
+        import auto_bet
+        monkeypatch.setattr(
+            auto_bet, "_live_wallet_snapshot",
+            lambda: None if equity is None else {
+                "available": equity, "exposure": 0.0, "equity": equity})
+
+    def test_azzera_lo_stop_attivo(self, monkeypatch):
+        import asyncio
+        import bot
+        import auto_bet
+        monkeypatch.setattr(bot, "_admin_chat_ids", lambda: [self.ADMIN])
+        self._patch_wallet(monkeypatch, 28.91)
+        self._arm_daily()
+        assert auto_bet.daily_stop_status()["stopped"] is True
+
+        update = self._update()
+        asyncio.run(bot.cmd_stopreset(update, self._context()))
+
+        testo = self._text(update)
+        assert "AZZERATO" in testo
+        assert auto_bet.daily_stop_status()["stopped"] is False
+        assert not auto_bet.DAILY_STOP_FILE.exists()
+
+    def test_dichiara_il_riarmo_sull_equity_attuale(self, monkeypatch):
+        """Il riferimento del giorno viene ricreato sull'equity ATTUALE:
+        l'admin deve sapere che una nuova perdita >= soglia lo riarma."""
+        import asyncio
+        import bot
+        monkeypatch.setattr(bot, "_admin_chat_ids", lambda: [self.ADMIN])
+        self._patch_wallet(monkeypatch, 28.91)
+        self._arm_daily()
+
+        update = self._update()
+        asyncio.run(bot.cmd_stopreset(update, self._context()))
+
+        testo = self._text(update)
+        assert "28.91" in testo
+        assert "1.45" in testo            # 28.91 x 5% = 1.4455 -> 1.45
+        assert "riarma" in testo
+
+    def test_non_cancella_il_riferimento_se_non_attivo(self, monkeypatch):
+        """Un file NON attivo e' il riferimento del giorno: cancellarlo
+        azzererebbe la contabilita' e il -5% verrebbe misurato da capo."""
+        import asyncio
+        import bot
+        import auto_bet
+        monkeypatch.setattr(bot, "_admin_chat_ids", lambda: [self.ADMIN])
+        self._patch_wallet(monkeypatch, 30.0)
+        self._arm_daily(money_back=False)     # blocco scaduto / mai scattato
+        prima = auto_bet.DAILY_STOP_FILE.read_text(encoding="utf-8")
+
+        update = self._update()
+        asyncio.run(bot.cmd_stopreset(update, self._context()))
+
+        assert "non era attivo" in self._text(update)
+        assert auto_bet.DAILY_STOP_FILE.exists()
+        assert auto_bet.DAILY_STOP_FILE.read_text(encoding="utf-8") == prima
+
+    def test_stato_non_azzera_nulla(self, monkeypatch):
+        import asyncio
+        import bot
+        import auto_bet
+        monkeypatch.setattr(bot, "_admin_chat_ids", lambda: [self.ADMIN])
+        self._patch_wallet(monkeypatch, 28.91)
+        self._arm_daily()
+
+        update = self._update()
+        asyncio.run(bot.cmd_stopreset(update, self._context("stato")))
+
+        testo = self._text(update)
+        assert "ATTIVO" in testo and "Fino a:" in testo
+        assert auto_bet.daily_stop_status()["stopped"] is True
+
+    def test_non_admin_bloccato(self, monkeypatch):
+        import asyncio
+        import bot
+        import auto_bet
+        monkeypatch.setattr(bot, "_admin_chat_ids", lambda: [self.ADMIN])
+        self._arm_daily()
+
+        update = self._update(chat_id=42)
+        asyncio.run(bot.cmd_stopreset(update, self._context()))
+
+        assert "riservato agli admin" in self._text(update)
+        assert auto_bet.daily_stop_status()["stopped"] is True
+
+    def test_dichiara_il_cb2_attivo(self, monkeypatch):
+        """Con il CB2 armato il giro resta fermo: dirlo, non promettere."""
+        import asyncio
+        import json
+        import bot
+        import auto_bet
+        monkeypatch.setattr(bot, "_admin_chat_ids", lambda: [self.ADMIN])
+        self._patch_wallet(monkeypatch, 24.0)
+        self._arm_daily()
+        auto_bet.T60_KILL_FILE.write_text(json.dumps({
+            "triggered_at": "2026-10-03T00:00:00+00:00",
+            "wallet_equity": 24.0,
+            "reason": "equity wallet 24.00 <= soglia 25.00"}),
+            encoding="utf-8")
+
+        update = self._update()
+        asyncio.run(bot.cmd_stopreset(update, self._context()))
+
+        testo = self._text(update)
+        assert "CB2" in testo and "/t60reset" in testo
+        assert "restera' comunque fermo" in testo
+
+    def test_dichiara_lo_stop_settimanale_attivo(self, monkeypatch):
+        import asyncio
+        import json
+        from datetime import datetime, timedelta, timezone
+        import bot
+        import auto_bet
+        monkeypatch.setattr(bot, "_admin_chat_ids", lambda: [self.ADMIN])
+        self._patch_wallet(monkeypatch, 28.91)
+        self._arm_daily()
+        now = datetime.now(timezone.utc)
+        auto_bet.WEEKLY_STOP_FILE.write_text(json.dumps({
+            "stopped_until": (now + timedelta(hours=10)).isoformat(),
+            "peak": 33.5535, "drawdown_pct": 13.83,
+            "reason": "drawdown 13.8%"}), encoding="utf-8")
+
+        update = self._update()
+        asyncio.run(bot.cmd_stopreset(update, self._context()))
+
+        testo = self._text(update)
+        assert "stop settimanale" in testo
+        # Il settimanale NON viene azzerato da questo comando.
+        assert auto_bet.weekly_stop_status()["stopped"] is True
+
+    def test_non_azzera_il_settimanale_nel_sorgente(self):
+        """Tripwire: il blocco settimanale e' un'autorita' distinta e si
+        azzera solo con una scelta esplicita, non come effetto collaterale.
+
+        Si guarda solo il CODICE: la docstring NOMINA `clear_weekly_stop`
+        per spiegare perche' NON viene chiamato (stessa accortezza del
+        tripwire ast-based di `test_money_decimal`).
+        """
+        import ast
+        import pathlib
+        import bot
+        src = pathlib.Path(bot.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.AsyncFunctionDef)
+                  and n.name == "cmd_stopreset")
+        corpo_ast = [n for n in fn.body if not (
+            isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+            and isinstance(n.value.value, str))]
+        corpo = "\n".join(ast.get_source_segment(src, n) or ""
+                          for n in corpo_ast)
+        assert "clear_weekly_stop" not in corpo
+        assert "clear_daily_stop" in corpo
+
+    def test_comando_registrato_e_documentato(self):
+        import asyncio
+        import pathlib
+        import bot
+        src = pathlib.Path(bot.__file__).read_text(encoding="utf-8")
+        assert 'CommandHandler("stopreset", cmd_stopreset)' in src
+        assert asyncio.iscoroutinefunction(bot.cmd_stopreset)
+        update = self._update()
+        asyncio.run(cmd_help(update, MagicMock()))
+        assert "/stopreset" in self._text(update)
+
+    def test_lo_stato_autobet_rimanda_al_comando(self):
+        """Tripwire: con lo stop attivo `/autobet` deve dire come azzerarlo
+        (prima l'unica via era aspettare 24h)."""
+        import pathlib
+        import bot
+        src = pathlib.Path(bot.__file__).read_text(encoding="utf-8")
+        assert "per azzerarlo subito: `/stopreset`" in src

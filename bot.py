@@ -474,6 +474,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/setbankroll <€>` – imposta bankroll\n"
         "`/autobet [off|sim|live|now]` – kill-switch/esegui ora (admin)\n"
         "`/t60reset` – disinnesca il kill switch patrimoniale T-60 (admin)\n"
+        "`/stopreset` – azzera lo stop-loss giornaliero (admin)\n"
         "`/settlement [on|off]` – pausa settlement automatico (admin)\n"
         "`/sxscan` – scan segnali SX Bet ora (admin)\n"
         "`/subscribe` – attiva notifiche Pro\n"
@@ -1279,7 +1280,9 @@ async def cmd_autobet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f"• Cap per bet: 1% value/moderate · 2% strong_value\n"
                 f"• Cap severo: {cap_line}\n"
                 f"• Stop-loss giornaliero: {stop_line}\n"
-                f"• Circuit breaker settimanale: {weekly_line}\n"
+                + ("  ↳ per azzerarlo subito: `/stopreset`\n"
+                   if _ds.get("stopped") else "")
+                + f"• Circuit breaker settimanale: {weekly_line}\n"
                 f"{wallet_warn}\n"
                 "Comandi:\n"
                 "`/autobet off` – stop totale\n"
@@ -2380,6 +2383,108 @@ async def cmd_t60reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "a ogni giro).", parse_mode="Markdown")
 
 
+async def cmd_stopreset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/stopreset [stato] (solo admin): azzera lo stop-loss GIORNALIERO.
+
+    Direttiva 03/10/2026: `auto_bet.clear_daily_stop()` esisteva per la
+    rimozione manuale, ma nessun comando Telegram la esponeva — con il blocco
+    attivo le puntate restavano ferme 24h e l'unica alternativa era aspettare
+    la scadenza.
+
+    Il comando NON indebolisce il guardrail: azzera il blocco in corso e
+    dichiara (a) che il riferimento del giorno verra' RICREATO dal giro
+    successivo sull'equity ATTUALE (una perdita >= soglia lo riarma subito) e
+    (b) lo stato degli ALTRI guardrail che precedono l'ordine (stop
+    settimanale e CB2): "sbloccato" non deve essere una promessa vuota.
+
+    `clear_weekly_stop()` NON viene chiamato da qui: il blocco settimanale e'
+    un'autorita' distinta e si azzera solo con una scelta esplicita.
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text("⛔ Comando riservato agli admin.")
+        return
+    from auto_bet import (DAILY_STOP_LOSS_PCT, _live_wallet_snapshot,
+                          clear_daily_stop, daily_stop_status,
+                          t60_kill_switch_status, weekly_stop_status)
+    arg = (context.args[0] if context.args else "").strip().lower()
+    only_status = arg in ("stato", "status")
+    before = daily_stop_status()
+    was_stopped = bool(before.get("stopped"))
+    # Si azzera SOLO un blocco davvero attivo: cancellare un file che contiene
+    # il solo riferimento del giorno (blocco scaduto o mai scattato) ne
+    # azzererebbe la contabilita' — la perdita accumulata oggi sparirebbe dal
+    # confronto e il -5% verrebbe misurato da capo.
+    if not only_status and was_stopped:
+        clear_daily_stop()
+
+    # Stato reale degli altri guardrail nella catena di run_today_bets:
+    # daily -> weekly -> CB2. Senza dichiararli, "azzerato" sembrerebbe una
+    # ripartenza mentre il giro si ferma al breaker successivo.
+    _ws = weekly_stop_status()
+    _cb2 = t60_kill_switch_status()
+    try:
+        snap = _live_wallet_snapshot()
+    except Exception:
+        snap = None
+    equity = snap["equity"] if snap else None
+
+    weekly_txt = (f"🛑 *ATTIVO* fino a {str(_ws.get('until'))[:16]} "
+                  f"(drawdown -{(_ws.get('drawdown_pct') or 0):.1f}%, "
+                  f"soglia -{_ws['loss_pct']:.0f}%)"
+                  if _ws.get("stopped") else
+                  f"🟢 non attivo (soglia -{_ws['loss_pct']:.0f}%)")
+    cb2_txt = (f"🛑 *ATTIVO* ({_cb2.get('reason') or 'soglia wallet'})"
+               if _cb2.get("triggered") else
+               f"🟢 non attivo (soglia {float(_cb2.get('threshold') or 0):.2f} "
+               f"USDC di equity)")
+
+    lines: list = []
+    if only_status:
+        head = (("🛑 *STOP-LOSS GIORNALIERO ATTIVO*\n\n"
+                 f"• Fino a: `{str(before.get('until'))[:16]}`\n"
+                 f"• Motivo: {before.get('reason') or 'perdita giornaliera'}\n"
+                 f"• Riferimento del giorno: {before.get('start_bankroll')} "
+                 f"USDC (base `{before.get('basis_key')}`)\n\n")
+                if was_stopped else
+                "🟢 *STOP-LOSS GIORNALIERO non attivo*\n\n")
+        lines.append("Per azzerarlo: `/stopreset`")
+    elif was_stopped:
+        head = ("✅ *STOP-LOSS GIORNALIERO AZZERATO*\n\n"
+                f"Prima: 🛑 attivo fino a `{str(before.get('until'))[:16]}`\n"
+                f"• Motivo: {before.get('reason') or 'perdita giornaliera'}\n"
+                f"• Riferimento del giorno: {before.get('start_bankroll')} "
+                f"USDC (base `{before.get('basis_key')}`)\n\n")
+        lines.append(
+            "Ora: 🟢 non attivo → il giro di puntate (ogni 60s) riparte.")
+        if equity is not None:
+            lines.append(
+                f"⚠️ Il giro successivo RICREA il riferimento del giorno "
+                f"sull'equity ATTUALE ({equity:.2f} USDC): una perdita ≥ "
+                f"{equity * DAILY_STOP_LOSS_PCT:.2f} USDC "
+                f"({DAILY_STOP_LOSS_PCT * 100:.0f}%) lo riarma per 24h.")
+    else:
+        head = ("ℹ️ *STOP-LOSS GIORNALIERO non era attivo*\n\n"
+                "Nessun blocco da azzerare: il giro di puntate era già libero.\n\n")
+        lines.append("Nessuna modifica applicata al riferimento del giorno.")
+
+    lines.append("")
+    lines.append("*Altri guardrail PRIMA dell'ordine*")
+    lines.append(f"• Settimanale (7g): {weekly_txt}")
+    lines.append(f"• CB2 patrimoniale: {cb2_txt}")
+    if _ws.get("stopped") or _cb2.get("triggered"):
+        blocker = []
+        if _ws.get("stopped"):
+            blocker.append("stop settimanale")
+        if _cb2.get("triggered"):
+            blocker.append("CB2 (`/t60reset`)")
+        lines.append("")
+        lines.append("⚠️ *Il giro restera' comunque fermo per: "
+                     + ", ".join(blocker) + ".*")
+    await update.message.reply_text(head + "\n".join(lines),
+                                    parse_mode="Markdown")
+
+
 async def report_morning_job(context: ContextTypes.DEFAULT_TYPE):
     """Riepilogo del mattino (08:05 ITA): cosa è successo ieri.
 
@@ -2978,6 +3083,7 @@ def main() -> None:
     application.add_handler(CommandHandler("hedge", cmd_hedge))
     application.add_handler(CommandHandler("ordini", cmd_ordini))
     application.add_handler(CommandHandler("t60reset", cmd_t60reset))
+    application.add_handler(CommandHandler("stopreset", cmd_stopreset))
     application.add_handler(CommandHandler("settlement", cmd_settlement))
     application.add_handler(CommandHandler("revisioni", cmd_revisioni))
     # Revisioni umane: i bottoni ✅/❌ dei verdetti REVIEW. Il pattern limita
