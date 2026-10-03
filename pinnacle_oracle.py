@@ -1060,7 +1060,23 @@ def scan_cache(cache_dir: Optional[Path] = None, *,
 # 6. PERCORSO LIVE (1 credito): SOLO diagnostica, misura il costo reale
 # ---------------------------------------------------------------------------
 
-def fetch_pinnacle_payload(sport_key: str, *, days_ahead: int = 7,
+def _fetch_window_min() -> int:
+    """Finestra (minuti) della query `/odds`: la STESSA dell'oracolo a linea.
+
+    Delega a `odds_api.oracle_fetch_window_min()` (default 70 minuti, env
+    `ORACLE_FETCH_WINDOW_MIN`) invece di duplicare la soglia: se i due
+    percorsi usassero finestre diverse, un ramo scaricherebbe partite che
+    l'altro non considera. Import PIGRO (il modulo resta leggero all'import)
+    con fallback dichiarato se `odds_api` non e' disponibile.
+    """
+    try:
+        from odds_api import oracle_fetch_window_min
+        return int(oracle_fetch_window_min())
+    except Exception:                                            # pragma: no cover
+        return 70
+
+
+def fetch_pinnacle_payload(sport_key: str, *, minutes_ahead: Optional[int] = None,
                            bookmakers: str = MULTI_BOOKMAKERS,
                            regions: str = "eu",
                            timeout: int = 30) -> Dict[str, Any]:
@@ -1070,10 +1086,17 @@ def fetch_pinnacle_payload(sport_key: str, *, days_ahead: int = 7,
     Fail-safe: non solleva mai. Rifiuta (senza chiamare) se i crediti sono
     sotto la soglia di blocco totale del progetto.
 
-    Perche' esiste nonostante l'oracolo sia gratis: serve a DIMOSTRARE quanto
-    costa una chiamata filtrata (`x-requests-last`) e quindi a decidere, con un
-    numero e non con un'opinione, se un job di confronto continuo sia
-    sostenibile col piano crediti attuale.
+    FINESTRA (03/10/2026): `commenceTimeTo` e' `minutes_ahead` minuti avanti
+    (default `_fetch_window_min()`, 70) e NON piu' 7 giorni. Si ordina solo
+    nella finestra esecutiva T-60..T-5: scaricare l'intero palinsesto
+    significa pagare e parsare partite che non entreranno mai in finestra.
+    ⚠️ Il costo the-odds-api e' per CHIAMATA, non per evento: la finestra
+    stretta riduce il PAYLOAD (byte/parsing), non i crediti.
+
+    Perche' esiste nonostante l'oracolo gratis sia la via di produzione:
+    serve a DIMOSTRARE quanto costa una chiamata filtrata (`x-requests-last`)
+    e quindi a decidere, con un numero e non con un'opinione, se un job di
+    confronto continuo sia sostenibile col piano crediti attuale.
     """
     out: Dict[str, Any] = {"payload": [], "remaining": None, "last_cost": None,
                            "status": None, "error": None}
@@ -1088,6 +1111,8 @@ def fetch_pinnacle_payload(sport_key: str, *, days_ahead: int = 7,
             return out
     except Exception:
         pass                                   # telemetria assente -> si procede
+    window_min = _fetch_window_min() if minutes_ahead is None \
+        else int(minutes_ahead)
     try:
         import requests
         from datetime import datetime, timedelta, timezone
@@ -1096,7 +1121,7 @@ def fetch_pinnacle_payload(sport_key: str, *, days_ahead: int = 7,
             "apiKey": key, "regions": regions, "markets": "h2h",
             "bookmakers": bookmakers, "oddsFormat": "decimal",
             "commenceTimeFrom": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "commenceTimeTo": (now + timedelta(days=days_ahead))
+            "commenceTimeTo": (now + timedelta(minutes=window_min))
                               .strftime("%Y-%m-%dT%H:%M:%SZ"),
         }, timeout=timeout)
         out["status"] = r.status_code

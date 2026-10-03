@@ -18,6 +18,7 @@ Cosa si verifica, senza rete ne' crediti:
 
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -63,7 +64,9 @@ class TestBudgetECacheOracolo:
     def test_costanti_dedicate(self):
         assert odds_api.ORACLE_MARKETS_LIST == "h2h,totals,spreads"
         assert odds_api.ORACLE_EXTRA_CREDITS == 2
-        assert odds_api.ORACLE_CACHE_TTL_S == 86400
+        # TTL allineata alla FINESTRA di fetch (03/10/2026), non piu' 24h.
+        assert odds_api.oracle_fetch_window_min() == 70
+        assert odds_api.oracle_cache_ttl_s() == 70 * 60
         assert odds_api.ORACLE_CACHE_PREFIX == "toao_"
         assert odds_api.ORACLE_BUDGET_DAY >= 1
 
@@ -162,6 +165,92 @@ class TestFollowTheMoney:
              "sport_key": "soccer_a", "kickoff": "x", "kickoff_ts": far}])
         import line_oracle
         assert line_oracle.leagues_needing_fetch(time.time()) == []
+
+
+# ---------------------------------------------------------------------------
+# 2b. Finestra di fetch (03/10/2026): 70 minuti, non il palinsesto intero
+# ---------------------------------------------------------------------------
+
+class TestFinestraFetch:
+    """Query e selezione dei pick usano la STESSA finestra.
+
+    Direttiva del proprietario: si ordina solo nella finestra esecutiva
+    T-60..T-5, quindi non si scarica (ne' si parsa) l'intero palinsesto
+    giornaliero della lega. ⚠️ Il costo the-odds-api e' per CHIAMATA, non per
+    evento: la finestra stretta riduce il PAYLOAD, non i crediti.
+    """
+
+    def test_default_70_minuti(self, monkeypatch):
+        monkeypatch.delenv("ORACLE_FETCH_WINDOW_MIN", raising=False)
+        assert odds_api.oracle_fetch_window_min() == 70
+        assert odds_api.oracle_cache_ttl_s() == 70 * 60
+
+    def test_env_cambia_la_finestra(self, monkeypatch):
+        monkeypatch.setenv("ORACLE_FETCH_WINDOW_MIN", "30")
+        assert odds_api.oracle_fetch_window_min() == 30
+        assert odds_api.oracle_cache_ttl_s() == 1800
+
+    def test_env_impossibile_ricade_sul_default(self, monkeypatch):
+        for bad in ("", "abc", "0", "-5"):
+            monkeypatch.setenv("ORACLE_FETCH_WINDOW_MIN", bad)
+            assert odds_api.oracle_fetch_window_min() == 70, bad
+
+    def test_la_vecchia_costante_24h_e_rimossa(self):
+        """Una TTL da 24h su una finestra da 70' e' una bugia: non torni."""
+        assert not hasattr(odds_api, "ORACLE_CACHE_TTL_S")
+
+    def test_selezione_allineata_alla_query(self, monkeypatch):
+        import line_oracle
+        monkeypatch.setenv("ORACLE_FETCH_WINDOW_MIN", "120")
+        assert line_oracle._window_h() == pytest.approx(2.0)
+        monkeypatch.setenv("ORACLE_FETCH_WINDOW_MIN", "70")
+        assert line_oracle._window_h() == pytest.approx(70 / 60.0)
+
+    def test_ensure_oracle_payloads_usa_la_finestra(self, monkeypatch):
+        import line_oracle
+        captured = {}
+
+        def _fake_fetch(sport, frm, to):
+            captured.update({"sport": sport, "frm": frm, "to": to})
+            return [{"id": "m1"}], 300
+
+        monkeypatch.setattr(odds_api, "fetch_line_odds", _fake_fetch)
+        monkeypatch.setattr(line_oracle, "leagues_needing_fetch",
+                            lambda: [{"sport_key": "soccer_a"}])
+        res = line_oracle.ensure_oracle_payloads(max_leagues=1)
+        assert res["fetched"] == 1
+        assert captured["sport"] == "soccer_a"
+        frm = datetime.fromisoformat(captured["frm"].replace("Z", "+00:00"))
+        to = datetime.fromisoformat(captured["to"].replace("Z", "+00:00"))
+        assert 69.0 <= (to - frm).total_seconds() / 60.0 <= 71.0
+
+    def test_cache_oltre_la_finestra_e_rifatta(self, monkeypatch, tmp_path):
+        """80 minuti di eta': NON fresca (a 24h lo sarebbe stata)."""
+        _write_oracle_cache(tmp_path, "soccer_a", [{"id": "old"}],
+                            ts=time.time() - 80 * 60)
+        monkeypatch.setattr("config.DATA_DIR", tmp_path)
+        monkeypatch.setattr("line_oracle.line_picks", lambda: [
+            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Serie A",
+             "sport_key": "soccer_a", "kickoff": "x",
+             "kickoff_ts": time.time() + 600}])
+        import line_oracle
+        pending = line_oracle.leagues_needing_fetch(time.time())
+        assert [x["sport_key"] for x in pending] == ["soccer_a"]
+
+    def test_pick_a_tre_ore_e_fuori_finestra(self, monkeypatch, tmp_path):
+        """3h era DENTRO il vecchio orizzonte (24h): ora e' fuori."""
+        monkeypatch.setattr("config.DATA_DIR", tmp_path)
+        monkeypatch.setattr("line_oracle.line_picks", lambda: [
+            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Serie A",
+             "sport_key": "soccer_a", "kickoff": "x",
+             "kickoff_ts": time.time() + 3 * 3600}])
+        import line_oracle
+        assert line_oracle.leagues_needing_fetch(time.time()) == []
+
+    def test_nessun_riferimento_al_vecchio_orizzonte(self):
+        src = Path("line_oracle.py").read_text()
+        assert "ORACLE_PICK_WINDOW_H" not in src
+        assert "_pick_window_h" not in src
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +431,7 @@ class TestTripwire:
     def test_iac_dichiara_le_env_oracolo(self):
         src = Path(".railway/railway.ts").read_text()
         for env in ("ORACLE_ENABLED", "ORACLE_BUDGET_DAY",
-                    "ORACLE_PICK_WINDOW_H", "ORACLE_LEAGUES_PER_PASS"):
+                    "ORACLE_FETCH_WINDOW_MIN", "ORACLE_LEAGUES_PER_PASS"):
             assert env in src, f"{env} non dichiarata in preserve() IaC"
 
     def test_line_oracle_job_registrato(self):

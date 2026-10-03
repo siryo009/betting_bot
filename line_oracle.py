@@ -14,12 +14,21 @@ FOLLOW-THE-MONEY:
 - la rotazione di ricerca resta `markets="h2h"` (1 credito) — INVARIATA;
 - una seconda chiamata `markets="h2h,totals,spreads"` (3 crediti) viene fatta
   SOLO per le leghe con pick OU/AH aperti in finestra d'ordine;
-- cache separata `toao_<sport>.json` (TTL 24h), budget giornaliero dedicato
-  (`ORACLE_BUDGET_DAY`, default 12 leghe) e hard-stop crediti rispettati.
+- cache separata `toao_<sport>.json`, con la TTL ALLINEATA alla finestra di
+  fetch (`odds_api.oracle_cache_ttl_s()`), budget giornaliero dedicato
+  (`ORACLE_BUDGET_DAY`) e hard-stop crediti rispettati.
 
-Costo atteso misurato: ~118 crediti/mese (2 crediti extra x ~59 righe
-OU/AH giocabili chiuse/giorno, storico 25/09). La DIAGONALE `line_true_probs`
-(e' in `pinnacle_oracle`) resta sempre a costo ZERO: legge solo le cache.
+FINESTRA DI FETCH (03/10/2026, direttiva del proprietario). Si ordina SOLO
+nella finestra esecutiva T-60..T-5: query e selezione usano la STESSA finestra
+(`odds_api.ORACLE_FETCH_WINDOW_MIN`, default **70 minuti**), quindi si scarica
+e si parsa solo cio' che puo' diventare un ordine — non l'intero palinsesto
+della lega (era 24h). ⚠️ Il costo the-odds-api e' per CHIAMATA, non per
+evento: restringere la finestra non riduce i crediti, riduce il payload.
+
+Costo atteso misurato: ~118 crediti/mese con la finestra larga; con la
+finestra a 70 minuti il tetto resta `ORACLE_BUDGET_DAY` x 3 crediti/giorno
+(in produzione 3 x 3 = 9). La DIAGONALE `line_true_probs` (e' in
+`pinnacle_oracle`) resta sempre a costo ZERO: legge solo le cache.
 
 GARANZIE (tripwire in `test_line_oracle.py`):
 - sola orchestrazione: nessuna scrittura sul ledger, nessun ordine, nessuna
@@ -44,26 +53,27 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-#: Finestra dei pick considerati "in gioco" (ore dal kickoff): allineata alla
-#: finestra esecutiva T-120..T-15 (prod) con margine: un pick oltre T-120 non
-#: genera ordini oggi, non serve pagare la sua linea.
-PICK_WINDOW_H = float(os.getenv("ORACLE_PICK_WINDOW_H", "6"))
-
 # Quante leghe fetchare per giro (doppio tetto col budget giornaliero di
-# `odds_api.ORACLE_BUDGET_DAY`, default 3 leghe/giorno = 9 crediti): i pick
-# piu' vicini al kickoff prima.
+# `odds_api.ORACLE_BUDGET_DAY`): i pick piu' vicini al kickoff prima.
 LEAGUES_PER_PASS = int(os.getenv("ORACLE_LEAGUES_PER_PASS", "3"))
 
 
-def _pick_window_h() -> float:
-    raw = os.getenv("ORACLE_PICK_WINDOW_H")
-    if raw is None:
-        return PICK_WINDOW_H
+def _window_h() -> float:
+    """Finestra dell'oracolo a linea, in ORE, dalla STESSA env del fetch.
+
+    UNA sola definizione (03/10/2026, direttiva del proprietario): si ordina
+    solo nella finestra esecutiva T-60..T-5, quindi non ha senso pagare (ne'
+    scaricare) le partite che entreranno in finestra fra mezza giornata.
+    Delegare a `odds_api.oracle_fetch_window_min()` (default 70 minuti, env
+    `ORACLE_FETCH_WINDOW_MIN`) impedisce che selezione dei pick e query HTTP
+    usino orizzonti diversi: pagheremmo leghe le cui partite non entrano
+    nell'intervallo scaricato (e salteremmo leghe che hanno pick in finestra).
+    """
     try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return PICK_WINDOW_H
-    return v if v > 0 else PICK_WINDOW_H
+        import odds_api as oa
+        return oa.oracle_fetch_window_min() / 60.0
+    except Exception:                                            # pragma: no cover
+        return 70 / 60.0
 
 
 def budget_credits_per_day() -> float:
@@ -104,7 +114,7 @@ def line_picks() -> List[Dict[str, Any]]:
     """
     try:
         import multi_market
-        picks = multi_market.live_picks(hours=_pick_window_h() * 4)
+        picks = multi_market.live_picks(hours=_window_h())
     except Exception as exc:                                     # pragma: no cover
         logger.warning("line_oracle: corsia multi-mercato non disponibile (%s)",
                        exc)
@@ -115,7 +125,7 @@ def line_picks() -> List[Dict[str, Any]]:
         logger.warning("line_oracle: league_to_sport non disponibile (%s)", exc)
         return []
     now = datetime.now(timezone.utc)
-    deadline = now + timedelta(hours=_pick_window_h() * 4)
+    deadline = now + timedelta(hours=_window_h())
     out: List[Dict[str, Any]] = []
     seen: set = set()
     for p in picks:
@@ -140,9 +150,10 @@ def line_picks() -> List[Dict[str, Any]]:
 def leagues_needing_fetch(now: Optional[float] = None) -> List[Dict[str, Any]]:
     """Sport key DISTINTI con pick a linea in gioco e cache oracolo stantia.
 
-    La cache `toao_<sport>.json` copre TUTTA la lega: se e' fresca (TTL 24h)
-    la lega non serve (gia' pagata). `expired` e' letto a runtime dal file di
-    cache, come fa `odds_api._get_odds`.
+    La cache `toao_<sport>.json` copre la FINESTRA (`oracle_fetch_window_min()`
+    minuti): se e' fresca (eta' < `odds_api.oracle_cache_ttl_s()`) la lega non
+    serve (gia' pagata). `expired` e' letto a runtime dal file di cache, come
+    fa `odds_api._get_odds`.
     """
     try:
         import odds_api as oa
@@ -154,7 +165,7 @@ def leagues_needing_fetch(now: Optional[float] = None) -> List[Dict[str, Any]]:
     ts_now = time.time() if now is None else float(now)
     # Finestra "in gioco": un pick oltre l'orizzonte non genera ordini oggi
     # (la sua linea si paga quando si avvicina il kickoff).
-    deadline = ts_now + _pick_window_h() * 4 * 3600.0
+    deadline = ts_now + _window_h() * 3600.0
     per_sport: Dict[str, Dict[str, Any]] = {}
     for p in line_picks():
         if float(p.get("kickoff_ts") or 0) > deadline:
@@ -174,7 +185,7 @@ def leagues_needing_fetch(now: Optional[float] = None) -> List[Dict[str, Any]]:
             if cache.exists():
                 data = json.loads(cache.read_text())
                 age = (ts_now - float(data.get("ts") or 0))
-                if age < oa.ORACLE_CACHE_TTL_S:
+                if age < oa.oracle_cache_ttl_s():
                     continue        # cache fresca: la lega e' gia' coperta
         except Exception:
             age = None              # cache corrotta = da rifare
@@ -205,7 +216,7 @@ def ensure_oracle_payloads(max_leagues: Optional[int] = None
                            getattr(oa, "_oracle_req_day", {}).get("n", 0)}
     now = datetime.now(timezone.utc)
     frm = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    to = (now + timedelta(hours=_pick_window_h() * 4)).strftime(
+    to = (now + timedelta(hours=_window_h())).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
     for info in pending:
         sp = info["sport_key"]

@@ -41,6 +41,11 @@ export default defineRailway(() => {
       AUTO_BET_DRY_RUN: preserve(),
       AUTO_BET_MODE: preserve(),
       AUTO_BET_STAKE_MODE: preserve(),
+      // Rotazione degli snapshot di backup (03/10/2026): ogni snapshot copia
+      // TUTTA `data/`, quindi con i JSONL di telemetria il volume si riempiva
+      // (342 MB su 434, 81%). Portato a 2 e dichiarato qui perche' un
+      // `config apply` non lo riporti al default di codice (7).
+      BACKUP_KEEP: preserve(),
       BOOK_FLOW_DEDUP_MIN: preserve(),
       BOOK_FLOW_LOG: preserve(),
       BOOK_FLOW_MAX_KEYS: preserve(),
@@ -230,7 +235,11 @@ export default defineRailway(() => {
       // preserve(), un `config apply` distruggerebbe gli override operativi.
       ORACLE_ENABLED: preserve(),
       ORACLE_BUDGET_DAY: preserve(),
-      ORACLE_PICK_WINDOW_H: preserve(),
+      // Finestra di fetch dell'oracolo a linea (minuti, default 70): si ordina
+      // solo nella finestra esecutiva T-60..T-5, quindi non si scarica piu'
+      // l'intero palinsesto della lega. Sostituisce ORACLE_PICK_WINDOW_H
+      // (orizzonte a ore, rimosso il 03/10/2026).
+      ORACLE_FETCH_WINDOW_MIN: preserve(),
       ORACLE_LEAGUES_PER_PASS: preserve(),
     },
   });

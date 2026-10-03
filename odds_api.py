@@ -33,16 +33,59 @@ CREDIT_EMERGENCY = 15     # sotto 15: solo Serie A, PL, La Liga
 # la rotazione di ricerca resta `h2h` (1 credito), e una SECONDA chiamata a
 # `markets=h2h,totals,spreads` (3 crediti) viene fatta SOLO per le leghe con
 # pick OU/AH aperti in finestra d'ordine — si paga la linea SOLO dove c'e'
-# denaro in gioco. Costo atteso misurato: ~118 crediti/mese (2 crediti
-# extra x ~59 chiusure/giorno storiche). La cache oracolo e' SEPARATA
-# (`toao_<sport>.json`, TTL 24h): la cache di ricerca resta h2h-only per
-# `fixture_engine`/`pinnacle_oracle` 1X2, la cache oracolo serve a
-# `line_oracle.py` (scelta dichiarata: le due letture hanno consumatori
-# diversi e un file unico confonderebbe le forme).
+# denaro in gioco. La cache oracolo e' SEPARATA (`toao_<sport>.json`): la
+# cache di ricerca resta h2h-only per `fixture_engine`/`pinnacle_oracle` 1X2,
+# la cache oracolo serve a `line_oracle.py` (scelta dichiarata: le due letture
+# hanno consumatori diversi e un file unico confonderebbe le forme).
 ORACLE_MARKETS_LIST = "h2h,totals,spreads"   # 3 crediti a chiamata (eu)
 ORACLE_EXTRA_CREDITS = 2                     # over h2h (1 gia' contato a parte)
-ORACLE_CACHE_TTL_S = 86400                   # 24h: la linea non e' intra-day
 ORACLE_CACHE_PREFIX = "toao_"
+# FINESTRA DI FETCH dell'oracolo a linea, in MINUTI (03/10/2026, direttiva del
+# proprietario). Si ordina SOLO nella finestra esecutiva T-60..T-5: chiedere
+# l'INTERO palinsesto della lega (era 24h) significa scaricare e parsare
+# decine di partite che non entreranno MAI in finestra d'ordine. 70 minuti
+# coprono la finestra con margine.
+# ⚠️ Il costo the-odds-api e' per CHIAMATA, non per evento: restringere la
+# finestra NON riduce i crediti, riduce il PAYLOAD (byte/parsing). Per questo
+# la TTL della cache e' ALLINEATA alla finestra (`oracle_cache_ttl_s()`): una
+# cache da 70 minuti tenuta "fresca" 24h sarebbe valida ma vuota delle
+# partite che stanno entrando in finestra.
+ORACLE_FETCH_WINDOW_MIN = 70
+
+
+def oracle_fetch_window_min() -> int:
+    """Finestra di fetch dell'oracolo a linea (minuti), letta a RUNTIME.
+
+    Env `ORACLE_FETCH_WINDOW_MIN`: un valore assente o impossibile ricade sul
+    default dichiarato (una guardia non si spegne con un env sbagliato).
+    """
+    raw = os.getenv("ORACLE_FETCH_WINDOW_MIN")
+    if raw is None or not str(raw).strip():
+        return ORACLE_FETCH_WINDOW_MIN
+    try:
+        val = int(float(raw))
+    except (TypeError, ValueError):
+        logger.warning("oracolo a linea: ORACLE_FETCH_WINDOW_MIN=%r non "
+                       "numerico, uso %s", raw, ORACLE_FETCH_WINDOW_MIN)
+        return ORACLE_FETCH_WINDOW_MIN
+    if val <= 0:
+        logger.warning("oracolo a linea: ORACLE_FETCH_WINDOW_MIN=%r non "
+                       "positivo, uso %s", raw, ORACLE_FETCH_WINDOW_MIN)
+        return ORACLE_FETCH_WINDOW_MIN
+    return val
+
+
+def oracle_cache_ttl_s() -> int:
+    """TTL della cache `toao_*`, ALLINEATO alla finestra di fetch.
+
+    Una cache scritta con una finestra di 70 minuti copre SOLO
+    `[ts, ts + finestra]`: considerarla fresca 24h (com'era prima del
+    03/10/2026) significherebbe fidarsi di un payload che non contiene piu'
+    le partite in ingresso in finestra — il gate top-down ripiegherebbe su
+    `linea`/`no_oracle` pur avendo una cache "valida". Finestra e TTL sono
+    percio' la STESSA grandezza, con una sola env a governarle.
+    """
+    return oracle_fetch_window_min() * 60
 # TETTO di leghe fetchate al giorno (3 crediti l'una = 6 crediti/giorno =
 # 180/mese): con la rotazione a 7gg (~169 crediti/mese) il totale ~349 resta
 # sotto il tetto 460 del piano free con margine per /scores. E' un TETTO,
@@ -587,7 +630,14 @@ def fetch_line_odds(sport, frm, to):
     Follow-the-money (30/09/2026): chiamata fatta SOLO per le leghe con pick
     OU/AH aperti in finestra d'ordine (`line_oracle.ensure_oracle_payload`),
     budget giornaliero dedicato (`ORACLE_BUDGET_DAY`) e cache separata
-    `toao_<sport>.json` (TTL 24h). Ritorna `(payload, remaining)`.
+    `toao_<sport>.json`. Ritorna `(payload, remaining)`.
+
+    `frm`/`to` arrivano da `line_oracle`, che dal 03/10/2026 usa la FINESTRA
+    DI FETCH (`oracle_fetch_window_min()`, default 70 minuti): si scarica solo
+    cio' che puo' entrare nella finestra esecutiva T-60..T-5, non l'intero
+    palinsesto della lega. La freschezza della cache segue la STESSA
+    grandezza (`oracle_cache_ttl_s()`), altrimenti una cache di 70 minuti
+    resterebbe considerata valida per 24h pur non coprendo piu' nulla.
     """
     # Budget giornaliero dedicato: l'oracolo a linea NON puo' sfinire la
     # stessa risorsa (crediti) della ricerca — un tetto proprio rende il
@@ -610,13 +660,13 @@ def fetch_line_odds(sport, frm, to):
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            if time.time() - data.get("ts", 0) < ORACLE_CACHE_TTL_S:
+            if time.time() - data.get("ts", 0) < oracle_cache_ttl_s():
                 return data.get("payload", []), data.get("remaining", 999)
         except Exception:
             pass
     payload, remaining = _get_odds(sport, frm, to, markets=ORACLE_MARKETS_LIST,
                                    cache_prefix=ORACLE_CACHE_PREFIX,
-                                   ttl_s=ORACLE_CACHE_TTL_S)
+                                   ttl_s=oracle_cache_ttl_s())
     if payload or remaining != 999:
         _oracle_req_day["n"] += 1
     return payload, remaining

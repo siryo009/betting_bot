@@ -14,6 +14,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -721,6 +722,73 @@ class TestFetchSenzaChiave:
         monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: True)
         res = po.fetch_pinnacle_payload("soccer_usa_mls")
         assert res["status"] is None and "soglia" in res["error"]
+
+
+class TestFinestraFetchQuery:
+    """`fetch_pinnacle_payload` chiede SOLO i match entro la finestra (3/10).
+
+    Direttiva: si ordina solo nella finestra esecutiva T-60..T-5, quindi la
+    query `/odds` NON deve piu' scaricare l'intero palinsesto (era
+    `commenceTimeTo = now + 7 giorni`). Il costo the-odds-api e' per CHIAMATA:
+    la finestra stretta riduce il PAYLOAD, non i crediti.
+    """
+
+    def _capture(self, monkeypatch):
+        """Intercetta `requests.get` e ritorna i parametri inviati."""
+        captured: dict = {}
+        import requests as _requests
+
+        class _R:
+            status_code = 200
+            headers = {"x-requests-remaining": "300", "x-requests-last": "1"}
+            text = "[]"
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return []
+
+        def _get(url, params=None, timeout=None):
+            captured.update(params or {})
+            return _R()
+
+        monkeypatch.setenv("ODDS_API_KEY", "fake-probe-key")
+        import odds_api
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: False)
+        monkeypatch.setattr(_requests, "get", _get)
+        return captured
+
+    @staticmethod
+    def _span_minutes(captured):
+        start = datetime.fromisoformat(
+            captured["commenceTimeFrom"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(
+            captured["commenceTimeTo"].replace("Z", "+00:00"))
+        return (end - start).total_seconds() / 60.0
+
+    def test_commence_time_to_entro_la_finestra(self, monkeypatch):
+        monkeypatch.delenv("ORACLE_FETCH_WINDOW_MIN", raising=False)
+        captured = self._capture(monkeypatch)
+        assert po.fetch_pinnacle_payload("soccer_usa_mls")["status"] == 200
+        span = self._span_minutes(captured)
+        assert 69.0 <= span <= 71.0, span
+
+    def test_minutes_ahead_esplicito_vince(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        po.fetch_pinnacle_payload("soccer_usa_mls", minutes_ahead=15)
+        assert 14.0 <= self._span_minutes(captured) <= 16.0
+
+    def test_finestra_dall_env(self, monkeypatch):
+        monkeypatch.setenv("ORACLE_FETCH_WINDOW_MIN", "45")
+        captured = self._capture(monkeypatch)
+        po.fetch_pinnacle_payload("soccer_usa_mls")
+        assert 44.0 <= self._span_minutes(captured) <= 46.0
+
+    def test_non_usa_piu_la_finestra_a_giorni(self):
+        """Il vecchio default a 7 giorni non deve tornare in silenzio."""
+        assert "timedelta(days=days_ahead)" not in SOURCE
+        assert "minutes_ahead" in SOURCE
 
 
 class TestCli:
