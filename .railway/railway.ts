@@ -192,6 +192,26 @@ export default defineRailway(() => {
       TENNIS_LANE_STATE: preserve(),
       TENNIS_JOB_INTERVAL_MIN: preserve(),
       TENNIS_DISCOVERY_TTL_S: preserve(),
+      // Motore quantitativo TENNIS (03/10/2026, `tennis_quant.py`): ELO
+      // superficie-specifico + Poisson da hold/break in parallelo al de-vig
+      // di Shin. Modalita' SOLO MISURA (nessun ordine: lo stake reale resta
+      // `auto_bet.order_stake`). Dichiarate perche' un `config apply` non
+      // deve distruggere soglie/parametri che l'operatore tara.
+      TENNIS_QUANT_ENABLED: preserve(),
+      TENNIS_QUANT_DB: preserve(),
+      TENNIS_QUANT_LOG: preserve(),
+      TENNIS_QUANT_EV_MIN: preserve(),
+      TENNIS_QUANT_W_ELO: preserve(),
+      TENNIS_QUANT_RETURN_GAMES: preserve(),
+      TENNIS_QUANT_MAX_BREAKS: preserve(),
+      TENNIS_QUANT_BASE_HOLD: preserve(),
+      TENNIS_QUANT_HOLD_SPREAD: preserve(),
+      TENNIS_QUANT_KELLY_FRACTION: preserve(),
+      TENNIS_QUANT_MAX_STAKE_PCT: preserve(),
+      TENNIS_QUANT_MAX_STAKE_ABS: preserve(),
+      TENNIS_QUANT_HOURS_AHEAD: preserve(),
+      TENNIS_QUANT_MIN_MODEL_MATCHES: preserve(),
+      TENNIS_QUANT_SHARP_METHOD: preserve(),
       TEST_NOTIFY_KEY: preserve(),
       TOP_DOWN_EV: preserve(),
       TOP_DOWN_MARGIN: preserve(),

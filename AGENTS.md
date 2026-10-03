@@ -8400,3 +8400,107 @@ risk_guards + auto_bet_live + capital_enclosure + exposure_gate + t60_breakers
 (140), secret_hygiene + settlement_pause + order_watch + decision_pipeline.
 `compileall` OK, 0 marker di conflitto. Nessuna env nuova → nessuna modifica a
 `.railway/railway.ts`.
+
+### Motore quantitativo TENNIS: `tennis_quant.py` (03/10/2026, SOLO MISURA)
+
+Direttiva del proprietario: potenziare il motore decisionale tennis con ELO per
+superficie e Poisson da hold/break, **in parallelo** al de-vig di Shin e allo
+steam move. Due scelte chieste prima di scrivere codice e registrate qui:
+**modalita' SOLO MISURA/telemetria** (nessun collegamento agli ordini) e
+**stake reale INVARIATO** (1.50 USDC fissi di `auto_bet.order_stake`; il Kelly
+del modulo e' solo confronto).
+
+**Perche' non e' stato "sbloccato" niente del denaro**: la corsia tennis LIVE
+esiste gia' (`tennis_lane.picks` → `auto_bet._tennis_picks`) e Shin e' gia' il
+de-vig di default dell'oracolo dal 02/10. Il pezzo che mancava era il modello
+intrinseco indipendente dal mercato — ed e' quello che questo modulo misura.
+
+**Nessuna formula ricopiata** (regola di progetto):
+- **ELO superficie** → `SurfaceElo` **eredita** da `tennis_sandbox.TennisElo`
+  (K, time-decay 30/60/365gg, blend superficie, seeding coerente). L'unica
+  riscrittura e' la **persistenza**: tabelle `tennis_elo_ratings` /
+  `tennis_elo_surfaces` nel **ledger principale** (`tracker.DB_PATH`), come
+  richiesto (`"leggere e salvare i rating nel ledger"`). Il sandbox paper
+  continua col suo `ratings.json`: stessa formula, storage diverso → i rating
+  restano confrontabili.
+- **Shin** → `market_calib.market_implied(..., method="shin")`.
+- **Kelly** → `value_filter.kelly_fraction`.
+- **Recinto 40%** → `auto_bet.exposure_allows` (lettura, mai esecuzione).
+- **Superficie** → `tennis_sandbox.detect_surface` (mai indovinare).
+- **Discovery/memo SX** → `tennis_lane.discover` (pubblica, zero crediti).
+
+**Poisson da hold/break**: λ_A = gare_di_risposta · (1 − hold_B), λ_B =
+gare_di_risposta · (1 − hold_A); P(A) = P(Xa>Xb) + 0.5·P(Xa=Xb) con X~Poisson
+(troncamento a 40 e rinormalizzazione; il pareggio di break vale 0.5,
+dichiarato). Fallback **dichiarato** quando non c'e' uno stat provider:
+`hold_rates_from_prob` traduce la probabilita' ELO in un differenziale di
+tenuta servizio (BASE_HOLD 0.80, spread 0.10) — e' un ponte, non una misura,
+e il verdetto lo dichiara (`serve_stats_source`).
+
+**Il gate "entrambi confermano"**: un lato e' candidato solo se
+`EV_intrinseco >= soglia` **E** `EV_sharp >= soglia`, entrambi calcolati sul
+**prezzo SX** (quello che si pagherebbe). L'EV intrinseco e' sulla combinazione
+`w_elo·ELO + (1−w_elo)·Poisson` (w_elo 0.5 di default); l'EV sharp e' sulla
+probabilita' fair di Shin dello sharp.
+
+**Indipendenza dichiarata (il punto delicato)**: un giocatore senza storico
+viene **seminato** dallo sharp (miglior prior), quindi finche' non ha partite
+saldate i due modelli **non sono indipendenti** e il verdetto lo dice
+(`independent=False`, `model_mature`, `elo_matches_a/b`). L'indipendenza arriva
+coi settlement (`update_ratings_from_ledger`).
+
+**Apprendimento dai settlement**: `update_ratings_from_ledger()` legge
+`predictions` (mercato `TENNIS`, `esito_finale` noto) JOIN `matches` per nomi e
+lega (→ superficie) e aggiorna l'ELO. **Idempotente** grazie a
+`tennis_elo_applied(match_id, esito)`: senza, un secondo giro double-applicherebbe
+l'update e i rating divergerebbero. I `push` (void/ritiro) non insegnano nulla.
+
+**Telemetria**: JSONL `data/tennis_quant/evaluations.jsonl` (env
+`TENNIS_QUANT_LOG`) con il verdetto completo per evento; CLI `--cycle`,
+`--update-ratings`, `--report [--json]`.
+
+**Integrazione asincrona (nessun collo di bottiglia)**: `run_cycle()` e'
+sincrona e CPU-only (discovery memoizzata 5'), quindi va invocata in un THREAD:
+```python
+loop = asyncio.get_running_loop()
+await loop.run_in_executor(_scan_executor, tennis_quant.run_cycle)
+```
+Il job `bot.tennis_quant_job` (stesso intervallo di `tennis_lane_job`, 6h,
+`first=390`, `max_instances=1`) fa esattamente questo: prima
+`update_ratings_from_ledger()`, poi `run_cycle()`. Spento con
+`TENNIS_QUANT_ENABLED=0`. **Nessun ordine**: la corsia di denaro (`auto_bet`)
+NON importa il modulo (tripwire).
+
+**Bug reali trovati in fase di test (fixati)**:
+1. **λ invertito** in `break_rates` (usava `1 - hold_a` per i break di A):
+il favorito di servizio risultava SFAVORITO. Ora λ_A dipende da `hold_b`;
+tripwire `test_favorito_di_servizio_favorito_anche_nel_match`.
+2. **`touched` cieco al seeding**: il salvataggio dei rating era condizionato a
+un confronto sui CONTEGGI, ma un giocatore seminato ha n=0 → i rating non
+venivano mai scritti. Ora si confronta l'INSIEME dei giocatori.
+3. **`TELEMETRY_FILE` letta all'IMPORT**: cambiare/isolare `TENNIS_QUANT_LOG`
+non aveva effetto e i test scrivevano nel file di PRODUZIONE
+(`data/tennis_quant/`). Ora `log_path()` legge l'env a OGNI chiamata; il file
+leakato dai test e' stato rimosso.
+
+**Test**: `test_tennis_quant.py` (**50 verdi, tutti OFFLINE**: SQLite
+ temporaneo, `sharp_lookup`/`provider` iniettati, telemetria nella tmp via
+`conftest.py`) + regressioni verdi: `test_bot`+`test_tennis_lane`+
+`test_tennis_sandbox`+`test_railway_drift_check`+`test_secret_hygiene` (216),
+`test_auto_bet*`+`test_value_filter`+`test_market_calib`+`test_pinnacle_api`+
+`test_top_down`+`test_capital_enclosure`+`test_exposure_gate` (304 verdi, 1
+skipped).
+`compileall` OK, 0 marker di conflitto, `railway config plan` =
+**"already up to date"** (0 to add, 0 to change, 0 to destroy).
+
+**Env** (tutte in `preserve()` di `.railway/railway.ts`):
+`TENNIS_QUANT_ENABLED`, `TENNIS_QUANT_DB`, `TENNIS_QUANT_LOG`,
+`TENNIS_QUANT_EV_MIN`, `TENNIS_QUANT_W_ELO`, `TENNIS_QUANT_RETURN_GAMES`,
+`TENNIS_QUANT_MAX_BREAKS`, `TENNIS_QUANT_BASE_HOLD`, `TENNIS_QUANT_HOLD_SPREAD`,
+`TENNIS_QUANT_KELLY_FRACTION`, `TENNIS_QUANT_MAX_STAKE_PCT`,
+`TENNIS_QUANT_MAX_STAKE_ABS`, `TENNIS_QUANT_HOURS_AHEAD`,
+`TENNIS_QUANT_MIN_MODEL_MATCHES`, `TENNIS_QUANT_SHARP_METHOD`.
+
+⚠️ **NON committato/deployato**: il lavoro e' nel working tree. Il prossimo
+passo naturale, quando ci sara' campione, e' leggere la telemetria e DECIDERE
+se collegare il modello alla corsia (oggi il modulo misura e tace).

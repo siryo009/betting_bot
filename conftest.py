@@ -163,6 +163,13 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # discovery sembrerebbe vuota/piena in base all'ultimo test eseguito.
     import tennis_lane as _tl
     _tl.reset_cache()
+    # Motore quantitativo TENNIS (03/10/2026, `tennis_quant.py`): il ledger ELO
+    # vive nel ledger SQLite PRINCIPALE e la telemetria in un JSONL. In test
+    # entrambi vanno nella tmp: senza isolamento un `run_cycle()` scriverebbe
+    # rating e righe di telemetria nel DB/dati di PRODUZIONE, e i test
+    # successivi (stesso processo) leggerebbero quel materiale.
+    monkeypatch.setenv("TENNIS_QUANT_DB", str(tmp_path / "quant.db"))
+    monkeypatch.setenv("TENNIS_QUANT_LOG", str(tmp_path / "quant.jsonl"))
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di
     # MODULO e sopravvive fra i test dello stesso processo, mentre il ledger
     # no (ogni test ha il suo DB temporaneo). Senza reset un caso che semina

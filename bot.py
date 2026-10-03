@@ -2786,6 +2786,51 @@ async def tennis_lane_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error("tennis_lane_job: scan (%s)", e)
 
 
+async def tennis_quant_job(context: ContextTypes.DEFAULT_TYPE):
+    """Motore quantitativo TENNIS (03/10/2026): ELO superficie + Poisson.
+
+    **SOLO MISURA** (scelta esplicita del proprietario): calcola la probabilita'
+    intrinseca (ELO superficie-specifico + Poisson da hold/break), la confronta
+    col de-vig di Shin dello sharp e col prezzo SX, e registra il verdetto
+    "entrambi confermano" in telemetria. NON tocca il denaro: lo stake reale
+    resta quello di `auto_bet` (1.50 USDC fissi) e la corsia ordini non importa
+    questo modulo.
+
+    Il ciclo gira in un THREAD dell'executor (`run_in_executor`): `run_cycle()`
+    e' sincrona e CPU-only (la discovery ha memo 5'), quindi non deve mai essere
+    attesa direttamente sul loop. Spento con `TENNIS_QUANT_ENABLED=0`.
+    """
+    try:
+        import tennis_quant
+    except Exception as e:                                       # pragma: no cover
+        logger.error("tennis_quant_job: modulo non disponibile (%s)", e)
+        return
+    if not tennis_quant.enabled():
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        # Apprendimento dai settlement PRIMA della misura: cosi' il ciclo usa
+        # i rating piu' freschi e l'idempotenza (tennis_elo_applied) evita di
+        # riapplicare un match gia' contato.
+        learned = await loop.run_in_executor(_scan_executor,
+                                             tennis_quant.update_ratings_from_ledger)
+        if learned.get("applied"):
+            logger.info("tennis_quant_job: ELO aggiornato su %s match saldati "
+                        "(%s saltati)", learned.get("applied"),
+                        learned.get("skipped"))
+    except Exception as e:
+        logger.error("tennis_quant_job: update rating (%s)", e)
+    try:
+        res = await loop.run_in_executor(_scan_executor, tennis_quant.run_cycle)
+        logger.info("tennis_quant_job: %s eventi, %s valutati, %s candidati "
+                    "(entrambi i modelli), %s senza sharp, %s errori",
+                    res.get("events"), res.get("evaluated"),
+                    res.get("candidates"), res.get("skipped_no_sharp"),
+                    res.get("errors"))
+    except Exception as e:
+        logger.error("tennis_quant_job: ciclo di misura (%s)", e)
+
+
 async def line_oracle_job(context: ContextTypes.DEFAULT_TYPE):
     """Oracolo a linea OU/AH (30/09/2026): follow-the-money, budget dedicato.
 
@@ -3183,6 +3228,14 @@ def main() -> None:
         _tennis_min = max(60, int(os.getenv("TENNIS_JOB_INTERVAL_MIN", "360")))
         job_queue.run_repeating(tennis_lane_job, interval=_tennis_min * 60,
                                 first=330,
+                                job_kwargs={"max_instances": 1})
+        # Motore quantitativo TENNIS (03/10/2026): ELO superficie + Poisson +
+        # Shin in MISURA. Stesso intervallo della corsia tennis (i rating si
+        # aggiornano coi settlement, la discovery ha memo 5'). Spento con
+        # TENNIS_QUANT_ENABLED=0; nessun ordine, nessun credito (l'oracolo
+        # sharp e' gia' in cache e la discovery SX e' pubblica).
+        job_queue.run_repeating(tennis_quant_job, interval=_tennis_min * 60,
+                                first=390,
                                 job_kwargs={"max_instances": 1})
         # Copertura intelligente (26/09): ogni 15' (stesso intervallo dello
         # scan multi-mercato) valuta le posizioni LIVE aperte e piazza le
