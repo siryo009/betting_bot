@@ -99,8 +99,9 @@ class TestStake:
 
     def test_stake_oltre_il_tetto_e_violazione_sempre(self, tmp_env):
         # Anche su una riga PRECEDENTE alla direttiva: il tetto per-ordine non
-        # e' negoziabile, non e' una regola di strategia.
-        _bet(tmp_env["db"], stake=3.00, created="2026-09-10T10:00:00")
+        # e' negoziabile, non e' una regola di strategia. Col cap DINAMICO
+        # (12% di 33.5535 = 4.03) serve uno stake sopra quella soglia.
+        _bet(tmp_env["db"], stake=5.00, created="2026-09-10T10:00:00")
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
         assert data["violations"][0]["kind"] == order_watch.VIOL_STAKE_OVER_MAX
 
@@ -121,14 +122,22 @@ class TestStake:
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
         assert data["violations"][0]["kind"] == order_watch.VIOL_MISSING_BET_ID
 
-    def test_stake_fisso_spento_sospende_il_controllo(self, tmp_env, monkeypatch):
-        # Con lo stake fisso spento un importo diverso da 1.50 NON e' una
-        # violazione (e' staking dinamico), ma il tetto per-ordine resta.
+    def test_kelly_aggressivo_cambia_la_regola_non_sospende_il_controllo(
+            self, tmp_env, monkeypatch):
+        """Dal 04/10/2026 il default e' il Kelly aggressivo: con lo stake
+        fisso spento un importo diverso da 1.50 NON e' una violazione, ma il
+        controllo NON e' sospeso — valgono il cap dinamico (12%) e il ticket
+        minimo del motore. Un ordine sotto il ticket e' un percorso che ha
+        aggirato il motore."""
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
-        _bet(tmp_env["db"], stake=1.00)
+        _bet(tmp_env["db"], stake=3.00)          # entro il cap, sopra il ticket
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
         assert data["fixed_active"] is False
-        assert data["verdict"] == "ok"          # stake dinamico: non si giudica
+        assert data["verdict"] == "ok"
+        _bet(tmp_env["db"], stake=1.00, match="m2")   # sotto il ticket 2.00
+        data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
+        kinds = [v["kind"] for v in data["violations"]]
+        assert order_watch.VIOL_STAKE_UNDER_TICKET in kinds
 
     def test_tetto_per_ordine_vale_anche_con_stake_fisso_spento(self, tmp_env,
                                                                monkeypatch):
@@ -233,7 +242,7 @@ class TestReportESorveglianza:
         assert "1.5 USDC" in text
 
     def test_report_con_violazioni(self, tmp_env):
-        _bet(tmp_env["db"], stake=2.5)
+        _bet(tmp_env["db"], stake=5.0)      # oltre il cap dinamico (4.03)
         text = order_watch.format_report(order_watch.audit(
             tmp_env["db"], history_path=tmp_env["hist"]))
         assert "❌" in text and "tetto" in text

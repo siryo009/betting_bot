@@ -87,12 +87,26 @@ class TestCB1HardCap:
     """CB1: NESSUNO stake sopra il cap — Kelly sovrascritto, mai negoziato."""
 
     def test_t60_stake_mai_sopra_il_cap(self):
-        for bankroll in (34.0, 100.0, 500.0, 10_000.0):
-            assert auto_bet.t60_stake(bankroll, mode="live") \
-                <= auto_bet.T60_MAX_STAKE_USDC + 1e-9
+        """CB1 dal 04/10/2026 e' DINAMICO: nessuno stake sopra il 12%.
 
-    def test_t60_stake_da_wallet_piccolo(self):
-        # Con 34 USDC il cap resta 1.00 (>= floor exchange 1.00).
+        Il tetto si legge dal cap reale (`order_ceiling`), mai da una
+        costante scritta qui.
+        """
+        for bankroll in (34.0, 100.0, 500.0, 10_000.0):
+            cap = auto_bet.order_ceiling(bankroll)
+            assert cap > 0
+            assert auto_bet.t60_stake(bankroll, mode="live") <= cap + 1e-9
+
+    def test_t60_stake_scala_col_bankroll(self):
+        # Cap dinamico 12%: 4.08 su 34 USDC (e' il tetto che morde: il 30%
+        # di correlazione sarebbe 10.20, il 40% di esposizione 13.60).
+        assert auto_bet.t60_stake(34.0, mode="live") == 4.08
+        assert auto_bet.t60_stake(100.0, mode="live") == 12.0
+
+    def test_tetto_assoluto_esplicito_vince(self, monkeypatch):
+        """Un `T60_MAX_STAKE_USDC` > 0 resta un tetto assoluto (legacy)."""
+        monkeypatch.setattr(auto_bet, "T60_MAX_STAKE_USDC", 1.00)
+        assert auto_bet.order_ceiling(34.0) == 1.00
         assert auto_bet.t60_stake(34.0, mode="live") == 1.0
 
     def test_t60_stake_zero_sotto_il_floor(self):
@@ -114,23 +128,23 @@ class TestCB1HardCap:
             data_quality=DataQuality(model_coverage=1.0, calibrated=True))
         risk = risk_approve(checked=["test"])
         limits = RiskLimits.from_env()
-        rec_stake = auto_bet.T60_MAX_STAKE_USDC
-        # Kelly su bankroll 1000 con edge 15pp produrrebbe molto piu' di 1 USDC.
+        rec_stake = auto_bet.order_ceiling(1000.0)
+        # Kelly su bankroll 1000 con edge 15pp produrrebbe molto piu' del 12%.
         from decision.stake_engine import size
         sd = size(signal, risk, bankroll=1000.0, limits=limits, mode="live")
-        if sd.stake > rec_stake:
-            assert sd.stake <= rec_stake + 1e-9
-            assert sd.cap_source == "t60_hard_cap"
-        else:
-            assert sd.stake <= rec_stake + 1e-9  # comunque sotto il cap
+        assert sd.stake <= rec_stake + 1e-9
 
-    def test_cap_configurabile_alla_direttiva_letterale(self, monkeypatch):
-        """Env T60_MAX_STAKE_USDC=0.50: la direttiva letterale e' ripristinabile."""
-        monkeypatch.setenv("T60_MAX_STAKE_USDC", "0.50")
-        val = float(auto_bet.__dict__.get("T60_MAX_STAKE_USDC", 1.0))
-        # La costante e' letta all'import: qui verifichiamo solo che l'env
-        # sia la fonte (documentato), il valore runtime resta quello deployato.
-        assert val >= 0.5
+    def test_cap_assoluto_configurabile(self, monkeypatch):
+        """Env T60_MAX_STAKE_USDC=0.50: tetto assoluto ripristinabile."""
+        monkeypatch.setattr(auto_bet, "T60_MAX_STAKE_USDC", 0.50)
+        assert auto_bet.order_ceiling(1000.0) == 0.50
+
+    def test_tetto_fail_closed_su_bankroll_ignoto(self, monkeypatch):
+        """Senza bankroll (ne' passato ne' registrato) il CB1 dinamico non e'
+        calcolabile: nessun ordine, mai un tetto arbitrario."""
+        monkeypatch.setattr(auto_bet, "T60_MAX_STAKE_USDC", 0.0)
+        monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 0.0)
+        assert auto_bet.order_ceiling() == 0.0
 
 
 class TestCB2KillSwitch:
@@ -202,19 +216,29 @@ class TestCB3ValidazionePydantic:
         return base
 
     def test_payload_valido_passa(self):
-        ok, contract, errors = auto_bet.validate_order_payload(self._payload())
+        # CB1 dal 04/10 e' dinamico: il tetto efficace va passato col bankroll
+        # (con 34 USDC = 4.08; uno stake di 1.0 sta sotto).
+        ok, contract, errors = auto_bet.validate_order_payload(
+            self._payload(), bankroll=34.0)
         assert ok and errors == []
         assert contract.stake == 1.0
 
     def test_stake_sopra_cap_scartato_non_cappato(self):
         ok, contract, errors = auto_bet.validate_order_payload(
-            self._payload(stake=5.0))
+            self._payload(stake=5.0), bankroll=34.0)   # cap 4.08
         assert not ok and contract is None
         assert any("circuit breaker" in e for e in errors)
 
+    def test_tetto_ignoto_scarta_il_payload(self):
+        """Senza bankroll il CB1 dinamico non e' calcolabile: fail-closed."""
+        ok, contract, errors = auto_bet.validate_order_payload(
+            self._payload(), bankroll=None)
+        assert not ok and contract is None
+        assert any("non calcolabile" in e for e in errors)
+
     def test_quota_fuori_fascia_scartata(self):
         ok, _, errors = auto_bet.validate_order_payload(
-            self._payload(price=2.5))
+            self._payload(price=2.5), bankroll=34.0)
         assert not ok
         assert any("circuit breaker" in e for e in errors)
 
@@ -398,14 +422,15 @@ class TestFinestraT60:
                                 "price": floor, "stake": stake})
         placed = auto_bet.t60_dispatch_pending(bankroll=34.0)
         assert len(placed) == 1
-        assert placed[0]["stake"] == 1.0
+        # CB1 dinamico (12%): su bankroll 34 lo stake T-60 e' 4.08.
+        assert placed[0]["stake"] == 4.08
         assert placed[0]["mode"] == "t60-live"
         # La puntata e' sul ledger con i dati reali dell'ordine.
         conn = tracker._get_conn()
         row = conn.execute("SELECT mode, stake, bet_id FROM bets "
                            "WHERE match_id='ok'").fetchone()
         conn.close()
-        assert row == ("live", 1.0, "b1")
+        assert row == ("live", 4.08, "b1")
 
     def test_senza_bet_id_non_scrive_la_riga(self, temp_db, monkeypatch):
         """Secondo punto di scrittura: senza bet_id NESSUNA riga live.
@@ -490,10 +515,11 @@ class TestContrattoT60:
 
     def test_t60_executable_coerente_col_cap(self):
         from decision.models import t60_executable
-        cap = auto_bet.T60_MAX_STAKE_USDC
-        assert t60_executable(cap, 1.65) is True
-        assert t60_executable(cap + 0.01, 1.65) is False
-        assert t60_executable(1.0, 2.0) is False
+        cap = auto_bet.order_ceiling(34.0)
+        assert cap > 0
+        assert t60_executable(cap, 1.65, cap) is True
+        assert t60_executable(cap + 0.01, 1.65, cap) is False
+        assert t60_executable(1.0, 2.0, cap) is False
 
 
 class TestFinestraT15MercatiDerivati:

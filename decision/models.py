@@ -535,17 +535,32 @@ class T60OrderContract(BaseModel):
         return self.model_dump_json()
 
 
-def t60_executable(stake: float, price: float) -> bool:
+def t60_executable(stake: float, price: float,
+                   max_stake: Optional[float] = None) -> bool:
     """Un contratto T-60 rispetta i circuit breakers di decreto?
 
-    CB1 hard cap (0.50 USDC direttiva; su SX il minimo ordine e' 1.00 e la
-    scelta del proprietario del 17/09 e' il cap eseguibile 1.00) e tetto
-    quota (solo favoriti netti 1.30-1.80). Usato dal validatore d'ordine e
-    dai tripwire: una sola fonte per la regola.
+    CB1 (tetto per-ordine) e tetto quota (solo favoriti netti 1.30-1.80).
+    Usato dal validatore d'ordine e dai tripwire: una sola fonte per la
+    regola.
+
+    CB1 dal 04/10/2026 e' **DINAMICO** (12% del bankroll): il tetto efficace
+    lo calcola il CHIAMANTE (`auto_bet.order_ceiling`, unico punto di
+    verita') e lo passa qui in `max_stake`. Se non viene passato si ricade
+    sulla costante `T60_MAX_STAKE_USDC` (tetto assoluto legacy / default di
+    ambiente): senza cap esplicito e con la costante a 0.0 la funzione
+    risponde **False** — un tetto ignoto non autorizza un ordine.
     """
     from auto_bet import T60_MAX_ODDS, T60_MAX_STAKE_USDC  # lazy: nessun ciclo
-    return (0.0 < float(stake) <= float(T60_MAX_STAKE_USDC) + 1e-9
-            and 1.0 < float(price) <= float(T60_MAX_ODDS) + 1e-9)
+    if max_stake is None:
+        max_stake = as_float(T60_MAX_STAKE_USDC)
+    try:
+        cap = float(max_stake)
+    except (TypeError, ValueError):
+        return False
+    if cap <= 0:
+        return False
+    return (0.0 < as_float(stake) <= cap + 1e-9
+            and 1.0 < as_float(price) <= as_float(T60_MAX_ODDS) + 1e-9)
 
 
 __all__ = [

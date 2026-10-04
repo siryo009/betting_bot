@@ -86,10 +86,14 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # esercitano la funzione VERA non vengono isolati: sono i tripwire del
     # recinto (`test_capital_enclosure`) e la sua VERIFICA sugli ordini reali
     # (`test_order_watch`, che gira su un ledger temporaneo).
-    _verifica_il_recinto = ("test_capital_enclosure", "test_order_watch")
+    _verifica_il_recinto = ("test_capital_enclosure", "test_order_watch",
+                            "test_aggressive_kelly")
     if not any(name in request.node.nodeid for name in _verifica_il_recinto):
+        # Firma NUOVA (04/10/2026): `cap_order_stake(stake, bankroll=None)`.
+        # L'isolamento sostituisce la funzione VERA (il cap dinamico non e'
+        # disattivabile via env), quindi deve accettare la stessa firma.
         monkeypatch.setattr("auto_bet.cap_order_stake",
-                            lambda stake: float(stake or 0.0))
+                            lambda stake, bankroll=None: float(stake or 0.0))
         # STAKE FISSO (28/09/2026): la size di ogni ordine REALE e' un importo
         # fisso (1.50 USDC). La maggior parte dei test misura altro (cap
         # percentuali, liquidita', wallet, stop-loss): con l'importo fisso
@@ -97,6 +101,33 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
         # esame. I tripwire del recinto vero stanno in test_capital_enclosure,
         # che non viene isolato (`0` = staking dinamico storico).
         monkeypatch.setattr("auto_bet.FIXED_STAKE_USDC", 0.0)
+    # KELLY AGGRESSIVO (04/10/2026): la corsia LIVE usa il motore Kelly
+    # (`kelly_size_for_pick`). La maggior parte dei test misura altro (cap,
+    # wallet, liquidita', stop-loss) e semina `stake_eur` espliciti: isolare
+    # il MOTORE (non le soglie) fa tornare i test al percorso storico, mentre
+    # i file dedicati (test_aggressive_kelly, test_agents_* e lo stesso
+    # test_capital_enclosure) lo esercitano VERO.
+    _verifica_kelly = ("test_aggressive_kelly", "test_analysis_agent",
+                       "test_brain_agent", "test_agent_kelly")
+    if not any(name in request.node.nodeid for name in _verifica_kelly):
+        # Interruttore SPENTO: la corsia LIVE resta il percorso storico
+        # (stake esplicito/adattivo + tetto), cosi' i test che misurano cap,
+        # wallet, liquidita' o stop-loss non leggono il Kelly.
+        monkeypatch.setenv("KELLY_AGGRESSIVE_ENABLED", "0")
+        monkeypatch.setattr("auto_bet.aggressive_enabled", lambda: False)
+        monkeypatch.setattr("auto_bet.kelly_size_for_pick",
+                            lambda pick, **kw: {"stake": float(pick.get("stake") or 0.0),
+                                                "reason": "isolated"})
+    # Capitale dell'ultimo giro (usato da `cap_order_stake` quando il bankroll
+    # non e' passato): lo stato e' di PROCESSO e sopravviverebbe fra i test.
+    monkeypatch.setattr("auto_bet._LAST_BANKROLL", 0.0)
+    # Parametri del motore Kelly: fissati ai default di codice, cosi' un `.env`
+    # dell'operatore non rende i test dipendenti dall'ambiente.
+    monkeypatch.setenv("KELLY_AGGRESSIVE_FRACTION", "0.65")
+    monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.12")
+    monkeypatch.setenv("KELLY_MIN_TICKET_USDC", "2.00")
+    # Stato del juice (Agente Analisi): sul volume in produzione, nella tmp qui.
+    monkeypatch.setenv("ANALYSIS_JUICE_STATE", str(tmp_path / "juice_state.json"))
     # Stato degli ORDINI APERTI (direttiva 28/09/2026): la lettura reale
     # interroga il ledger (`tracker`) e nei test che non isolano il DB sarebbe
     # una scrittura silenziosa sul data dir vero (le migrazioni girano alla

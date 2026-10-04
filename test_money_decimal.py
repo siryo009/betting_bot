@@ -268,9 +268,17 @@ class TestT60OrderContract:
             self._contract(stake=0)
 
     def test_t60_executable_accetta_decimal(self):
-        """CB1/CB4 usano `float()` all'estremo: con Decimal devono funzionare."""
-        assert t60_executable(Decimal("1.00"), Decimal("1.75")) is True
-        assert t60_executable(Decimal("1.50"), Decimal("1.75")) is False  # cap 1.00
+        """CB1/CB4 usano `float()` all'estremo: con Decimal devono funzionare.
+
+        Il tetto efficace arriva dal CHIAMANTE (dal 04/10/2026 il CB1 e'
+        dinamico: 12% del bankroll), quindi il test lo passa esplicito.
+        """
+        assert t60_executable(Decimal("1.00"), Decimal("1.75"), 1.00) is True
+        assert t60_executable(Decimal("1.50"), Decimal("1.75"), 1.00) is False
+
+    def test_tetto_non_calcolabile_rifiuta(self):
+        """Cap <= 0 (bankroll ignoto) = nessun ordine, mai un tetto arbitrario."""
+        assert t60_executable(Decimal("1.00"), Decimal("1.75"), 0.0) is False
 
     def test_json_numerico(self):
         payload = json.loads(self._contract().model_dump_json())

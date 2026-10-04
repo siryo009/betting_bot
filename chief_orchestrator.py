@@ -23,6 +23,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from agents.analysis_agent import AnalysisAgent
+from agents.brain_agent import BrainAgent
 from agents.contracts import CycleReport
 from agents.data_agent import DataAgent
 from agents.execution_agent import ExecutionAgent
@@ -40,10 +42,16 @@ class ChiefOrchestrator:
                  strategy: Optional[StrategyAgent] = None,
                  finance: Optional[FinanceAgent] = None,
                  execution: Optional[ExecutionAgent] = None,
-                 advisor: Optional[Any] = None, *,
+                 advisor: Optional[Any] = None,
+                 analysis: Optional[AnalysisAgent] = None,
+                 brain: Optional[BrainAgent] = None, *,
                  advisor_enabled: Optional[bool] = None) -> None:
         self.data = data
         self.strategy = strategy or StrategyAgent()
+        # ANALISI + CERVELLO (direttiva 04/10/2026): arricchiscono e validano i
+        # segnali PRIMA della Finanza. Iniettabili -> i test girano offline.
+        self.analysis = analysis
+        self.brain = brain or BrainAgent()
         self.finance = finance
         self.execution = execution or ExecutionAgent()
         # --- Braccio destro (co-pilota per le eccezioni) ---
@@ -120,9 +128,44 @@ class ChiefOrchestrator:
         strategy = self.strategy.process(market.signals)
         report.strategy = strategy.as_json()
 
+        # --- 2b. ANALISI: steam velocity + juice + freshness ---------------
+        # Arricchisce RISPETTO al prezzo (che valore non porta): il gradiente
+        # dello sharp e l'overround col suo delta. NON decide: descrive.
+        # Fail-safe: un errore lascia l'agente a valle senza arricchimento.
+        try:
+            self.analysis = self.analysis or AnalysisAgent()
+            analysis = self.analysis.process(strategy.signals)
+            report.analysis = analysis.as_json()
+        except Exception as exc:
+            logger.warning("chief: analisi fallita: %s", exc)
+            analysis = None
+
+        # --- 2c. CERVELLO: EV dinamico + Portfolio Shield ------------------
+        # Valida i segnali arricchiti: la soglia EV sale su liquidita' bassa e
+        # volatilita' alta (mai sotto la base), e il blocco correlato (30% di
+        # `auto_bet`) puo' permettere, ridurre o bloccare.
+        try:
+            self.brain.bankroll = float(getattr(self.finance, "bankroll", 0.0) or 0.0)
+            brain = self.brain.process(analysis.signals if analysis else [])
+            report.brain = brain.as_json()
+        except Exception as exc:
+            logger.warning("chief: cervello fallito: %s", exc)
+            brain = None
+
         # --- 3. FINANZA & RISCHIO ----------------------------------------
         finance = self.finance.process_many(strategy.signals, now=now)
         report.finance = finance.as_json()
+        # Sizing del percorso ValidatedTrade (motore Kelly aggressivo): la
+        # size vera che la corsia d'ordine userebbe. Telemetria + payout verso
+        # `report.sizing`; lo stake resta un DATO finche' `CHIEF_EXECUTION`
+        # non e' "live" (la corsia reale lo legge da qui).
+        try:
+            if brain is not None:
+                sized = self.finance.process_trades(
+                    [t for t in brain.trades if t.shield_action != "block"])
+                report.sizing = sized.as_json()
+        except Exception as exc:
+            logger.warning("chief: sizing ValidatedTrade fallito: %s", exc)
 
         # --- 3b. BRACCIO DESTRO: risoluzione delle eccezioni --------------
         # Per ogni piano bloccato (reject di valore o stake non eseguibile)

@@ -8641,3 +8641,143 @@ destroy: l'applicazione era `1 to change` = set della variabile, applicata).
   `cronSchedule`** nel blocco `surebet`). File: **74 verdi**; lotti di
   regressione verdi (`test_railway_drift_check`, `test_bot`,
   `test_secret_hygiene`). `compileall` OK, 0 marker di conflitto.
+
+### Kelly aggressivo + tre agenti (Analisi / Cervello / Finanza) (04/10/2026)
+
+Direttiva del proprietario: la size degli ordini reali non e' piu' un importo
+fisso ma un **Kelly aggressivo con cap DINAMICO**, e il ciclo decisionale e'
+diviso in **tre agenti con confini netti**. Scelte confermate via `ask_user`:
+corsia denaro su **entrambe** le strade (catena agenti + `auto_bet`, con
+`CHIEF_EXECUTION=live` che puo' alimentare la coda ordini); **ticket minimo
+2.00 = soglia del MOTORE**, non dell'exchange (il floor SX resta **1.00**,
+dato misurato); **guardrail intatti** (recinto 40%, CB2 25 USDC, finestra
+T-60..T-5, cap correlazione 30%). La direttiva 0.65/12% **rivede** la prima
+bozza (Half Kelly 0.5 / cap 10%).
+
+**1) IL MOTORE (`decision/stake_engine.py`) — una sola definizione.**
+- Env lette a RUNTIME: `KELLY_AGGRESSIVE_FRACTION` (**0.65**),
+  `KELLY_MAX_STAKE_PCT` (**0.12**), `KELLY_MIN_TICKET_USDC` (**2.00**);
+  `aggressive_config()` clampa (frazione/pct in [0,1], ticket >= 0).
+- `calculate_kelly_stake(true_prob, offered_odds, bankroll)`:
+  `raw = bankroll x kelly_pieno x k` (il Kelly pieno viene da
+  `value_filter.kelly_fraction(..., fraction=1.0)`: **k applicato UNA volta**,
+  il bug del doppio scaling del 13/09 resta chiuso) -> cap `bankroll x 12%`
+  che **TRONCA, mai alza** -> sotto il ticket lo stake e' **0.0**.
+  `reason` machine-readable: `invalid_inputs` / `no_bankroll` / `no_edge` /
+  `below_min_ticket` / `ok`. `bankroll: Money` (Decimal a riposo, `as_float`
+  in transito: il tripwire di `test_money_decimal` difende la direttiva).
+- `aggressive_cap_usdc(bankroll)` = `round(bankroll x pct, 6)`, 0.0 se
+  bankroll <= 0/non numerico. **UNICA fonte del cap dinamico**.
+- `size()` (catena `decision`) ora legge il tetto da
+  `auto_bet.order_ceiling(bankroll)`: il CB1 e' **dinamico** e se il tetto
+  non e' calcolabile lo stake va a 0 (fail-closed).
+
+**2) `auto_bet.py` — un solo punto di precedenza.**
+- `order_ceiling(bankroll=None)`: tetto per-ordine EFFICACE (assoluto se
+  `T60_MAX_STAKE_USDC` > 0, altrimenti 12% del bankroll letto da
+  `_LAST_BANKROLL`). 0.0 = non calcolabile -> il chiamante salta l'ordine.
+- `cap_order_stake(stake, bankroll=None)` (cap corsia normale),
+  `aggressive_min_ticket()`, `set_last_bankroll()`,
+  `aggressive_enabled()` (env `KELLY_AGGRESSIVE_ENABLED`, default ON) e
+  **`aggressive_live_active()`** = interruttore ON **e** importo fisso
+  spento **e** `STAKE_MODE != flat`: e' l'UNICO posto che decide la corsia,
+  cosi' il ramo di calcolo e il refresh pre-ordine non possono divergere.
+- `true_probability(pick, price)`: `p_true` esplicito (oracolo) oppure
+  **derivata dall'EV** del pick (`p = (EV + 1) / quota`): algebra dell'EV,
+  non una probabilita' inventata. None -> il chiamante salta.
+- `kelly_size_for_pick(...)`: UNICO punto di chiamata del motore (le corsie
+  non ricopiano formula ne' soglie); il vincolo di **cassa** (fondi liberi)
+  resta separato dal cap percentuale — i soldi in escrow non si spendono due
+  volte (`cassa_capped` / `below_min_ticket_cassa`).
+- **`refresh_live_stakes(candidates)`**: fetch del saldo **subito prima**
+  degli ordini (compounding "all'ultimo tick"), poi cap dinamico e ticket sul
+  capitale fresco. Un candidato gia' ridotto dai cap di PORTAFOGLIO
+  (correlazione/esposizione) **non** viene ri-dimensionato dal Kelly: quei
+  cap decidono SE, il Kelly QUANTO. Wallet non leggibile -> **nessun
+  candidato** (fail-closed).
+- Costanti **fisse a 0.0**: `ORDER_FIXED_STAKE_USDC...` — `FIXED_STAKE_USDC`
+  (0.0 = legacy spento, `ORDER_FIXED_STAKE_USDC` lo ripristina),
+  `T60_MAX_STAKE_USDC` (0.0 = CB1 dinamico).
+- `validate_order_payload(payload, bankroll=)` (CB3) e `t60_stake()` usano
+  `order_ceiling`: un payload sopra il tetto e' **SCARTATO** (mai cappato in
+  silenzio) e **senza bankroll non passa** (fail-closed).
+
+**3) TRE AGENTI (`agents/`) — contratti Pydantic, nessuna formula copiata.**
+- **`analysis_agent.py` (Analisi)**: per ogni segnale calcola la **Steam
+  Velocity** (`velocity_pct_min = move_pct / span_minutes`, ΔQ/Δt dello sharp)
+  e il **Juice/overround** (`oracle["overround"]`, delta in pp contro lo stato
+  persistente `ANALYSIS_JUICE_STATE`, default `DATA_DIR/decision/juice_state.json`)
+  con `juice_anomaly` sopra `ANALYSIS_JUICE_SPIKE_PP` (1.5pp); emette
+  `OracleSignal` con **freshness** (`age_s`/`fresh`, `ANALYSIS_MAX_AGE_S` 180s,
+  timestamp naive RIFIUTATO, tolleranza futuro 300s). Senza nomi squadra ->
+  `unsupported_market`; eccezione -> `error:<Tipo>` (mai un traceback).
+- **`brain_agent.py` (Cervello)**: **EV dinamico** (`dynamic_ev_min`, solo
+  crescente: `+0.25` se il libro e' sotto `BRAIN_MIN_DEPTH_USDC` 20,
+  `+0.20` se la volatilita' supera `BRAIN_VOLATILITY_PP_MIN` (0.20%/min),
+  saturazione a 1x l'extra) e **Portfolio Shield** anti-correlazione
+  (`shield_decision`: `allow` / `scale` / `block` sul cap del blocco, letto da
+  `auto_bet.CORRELATION_CAP_PCT` 30%). La soglia base NON e' copiata: arriva da
+  `value_filter.EV_MIN`. Emette `ValidatedTrade`.
+  ⚠️ **BUG REALE trovato e fixato**: `_open_live_bets` leggeva una colonna
+  `league` che **`bets` non ha** (lo schema la mette su `matches`) ->
+  `sqlite3.OperationalError: no such column: league` e il Shield avrebbe
+  **bloccato OGNI ordine per sempre**. Ora `LEFT JOIN matches` (una bet orfana
+  resta visibile con lega vuota).
+- **`finance_agent.py` (Finanza)**: consuma `ValidatedTrade` e dimensiona col
+  motore Kelly (`fresh_bankroll`: override > `balance_fn` > bankroll di ciclo);
+  `block` -> non eseguibile, cap a `shield_max_usdc` -> `shield_scaled`, sotto
+  ticket -> `below_min_ticket`. Denaro in `Decimal` a riposo, `as_float` in
+  transito (nessun `float()` sparso: tripwire).
+- **`chief_orchestrator.py`**: la catena diventa
+  Analisi -> Cervello -> Finanza -> [Advisor] -> Esecuzione; `report.analysis`
+  / `report.brain` / `report.sizing` sono nel `CycleReport` (e in `as_json`).
+
+**4) `order_watch.py`**: nuova violazione `stake_under_ticket`; il tetto per
+ordine e' stimato **dall'equity dell'istante** (`order_cap_estimated` /
+`order_cap_unverifiable`, mai "ok" su un tetto stimato); `min_ticket()` letto
+da `auto_bet.aggressive_min_ticket()`.
+
+**5) ISOLAMENTO NEI TEST (`conftest.py`)**. Il motore Kelly e il tetto
+dinamico non si disattivano via env: i test che misurano ALTRO (cap, wallet,
+liquidita', stop-loss) ricevono `KELLY_AGGRESSIVE_ENABLED=0` +
+`aggressive_enabled -> False` + uno stub di `kelly_size_for_pick`, e i
+parametri del motore sono fissati ai default di codice (0.65/0.12/2.00).
+Le eccezioni DICHIARATE che esercitano il recinto VERO sono
+`test_capital_enclosure`, `test_order_watch`, `test_aggressive_kelly`
+(`_verifica_il_recinto`) e `test_aggressive_kelly`, `test_analysis_agent`,
+`test_brain_agent`, `test_agent_kelly` (`_verifica_kelly`).
+
+**6) TEST.** Quattro file NUOVI, tutti OFFLINE:
+`test_aggressive_kelly.py` (**44**: config/default/env/clamp, k applicato una
+volta, cap che tronca, ticket che scarta, compounding, motivi,
+`cap_order_stake` dinamico/assoluto/fail-closed, `refresh_live_stakes`,
+interruttore e precedenza), `test_analysis_agent.py` (**25**),
+`test_brain_agent.py` (**31**), `test_agent_kelly.py` (**29**, catena
+end-to-end Analisi->Cervello->Finanza + ciclo del Capo).
+Aggiornati di proposito al CB1 dinamico: `test_t60_breakers` (cap per-ordine
+via `order_ceiling`, stake T-60 4.08 su 34 USDC, fail-closed su bankroll
+ignoto), `test_money_decimal` (`t60_executable` col cap esplicito),
+`test_decision_review`, `test_capital_enclosure`, `test_order_watch`.
+**`verify_guardrails.py`: A–H TUTTI BLOCCANO** (exit 0). Lo scenario C e' ora
+il Kelly aggressivo (stake = min(kelly x 0.65, 12% del bankroll), ticket 2.00
+-> 0 ordini con wallet piccolo, controprova legacy a importo fisso e
+controprova con l'importo fisso spento); G2 usa il CB1 dinamico (bankroll
+10000 -> 1200, tetto 12%) e H il tetto del recinto col nuovo stake per ordine
+(3 x 4.03 = 12.09 dentro 13.42, il quarto respinto). Due difetti della
+diagnostica fixati nello stesso giro: il **CB2 armato dallo scenario C2**
+(wallet finto 4 USDC) restava attivo e metteva a zero gli scenari successivi —
+`_reset_state()` ora lo disarma; e lo scenario H partiva con il board degli
+scenari precedenti, i cui cap di portafoglio riducevano gli stake e
+mascherassero il recinto — ora il board viene azzerato e riseededato.
+
+**7) IaC**: `KELLY_AGGRESSIVE_FRACTION`, `KELLY_MAX_STAKE_PCT`,
+`KELLY_MIN_TICKET_USDC`, `KELLY_AGGRESSIVE_ENABLED`, `ANALYSIS_*`, `BRAIN_*`
+dichiarate `preserve()` in `.railway/railway.ts`. `railway config plan`:
+**already up to date** (0 to add, 0 to change, **0 to destroy**).
+
+**8) ⚠️ Da sapere in produzione.** Con equity ~33.55 USDC il cap 12% vale
+**4.03** e il ticket 2.00 e' ampiamente coperto: il motore ordina.
+`KELLY_AGGRESSIVE_ENABLED=0` ripristina in un giro (senza redeploy) il
+percorso storico; `ORDER_FIXED_STAKE_USDC=1.50` ripristina l'importo fisso del
+28/09. Il floor dell'EXCHANGE resta **1.00 USDC**: il ticket 2.00 e' una soglia
+di sizing, non una dichiarazione sul minimo dell'exchange.

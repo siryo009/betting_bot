@@ -145,18 +145,27 @@ TOTAL_EXPOSURE_CAP_PCT = 0.40  # max 40% di bankroll per il portafoglio del gior
 # (corsia + catena) continuano a girare. Si sblocca da sola quando i
 # settlement chiudono le righe e l'esposizione torna sotto soglia.
 OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.40"))
-# Tetto per SINGOLO ordine (micro-stake): l'esposizione va spalmata su piu'
-# partite, non concentrata su una. Vale per ogni corsia (quella storica e la
-# catena piramidale): e' un tetto ASSOLUTO, mai un floor.
-ORDER_MAX_STAKE_USDC = float(os.getenv("ORDER_MAX_STAKE_USDC", "1.50"))
-# --- STAKE FISSO (direttiva 28/09/2026) ------------------------------------
-# La size di ogni singola scommessa REALE non e' piu' dimensionata (Kelly +
-# cap): e' un IMPORTO FISSO, 1.50 USDC. Con 8 ordini aperti l'esposizione e'
-# 12.00 USDC, sotto il recinto del 40%. Il valore resta comunque soggetto al
-# tetto per-ordine qui sopra (l'env puo' abbassare l'importo, mai alzarlo
-# oltre 1.50) e al vincolo di cassa (non si spendono fondi che non ci sono).
-# `ORDER_FIXED_STAKE_USDC=0` ripristina lo staking dinamico storico.
-FIXED_STAKE_USDC = float(os.getenv("ORDER_FIXED_STAKE_USDC", "1.50"))
+# Tetto per SINGOLO ordine. **DINAMICO dal 04/10/2026** (direttiva del
+# proprietario: "sostituisci qualsiasi hard cap fisso precedente con una
+# percentuale dinamica sul bankroll"): il tetto e' `bankroll x
+# KELLY_MAX_STAKE_PCT` (12%), ricalcolato a ogni ordine — cosi' il capitale
+# scala col bankroll invece di essere soffocato da un importo costante.
+# La formula vive UNA volta in `decision.stake_engine.aggressive_cap_usdc`
+# (qui non si ricopia). Uno `ORDER_MAX_STAKE_USDC` esplicito > 0 RESTA un
+# tetto assoluto (retro-compatibilita' per diagnostica e test): vince lui.
+ORDER_MAX_STAKE_USDC = float(os.getenv("ORDER_MAX_STAKE_USDC", "0.0"))
+# --- STAKE FISSO (direttiva 28/09/2026, SUPERATA il 04/10/2026) -----------
+# L'importo fisso per ordine e' DISATTIVATO di default (`0.0`): la size degli
+# ordini reali e' il Kelly aggressivo (k=0.65, cap dinamico 12%) con ticket
+# minimo 2.00 USDC. Impostando `ORDER_FIXED_STAKE_USDC` a un valore > 0 si
+# ripristina l'importo fisso (percorso legacy, con il suo tetto esplicito).
+FIXED_STAKE_USDC = float(os.getenv("ORDER_FIXED_STAKE_USDC", "0.0"))
+#: Bankroll dell'ultimo giro di DENARO: e' il capitale su cui si calcola il
+#: cap dinamico quando un chiamante non lo passa esplicitamente (il giro gira
+#: ogni 60s e lo aggiorna: e' il "capitale all'ultimo tick"). 0 = mai visto
+#: un giro -> il cap dinamico non e' calcolabile e l'ordine si salta
+#: (fail-closed: mai un tetto ignoto su denaro reale).
+_LAST_BANKROLL = 0.0
 # Modalita' della catena piramidale dentro il giro REALE:
 #   "off"   (default) -> la catena registra/valuta, non esegue (Fase 1/2);
 #   "live"            -> i piani approvati dal Finance Agent entrano nella
@@ -210,13 +219,14 @@ T60_WINDOW_MIN_MIN = float(os.getenv("T60_WINDOW_MIN_MIN", "60"))   # apertura (
 # (Railway: T60_WINDOW_MIN_MIN=60, T60_WINDOW_MAX_MIN=5).
 T60_WINDOW_MAX_MIN = float(os.getenv("T60_WINDOW_MAX_MIN",
                                      str(MIN_MINUTES_TO_START)))   # chiusura (fail-closed: oltre, non si ordina)
-# CB1 — HARD CAP PER ORDINE: NESSUN calcolo dinamico (Kelly incluso) puo'
-# produrre uno stake sopra questo tetto: viene SORSCRITTO. Il proprietario
-# ha scelto 1.00 USDC (17/09): e' il minimo ordine eseguibile dell'exchange
-# SX Bet (con 0.50 OGNI ordine sarebbe stato scartato dal floor e il
-# sistema sarebbe rimasto armato ma inerte). Env T60_MAX_STAKE_USDC per
-# tornare alla direttiva letterale (0.50) se il minimo exchange cambia.
-T60_MAX_STAKE_USDC = float(os.getenv("T60_MAX_STAKE_USDC", "1.00"))
+# CB1 — TETTO PER ORDINE: NESSUN calcolo dinamico (Kelly incluso) puo'
+# produrre uno stake sopra questo tetto: viene SORSCRITTO, mai negoziato.
+# **DINAMICO dal 04/10/2026** (direttiva del proprietario: "sostituisci
+# qualsiasi hard cap fisso con una percentuale dinamica"): con 0.0 il tetto
+# e' `bankroll x KELLY_MAX_STAKE_PCT` (12%), calcolato da `order_ceiling`
+# dalla STESSA fonte del cap per-ordine della corsia normale. Un valore > 0
+# ripristina il tetto ASSOLUTO (era 1.00 USDC dal 17/09).
+T60_MAX_STAKE_USDC = float(os.getenv("T60_MAX_STAKE_USDC", "0.0"))
 # Tetto quota della strategia (favoriti netti, allineato a value_filter): un
 # ordine su una quota fuori fascia e' dati incoerenti, non un mercato.
 T60_MAX_ODDS = float(os.getenv("T60_MAX_ODDS", "1.80"))
@@ -294,27 +304,56 @@ def t60_window(kickoff: "datetime | None") -> str:
     return "missed"
 
 
-def t60_stake(bankroll: float, *, mode: str = "sim") -> float:
-    """Stake T-60: CB1 HARD CAP 1.00 USDC, NESSUN Kelly.
+def order_ceiling(bankroll: float | None = None) -> float:
+    """Tetto per-ordine EFFICACE (CB1): assoluto se configurato, altrimenti 12%.
 
-    Micro-allocazione FISSA per la strategia T-60 (direttiva 17/09): il
-    Kelly dinamico e' ignorato di proposito — qualunque calcolo che produca
-    uno stake superiore al cap viene sovrascritto. Rispetta comunque i
-    limiti di portafoglio (correlazione 30%, esposizione totale 40%) e la
-    cassa reale del wallet: mai un ordine sopra i fondi disponibili.
+    UNICO punto di verita' del tetto per gli ordini reali: lo usano
+    `t60_stake` (corsia T-60), `validate_order_payload` (CB3) e la
+    validazione dei payload di `_live_fill`. 0.0 = non calcolabile (bankroll
+    ignoto) -> il chiamante DEVE saltare l'ordine (fail-closed).
+    """
+    if T60_MAX_STAKE_USDC > 0:
+        return float(T60_MAX_STAKE_USDC)
+    try:
+        from decision.stake_engine import aggressive_cap_usdc
+        return float(aggressive_cap_usdc(
+            bankroll if bankroll is not None else _LAST_BANKROLL))
+    except Exception as exc:                                  # pragma: no cover
+        logger.warning("auto_bet: tetto per-ordine non calcolabile (%s): "
+                       "nessun ordine (fail-closed)", exc)
+        return 0.0
+
+
+def t60_stake(bankroll: float, *, mode: str = "sim") -> float:
+    """Stake T-60: CB1 con cap DINAMICO 12% del bankroll, nessun Kelly.
+
+    Il tetto della strategia T-60 (micro-allocazione) non e' piu' l'importo
+    fisso 1.00 del 17/09 ma la percentuale dinamica del 04/10, dalla stessa
+    fonte del cap per-ordine: cosi' un ordine T-60 non puo' valere piu' del
+    tetto che vale sulla corsia normale. Rispetta comunque i limiti di
+    portafoglio (correlazione 30%, esposizione totale 40%) e la cassa reale
+    del wallet: mai un ordine sopra i fondi disponibili.
     """
     try:
         bankroll = float(bankroll)
     except (TypeError, ValueError):
         bankroll = 0.0
-    stake = min(float(T60_MAX_STAKE_USDC),
+    # CB1 DINAMICO dal 04/10/2026: il tetto non e' piu' l'importo fisso 1.00
+    # ma `bankroll x KELLY_MAX_STAKE_PCT` (12%), dalla STESSA fonte del cap
+    # per-ordine (`decision.stake_engine.aggressive_cap_usdc`): le due corsie
+    # non possono misurare due tetti diversi. Uno `T60_MAX_STAKE_USDC`
+    # esplicito > 0 resta un tetto assoluto (retro-compatibilita').
+    cap = order_ceiling(bankroll)
+    if cap <= 0:
+        return 0.0                     # capitale ignoto: nessun tetto, no bet
+    stake = min(cap,
                 bankroll * CORRELATION_CAP_PCT,
                 bankroll * TOTAL_EXPOSURE_CAP_PCT)
     if mode == "live":
         stake = min(stake, bankroll)   # mai oltre la cassa reale
     if stake < MIN_STAKE_EUR:
         return 0.0                     # sotto il minimo ordine: no bet
-    return float(round(min(stake, T60_MAX_STAKE_USDC), 2))
+    return float(round(min(stake, cap), 2))
 
 
 # Loader dell'oracolo INIETTABILE (default = le cache di produzione): i test
@@ -635,13 +674,20 @@ def _t60_emergency_alert(reason: str) -> None:
         logger.warning("auto_bet: alert CB2 non inviato: %s", e)
 
 
-def validate_order_payload(payload: dict) -> "tuple[bool, object | None, list[str]]":
+def validate_order_payload(payload: dict,
+                           bankroll: float | None = None
+                           ) -> "tuple[bool, object | None, list[str]]":
     """CB3: valida il payload d'ordine col contratto Pydantic rigido.
 
     Ritorna `(ok, contract, errors)`. CB1/CB2 sono verificati QUI oltre che
     nel motore: un payload che li viola e' SCARTATO (non cappato in silenzio),
     perche' a valle del contratto non esistono correttivi impliciti. Gli
     errori sono machine-readable per la riga del ledger.
+
+    `bankroll` (opzionale) serve al CB1 DINAMICO (04/10/2026): quando
+    `T60_MAX_STAKE_USDC` e' 0.0 il tetto e' `bankroll x 12%`, letto dal
+    chiamante — senza bankroll il cap non e' calcolabile e il payload NON
+    passa (fail-closed: mai un tetto ignoto su denaro reale).
     """
     from decision.models import T60OrderContract, t60_executable
     errors: list[str] = []
@@ -650,10 +696,14 @@ def validate_order_payload(payload: dict) -> "tuple[bool, object | None, list[st
     except Exception as exc:
         return False, None, [str(exc)]
     if T60_ORDER_VALIDATION:
-        if not t60_executable(contract.stake, contract.price):
+        cap = order_ceiling(bankroll)
+        if cap <= 0:
+            errors.append("circuit breaker: tetto per-ordine non calcolabile "
+                          "(bankroll ignoto): payload scartato (fail-closed)")
+        elif not t60_executable(contract.stake, contract.price, cap):
             errors.append(
-                f"circuit breaker: stake {contract.stake} > "
-                f"{T60_MAX_STAKE_USDC} o quota {contract.price} > {T60_MAX_ODDS}")
+                f"circuit breaker: stake {contract.stake} > {cap:.2f} "
+                f"o quota {contract.price} > {T60_MAX_ODDS}")
     return (not errors), (contract if not errors else None), errors
 
 
@@ -756,7 +806,7 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
             "kickoff": k.isoformat() if k else "",
             "created_at": created.isoformat() if created else "",
         }
-        ok, contract, errors = validate_order_payload(payload)
+        ok, contract, errors = validate_order_payload(payload, bankroll=bankroll)
         if not ok:
             # CB3: payload malformato o circuit breaker violato -> riga di
             # rifiuto sul ledger, MAI verso il provider.
@@ -1275,54 +1325,133 @@ def _exposure_deny_reason(usable: bool, projected: float, cap: float,
             "nuovo ordine (fail-closed)" % open_stake)
 
 
-def cap_order_stake(stake: float) -> float:
-    """Tetto assoluto per singolo ordine (micro-stake, 27/09/2026).
+def aggressive_cap_pct() -> float:
+    """Cap percentuale dinamico (KELLY_MAX_STAKE_PCT, default 12%)."""
+    try:
+        from decision.stake_engine import aggressive_config
+        return float(aggressive_config()["max_stake_pct"])
+    except Exception as exc:                                  # pragma: no cover
+        logger.warning("auto_bet: configurazione Kelly non leggibile (%s), "
+                       "uso 0.12", exc)
+        return 0.12
 
-    Riduce, non alza mai: un cap non puo' creare un ordine. Il tetto di
-    1.50 USDC e' una regola di business inviolabile: non puo' essere
-    disattivato neanche impostando l'ENV a 0.0. Se il tetto scende sotto
-    il minimo ordine dell'exchange la funzione restituisce comunque il tetto
-    — il chiamante (fail-closed) salta la puntata invece di alzarla al floor.
+
+def aggressive_min_ticket() -> float:
+    """Ticket minimo del motore Kelly (KELLY_MIN_TICKET_USDC, default 2.00)."""
+    try:
+        from decision.stake_engine import aggressive_config
+        return float(aggressive_config()["min_ticket"])
+    except Exception as exc:                                  # pragma: no cover
+        logger.warning("auto_bet: ticket minimo non leggibile (%s), uso 2.00", exc)
+        return 2.00
+
+
+def set_last_bankroll(bankroll: float | None) -> None:
+    """Registra il bankroll dell'ultimo giro di denaro (capitale all'ultimo tick)."""
+    global _LAST_BANKROLL
+    try:
+        value = float(bankroll or 0.0)
+    except (TypeError, ValueError):
+        return
+    if value > 0:
+        _LAST_BANKROLL = value
+
+
+def cap_order_stake(stake: float, bankroll: float | None = None) -> float:
+    """Tetto per singolo ordine: DINAMICO (12% del bankroll) dal 04/10/2026.
+
+    Riduce, non alza mai. L'importo FISSO di 1.50 del 28/09 e' stato sostituito
+    dalla percentuale dinamica (direttiva del proprietario): con bankroll 100
+    il tetto e' 12.00, con 30 e' 3.60. Uno `ORDER_MAX_STAKE_USDC` esplicito > 0
+    resta un tetto ASSOLUTO e vince sul dinamico (diagnostica/test).
+
+    Fail-closed sul capitale IGNOTO: senza un bankroll (ne' passato ne'
+    registrato dall'ultimo giro) non esiste un tetto calcolabile, quindi
+    l'ordine non passa (0.0). Un tetto che non si sa misurare non autorizza
+    denaro reale.
     """
     stake = float(stake or 0.0)
-    return min(stake, 1.50)
+    if ORDER_MAX_STAKE_USDC > 0:
+        return min(stake, float(ORDER_MAX_STAKE_USDC))
+    try:
+        from decision.stake_engine import aggressive_cap_usdc
+        bk = bankroll if bankroll is not None else _LAST_BANKROLL
+        cap = float(aggressive_cap_usdc(bk))
+    except Exception as exc:                                  # pragma: no cover
+        logger.warning("auto_bet: cap dinamico non calcolabile (%s): ordine "
+                       "saltato (fail-closed)", exc)
+        return 0.0
+    if cap <= 0:
+        logger.warning("auto_bet: cap dinamico non calcolabile (bankroll "
+                       "ignoto o nullo): ordine saltato (fail-closed)")
+        return 0.0
+    return min(stake, cap)
 
 
 # --- STAKE FISSO per gli ordini reali (direttiva 28/09/2026) ----------------
 
 def fixed_order_stake() -> float:
-    """Importo FISSO di ogni ordine reale (default 1.50 USDC), 0 = disattivo.
+    """Importo FISSO per ordine reale (percorso LEGACY), 0 = disattivo (default).
 
-    Un solo punto di verita': l'env puo' solo ABBASSARE l'importo (il tetto
-    per singolo ordine resta inviolabile), mai alzarlo. Un valore non
-    numerico ricade sul default di progetto invece di creare uno stake
-    casuale.
+    Dal 04/10/2026 il default e' 0.0: la size degli ordini reali e' il Kelly
+    aggressivo. Impostando l'env a un valore > 0 si torna all'importo fisso
+    (direttiva 28/09), che resta soggetto al solo tetto ESPLICITO
+    `ORDER_MAX_STAKE_USDC` quando e' impostato — il cap dinamico non si
+    applica al percorso legacy (la sua direttiva e' l'importo, non il cap).
     """
     try:
         fixed = float(FIXED_STAKE_USDC)
     except (TypeError, ValueError):
-        fixed = 1.50
+        fixed = 0.0
     if fixed <= 0:
         return 0.0
-    return cap_order_stake(round(fixed, 2))
+    if ORDER_MAX_STAKE_USDC > 0:
+        return float(round(min(fixed, float(ORDER_MAX_STAKE_USDC)), 2))
+    return float(round(fixed, 2))
 
 
 def fixed_stake_active() -> bool:
-    """True se la size degli ordini reali e' l'importo fisso (default)."""
+    """True se la size degli ordini reali e' l'importo fisso (legacy)."""
     return fixed_order_stake() > 0
 
 
-def order_stake(stake: float, spendable: float = float("inf")) -> float:
+def aggressive_enabled() -> bool:
+    """Interruttore del motore Kelly aggressivo (env, default ON).
+
+    Letto a ogni giro (non a import): `KELLY_AGGRESSIVE_ENABLED=0` ripristina
+    il percorso storico senza redeploy. E' anche l'isolamento dei test che
+    misurano altro (cap, wallet, liquidita', stop-loss): con l'env spenta
+    `run_today_bets` resta identico a prima della direttiva 04/10/2026.
+    """
+    return ((os.getenv("KELLY_AGGRESSIVE_ENABLED", "1") or "1")
+            .strip().lower() in ("1", "true", "yes", "on"))
+
+
+def aggressive_live_active() -> bool:
+    """Il Kelly aggressivo governa la size degli ordini REALI in questo giro?
+
+    NON e' un doppione di `aggressive_enabled`: e' la regola di PRECEDENZA —
+    l'importo fisso (legacy, 28/09) e il flat-stake hanno la priorita', il
+    motore Kelly entra solo quando nessuno dei due e' attivo. Un solo posto
+    decide la corsia, cosi' il ramo di calcolo e il refresh pre-ordine non
+    possono divergere.
+    """
+    if not aggressive_enabled():
+        return False
+    if fixed_stake_active():
+        return False
+    return STAKE_MODE != "flat"
+
+
+def order_stake(stake: float, spendable: float = float("inf"),
+                bankroll: float | None = None) -> float:
     """Stake FINALE di un ordine REALE — unico punto di verita'.
 
-    Direttiva 28/09/2026: importo FISSO (`ORDER_FIXED_STAKE_USDC`, 1.50 USDC)
-    invece del dimensionamento dinamico. Con l'importo fisso disattivato
-    (0) resta il percorso storico (tetto per-ordine sopra lo stake calcolato).
-
-    Il vincolo di CASSA non e' negoziabile: se i fondi liberi del wallet non
-    coprono l'importo fisso la funzione restituisce 0 e il chiamante salta
-    l'ordine (fail-closed) — mai un importo diverso da quello della direttiva
-    per far passare comunque un ordine.
+    Percorso PRIMARIO (Kelly aggressivo, default dal 04/10/2026): lo stake
+    calcolato viene passato dal TETTO DINAMICO (12% del bankroll) e dal
+    vincolo di cassa. Percorso LEGACY attivo solo se `ORDER_FIXED_STAKE_USDC`
+    e' impostato: li' la size e' l'importo fisso e va coperta dai fondi
+    liberi (fail-closed).
     """
     try:
         cassa = float(spendable)
@@ -1330,12 +1459,160 @@ def order_stake(stake: float, spendable: float = float("inf")) -> float:
         cassa = float("inf")
     fixed = fixed_order_stake()
     if fixed > 0:
-        # Importo fisso: se i fondi liberi non lo coprono l'ordine e' 0
+        # Importo fisso (legacy): se i fondi liberi non lo coprono l'ordine e' 0
         # (fail-closed), mai un importo diverso dalla direttiva.
         return fixed if cassa >= fixed else 0.0
-    # Staking dinamico storico: tetto per-ordine SOPRA il vincolo di cassa
-    # (i fondi in escrow non si possono spendere due volte).
-    return min(cap_order_stake(stake), cassa)
+    # Kelly aggressivo: cap dinamico SOPRA il vincolo di cassa (i fondi in
+    # escrow non si possono spendere due volte).
+    return min(cap_order_stake(stake, bankroll), cassa)
+
+
+def true_probability(pick: dict, price: float) -> float | None:
+    """Probabilita' "vera" del pick per il Kelly: oracolo esplicito o dall'EV.
+
+    Due fonti, in quest'ordine:
+    1. `p_true` — la probabilita' fair del consenso sharp (gate top-down):
+       e' la verita' su cui l'ordine e' stato approvato;
+    2. derivata dall'EV che il pick porta GIA' (`EV = p x (quota - 1) - (1 - p)`
+       -> `p = (EV + 1) / quota`): algebra dell'EV, non una probabilita' nuova
+       inventata qui. Serve alle corsie con oracolo proprio (tennis/eSports) e
+       ai mercati a linea, che il gate 1X2 non copre.
+
+    None se non e' determinabile -> il chiamante SALTA (fail-closed: nessuna
+    size su una probabilita' che nessuno ha calcolato).
+    """
+    try:
+        quota = float(price)
+    except (TypeError, ValueError):
+        return None
+    if quota <= 1.0:
+        return None
+    explicit = pick.get("p_true")
+    if explicit is not None:
+        try:
+            value = float(explicit)
+        except (TypeError, ValueError):
+            value = 0.0
+        return value if 0.0 < value < 1.0 else None
+    for key in ("top_down_ev", "ev", "best_ev"):
+        if pick.get(key) is None:
+            continue
+        try:
+            ev = float(pick[key])
+        except (TypeError, ValueError):
+            continue
+        prob = (ev + 1.0) / quota
+        return prob if 0.0 < prob < 1.0 else None
+    return None
+
+
+def kelly_size_for_pick(pick: dict, *, price: float, bankroll: float,
+                        spendable: float | None = None,
+                        label: str = "Kelly aggressivo") -> dict:
+    """Size del motore Kelly aggressivo per un pick (dict pronto + log).
+
+    UNICO punto di chiamata del motore (k=0.65, cap 12%, ticket 2.00): le
+    corsie non ricopiano ne' la formula ne' le soglie. Il vincolo di CASSA
+    (fondi liberi) resta separato dal cap percentuale: non si spendono soldi
+    in escrow.
+    """
+    try:
+        from decision.stake_engine import calculate_kelly_stake
+    except Exception as exc:
+        logger.warning("auto_bet: motore Kelly non disponibile (%s)", exc)
+        return {"stake": 0.0, "reason": f"engine_unavailable:{type(exc).__name__}"}
+    prob = true_probability(pick, price)
+    if prob is None:
+        return {"stake": 0.0, "reason": "no_true_prob"}
+    res = dict(calculate_kelly_stake(prob, price, bankroll))
+    res["true_prob"] = round(prob, 6)
+    if not res.get("executable"):
+        return res
+    if spendable is not None:
+        try:
+            cassa = float(spendable)
+        except (TypeError, ValueError):
+            cassa = None
+        if cassa is not None and res["stake"] > cassa:
+            res["stake"] = round(max(cassa, 0.0), 2)
+            res["cassa_capped"] = True
+            if res["stake"] < aggressive_min_ticket():
+                res["stake"] = 0.0
+                res["executable"] = False
+                res["reason"] = "below_min_ticket_cassa"
+    if res.get("stake", 0.0) > 0:
+        logger.info("auto_bet: %s %s (%s): k=%.2f p=%.3f -> stake %.2f USDC "
+                    "(raw %.2f, cap %.2f = %.1f%% di %.2f, bankroll)",
+                    label, pick.get("match_id"), pick.get("esito_key"),
+                    float(res.get("kelly_fraction", 0.0)), prob,
+                    float(res["stake"]), float(res.get("raw_stake", 0.0)),
+                    float(res.get("cap_usdc", 0.0)),
+                    float(res.get("max_stake_pct", 0.0)) * 100.0,
+                    float(res.get("bankroll", 0.0)))
+    return res
+
+
+def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
+    """Ri-fetcha il saldo REALE e ri-dimensiona i candidati prima degli ordini.
+
+    Direttiva 04/10/2026: il fetch "pulito" del bilancio USDC avviene subito
+    PRIMA della size, cosi' il compounding usa il capitale all'ultimo tick.
+    Un candidato gia' ridotto dai cap di PORTAFOGLIO (correlazione/esposizione
+    totale) NON viene ri-dimensionato dal Kelly — quei cap decidono SE e
+    quanto, e ri-calcolare lo stake li scavalcherebbe: per quelli si applicano
+    solo il cap dinamico e il ticket minimo sul capitale fresco.
+
+    Fail-closed: wallet non leggibile -> nessun candidato passa (un saldo
+    ignoto non autorizza ordini reali).
+    """
+    info: dict = {"ok": False, "reason": "", "skipped": 0}
+    snap = _live_wallet_snapshot()
+    if snap is None:
+        info["reason"] = "wallet_non_leggibile"
+        logger.warning("auto_bet: saldo wallet non leggibile prima degli "
+                       "ordini: nessuna puntata (fail-closed)")
+        return [], info
+    equity = float(snap["equity"])
+    available = float(snap["available"])
+    set_last_bankroll(equity)
+    info.update({"ok": True, "equity": equity, "available": available})
+    min_ticket = aggressive_min_ticket()
+    try:
+        from decision.stake_engine import aggressive_cap_usdc
+        cap = float(aggressive_cap_usdc(equity)) or 0.0
+    except Exception as exc:                                  # pragma: no cover
+        logger.warning("auto_bet: cap dinamico non calcolabile (%s): "
+                       "nessuna puntata (fail-closed)", exc)
+        cap = 0.0
+    cap = min(cap, available)
+    if cap <= 0:
+        info["reason"] = "cap_non_calcolabile"
+        logger.warning("auto_bet: cap dinamico non calcolabile su equity "
+                       "%.2f: nessuna puntata (fail-closed)", equity)
+        return [], info
+    kept: list[dict] = []
+    for cand in candidates:
+        if cand.get("corr_cap") or cand.get("total_cap"):
+            stake = min(float(cand.get("stake") or 0.0), cap)
+        else:
+            res = kelly_size_for_pick(cand, price=float(cand.get("price") or 0.0),
+                                      bankroll=equity, spendable=available,
+                                      label="Kelly fresco (pre-ordine)")
+            stake = float(res.get("stake") or 0.0)
+            cand["kelly"] = {k: res.get(k) for k in
+                             ("kelly_fraction", "kelly_full", "raw_stake",
+                              "cap_usdc", "max_stake_pct", "min_ticket",
+                              "capped", "reason", "true_prob")}
+        if stake < min_ticket:
+            info["skipped"] = int(info["skipped"]) + 1
+            logger.info("auto_bet: %s (%s) stake %.2f < ticket minimo %.2f "
+                        "(saldo fresco %.2f): scartato",
+                        cand.get("match_id"), cand.get("esito_key"), stake,
+                        min_ticket, equity)
+            continue
+        cand["stake"] = float(round(stake, 2))
+        kept.append(cand)
+    return kept, info
 
 
 def chief_execution_enabled() -> bool:
@@ -2614,6 +2891,9 @@ def run_today_bets(stake_eur: float | None = None,
             logger.info("auto_bet: bankroll LIVE = equity %.2f USDC "
                         "(disponibile %.2f + in gioco %.2f)",
                         _bankroll, _wallet_balance, _wallet_exposure)
+    # Capitale dell'ultimo tick: e' il riferimento del CAP DINAMICO per ogni
+    # chiamante che non passa il bankroll esplicito (T-60, catena, dispatch).
+    set_last_bankroll(_bankroll)
 
     # --- STOP-LOSS GIORNALIERO (11/09): nessuna puntata dopo un -5% dal
     # valore di inizio giornata, per DAILY_STOP_HOURS (default 24h). In LIVE
@@ -2919,14 +3199,31 @@ def run_today_bets(stake_eur: float | None = None,
         # CAP SEVERO: se lo stake cappato e' sotto il minimo ordine
         # dell'exchange, il floor NON lo alza (sforerebbe il cap): l'ordine
         # viene saltato, a meno che il cap severo sia disattivato.
-        if mode == "live":
-            # --- STAKE FISSO (direttiva 28/09/2026): la size dell'ordine REALE
-            # e' un IMPORTO FISSO (default 1.50 USDC), non piu' il Kelly.
-            # `order_stake` e' l'unico punto di verita' (tetto per-ordine
-            # inviolabile + vincolo di cassa): con fondi liberi insufficienti
-            # restituisce 0 e l'ordine viene saltato — mai un importo diverso
-            # dalla direttiva (fail-closed).
-            pick_stake = order_stake(pick_stake, _spendable)
+        if mode == "live" and aggressive_live_active():
+            # --- KELLY AGGRESSIVO (direttiva 04/10/2026): la size dell'ordine
+            # REALE e' il Kelly frazionato k=0.65 con cap DINAMICO 12% del
+            # bankroll e ticket minimo 2.00 USDC. Sostituisce sia il Kelly del
+            # modello blend sia l'importo fisso 1.50 del 28/09: il capitale
+            # scala col bankroll (compounding). `kelly_size_for_pick` e' l'unico
+            # punto (formula e soglie vivono in `decision.stake_engine`).
+            _ks = kelly_size_for_pick(pick, price=price, bankroll=_bankroll,
+                                      spendable=_spendable)
+            if not _ks.get("stake"):
+                logger.info("auto_bet: %s (%s) nessuno stake dal Kelly "
+                            "aggressivo [%s], salto",
+                            pick["match_id"], pick["esito_key"],
+                            _ks.get("reason"))
+                continue
+            pick_stake = float(_ks["stake"])
+            pick["kelly"] = {k: _ks.get(k) for k in
+                             ("kelly_fraction", "kelly_full", "raw_stake",
+                              "cap_usdc", "max_stake_pct", "min_ticket",
+                              "capped", "reason", "true_prob")}
+        elif mode == "live":
+            # --- PERCORSO LEGACY (solo se `ORDER_FIXED_STAKE_USDC` > 0):
+            # importo fisso (direttiva 28/09) con tetto esplicito e vincolo di
+            # cassa. `order_stake` e' l'unico punto di verita'.
+            pick_stake = order_stake(pick_stake, _spendable, _bankroll)
             if pick_stake < MIN_STAKE_EUR:
                 if fixed_stake_active():
                     logger.warning("auto_bet: STAKE FISSO %.2f non sostenibile "
@@ -3063,7 +3360,7 @@ def run_today_bets(stake_eur: float | None = None,
                             c.get("match_id"), c.get("esito_key"),
                             raw_stake, _fixed)
                 continue
-            stake = order_stake(raw_stake, _spendable)
+            stake = order_stake(raw_stake, _spendable, _bankroll)
             if stake < MIN_STAKE_EUR:
                 if _fixed > 0:
                     logger.warning("auto_bet: STAKE FISSO %.2f non sostenibile "
@@ -3083,6 +3380,23 @@ def run_today_bets(stake_eur: float | None = None,
             c["stake"] = stake
             kept.append(c)
         candidates = kept
+
+        if aggressive_live_active():
+            # --- FETCH DEL SALDO REALE + CAP DINAMICO (direttiva 04/10/2026) ---
+            # Subito PRIMA degli ordini: una lettura pulita del bilancio USDC,
+            # poi cap dinamico (12%) e ticket minimo (2.00 USDC) sul capitale
+            # fresco — e' il compounding "all'ultimo tick". Fail-closed: senza
+            # saldo leggibile non parte nessun ordine.
+            candidates, _fresh = refresh_live_stakes(candidates)
+            if _fresh.get("ok"):
+                logger.info("auto_bet: saldo fresco pre-ordine: equity %.2f "
+                            "USDC (disponibile %.2f) — %d candidati pronti, "
+                            "%d scartati dal ticket minimo",
+                            _fresh["equity"], _fresh["available"],
+                            len(candidates), _fresh.get("skipped", 0))
+            else:
+                logger.warning("auto_bet: saldo non leggibile prima degli "
+                               "ordini (%s): nessuna puntata", _fresh.get("reason"))
 
     # --- FASE 3: esegui e registra (LIVE via execution_engine oppure SIM) ---
     from tracker import save_bet
@@ -3242,8 +3556,9 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
         return []
     out: list[dict] = []
     try:
+        from agents.analysis_agent import AnalysisAgent
+        from agents.brain_agent import BrainAgent
         from chief_orchestrator import ChiefOrchestrator
-        from decision.commands import CommandKind
         from value_filter import get_optimal_timing, ODDS_MIN, ODDS_MAX
 
         chief = ChiefOrchestrator()
@@ -3260,58 +3575,65 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
                            market.gate.reason.value)
             return []
         strategy = chief.strategy.process(market.signals)
-        # 3. Finanza: un piano per segnale.
-        finance = chief.finance.process_many(strategy.signals, now=now)
-        for plan in finance.plans:
-            if plan.record.risk.verdict != "approve" or not plan.places_order:
+        # 2b. ANALISI (steam velocity + juice) -> CERVELLO (EV dinamico +
+        # Portfolio Shield) -> FINANZA (Kelly aggressivo k=0.65, cap 12%,
+        # ticket 2.00). Direttiva 04/10/2026: la catena agenti applica lo
+        # STESSO motore Kelly della corsia storica (`decision.stake_engine`),
+        # quindi le due corsie non possono dimensionarsi in modo diverso.
+        analysis = AnalysisAgent().process(strategy.signals)
+        brain = BrainAgent(bankroll=float(bankroll or 0.0)).process(
+            analysis.signals)
+        sizing = chief.finance.process_trades(
+            [t for t in brain.trades if t.shield_action != "block"],
+            bankroll=bankroll)
+        for trade in sizing.trades:
+            if not trade.executable or float(trade.stake or 0.0) <= 0:
                 continue
-            stake_dec = plan.record.stake
-            if stake_dec is None or not bool(getattr(stake_dec, "executable",
-                                                     False)):
-                continue
-            order_cmd = plan.of_kind(CommandKind.PLACE_ORDER)[0]
-            payload = dict(order_cmd.payload)
-            price = float(payload.get("price") or 0.0)
+            price = float(trade.price)
             if not (ODDS_MIN <= price <= ODDS_MAX):
-                logger.info("auto_bet: piano chief %s (%s) quota %.2f fuori "
+                logger.info("auto_bet: trade chief %s (%s) quota %.2f fuori "
                             "fascia %.2f-%.2f, scartato",
-                            payload.get("match_id"), payload.get("outcome"),
-                            price, ODDS_MIN, ODDS_MAX)
+                            trade.match_id, trade.esito, price,
+                            ODDS_MIN, ODDS_MAX)
                 continue
-            kickoff = payload.get("kickoff")
-            if T60_EXECUTION_ONLY and \
-                    t60_window(_parse_iso_utc(kickoff)) != "within":
-                logger.info("auto_bet: piano chief %s (%s) fuori finestra "
+            kickoff = trade.kickoff
+            if kickoff is None:
+                logger.info("auto_bet: trade chief %s (%s) senza kickoff, "
+                            "scartato (fail-closed)", trade.match_id, trade.esito)
+                continue
+            if T60_EXECUTION_ONLY and t60_window(kickoff) != "within":
+                logger.info("auto_bet: trade chief %s (%s) fuori finestra "
                             "T-60 (%s): solo scansione",
-                            payload.get("match_id"), payload.get("outcome"),
-                            t60_window(_parse_iso_utc(kickoff)))
+                            trade.match_id, trade.esito, t60_window(kickoff))
                 continue
-            if not get_optimal_timing(kickoff)["optimal"]:
-                logger.info("auto_bet: piano chief %s (%s) timing non "
-                            "ottimale, scartato", payload.get("match_id"),
-                            payload.get("outcome"))
-                continue
-            stake = order_stake(float(payload.get("stake") or 0.0))
-            if stake <= 0:
+            if not get_optimal_timing(kickoff.isoformat())["optimal"]:
+                logger.info("auto_bet: trade chief %s (%s) timing non "
+                            "ottimale, scartato", trade.match_id, trade.esito)
                 continue
             out.append({
-                "match_id": payload.get("match_id"),
-                "mercato": payload.get("market") or "1X2",
-                "esito_key": payload.get("outcome"),
-                "home": payload.get("home") or "",
-                "away": payload.get("away") or "",
-                "commence": kickoff,
+                "match_id": trade.match_id,
+                "mercato": trade.market or "1X2",
+                "esito_key": trade.esito,
+                "home": trade.home or "",
+                "away": trade.away or "",
+                "commence": kickoff.isoformat() if kickoff is not None else "",
                 "quota": price,
-                "league": payload.get("league") or "",
+                "league": trade.league or "",
                 "price": price,
-                "stake": stake,
+                "stake": float(trade.stake),
                 "lane": "chief",
-                "signal_id": getattr(order_cmd, "signal_id", "") or "",
-                "record_id": getattr(order_cmd, "record_id", "") or "",
+                "signal_id": trade.signal_id or "",
+                "kelly": {"kelly_fraction": trade.kelly_fraction,
+                          "kelly_full": trade.kelly_full,
+                          "raw_stake": trade.raw_stake,
+                          "dynamic_ev_min": trade.dynamic_ev_min,
+                          "shield_action": trade.shield_action},
             })
         if out:
-            logger.info("auto_bet: %d piani chief approvati entrano nella "
-                        "coda di esecuzione (stake %s)", len(out),
+            logger.info("auto_bet: %d trade chief approvati entrano nella "
+                        "coda di esecuzione (Kelly k=%.2f, stake %s)",
+                        len(out),
+                        float(sizing.trades[0].kelly_fraction if sizing.trades else 0.0),
                         ", ".join("%.2f" % c["stake"] for c in out))
     except Exception as exc:
         logger.warning("auto_bet: ciclo chief live saltato (%s)", exc)

@@ -8,10 +8,11 @@ disattiva di proposito per gli altri test — vedi la nota in conftest.py):
    nuovo ordine, ma valutazione e telemetria continuano. Il tetto vale anche
    in PROIEZIONE (esposizione aperta + nuovo ordine), quindi otto micro-stake
    da 1.50 saturano il recinto e il nono non entra.
-2. **Stake fisso + micro-stake**: dal 28/09/2026 la size di ogni ordine REALE
-   è un IMPORTO FISSO di 1.50 USDC (`ORDER_FIXED_STAKE_USDC`), che resta
-   anche il tetto assoluto per singolo ordine: l'esposizione si spalma su più
-   partite invece di concentrarsi.
+2. **Stake + micro-stake**: dal 04/10/2026 la size degli ordini REALI e' il
+   Kelly aggressivo con cap DINAMICO (12% del bankroll) e ticket minimo 2.00
+   USDC; un `ORDER_FIXED_STAKE_USDC` > 0 ripristina l'importo fisso del
+   28/09, e un `ORDER_MAX_STAKE_USDC` > 0 resta un tetto assoluto per singolo
+   ordine. Qui si verificano ENTRAMBI i percorsi con le soglie reali.
 3. **Corsiа Chief**: `CHIEF_EXECUTION=live` fa entrare i piani approvati
    dalla catena piramidale nella STESSA coda di esecuzione della corsia
    storica — non un canale di denaro parallelo (tripwire sul sorgente).
@@ -44,6 +45,11 @@ def temp_db(monkeypatch):
 def _soglie_reali(monkeypatch, tmp_path):
     """Valori di PRODUZIONE: il conftest li spegne, qui li riaccendiamo."""
     monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 1.50)
+    # Il recinto si verifica con l'importo FISSO attivo (percorso legacy): i
+    # test del Kelly aggressivo lo spengono esplicitamente. Senza questo, il
+    # default 0.0 del 04/10 farebbe passare ogni ordine dal motore Kelly e i
+    # test del recinto misurerebbero un'altra grandezza.
+    monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 1.50)
     monkeypatch.setattr(auto_bet, "OPEN_EXPOSURE_CAP_PCT", 0.40)
     monkeypatch.setattr(auto_bet, "T60_EXECUTION_ONLY", False)
     monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE", tmp_path / "daily_stop.json")
@@ -130,9 +136,22 @@ class TestEsposizioneAperta:
 # ---------------------------------------------------------------------------
 
 class TestFixedStake:
-    """Direttiva 28/09/2026: la size dell'ordine reale e' un IMPORTO FISSO."""
+    """Direttiva 28/09/2026 (percorso LEGACY dal 04/10/2026): la size puo'
+    tornare a un IMPORTO FISSO via `ORDER_FIXED_STAKE_USDC`.
 
-    def test_importo_esatto(self):
+    Dal 04/10 il DEFAULT e' 0.0: la size degli ordini reali e' il Kelly
+    aggressivo (cap dinamico 12%, ticket 2.00). Il percorso a importo fisso
+    resta disponibile, ma va ATTIVATO esplicitamente.
+    """
+
+    def test_default_legacy_spento(self, monkeypatch):
+        """Senza env (default di codice), la size e' il Kelly aggressivo."""
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
+        assert auto_bet.fixed_order_stake() == 0.0
+        assert auto_bet.fixed_stake_active() is False
+
+    def test_importo_esatto(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 1.50)
         assert auto_bet.fixed_order_stake() == 1.50
         assert auto_bet.fixed_stake_active() is True
         # Qualunque stake calcolato a monte, l'ordine vale 1.50.
@@ -141,25 +160,28 @@ class TestFixedStake:
 
     def test_env_puo_solo_abbassare(self, monkeypatch):
         """Il tetto per-ordine resta inviolabile: l'env abbassa l'importo,
-        non lo alza oltre 1.50."""
+        non lo alza oltre il tetto assoluto."""
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.90)
         assert auto_bet.fixed_order_stake() == 0.90
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 9.0)
         assert auto_bet.fixed_order_stake() == 1.50
 
-    def test_zero_ripristina_lo_staking_dinamico(self, monkeypatch):
+    def test_zero_ripristina_il_kelly_aggressivo(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.0)
         assert auto_bet.fixed_stake_active() is False
-        assert auto_bet.order_stake(5.0) == 1.50      # torna il tetto classico
-        assert auto_bet.order_stake(0.80) == 0.80     # riduce, non alza
+        # Percorso Kelly: cap dinamico 12% del bankroll (qui 100 -> 12).
+        assert auto_bet.order_stake(50.0, bankroll=100.0) == 12.0
+        assert auto_bet.order_stake(5.0, bankroll=100.0) == 5.0  # riduce, non alza
 
     def test_valore_non_numerico_non_crea_stake_casuali(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", "boh")
-        assert auto_bet.fixed_order_stake() == 1.50
+        assert auto_bet.fixed_order_stake() == 0.0   # default legacy spento
 
     def test_fondi_liberi_insufficienti_saltano_l_ordine(self, monkeypatch):
         """Mai un importo diverso dalla direttiva per far passare un ordine:
-        con meno di 1.50 USDC liberi lo stake e' 0 (fail-closed)."""
+        con meno dell'importo fisso di USDC liberi lo stake e' 0 (fail-closed)."""
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 1.50)
         assert auto_bet.order_stake(5.0, spendable=1.20) == 0.0
         assert auto_bet.order_stake(5.0, spendable=1.50) == 1.50
 
@@ -196,17 +218,31 @@ class TestFixedStake:
 
 
 class TestMicroStake:
-    def test_riduce_ma_non_alza(self):
+    """Tetto del singolo ordine. Dal 04/10/2026 il default e' DINAMICO
+    (`decision.stake_engine.aggressive_cap_usdc`: 12% del bankroll); un
+    `ORDER_MAX_STAKE_USDC` esplicito resta un tetto ASSOLUTO che vince."""
+
+    def test_riduce_ma_non_alza_col_tetto_assoluto(self):
+        # La fixture `_soglie_reali` imposta ORDER_MAX_STAKE_USDC = 1.50.
         assert auto_bet.cap_order_stake(5.0) == 1.50
         assert auto_bet.cap_order_stake(1.50) == 1.50
         assert auto_bet.cap_order_stake(0.80) == 0.80    # non alza
 
-    def test_tetto_inviolabile(self, monkeypatch):
-        """Il tetto di 1.50 USDC è una regola di business inviolabile: non
-        può essere disattivato mettendo l'ENV a 0.0, l'assertion attende sempre
-        un output massimo di 1.50 anche quando l'ENV tenta di disattivarlo."""
+    def test_tetto_dinamico_scala_col_bankroll(self, monkeypatch):
+        """Cap dinamico (12%): 12 USDC su bankroll 100, 3.60 su 30."""
         monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.0)
-        assert auto_bet.cap_order_stake(5.0) == 1.50
+        monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 0.0)
+        assert auto_bet.cap_order_stake(1000.0, bankroll=100.0) == 12.0
+        assert auto_bet.cap_order_stake(1000.0, bankroll=30.0) == 3.6
+        # Vale anche per uno stake piccolo: il cap riduce, non alza.
+        assert auto_bet.cap_order_stake(2.0, bankroll=30.0) == 2.0
+
+    def test_tetto_fail_closed_su_capitale_ignoto(self, monkeypatch):
+        """Senza bankroll (ne' passato ne' registrato) il tetto non e'
+        calcolabile: l'ordine non passa (0.0), mai un tetto arbitrario."""
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.0)
+        monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 0.0)
+        assert auto_bet.cap_order_stake(5.0) == 0.0
 
     def test_tetto_applicato_in_fase_1(self, monkeypatch, temp_db):
         """Stake 5.0 in LIVE -> l'ordine effettivo e' 1.50."""

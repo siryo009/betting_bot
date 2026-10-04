@@ -55,12 +55,14 @@ TOL = 1e-6
 
 VIOL_STAKE_MISMATCH = "stake_mismatch"
 VIOL_STAKE_OVER_MAX = "stake_over_max"
+VIOL_STAKE_UNDER_TICKET = "stake_under_ticket"
 VIOL_EXPOSURE_OVER_CAP = "exposure_over_cap"
 VIOL_MISSING_BET_ID = "missing_bet_id"
 
 VIOLATION_LABEL = {
     VIOL_STAKE_MISMATCH: "stake diverso dal valore fisso",
     VIOL_STAKE_OVER_MAX: "stake oltre il tetto per-ordine",
+    VIOL_STAKE_UNDER_TICKET: "stake sotto il ticket minimo del motore Kelly",
     VIOL_EXPOSURE_OVER_CAP: "esposizione aperta oltre il 40%",
     VIOL_MISSING_BET_ID: "ordine riempito senza id dell'exchange",
 }
@@ -93,6 +95,35 @@ def expected_stake() -> float:
 def fixed_active() -> bool:
     """Lo stake fisso e' attivo? (con `ORDER_FIXED_STAKE_USDC=0` no)."""
     return bool(_ab().fixed_stake_active())
+
+
+def order_ceiling_active() -> bool:
+    """True se il tetto per-ordine e' ASSOLUTO (`ORDER_MAX_STAKE_USDC` > 0)
+    invece che DINAMICO (12% del bankroll, direttiva 04/10/2026)."""
+    try:
+        return float(_ab().ORDER_MAX_STAKE_USDC) > 0
+    except Exception:
+        return False
+
+
+def dynamic_order_cap(equity: Optional[float]) -> Optional[float]:
+    """Tetto per-ordine dinamico all'equity data (None = non calcolabile)."""
+    if equity is None:
+        return None
+    try:
+        from decision.stake_engine import aggressive_cap_usdc
+        cap = float(aggressive_cap_usdc(equity))
+        return cap if cap > 0 else None
+    except Exception:
+        return None
+
+
+def min_ticket() -> float:
+    """Ticket minimo del motore Kelly (UNICA fonte: `auto_bet`/stake_engine)."""
+    try:
+        return float(_ab().aggressive_min_ticket())
+    except Exception:
+        return 0.0
 
 
 def cap_pct() -> float:
@@ -198,9 +229,9 @@ def audit(db_path: Optional[Any] = None, *, since: str = DIRECTIVE_SINCE,
     expected = expected_stake()
     active = fixed_active()
     pct = cap_pct()
-    # Il tetto per singolo ordine e' indipendente dalla direttiva sullo stake
-    # fisso (e' la costante del recinto, non disattivabile): si legge da
-    # `auto_bet` e resta valido anche con lo stake fisso spento.
+    # Il tetto per singolo ordine e' ASSOLUTO se `ORDER_MAX_STAKE_USDC` > 0;
+    # altrimenti (default 04/10/2026) e' DINAMICO e si calcola sull'equity
+    # dell'istante dell'ordine.
     try:
         max_order = float(_ab().ORDER_MAX_STAKE_USDC)
     except Exception:
@@ -220,21 +251,41 @@ def audit(db_path: Optional[Any] = None, *, since: str = DIRECTIVE_SINCE,
                            "esito": row.get("esito"),
                            "created_at": row.get("created_at")})
 
-    # --- 1. stake esatto e id dell'exchange ------------------------------
+    # --- 1. stake esatto / entro il tetto, e id dell'exchange ------------
+    # Il tetto per-ordine dal 04/10/2026 puo' essere DINAMICO (12% del
+    # bankroll): senza un tetto assoluto il valore atteso dipende dall'equity
+    # dell'ISTANTE dell'ordine, quindi lo si stima dallo storico campionato.
+    ticket = min_ticket()
     for row in live:
         try:
             stake = float(row.get("stake") or 0.0)
         except (TypeError, ValueError):
             stake = 0.0
         pre = str(row.get("created_at") or "") < str(since)
-        if stake > max_order + TOL:
-            # Il tetto per-ordine non e' mai negoziabile, nemmeno sul passato
-            # e nemmeno con lo stake fisso spento.
+        ceiling = float(max_order)
+        if max_order <= 0:      # cap dinamico: tetto all'equity dell'ordine
+            eq_row, src_row = _equity_at(_parse_ts(row.get("created_at")),
+                                         hist, eq_now)
+            dyn = dynamic_order_cap(eq_row)
+            if dyn is None:
+                declared.append({"id": row.get("id"),
+                                 "kind": "order_cap_unverifiable",
+                                 "detail": "tetto dinamico non calcolabile "
+                                           "(equity ignota): non verificato",
+                                 "created_at": row.get("created_at")})
+                ceiling = None
+            else:
+                ceiling = dyn
+                if src_row != "sample":
+                    declared.append({"id": row.get("id"),
+                                     "kind": "order_cap_estimated",
+                                     "detail": f"tetto dinamico stimato con "
+                                               f"equity {src_row}: {dyn:.2f}",
+                                     "created_at": row.get("created_at")})
+        if ceiling is not None and stake > ceiling + TOL:
             _add(VIOL_STAKE_OVER_MAX, row,
-                 f"stake {stake:.4f} > tetto per-ordine {max_order:.2f}")
-        elif not active:
-            pass            # stake dinamico: nessun importo fisso da confrontare
-        elif abs(stake - expected) > TOL:
+                 f"stake {stake:.4f} > tetto per-ordine {ceiling:.2f}")
+        elif active and abs(stake - expected) > TOL:
             if pre:
                 declared.append({"id": row.get("id"), "kind": "stake_predirective",
                                  "detail": f"creata prima del {since}: stake "
@@ -243,6 +294,13 @@ def audit(db_path: Optional[Any] = None, *, since: str = DIRECTIVE_SINCE,
             else:
                 _add(VIOL_STAKE_MISMATCH, row,
                      f"stake {stake:.4f} != valore fisso {expected:.2f}")
+        elif (not active and not pre and ticket > 0
+              and 0 < stake < ticket - TOL):
+            # Motore Kelly: sotto il ticket minimo l'operazione non dovrebbe
+            # esistere (sarebbe stata scartata). Un ordine sotto soglia e' un
+            # percorso che ha aggirato il motore.
+            _add(VIOL_STAKE_UNDER_TICKET, row,
+                 f"stake {stake:.4f} < ticket minimo {ticket:.2f}")
         if (str(row.get("status") or "").upper() == "FULLY_FILLED"
                 and not (row.get("bet_id") or "").strip()):
             _add(VIOL_MISSING_BET_ID, row, "FULLY_FILLED senza bet_id")
@@ -329,14 +387,16 @@ def format_report(data: Optional[Dict[str, Any]] = None) -> str:
     """Report leggibile (CLI/Telegram), mai un'eccezione."""
     d = data if isinstance(data, dict) else audit()
     o = d.get("orders") or {}
-    lines = ["🛡️  VERIFICA ORDINI REALI (stake fisso + recinto 40%)",
-             f"Direttiva dal {d.get('since')} | stake atteso "
-             f"{d.get('expected_stake')} USDC (tetto per-ordine "
-             f"{d.get('max_order_stake')}) | recinto "
+    if d.get("fixed_active"):
+        stake_rule = f"stake fisso {d.get('expected_stake')} USDC"
+    elif float(d.get('max_order_stake') or 0) > 0:
+        stake_rule = f"Kelly aggressivo + tetto assoluto {d.get('max_order_stake')} USDC"
+    else:
+        stake_rule = ("Kelly aggressivo (cap dinamico 12% del bankroll, "
+                      "ticket minimo del motore)")
+    lines = ["🛡️  VERIFICA ORDINI REALI (stake + recinto 40%)",
+             f"Direttiva dal {d.get('since')} | {stake_rule} | recinto "
              f"{(d.get('cap_pct') or 0) * 100:.0f}%"]
-    if not d.get("fixed_active"):
-        lines.append("⚠️  stake fisso NON attivo (ORDER_FIXED_STAKE_USDC=0): "
-                     "il controllo sullo stake e' sospeso")
     lines.append(f"Ordini: {o.get('live', 0)} live "
                  f"({o.get('live_dopo_direttiva', 0)} dopo la direttiva) | "
                  f"{o.get('sim', 0)} sim | {o.get('aperte', 0)} aperti ora "

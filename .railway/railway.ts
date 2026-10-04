@@ -150,6 +150,26 @@ export default defineRailway(() => {
       ESPORTS_ODDS_TTL_MIN: preserve(),
       ESPORTS_ODDS_MISS_TTL_MIN: preserve(),
       ESPORTS_CACHE: preserve(),
+      // KELLY AGGRESSIVO (04/10/2026, direttiva del proprietario): k=0.65,
+      // cap DINAMICO 12% del bankroll (sostituisce i tetti fissi 1.50/1.00),
+      // ticket minimo 2.00 USDC del MOTORE (il floor dell'EXCHANGE resta
+      // 1.00). `KELLY_AGGRESSIVE_ENABLED=0` ripristina il percorso storico;
+      // `ORDER_FIXED_STAKE_USDC` > 0 ripristina l'importo fisso del 28/09.
+      KELLY_AGGRESSIVE_FRACTION: preserve(),
+      KELLY_MAX_STAKE_PCT: preserve(),
+      KELLY_MIN_TICKET_USDC: preserve(),
+      KELLY_AGGRESSIVE_ENABLED: preserve(),
+      // Tre agenti (04/10/2026): Analisi (Steam Velocity + Juice/overround,
+      // freschezza delle osservazioni) e Cervello (EV dinamico su liquidita'
+      // e volatilita' + Portfolio Shield anti-correlazione).
+      ANALYSIS_MAX_AGE_S: preserve(),
+      ANALYSIS_JUICE_STATE: preserve(),
+      ANALYSIS_JUICE_SPIKE_PP: preserve(),
+      BRAIN_MIN_DEPTH_USDC: preserve(),
+      BRAIN_EV_MULT_LIQUIDITY: preserve(),
+      BRAIN_EV_MULT_VOLATILITY: preserve(),
+      BRAIN_VOLATILITY_PP_MIN: preserve(),
+      BRAIN_SHIELD_CAP_PCT: preserve(),
       OPEN_EXPOSURE_CAP_PCT: preserve(),
       ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),
