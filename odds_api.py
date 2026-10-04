@@ -1,6 +1,7 @@
 import json, os, time, logging, requests
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 from config import DATA_DIR, load_dotenv
 
 load_dotenv()
@@ -133,7 +134,14 @@ def credit_calls_log_path() -> Path:
 
 
 def credits_for_markets(markets: str) -> int:
-    """Crediti addebitati: the-odds-api fattura `markets x regions` (eu=1)."""
+    """Crediti addebitati: the-odds-api fattura `markets x regions` (eu=1).
+
+    E' la STIMA di ripiego: quando la risposta porta l'header ufficiale
+    `x-requests-last` si registra QUEL valore (vedi `record_credit_call`).
+    Serve perche' la stima sbaglia su `/scores`: 1 mercato x 1 regione
+    darebbe 1, mentre la chiamata costa **2 crediti** (misurato il
+    04/10/2026 con `x-requests-last`, uguale per daysFrom 1/2/3).
+    """
     try:
         n = len([m for m in str(markets or "").split(",") if m.strip()])
         return max(1, n)
@@ -141,14 +149,36 @@ def credits_for_markets(markets: str) -> int:
         return 1
 
 
+def _request_cost(resp) -> Optional[int]:
+    """Costo REALE della chiamata appena fatta: header `x-requests-last`.
+
+    the-odds-api restituisce in ogni risposta il costo in crediti di QUELLA
+    richiesta. `None` se l'header manca o non e' un intero (risposte di
+    errore, 429, proxy): in quel caso la telemetria ripiega sulla stima
+    `credits_for_markets` invece di inventare un numero.
+    """
+    try:
+        raw = resp.headers.get("x-requests-last")
+        if raw is None:
+            return None
+        val = int(str(raw).strip())
+        return val if val >= 0 else None
+    except Exception:
+        return None
+
+
 def record_credit_call(source, sport, markets, remaining, *, status=200,
-                       endpoint="/odds") -> dict:
+                       endpoint="/odds", credits=None) -> dict:
     """Registra UNA chiamata a the-odds-api (fail-safe: mai eccezioni).
 
     `source`: "rotation" (rotazione di ricerca, 1 credito), "oracle" (oracolo
-    a linea OU/AH, 3 crediti), "settlement" (risultati, 1 credito).
+    a linea OU/AH, 3 crediti), "settlement" (risultati, **2 crediti**).
+    `credits` e' il costo REALE letto da `x-requests-last`; se assente si
+    usa la stima `credits_for_markets` (dichiarata nel campo `credits_est`).
     """
     global _credit_log_warned
+    est = credits_for_markets(markets)
+    real = credits if isinstance(credits, int) and credits >= 0 else None
     evt = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "ts_epoch": time.time(),
@@ -156,7 +186,8 @@ def record_credit_call(source, sport, markets, remaining, *, status=200,
         "endpoint": endpoint,
         "sport": sport,
         "markets": markets,
-        "credits": credits_for_markets(markets),
+        "credits": est if real is None else real,
+        "credits_source": "estimated" if real is None else "header",
         "remaining": remaining,
         "status": int(status),
     }
@@ -692,17 +723,22 @@ def _get_odds(sport, frm, to, *, markets="h2h", cache_prefix="toa_", ttl_s=None)
             "oddsFormat": "decimal", "commenceTimeFrom": frm, "commenceTimeTo": to,
         }, timeout=30)
         remaining = int(r.headers.get("x-requests-remaining", 999))
+        # Costo REALE della chiamata (header ufficiale): la stima `markets x
+        # regions` non conosce le regole di prezzo dell'endpoint (es. /scores
+        # costa 2, non 1).
+        cost = _request_cost(r)
         if r.status_code in (401, 429):
             logger.warning(f"the-odds-api bloccata (codice {r.status_code})")
             record_credit_call(_source, sport, markets, remaining,
-                               status=r.status_code)
+                               status=r.status_code, credits=cost)
             return [], 0
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
         logger.warning(f"Errore the-odds-api {sport}: {e}")
         return [], 999
-    record_credit_call(_source, sport, markets, remaining, status=r.status_code)
+    record_credit_call(_source, sport, markets, remaining,
+                       status=r.status_code, credits=cost)
     CACHE_DIR.mkdir(exist_ok=True)
     cache_file.write_text(json.dumps({"ts": time.time(), "payload": payload,
                                       "remaining": remaining,
@@ -812,10 +848,15 @@ def fetch_scores(sport=None, days_from=SCORES_DAYS_FROM):
         r = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport}/scores",
                          params={"apiKey": key, "daysFrom": days_from}, timeout=30)
         remaining = int(r.headers.get("x-requests-remaining", 999))
+        # `/scores` costa 2 crediti (verificato il 04/10/2026 con
+        # `x-requests-last`, uguale per daysFrom 1/2/3): la stima
+        # `markets x regions` direbbe 1. Si registra il valore REALE.
+        cost = _request_cost(r)
         if r.status_code in (401, 429):
             logger.warning(f"Scores bloccati ({r.status_code})")
             record_credit_call("settlement", sport, "scores", remaining,
-                               status=r.status_code, endpoint="/scores")
+                               status=r.status_code, endpoint="/scores",
+                               credits=cost)
             return payload if cache_file.exists() else []
         r.raise_for_status()
         payload = r.json()
@@ -823,7 +864,8 @@ def fetch_scores(sport=None, days_from=SCORES_DAYS_FROM):
         logger.warning(f"Errore scores {sport}: {e}")
         return payload if cache_file.exists() else []
     record_credit_call("settlement", sport, "scores", remaining,
-                       status=r.status_code, endpoint="/scores")
+                       status=r.status_code, endpoint="/scores",
+                       credits=cost)
     CACHE_DIR.mkdir(exist_ok=True)
     # Se il payload contiene SOLO partite completate, salviamo con il
     # timestamp originale della cache precedente (se fresca): cosi' la

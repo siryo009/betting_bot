@@ -190,3 +190,55 @@ def test_env_dichiarate_in_iac():
                  "LOG_ROTATE_AFTER_DAYS", "LOG_ROTATE_QUIET_MIN",
                  "LOG_ROTATE_KEEP"):
         assert name in iac, f"{name} non dichiarata in preserve()"
+
+
+# --------------------------------------- costo REALE (header x-requests-last)
+
+class _FakeResp:
+    def __init__(self, headers):
+        self.headers = headers
+
+
+def test_request_cost_legge_l_header():
+    """Il costo reale della chiamata arriva da `x-requests-last`."""
+    assert oa._request_cost(_FakeResp({"x-requests-last": "2"})) == 2
+    assert oa._request_cost(_FakeResp({"x-requests-last": " 3 "})) == 3
+    assert oa._request_cost(_FakeResp({"x-requests-last": "0"})) == 0
+
+
+def test_request_cost_fail_safe_senza_header():
+    """Header assente/non numerico/negativo -> None (si stima, non si inventa)."""
+    assert oa._request_cost(_FakeResp({})) is None
+    assert oa._request_cost(_FakeResp({"x-requests-last": "abc"})) is None
+    assert oa._request_cost(_FakeResp({"x-requests-last": "-1"})) is None
+    assert oa._request_cost(object()) is None          # senza .headers
+
+
+def test_settlement_costa_due_crediti_non_uno(log_path):
+    """REGRESSIONE 04/10/2026: `/scores` costa 2, la stima `markets x
+    regions` diceva 1 -> la telemetria sottostimava del 50% la sorgente piu'
+    frequente. Con l'header il valore registrato e' quello vero."""
+    assert oa.credits_for_markets("scores") == 1        # la stima (sbagliata)
+    # Prima del fix: `credits` 1. Ora si passa il costo reale letto dalla
+    # risposta (2 crediti, misurato con x-requests-last su daysFrom 1/2/3).
+    evt = oa.record_credit_call("settlement", "soccer_italy_serie_b",
+                                "scores", 380, endpoint="/scores", credits=2)
+    assert evt["credits"] == 2
+    assert evt["credits_source"] == "header"
+    row = json.loads(log_path.read_text().splitlines()[0])
+    assert row["credits"] == 2 and row["credits_source"] == "header"
+
+
+def test_senza_header_la_stima_e_dichiarata(log_path):
+    evt = oa.record_credit_call("rotation", "soccer_epl", "h2h", 379)
+    assert evt["credits"] == 1 and evt["credits_source"] == "estimated"
+
+
+def test_attribuzione_usa_il_costo_reale(log_path):
+    """Il breakdown somma i crediti VERI: 4 settlement = 8, non 4."""
+    oa.record_credit_call("settlement", "a", "scores", 400, credits=2)
+    oa.record_credit_call("settlement", "b", "scores", 398, credits=2)
+    oa.record_credit_call("rotation", "c", "h2h", 397)
+    b = cd.breakdown(days=1)
+    assert b["total_credits"] == 5.0
+    assert b["by_source"]["settlement"]["credits"] == 4.0

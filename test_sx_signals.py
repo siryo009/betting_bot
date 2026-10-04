@@ -224,6 +224,94 @@ def test_settle_sx_bets_fail_closed(temp_db, no_settlement_sources):
     assert outcome is None
 
 
+def _sx_two_matches(kickoff: str) -> tuple:
+    """Ledger: una partita con PUNTATA aperta e una con la sola PREVISIONE."""
+    sx2 = "sx-LTEST2"
+    tracker.save_match(SX, "Serie A", "Alpha", "Beta", kickoff)
+    tracker.save_bet(SX, "1X2", "1", "0xabc", 1, 2.5, 1.0)
+    tracker.save_match(sx2, "Serie A", "Gamma", "Delta", kickoff)
+    tracker.save_prediction(sx2, "1X2", "1", 2.5, 0.5, 0.05,
+                            league="Serie A")
+    return sx2
+
+
+def test_settlement_esterno_segue_il_denaro(temp_db, monkeypatch):
+    """FIX 04/10/2026: il percorso PAGATO segue solo le partite con PUNTATA.
+
+    Il consumo dominante dei 46,5 crediti/giorno era questo: `fetch_scores`
+    (2 crediti a chiamata) interrogato per la lega di OGNI previsione `sx-*`
+    aperta, a ogni scadenza di cache, dal job `sx_signals` ogni 15'. La
+    politica solo-puntate del watchdog (15/09) non era applicata qui.
+    """
+    monkeypatch.setenv("ODDS_API_KEY", "fake-key")
+    monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "1")
+    monkeypatch.setattr(sx_signals, "_results_from_sx",
+                        lambda prov=None: 0)
+    kickoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    sx2 = _sx_two_matches(kickoff)
+    seen = {}
+
+    def fake_paid(meta):
+        seen.update(meta)
+        return 0
+
+    monkeypatch.setattr(sx_signals, "_results_from_the_odds_api", fake_paid)
+    sx_signals.settle_sx_bets()
+    # La partita con la puntata entra nel percorso pagato...
+    assert SX in seen
+    # ...quella con la sola previsione NO (nessun credito speso).
+    assert sx2 not in seen
+
+
+def test_settlement_esterno_esteso_con_env_0(temp_db, monkeypatch):
+    """Controprova: `SETTLEMENT_BETS_ONLY=0` ripristina la copertura estesa."""
+    monkeypatch.setenv("ODDS_API_KEY", "fake-key")
+    monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "0")
+    monkeypatch.setattr(sx_signals, "_results_from_sx",
+                        lambda prov=None: 0)
+    kickoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    sx2 = _sx_two_matches(kickoff)
+    seen = {}
+    monkeypatch.setattr(sx_signals, "_results_from_the_odds_api",
+                        lambda meta: seen.update(meta) or 0)
+    sx_signals.settle_sx_bets()
+    assert SX in seen and sx2 in seen
+
+
+def test_settlement_esterno_salta_il_filtro_se_illeggibile(temp_db, monkeypatch):
+    """Fail-OPEN dichiarato: un errore di lettura non deve perdere un referto."""
+    monkeypatch.setenv("ODDS_API_KEY", "fake-key")
+    monkeypatch.setattr(sx_signals, "_results_from_sx",
+                        lambda prov=None: 0)
+    kickoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    _sx_two_matches(kickoff)
+
+    def boom():
+        raise RuntimeError("DB non leggibile")
+
+    monkeypatch.setattr(tracker, "open_bet_match_ids", boom)
+    seen = {}
+    monkeypatch.setattr(sx_signals, "_results_from_the_odds_api",
+                        lambda meta: seen.update(meta) or 0)
+    sx_signals.settle_sx_bets()
+    # Senza il filtro si interrogano tutte le partite aperte (come prima del fix).
+    assert SX in seen and "sx-LTEST2" in seen
+
+
+def test_open_bet_match_ids_solo_puntate_aperte(temp_db):
+    """L'helper ritorna SOLO le partite con una puntata non ancora saldata."""
+    kickoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    sx2 = _sx_two_matches(kickoff)
+    assert tracker.open_bet_match_ids() == {SX}
+    # Una previsione senza puntata non entra mai.
+    assert sx2 not in tracker.open_bet_match_ids()
+    # Puntata saldata -> fuori dall'insieme.
+    tracker.save_result(SX, "Serie A", "Alpha", "Beta", 2, 0,
+                        datetime.now(timezone.utc).isoformat())
+    tracker.settle_bets()
+    assert SX not in tracker.open_bet_match_ids()
+
+
 def test_settle_sx_bets_with_result(temp_db, no_settlement_sources):
     """Con il punteggio gia' in match_results la bet viene saldata."""
     tracker.save_match(SX, "Serie A", "Alpha", "Beta",

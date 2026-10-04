@@ -2626,6 +2626,31 @@ def _credits_below_low_water() -> bool:
         return False
 
 
+def open_bet_match_ids() -> set:
+    """match_id con una PUNTATA APERTA (nessun risultato finale).
+
+    Serve a `sx_signals.settle_sx_bets`: il percorso PAGATO delle fonti
+    esterne (the-odds-api / API-Football) segue il DENARO — la stessa
+    politica `SETTLEMENT_BETS_ONLY` del watchdog (15/09/2026) — mentre il
+    percorso SX-native (gratis) continua a coprire anche le sole previsioni.
+
+    Senza questo filtro ogni previsione `sx-*` aperta faceva interrogare la
+    sua lega a ogni scadenza di cache punteggi: `fetch_scores` costa 2
+    crediti a chiamata (misurato il 04/10/2026 con `x-requests-last`,
+    indipendente da `daysFrom`) e il percorso SX, a differenza del watchdog,
+    NON applicava la politica solo-puntate — era il consumo dominante dei
+    46,5 crediti/giorno.
+    """
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT match_id FROM bets "
+            "WHERE esito_finale IS NULL AND match_id IS NOT NULL").fetchall()
+    finally:
+        conn.close()
+    return {r[0] for r in rows if r[0]}
+
+
 def get_leagues_with_open_rows(recent_settled_hours: int = 48,
                                days_back: int | None = None,
                                heal_interval_hours: float | None = None,

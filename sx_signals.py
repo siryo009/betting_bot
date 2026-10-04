@@ -1173,10 +1173,38 @@ def settle_sx_bets(provider: Optional[SxBetProvider] = None) -> dict:
         finally:
             conn.close()
         missing = {mid for mid in meta if mid not in have}
-        if missing and os.getenv("ODDS_API_KEY"):
+        # REFERTO SEGUE IL DENARO (04/10/2026). Il percorso SX-native (sopra,
+        # gratis) copre anche le sole previsioni; le fonti ESTERNE sono
+        # PAGATE (`fetch_scores` = 2 crediti/call) e devono seguire la stessa
+        # politica `SETTLEMENT_BETS_ONLY` del watchdog (15/09/2026): si
+        # interroga la lega di una partita solo se quella partita ha una
+        # PUNTATA aperta. Senza questo filtro ogni previsione `sx-*` aperta
+        # faceva interrogare la sua lega a ogni scadenza di cache punteggi
+        # (~20 leghe x 2 crediti al giorno: era il consumo dominante dei
+        # 46,5 crediti/giorno, mentre il watchdog da solo ne usava ~0).
+        paid_ids: Optional[set] = None
+        try:
+            from tracker import _settlement_bets_only, open_bet_match_ids
+            if _settlement_bets_only():
+                paid_ids = open_bet_match_ids()
+                _skipped = len(missing) - len(missing & paid_ids)
+                if _skipped:
+                    logger.info(
+                        "sx_signals: settlement fonti esterne — %d partite "
+                        "senza puntata saltate (referto segue il denaro); "
+                        "%d con puntata", _skipped, len(missing & paid_ids))
+        except Exception as e:
+            # Fail-OPEN dichiarato: un errore di lettura NON deve impedire di
+            # saldare una puntata reale (il denaro viene prima del risparmio).
+            # `paid_ids` resta None -> politica estesa come prima del fix.
+            logger.warning("sx_signals: filtro referto-segue-il-denaro non "
+                           "valutabile (%s) — si interrogano tutte le partite "
+                           "aperte (fail-open: mai perdere un referto)", e)
+        paid_missing = {mid: meta[mid] for mid in missing
+                        if paid_ids is None or mid in paid_ids}
+        if paid_missing and os.getenv("ODDS_API_KEY"):
             try:
-                n = _results_from_the_odds_api(
-                    {mid: meta[mid] for mid in missing})
+                n = _results_from_the_odds_api(paid_missing)
                 if n:
                     results += n
                     source = source or "the-odds-api"
@@ -1184,8 +1212,10 @@ def settle_sx_bets(provider: Optional[SxBetProvider] = None) -> dict:
                 logger.warning(
                     "sx_signals: settlement the-odds-api fallito: %s", e)
         if not results and os.getenv("API_FOOTBALL_KEY"):
+            paid_meta = {mid: info for mid, info in meta.items()
+                         if paid_ids is None or mid in paid_ids}
             try:
-                n = _results_from_api_football(meta)
+                n = _results_from_api_football(paid_meta)
                 if n:
                     results, source = n, "api-football"
             except Exception as e:
