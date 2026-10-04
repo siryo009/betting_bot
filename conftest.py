@@ -170,6 +170,18 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # successivi (stesso processo) leggerebbero quel materiale.
     monkeypatch.setenv("TENNIS_QUANT_DB", str(tmp_path / "quant.db"))
     monkeypatch.setenv("TENNIS_QUANT_LOG", str(tmp_path / "quant.jsonl"))
+    # Telemetria crediti + scarti oracolo (03/10/2026): i due JSONL e la
+    # rotazione vanno nella tmp. Decine di test esercitano `_top_down_eval` e
+    # `run_today_bets`, che ora scrivono `oracle_skips`; senza isolamento la
+    # suite lascerebbe `data/execution/oracle_skips.jsonl` nel data dir VERO
+    # (stessa lezione di shadow/feed/book_flow). La rotazione e' SPENTA nei
+    # test (non deve comprimere/spostare file durante una sessione), i test
+    # dedicati la accendono su una cartella temporanea.
+    monkeypatch.setenv("CREDIT_CALLS_LOG", str(tmp_path / "credit_calls.jsonl"))
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "oracle_skips.jsonl"))
+    monkeypatch.setenv("TELEMETRY_ROTATE_ENABLED", "0")
+    import oracle_skips as _oracle_skips
+    _oracle_skips.reset_dedup()
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di
     # MODULO e sopravvive fra i test dello stesso processo, mentre il ledger
     # no (ogni test ha il suo DB temporaneo). Senza reset un caso che semina
@@ -187,6 +199,7 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     _ld.reset_cache()
     yield
     _ld.reset_cache()
+    _oracle_skips.reset_dedup()
 
 
 def _free_enclosure(bankroll: float, new_stake: float = 0.0) -> dict:

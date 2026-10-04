@@ -110,10 +110,93 @@ CREDIT_HARD_STOP = int(os.getenv("ODDS_CREDIT_HARD_STOP", "5"))
 # riporta il contatore fresco).
 CREDIT_HARD_STOP_MAX_AGE_H = float(os.getenv("ODDS_CREDIT_PROBE_HOURS", "6"))
 
+# --- TELEMETRIA DELLE CHIAMATE (03/10/2026) -------------------------------
+# Il contatore globale dice QUANTO si consuma, non DA DOVE: il 01/10 il ritmo
+# misurato era 44,8 crediti/giorno contro 13,9 sostenibili senza che nessuno
+# potesse attribuire il costo a una sorgente. Ogni chiamata HTTP (rotazione di
+# ricerca, settlement, oracolo a linea) lascia una riga JSONL con sorgente,
+# lega, mercati e crediti residui: `credit_diagnose.py` aggrega e dice dove
+# vanno i crediti. Fail-safe: un errore di scrittura non ferma MAI una chiamata.
+DEFAULT_CREDIT_CALLS_LOG = Path(
+    DATA_DIR) / "execution" / "credit_calls.jsonl"
+_credit_log_warned = False
+
+
+def credit_calls_log_path() -> Path:
+    """Path della telemetria letta a RUNTIME (env `CREDIT_CALLS_LOG`).
+
+    NON una costante di import: letto all'import, l'isolamento dei test (e un
+    path diverso in produzione) non avrebbe effetto e le righe finirebbero nel
+    file REALE — bug reale osservato in `tennis_quant` il 03/10.
+    """
+    return Path(os.getenv("CREDIT_CALLS_LOG", str(DEFAULT_CREDIT_CALLS_LOG)))
+
+
+def credits_for_markets(markets: str) -> int:
+    """Crediti addebitati: the-odds-api fattura `markets x regions` (eu=1)."""
+    try:
+        n = len([m for m in str(markets or "").split(",") if m.strip()])
+        return max(1, n)
+    except Exception:
+        return 1
+
+
+def record_credit_call(source, sport, markets, remaining, *, status=200,
+                       endpoint="/odds") -> dict:
+    """Registra UNA chiamata a the-odds-api (fail-safe: mai eccezioni).
+
+    `source`: "rotation" (rotazione di ricerca, 1 credito), "oracle" (oracolo
+    a linea OU/AH, 3 crediti), "settlement" (risultati, 1 credito).
+    """
+    global _credit_log_warned
+    evt = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts_epoch": time.time(),
+        "source": source,
+        "endpoint": endpoint,
+        "sport": sport,
+        "markets": markets,
+        "credits": credits_for_markets(markets),
+        "remaining": remaining,
+        "status": int(status),
+    }
+    try:
+        path = credit_calls_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(evt, ensure_ascii=False) + "\n")
+    except Exception as e:                                       # pragma: no cover
+        if not _credit_log_warned:
+            _credit_log_warned = True
+            logger.warning("credit telemetry: scrittura fallita (%s)", e)
+        evt["error"] = str(e)
+    return evt
+
+
 CORE_LEAGUES_HIGH = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_la_liga",
                       "soccer_germany_bundesliga", "soccer_france_ligue_one",
                       "soccer_efl_champ"}
 CORE_LEAGUES_EMERGENCY = {"soccer_italy_serie_a", "soccer_england_pl", "soccer_spain_la_liga"}
+
+def _credit_cache_files(cache_dir=None):
+    """Cache che portano il contatore crediti: rotazione, punteggi, oracolo.
+
+    UNA sola definizione per `_latest_credits_detail` e `credit_burn_rate`:
+    ⚠️ il glob `toa_*.json` NON cattura la cache oracolo `toao_*.json` (dopo
+    'toa' c'e' una 'o', non un underscore), quindi senza questa helper le
+    chiamate dell'oracolo (3 crediti l'una) restavano invisibili al contatore.
+    """
+    directory = CACHE_DIR if cache_dir is None else cache_dir
+    if not directory.exists():
+        return []
+    out, seen = [], set()
+    for pattern in ("toa_*.json", "toao_*.json"):
+        for f in directory.glob(pattern):
+            if f.name not in seen:
+                seen.add(f.name)
+                out.append(f)
+    return sorted(out, key=lambda p: p.name)
+
 
 def _latest_credits_detail():
     """(crediti, ts_lettura, n_cache) della lettura PIU' RECENTE.
@@ -135,22 +218,21 @@ def _latest_credits_detail():
     best = None            # (timestamp lettura credito, remaining)
     fallback = []
     n = 0
-    if CACHE_DIR.exists():
-        for f in CACHE_DIR.glob("toa_*.json"):
-            try:
-                d = json.loads(f.read_text())
-                if d.get("remaining") is None:
-                    continue
-                rem = int(d["remaining"])
-                n += 1
-                ts = d.get("remaining_ts", d.get("ts"))
-                if isinstance(ts, (int, float)):
-                    if best is None or ts > best[0]:
-                        best = (ts, rem)
-                else:
-                    fallback.append(rem)
-            except Exception:
+    for f in _credit_cache_files():
+        try:
+            d = json.loads(f.read_text())
+            if d.get("remaining") is None:
                 continue
+            rem = int(d["remaining"])
+            n += 1
+            ts = d.get("remaining_ts", d.get("ts"))
+            if isinstance(ts, (int, float)):
+                if best is None or ts > best[0]:
+                    best = (ts, rem)
+            else:
+                fallback.append(rem)
+        except Exception:
+            continue
     if best is not None:
         return best[1], best[0], n
     if fallback:
@@ -578,6 +660,9 @@ def _get_odds(sport, frm, to, *, markets="h2h", cache_prefix="toa_", ttl_s=None)
     consumatori h2h-only).
     """
     cache_file = CACHE_DIR / f"{cache_prefix}{sport}.json"
+    # Sorgente della chiamata (la cache oracolo usa un prefisso dedicato):
+    # serve alla telemetria crediti, che attribuisce il costo per sorgente.
+    _source = "oracle" if cache_prefix == ORACLE_CACHE_PREFIX else "rotation"
     if ttl_s is None:
         ttl_s = interval_for_sport(sport) * 86400
     if cache_file.exists():
@@ -609,12 +694,15 @@ def _get_odds(sport, frm, to, *, markets="h2h", cache_prefix="toa_", ttl_s=None)
         remaining = int(r.headers.get("x-requests-remaining", 999))
         if r.status_code in (401, 429):
             logger.warning(f"the-odds-api bloccata (codice {r.status_code})")
+            record_credit_call(_source, sport, markets, remaining,
+                               status=r.status_code)
             return [], 0
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
         logger.warning(f"Errore the-odds-api {sport}: {e}")
         return [], 999
+    record_credit_call(_source, sport, markets, remaining, status=r.status_code)
     CACHE_DIR.mkdir(exist_ok=True)
     cache_file.write_text(json.dumps({"ts": time.time(), "payload": payload,
                                       "remaining": remaining,
@@ -726,12 +814,16 @@ def fetch_scores(sport=None, days_from=SCORES_DAYS_FROM):
         remaining = int(r.headers.get("x-requests-remaining", 999))
         if r.status_code in (401, 429):
             logger.warning(f"Scores bloccati ({r.status_code})")
+            record_credit_call("settlement", sport, "scores", remaining,
+                               status=r.status_code, endpoint="/scores")
             return payload if cache_file.exists() else []
         r.raise_for_status()
         payload = r.json()
     except Exception as e:
         logger.warning(f"Errore scores {sport}: {e}")
         return payload if cache_file.exists() else []
+    record_credit_call("settlement", sport, "scores", remaining,
+                       status=r.status_code, endpoint="/scores")
     CACHE_DIR.mkdir(exist_ok=True)
     # Se il payload contiene SOLO partite completate, salviamo con il
     # timestamp originale della cache precedente (se fresca): cosi' la
@@ -893,17 +985,16 @@ def credit_burn_rate(window_hours: float = CREDIT_BURN_WINDOW_HOURS,
     """
     directory = cache_dir or CACHE_DIR
     rows = []
-    if directory.exists():
-        for f in directory.glob("toa_*.json"):
-            try:
-                d = json.loads(f.read_text())
-                if d.get("remaining") is None:
-                    continue
-                ts = d.get("remaining_ts", d.get("ts"))
-                if isinstance(ts, (int, float)):
-                    rows.append((float(ts), int(d["remaining"])))
-            except Exception:
+    for f in _credit_cache_files(directory):
+        try:
+            d = json.loads(f.read_text())
+            if d.get("remaining") is None:
                 continue
+            ts = d.get("remaining_ts", d.get("ts"))
+            if isinstance(ts, (int, float)):
+                rows.append((float(ts), int(d["remaining"])))
+        except Exception:
+            continue
     cut = time.time() - window_hours * 3600
     win = sorted(r for r in rows if r[0] >= cut)
     if len(win) < 2:

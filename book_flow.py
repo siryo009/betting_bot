@@ -365,38 +365,16 @@ def iter_events(days: Optional[float] = None) -> List[dict]:
     """Eventi dal registro (dal piu' recente al piu' vecchio).
 
     Righe corrotte ignorate; file assente -> lista vuota. `days=None` = tutto.
+    Legge il file vivo **e** le generazioni `.gz` (rotazione automatica dal
+    03/10/2026): il registro da 22 MB era il principale indiziato del volume
+    all'81%, e comprimerlo non deve togliere storia al riepilogo.
     """
-    out: List[dict] = []
+    from telemetry_logs import iter_events as _iter_jsonl
     try:
-        if not LOG_PATH.exists():
-            return []
-        cutoff = None
-        if days is not None:
-            cutoff = (_now() - timedelta(days=float(days))).timestamp()
-        for line in LOG_PATH.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                evt = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(evt, dict):
-                continue
-            if cutoff is not None:
-                try:
-                    if float(evt.get("ts_epoch") or 0) < cutoff:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-            out.append(evt)
+        return list(_iter_jsonl(LOG_PATH, days=days))
     except Exception as e:                                          # pragma: no cover
         logger.warning("book_flow: lettura registro fallita (%s)", e)
-    try:
-        out.sort(key=lambda e: float(e.get("ts_epoch") or 0), reverse=True)
-    except Exception:                                               # pragma: no cover
-        pass
-    return out
+        return []
 
 
 def summary(days: float = 7.0) -> Dict[str, Any]:

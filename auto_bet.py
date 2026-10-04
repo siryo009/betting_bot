@@ -370,6 +370,23 @@ def _h2h_cache_stantia(pick: dict) -> bool:
         return False
 
 
+def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
+                        ev: float | None = None) -> None:
+    """Registra uno scarto del gate top-down (03/10/2026, fail-safe).
+
+    Dal 03/10 la misura "quanti pick perde l'oracolo e perche'" e' leggibile:
+    `oracle_skips` scrive una riga JSONL sul volume (dedup per giorno/pick/
+    motivo) e `oracle_skips.py` la aggrega. Il log del bot non e' persistente,
+    quindi senza questa telemetria la domanda non aveva risposta misurabile.
+    Import pigro e doppia cintura: la telemetria non deve MAI fermare un giro.
+    """
+    try:
+        import oracle_skips
+        oracle_skips.record_skip(pick, reason, detail=detail, ev=ev)
+    except Exception:
+        pass
+
+
 def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
     """Valutazione TOP-DOWN di un candidato: EV contro l'ORACOLO Pinnacle.
 
@@ -2753,6 +2770,8 @@ def run_today_bets(stake_eur: float | None = None,
                 logger.info("auto_bet: %s (%s) top-down SKIP [%s]: %s",
                             pick["match_id"], pick["esito_key"],
                             verdict.get("reason"), verdict.get("detail") or "")
+                _note_top_down_skip(pick, verdict.get("reason") or "unknown",
+                                    detail=verdict.get("detail"))
                 continue
             pick["p_true"] = verdict["p_true"]
             pick["top_down_ev"] = verdict["ev"]
@@ -2766,6 +2785,8 @@ def run_today_bets(stake_eur: float | None = None,
                             verdict["ev"] * 100.0,
                             verdict["ev_min"] * 100.0,
                             verdict["true_odd"], verdict["required_price"])
+                _note_top_down_skip(pick, "no_value",
+                                    ev=verdict.get("ev"))
                 continue
             logger.info("auto_bet: %s (%s) @ %.2f EV top-down %+.2f%% >= "
                         "%.1f%% (p_true %.3f, true odd %.3f): CANDIDATO",

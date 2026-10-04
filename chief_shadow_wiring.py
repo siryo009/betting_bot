@@ -110,8 +110,10 @@ def summarize(days: int = 7, *, path: Optional[Path] = None) -> dict[str, Any]:
                            "advisor_kinds": {}, "blocked_reasons": {},
                            "exposure_blocked": 0, "exposure_gates": 0,
                            "exposure": {}, "files": str(path)}
-    if not path.exists():
-        return out
+    # NIENTE guardia `path.exists()`: dal 03/10/2026 la rotazione puo' aver
+    # compresso il registro ( `.gz`) e rimosso il file vivo — con la vecchia
+    # guardia il riepilogo sarebbe tornato VUOTO su una storia presente.
+    # `read_lines` legge vivo + generazioni e su file assente ritorna [].
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     by_verdict: dict[str, int] = {}
     advisor_kinds: dict[str, int] = {}
@@ -121,8 +123,10 @@ def summarize(days: int = 7, *, path: Optional[Path] = None) -> dict[str, Any]:
     exposure_gates = 0          # piani respinti dal recinto
     last_exposure: dict[str, Any] = {}
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle.readlines()[-_LOG_TAIL:]:
+        # Righe del registro, generazioni `.gz` INCLUSE (rotazione automatica
+        # dal 03/10/2026): si conserva la CODA (`_LOG_TAIL`) come prima.
+        from telemetry_logs import read_lines as _read_lines
+        for line in _read_lines(path)[-_LOG_TAIL:]:
                 try:
                     rec = json.loads(line)
                 except Exception:

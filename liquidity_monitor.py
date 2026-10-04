@@ -110,42 +110,17 @@ def iter_events(days: Optional[float] = None) -> List[dict]:
 
     `days` limita alla finestra [now - days, now]; None = tutto lo storico.
     Righe corrotte vengono ignorate (il log non deve mai bloccare il report).
+
+    Legge il file vivo **e** le sue generazioni `.gz` (`telemetry_logs`): il
+    03/10/2026 la rotazione automatica comprime i log inattivi, e comprimere
+    non deve significare perdere la storia che questo riepilogo misura.
     """
-    if not SKIP_LOG.exists():
-        return []
-    cutoff = None
-    if days is not None:
-        cutoff = (_now() - timedelta(days=float(days))).timestamp()
-    out: List[dict] = []
+    from telemetry_logs import iter_events as _iter_jsonl
     try:
-        with SKIP_LOG.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    evt = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(evt, dict):
-                    continue
-                if cutoff is not None:
-                    ts = evt.get("ts_epoch")
-                    if ts is None:
-                        try:
-                            ts = datetime.fromisoformat(
-                                str(evt.get("ts")).replace("Z", "+00:00")
-                            ).timestamp()
-                        except Exception:
-                            ts = 0.0
-                    if float(ts) < cutoff:
-                        continue
-                out.append(evt)
+        return list(_iter_jsonl(SKIP_LOG, days=days))
     except Exception as e:  # pragma: no cover - difensivo
         logger.warning("liquidity_monitor: lettura log fallita (%s)", e)
         return []
-    out.reverse()
-    return out
 
 
 def summary(days: float = 7.0) -> dict:

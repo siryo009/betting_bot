@@ -179,31 +179,26 @@ def record_event(kind: str, reason: str, **fields) -> dict:
 
 def iter_events(days: Optional[float] = None, now: Optional[datetime] = None
                 ) -> List[dict]:
-    """Eventi del log (piu' recenti prima). Righe corrotte ignorate."""
-    cutoff = None
-    if days is not None:
-        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=float(days))
-    out: List[dict] = []
+    """Eventi del log (piu' recenti prima). Righe corrotte ignorate.
+
+    Legge anche le generazioni `.gz` (rotazione automatica dal 03/10/2026).
+    `now` resta iniettabile: il taglio della finestra usa QUEL riferimento,
+    cosi' i test che simulano l'orologio continuano a valere.
+    """
+    from telemetry_logs import iter_events as _iter_jsonl
     try:
-        text = log_path().read_text(encoding="utf-8")
-    except Exception:
-        return out
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
+        events = list(_iter_jsonl(log_path()))
+    except Exception:                                            # pragma: no cover
+        return []
+    if days is None:
+        return events
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=float(days))
+    out: List[dict] = []
+    for evt in events:
+        ts = _parse_iso(evt.get("ts"))
+        if ts is None or ts < cutoff:
             continue
-        try:
-            evt = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(evt, dict):
-            continue
-        if cutoff is not None:
-            ts = _parse_iso(evt.get("ts"))
-            if ts is None or ts < cutoff:
-                continue
         out.append(evt)
-    out.reverse()
     return out
 
 

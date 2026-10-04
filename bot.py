@@ -2014,6 +2014,22 @@ async def credit_watchdog_job(context: ContextTypes.DEFAULT_TYPE = None):
                         b["remaining"], b["rate_per_day"], b["window_hours"],
                         b["samples"], b["exhaustion_date"],
                         b["days_to_reset"], b["sustainable_per_day"])
+            # ATTRIBUZIONE per sorgente (03/10/2026): il ritmo dice QUANTO,
+            # la telemetria delle chiamate dice DA DOVE (rotazione/oracolo/
+            # settlement). Zero costi: legge solo il JSONL sul volume.
+            attr_txt = "nessuna telemetria"
+            try:
+                from credit_diagnose import diagnose as _credit_diag
+                _by = _credit_diag(days=1).get(
+                    "credits_per_day_by_source") or {}
+                if _by:
+                    attr_txt = ", ".join(
+                        f"{k} {v}/gg" for k, v in sorted(
+                            _by.items(), key=lambda kv: -kv[1]))
+                logger.info("credit_watchdog: attribuzione 24h: %s", attr_txt)
+            except Exception as _e:
+                logger.debug("credit_watchdog: attribuzione non disponibile "
+                             "(%s)", _e)
             if b.get("alert"):
                 from datetime import timezone as _tz, timedelta as _td
                 # Ora italiana (IT_OFFSET in `main()` e' locale: qui +2).
@@ -2030,7 +2046,8 @@ async def credit_watchdog_job(context: ContextTypes.DEFAULT_TYPE = None):
                         f"{b['samples']} letture)\n"
                         f"• Esaurimento previsto: **{b['exhaustion_date']}**\n"
                         f"• Reset del piano tra {b['days_to_reset']} giorni "
-                        f"({b['sustainable_per_day']}/giorno sostenibili)\n\n"
+                        f"({b['sustainable_per_day']}/giorno sostenibili)\n"
+                        f"• Attribuzione 24h: {attr_txt}\n\n"
                         "Da ridurre (in ordine di costo): refetch del "
                         "settlement per le leghe con righe aperte, rotazione "
                         "quote (`ODDS_DAILY_BUDGET`), surebet. Le soglie "
@@ -3161,9 +3178,19 @@ async def backup_data_job(context: ContextTypes.DEFAULT_TYPE):
     snapshot (env, default 7).
     """
     from backup_manager import run_backup
+    from telemetry_logs import rotate_jsonl_logs
+    loop = asyncio.get_running_loop()
+    # ROTAZIONE dei JSONL di telemetria PRIMA del backup (03/10/2026): lo
+    # snapshot copia TUTTA `data/`, quindi comprimere prima significa che la
+    # copia contiene i log gia' ridotti — senza questo, un `book_flow_events`
+    # da 20 MB finiva intero in ogni snapshot (volume all'81% il 30/09).
+    # Fail-safe: un problema di rotazione non deve impedire il backup.
     try:
-        await asyncio.get_running_loop().run_in_executor(
-            _scan_executor, run_backup)
+        await loop.run_in_executor(_scan_executor, rotate_jsonl_logs)
+    except Exception as e:
+        logger.warning(f"backup_data_job: rotazione log: {e}")
+    try:
+        await loop.run_in_executor(_scan_executor, run_backup)
     except Exception as e:
         logger.error(f"backup_data_job: {e}")
 

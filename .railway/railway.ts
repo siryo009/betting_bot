@@ -46,6 +46,18 @@ export default defineRailway(() => {
       // (342 MB su 434, 81%). Portato a 2 e dichiarato qui perche' un
       // `config apply` non lo riporti al default di codice (7).
       BACKUP_KEEP: preserve(),
+      // Diagnostica crediti + rotazione log (03/10/2026): la telemetria delle
+      // chiamate the-odds-api (`credit_diagnose.py`) e la rotazione automatica
+      // dei JSONL di telemetria (`telemetry_logs.py`, agganciata al backup
+      // giornaliero). Dichiarate cosi' un `config apply` non le distrugge e
+      // l'operatore puo' tarare path e soglie senza redeploy di codice.
+      CREDIT_CALLS_LOG: preserve(),
+      ORACLE_SKIP_LOG: preserve(),
+      TELEMETRY_ROTATE_ENABLED: preserve(),
+      LOG_ROTATE_MAX_MB: preserve(),
+      LOG_ROTATE_AFTER_DAYS: preserve(),
+      LOG_ROTATE_QUIET_MIN: preserve(),
+      LOG_ROTATE_KEEP: preserve(),
       BOOK_FLOW_DEDUP_MIN: preserve(),
       BOOK_FLOW_LOG: preserve(),
       BOOK_FLOW_MAX_KEYS: preserve(),
