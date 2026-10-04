@@ -144,13 +144,31 @@ def iter_events(days: Optional[float] = None) -> List[dict]:
         return []
 
 
+def window_label() -> str:
+    """Etichetta della finestra esecutiva dai valori di PRODUZIONE.
+
+    NON una stringa copiata a mano: il 03/10 la chiusura e' scesa a T-5 e una
+    etichetta hardcoded (`T-120..T-15`) dichiarerebbe una banda che non esiste
+    piu' — la classe di bug dei "testi derivati dalle costanti" (13/09, 21/09).
+    Fail-safe: se i valori non sono leggibili, l'etichetta resta generica.
+    """
+    try:
+        import auto_bet
+        lo = float(auto_bet.T60_WINDOW_MIN_MIN)
+        hi = float(auto_bet.T60_WINDOW_MAX_MIN)
+        return f"T-{lo:g}..T-{hi:g}"
+    except Exception:
+        return "finestra esecutiva"
+
+
 def summary(days: float = 1.0) -> Dict[str, Any]:
     """Conteggi per motivo, mercato e lega, separando la FINESTRA esecutiva.
 
     `orders_blocked` e' il numero che conta: scarti di pick che erano gia'
-    nella finestra T-120..T-15, cioe' ordini che NON sono partiti per colpa
-    dell'oracolo. Fuori finestra uno scarto e' atteso (il pick verra'
-    rivalutato quando entra in finestra) e finisce in `outside_window`.
+    nella finestra esecutiva (`auto_bet.t60_window` = "within"), cioe' ordini
+    che NON sono partiti per colpa dell'oracolo. Fuori finestra uno scarto e'
+    atteso (il pick verra' rivalutato quando entra in finestra) e finisce in
+    `outside_window`.
     """
     events = iter_events(days=days)
     by_reason: Dict[str, int] = defaultdict(int)
@@ -195,7 +213,7 @@ def format_report(days: float = 1.0) -> str:
     # La riga che risponde a "l'oracolo sta bloccando ordini?": solo gli
     # scarti IN FINESTRA sono ordini persi (fuori finestra il pick verra'
     # rivalutato quando entra in finestra).
-    lines.append(f"  ordini bloccati (in finestra T-120..T-15): "
+    lines.append(f"  ordini bloccati (in finestra {window_label()}): "
                  f"{s['orders_blocked']} | fuori finestra: "
                  f"{s['outside_window']}"
                  + (f" | non valutabili: {s['window_unknown']}"

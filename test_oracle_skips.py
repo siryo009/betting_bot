@@ -223,3 +223,36 @@ def test_hook_fuori_finestra_non_blocca(tmp_path, monkeypatch):
     auto_bet._note_top_down_skip(dict(_pick(), commence=far), "linea")
     s = osk.summary(days=1)
     assert s["orders_blocked"] == 0 and s["outside_window"] == 1
+
+
+def test_etichetta_finestra_deriva_dalle_costanti(tmp_path, monkeypatch):
+    """Il report NON dichiara una banda hardcoded.
+
+    Il 03/10 la chiusura e' scesa a T-5: l'etichetta era `T-120..T-15` fissa e
+    avrebbe dichiarato una finestra che non esiste piu' (classe di bug dei
+    "testi derivati dalle costanti", 13/09 e 21/09). L'etichetta si costruisce
+    dai valori di PRODUZIONE di `auto_bet`.
+    """
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.reset_dedup()
+    osk.record_skip(_pick(), "linea", in_window=False)
+    import auto_bet
+    lab = osk.window_label()
+    assert lab == f"T-{auto_bet.T60_WINDOW_MIN_MIN:g}..T-{auto_bet.T60_WINDOW_MAX_MIN:g}"
+    assert lab in osk.format_report(days=1)
+    assert "T-120..T-15" not in osk.format_report(days=1)
+
+
+def test_etichetta_finestra_fail_safe_senza_costanti(monkeypatch):
+    """Se i valori non sono leggibili l'etichetta resta generica (mai un
+    numero inventato, mai un'eccezione dentro un report)."""
+    import builtins
+    real_import = builtins.__import__
+
+    def _boom(name, *a, **k):
+        if name == "auto_bet":
+            raise ImportError("simulato")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _boom)
+    assert osk.window_label() == "finestra esecutiva"
