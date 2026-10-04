@@ -8504,3 +8504,31 @@ skipped).
 ⚠️ **NON committato/deployato**: il lavoro e' nel working tree. Il prossimo
 passo naturale, quando ci sara' campione, e' leggere la telemetria e DECIDERE
 se collegare il modello alla corsia (oggi il modulo misura e tace).
+
+### Margine di budget crediti: `ORACLE_BUDGET_DAY` 3 -> 2 (04/10/2026)
+
+**Decisione del proprietario**: l'apertura automatica del mercato **OU in LIVE**
+(e' avvenuta da sola: `ou_readiness` = 40 chiusure, **ROI +10,97%** >= soglia 20
+-> `live_markets() = ('AH','OU')`) e' **corretta e non si tocca**: nessuna
+modifica alle logiche di mercato. L'unico intervento e' infrastrutturale sul
+budget crediti.
+
+**Cambio**: `ORACLE_BUDGET_DAY` **3 -> 2** su Railway (`railway variables
+--service betting_bot --set ORACLE_BUDGET_DAY=2`, readback verificato `=2`).
+Nessuna modifica di CODICE: il default di `odds_api.ORACLE_BUDGET_DAY` era **gia'
+2** (`os.getenv("ORACLE_BUDGET_DAY", "2")`) ed era **solo l'override su Railway**
+a valere 3; `ORACLE_BUDGET_DAY` e' gia' dichiarata `preserve()` in
+`.railway/railway.ts`, quindi `railway config plan` = **"already up to date"**
+(0 to add, 0 to change, 0 to destroy).
+
+**Effetto atteso**: l'oracolo a linea scende da 9 a **6 crediti/giorno**
+(2 leghe x 3 crediti), per un profilo totale di **~11-12/giorno** contro i
+**14,2 sostenibili** fino al reset dell'01/11 — margine strutturale sicuro
+(prima ~15/giorno, al limite).
+
+**Stato al momento del cambio**: `remaining` **384**; il rate misurato
+(46,5/giorno) e' ancora quello della finestra 31h **pre-fix** del referto
+esterno (il taglio `sx_signals` che segue il denaro e' in produzione dalle
+01:23 UTC e ha azzerato le chiamate: 87 partite senza puntata saltate, 0 con
+puntata). Il rate reale post-fix va riletto dopo il giro di rotazione delle
+04:00 UTC.
