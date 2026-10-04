@@ -520,3 +520,89 @@ class TestScanAllSports:
         second = se.run_scan()
         assert len(first) >= 1
         assert second == []  # gia' riportata → dedup
+
+
+# ---------------------------------------------------------------------------
+# Interruttore di servizio (SUREBET_ENABLED, 04/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestInterruttore:
+    """Modulo SOSPESO per budget (vedi .railway/railway.ts, blocco `surebet`).
+
+    Il cron in IaC e' l'interruttore del costo PERIODICO; questa guardia copre
+    il residuo: il servizio ha `source: github(...)`, quindi ogni push su main
+    lo fa ripartire ed esegue il CMD una volta anche senza cron.
+    """
+
+    def test_default_attivo(self, monkeypatch):
+        """Variabile assente = modulo ATTIVO (un deploy non si spegne da solo)."""
+        monkeypatch.delenv("SUREBET_ENABLED", raising=False)
+        assert se.enabled() is True
+
+    @pytest.mark.parametrize("raw", ["0", "false", "no", "off", "disabled",
+                                     "paused", " OFF ", "False"])
+    def test_disattivazione_esplicita(self, monkeypatch, raw):
+        monkeypatch.setenv("SUREBET_ENABLED", raw)
+        assert se.enabled() is False
+
+    @pytest.mark.parametrize("raw", ["1", "true", "yes", "on", "", "boh"])
+    def test_valore_ignoto_resta_attivo(self, monkeypatch, raw):
+        monkeypatch.setenv("SUREBET_ENABLED", raw)
+        assert se.enabled() is True
+
+    def test_main_disattivato_non_tocca_la_rete(self, tmp_path, monkeypatch):
+        """Con l'interruttore OFF il run esce PRIMA di qualunque chiamata."""
+        monkeypatch.setenv("SUREBET_ENABLED", "0")
+        monkeypatch.setattr(se, "HEARTBEAT_FILE", tmp_path / "hb.json")
+        called = []
+
+        def boom(*a, **k):
+            called.append(a)
+            raise AssertionError("rete toccata a modulo spento")
+
+        monkeypatch.setattr(se.requests, "get", boom)
+        monkeypatch.setattr(se, "scan_all_sports", boom)
+        monkeypatch.setattr(se, "run_scan", boom)
+        assert se.main([]) == 0
+        assert called == []
+        # nemmeno l'heartbeat: il run non e' nemmeno iniziato
+        assert not (tmp_path / "hb.json").exists()
+
+    def test_main_attivo_esegue_lo_scan(self, tmp_path, monkeypatch):
+        """Controprova: senza la disattivazione il run fa il suo lavoro."""
+        monkeypatch.setenv("SUREBET_ENABLED", "1")
+        monkeypatch.setattr(se, "HEARTBEAT_FILE", tmp_path / "hb.json")
+        ran = []
+        monkeypatch.setattr(se, "run_scan",
+                            lambda notify=True, log=True: ran.append(True) or [])
+        assert se.main([]) == 0
+        assert ran == [True]
+        assert (tmp_path / "hb.json").exists()
+
+    def test_iac_dichiara_lo_scanner_spento(self):
+        """Tripwire IaC: cron SOSPESO + interruttore a un valore di OFF.
+
+        Senza il valore ESPLICITO nella IaC un `config apply` non lo imposta,
+        e senza il cron spento il costo periodico ripartirebbe.
+        """
+        src = open(".railway/railway.ts").read()
+        marker = 'fn("surebet"'
+        start = src.index(marker)
+        block = src[start:src.index("\n  });", start)]
+        assert 'SUREBET_ENABLED: "0"' in block
+        # nessuna riga ATTIVA (non commentata) del blocco attiva il cron
+        for line in block.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue
+            assert "cronSchedule" not in stripped, line
+
+    def test_guardia_prima_di_ogni_lavoro(self):
+        """La guardia sta PRIMA dell'heartbeat e dello scan (fonte: sorgente) —
+        cosi' un redeploy a modulo spento non lascia nemmeno una traccia sul
+        volume (se l'ordine cambiasse, il run costerebbe comunque)."""
+        src = open("surebet_engine.py").read()
+        body = src[src.index("def main("):]
+        assert body.index("if not enabled():") < body.index("_one_pass()")
+        assert body.index("if not enabled():") < body.index("HEARTBEAT_FILE.parent.mkdir")
+        assert "_DISABLED_VALUES = {\"0\"" in src

@@ -265,7 +265,27 @@ export default defineRailway(() => {
   const surebet = fn("surebet", {
     source: github("siryo009/betting_bot", { checkSuites: false }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile.surebet" },
-    deploy: { cronSchedule: "*/15 * * * *", restartPolicyType: "NEVER" },
+    // ⛔ CRON SOSPESO IL 04/10/2026 (direttiva del proprietario).
+    // Motivo: il limite di sostenibilita' e' ~14 crediti/giorno e il core
+    // business validato e' lo Steam Chasing (oracolo + rotazione ~12): gli 8
+    // crediti/giorno del surebet (2 sport x 2 fetch x 2 regioni) portavano il
+    // profilo fuori budget senza margine di sicurezza. Il modulo resta nel
+    // codice e il servizio/volume restano dichiarati: RIACCENDERE = rimettere
+    //   deploy: { cronSchedule: "*/15 * * * *", restartPolicyType: "NEVER" }
+    //   + SUREBET_ENABLED: "1" (qui sotto)
+    //
+    // DUE serrature, nessuna delle quali e' il fragile trucco di svuotare
+    // SUREBET_SPORTS (un valore vuoto viene trattato come non impostato e il
+    // codice ricade sul default NBA+MLB: riaccenderebbe il costo in silenzio).
+    //   1. CRON (sopra): la sorgente del costo periodico (~8 cr/giorno).
+    //   2. SUREBET_ENABLED=0 (sotto): copre il RESIDUO che il cron non copre
+    //      — il servizio ha `source: github(...)`, quindi OGNI push su main lo
+    //      fa ripartire ed esegue il CMD una volta anche senza cron (~4 cr a
+    //      push). Il run esce subito, zero chiamate.
+    // La direzione del fail-safe e' quella giusta per un costo: dimenticare la
+    // serratura 2 a "0" con il cron riacceso NON paga nulla e urla nei log; non
+    // puo' riaccendere il costo in silenzio.
+    deploy: { restartPolicyType: "NEVER" },
     volumeMounts: { "/app/data": surebetData },
     env: {
       ADMIN_CHAT_ID: preserve(),
@@ -288,6 +308,12 @@ export default defineRailway(() => {
       // anche quello del codice (`surebet_engine.ODDS_TTL`), quindi un
       // `config apply` non puo' riportarlo a 6h.
       SUREBET_SPORTS: "basketball_nba,baseball_mlb",
+      // 04/10/2026: interruttore di servizio OFF (modulo sospeso, vedi il
+      // commento sul blocco `deploy`). Dichiarato qui come valore ESPLICITO
+      // (non preserve()): cosi' il piano non genera drift e un `config apply`
+      // non puo' riaccendere lo scanner. Valori riconosciuti come OFF: 0,
+      // false, no, off, disabled, paused.
+      SUREBET_ENABLED: "0",
       SUREBET_ODDS_TTL: "43200",
       SUREBET_MIN_REMAINING: "50",
       SUREBET_MIN_MARGIN: "0.005",

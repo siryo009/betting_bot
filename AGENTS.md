@@ -8579,3 +8579,65 @@ quota > 2,50**, cioe' proprio i longshot che il fix del 02/10
 (`TENNIS_ODDS_MIN/MAX` 1,30-2,50) ha chiuso: la perdita osservata VALIDA quel
 fix. Nessun ordine OU/AH/1X2 ancora (l'OU e' live da poco e i pick restano
 fuori finestra).
+
+### CRON SUREBET SOSPESO per budget (04/10/2026)
+
+**Direttiva del proprietario**: il core business VALIDATO ora e' lo **Steam
+Chasing**; il limite di sostenibilita' e' **~14 crediti/giorno** e l'infrastruttura
+core (oracolo a linea + rotazione quote) ne assorbe **~12**. Gli **~8
+crediti/giorno** del surebet (2 sport x 2 fetch/giorno con `SUREBET_ODDS_TTL`
+12h x **2 regioni** di `regions="eu,uk"` = 2 crediti/chiamata) portavano il
+profilo fuori budget senza margine: modulo **sospeso**, non rimosso.
+
+**1) IL MODULO E' INVISIBILE ALLA CONTABILITA': ecco perche' la scelta e'
+manuale e non automatica.** `credit_diagnose` attribuisce i consumi solo a
+`rotation`/`oracle`/`settlement`; `surebet_engine` ha **cache propria**
+(`data/surebet/cache`) e **non chiama `record_credit_call`** (indipendenza
+tassativa dal bot Value Bet: mai import da tracker/bot, tripwire dedicato).
+Quindi nessun watchdog poteva segnalare quel costo — ma nemmeno `credit_budget_status`
+lo include nella proiezione: **il budget sostenibile va letto al netto**.
+
+**2) DUE SERRATURE, nessuna delle quali e' il trucco fragile di svuotare
+`SUREBET_SPORTS`.**
+- **CRON (IaC, `.railway/railway.ts` blocco `surebet`)**: `cronSchedule`
+  rimosso (`deploy: { restartPolicyType: "NEVER" }`), con il motivo e le
+  istruzioni di riaccensione scritti NEL FILE (non solo in chat).
+- **INTERRUTTORE DI SERVIZIO (`SUREBET_ENABLED=0`)**: il solo cron NON azzera il
+  consumo. Il servizio ha `source: github(...)`, quindi **ogni push su main lo
+  fa ripartire ed esegue il CMD una volta anche senza cron** (~4 crediti a
+  push). **Misurato il 04/10**: il run delle 03:06:15 ("run avviato (sports=
+basketball_nba,baseball_mlb)") e' esattamente il deploy di `f944878`
+  (createdAt 03:05:57), NON uno scatto di cron. Nuova `enabled()` in
+  `surebet_engine.py`, chiamata in `main()` **prima dell'heartbeat e di
+  qualunque chiamata** (`--json`/`--loop` non la aggirano).
+- **Perche' NON `SUREBET_SPORTS=""`**: un valore vuoto viene trattato come non
+  impostato e il codice ricade sul **default NBA+MLB** → riaccenderebbe il
+  costo **in silenzio**. Le due serrature invece falliscono nella direzione
+  giusta: dimenticare `SUREBET_ENABLED="0"` col cron riacceso **non paga
+  nulla** e urla nei log.
+- Direzione del fail-safe in `enabled()`: variabile **assente o valore non
+  riconosciuto → modulo ATTIVO** (un deploy non si spegne da solo); per
+  disattivare serve un valore esplicito fra `0/false/no/off/disabled/paused`.
+
+**3) STATO OPERATIVO (verificato al 04/10/2026, 03:0x UTC)**
+- `railway variables --service surebet` → **`SUREBET_ENABLED=0`**;
+  `railway config plan` → **"already up to date"** (0 to add, 0 to change, 0 to
+destroy: l'applicazione era `1 to change` = set della variabile, applicata).
+- Servizio e volume (`surebet-volume`, sfo) restano DICHIARATI: il modulo resta
+  nel codice e **riaccenderlo e' una riga sola** —
+  `deploy: { cronSchedule: "*/15 * * * *", restartPolicyType: "NEVER" }` in
+  `.railway/railway.ts` **+ `SUREBET_ENABLED: "1"`** (o variabile rimossa).
+- ⚠️ **Cosa NON e' stato toccato**: sport/TTL/margini/`SUREBET_MIN_REMAINING=50`
+  restano come erano, cosi' la riaccensione non richiede una seconda decisione;
+  `SUREBET_CRON_HOLD_SECONDS`, `ODDSPAPI_KEY`, `ODDS_API_KEY`,
+  `QUOTAVERACE_BOT_TOKEN` restano in `preserve()`.
+
+**Test**: `test_surebet_engine.py` +`TestInterruttore` (11 nuovi, OFFLINE:
+  default attivo, valori di OFF parametrizzati, valore ignoto resta attivo,
+  **`main()` a modulo spento non tocca la rete** — `requests.get`,
+  `scan_all_sports` e `run_scan` avvelenati e heartbeat non scritto —,
+  controprova a modulo attivo, ordine della guardia nel sorgente, **tripwire
+  IaC** che pretende `SUREBET_ENABLED: "0"` e **nessuna riga ATTIVA con
+  `cronSchedule`** nel blocco `surebet`). File: **74 verdi**; lotti di
+  regressione verdi (`test_railway_drift_check`, `test_bot`,
+  `test_secret_hygiene`). `compileall` OK, 0 marker di conflitto.

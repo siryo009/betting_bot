@@ -61,6 +61,28 @@ LOG_FILE = SUREBET_DATA_DIR / "opportunities.jsonl"
 # (i log delle esecuzioni cron Railway non sempre sono esposti via CLI).
 HEARTBEAT_FILE = SUREBET_DATA_DIR / "heartbeat.json"
 
+# Interruttore di SERVIZIO (04/10/2026). Il cron e' SOSPESO in IaC
+# (.railway/railway.ts, blocco `surebet`) perche' gli ~8 crediti/giorno del
+# modulo (2 sport x 2 fetch/giorno x 2 regioni) non stanno nel budget dello
+# Steam Chasing (~14/giorno sostenibili, ~12 assorbiti da oracolo + rotazione).
+# Questa guardia copre il RESIDUO che il solo cron non copre: il servizio ha
+# `source: github(...)`, quindi OGNI push su main lo fa ripartire ed esegue il
+# CMD una volta anche senza cron (~4 crediti a push). Con SUREBET_ENABLED=0 il
+# run esce subito: zero chiamate, zero crediti.
+# Direzione del fail-safe: variabile ASSENTE o valore non riconosciuto ->
+# modulo ATTIVO (un deploy non si deve spegnere da solo); per disattivare
+# serve un valore ESPLICITO.
+# Riaccensione: `cronSchedule` in IaC + SUREBET_ENABLED=1 (o variabile rimossa).
+_DISABLED_VALUES = {"0", "false", "no", "off", "disabled", "paused"}
+
+
+def enabled() -> bool:
+    """False solo con un valore di disattivazione ESPLICITO (env SUREBET_ENABLED)."""
+    raw = os.getenv("SUREBET_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _DISABLED_VALUES
+
 # Crediti the-odds-api: budget CONSERVATIVO. La chiave e' CONDIVISA col
 # bot Value Bet (piano free ~500/mese, il calendario value ne consuma
 # ~407-460): ogni chiamata odds costa 1 credito per sport. Con TTL 6h e
@@ -718,6 +740,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+
+    if not enabled():
+        logger.info(
+            "surebet: modulo DISATTIVATO (SUREBET_ENABLED=%s) — scan saltato, "
+            "0 crediti", os.getenv("SUREBET_ENABLED", ""))
+        return 0
 
     def _one_pass() -> None:
         if args.json:
