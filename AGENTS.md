@@ -8532,3 +8532,50 @@ esterno (il taglio `sx_signals` che segue il denaro e' in produzione dalle
 01:23 UTC e ha azzerato le chiamate: 87 partite senza puntata saltate, 0 con
 puntata). Il rate reale post-fix va riletto dopo il giro di rotazione delle
 04:00 UTC.
+
+### FIX: il "giorno di fase" della rotazione era INERTE (04/10/2026)
+
+**Difetto trovato misurando il piano della rotazione delle 04:00 UTC.** Le 4
+leghe dichiarate dovute (`soccer_efl_champ`, `soccer_austria_bundesliga`,
+`soccer_mexico_ligamx`, `soccer_saudi_arabia_pro_league`) avevano cache di
+**3,94-4,35 giorni** con **intervallo 7gg**: `is_sport_due` = **True** (regola
+del giorno di fase del 10/09), ma `_get_odds` usava come TTL **l'INTERO
+intervallo** (7gg) -> serviva la cache **senza alcuna chiamata HTTP**. Il
+meccanismo di stagger non aveva quindi mai avuto effetto: ogni lega si
+rinfrescava solo a scadenza piena, e dal 30/09 (quando l'intervallo e' stato
+portato a 7gg) tutte in blocco lo stesso giorno -> **una settimana senza quote
+nuove** per le leghe ammesse.
+
+⚠️ **Il tripwire esistente testava IL RESOLVER, non IL CHIAMANTE**:
+`test_stagger_spalma_le_leghe_core` / `test_stagger_scadenza_sul_giorno_di_
+fase` verificano `is_sport_due`, ma nessuna asserzione verificava che il fetch
+avvenisse davvero — la stessa classe di bug del 24/09 ("il tripwire testa il
+resolver, non il chiamante").
+
+**Fix** (`odds_api._get_odds`): nel percorso di ROTAZIONE (`cache_prefix !=
+ORACLE_CACHE_PREFIX` e TTL non passato dal chiamante) una cache "fresca" ma
+nel **giorno di fase** (`is_sport_due(sport)` True) **non viene piu' servita**
+-> il fetch avviene. Vale SOLO per la rotazione: l'oracolo a linea ha un TTL
+proprio (minuti) e non deve seguire il calendario della ricerca.
+**Costo mensile INVARIATO**: dopo un refresh, il prossimo giorno di fase e'
+esattamente `intervallo` giorni dopo (1 refresh per lega per intervallo), ma
+e' **distribuito** invece che sincronizzato. Nessuna modifica alle logiche di
+mercato (gate leghe, soglie, EV, fascia quota).
+
+**Tripwire NUOVO sul CHIAMANTE** (`test_odds_api.py`):
+`test_giorno_di_fase_rinfresca_davvero_la_cache` (verifica che `requests.get`
+venga chiamato e che il payload arrivi dalla risposta, non dalla cache) +
+`test_fuori_giorno_di_fase_la_cache_e_servita` (controprova: nessuna spesa) +
+`test_cache_oracolo_non_segue_il_giorno_di_fase`. **Verificato con `git stash`
+del solo `odds_api.py`: il tripwire fallisce senza il fix.**
+
+**Verifica dello stato al 04/10/2026** (prima del fix): `credit_burn_rate(2h)`
+= **None** (zero crediti consumati), `remaining` **384**, settlement **0 bet
+aperte** (0 LIVE), 299 previsioni aperte di sola telemetria,
+`estimated_credits` 0, `overdue_orphans` 0, `leagues_to_query` = `['WTA -
+Beijing']` (non mappata = 0 crediti). Ledger: **7 bet, tutte TENNIS**, tutte
+saldate — stake 10,50, **P/L -8,25 USDC, ROI -78,6%**, hit 1/7; **5 delle 7 a
+quota > 2,50**, cioe' proprio i longshot che il fix del 02/10
+(`TENNIS_ODDS_MIN/MAX` 1,30-2,50) ha chiuso: la perdita osservata VALIDA quel
+fix. Nessun ordine OU/AH/1X2 ancora (l'OU e' live da poco e i pick restano
+fuori finestra).

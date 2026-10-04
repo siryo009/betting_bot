@@ -694,12 +694,31 @@ def _get_odds(sport, frm, to, *, markets="h2h", cache_prefix="toa_", ttl_s=None)
     # Sorgente della chiamata (la cache oracolo usa un prefisso dedicato):
     # serve alla telemetria crediti, che attribuisce il costo per sorgente.
     _source = "oracle" if cache_prefix == ORACLE_CACHE_PREFIX else "rotation"
+    _default_ttl = ttl_s is None
     if ttl_s is None:
         ttl_s = interval_for_sport(sport) * 86400
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            if time.time() - data.get("ts", 0) < ttl_s:
+            fresh = time.time() - data.get("ts", 0) < ttl_s
+            # GIORNO DI FASE (10/09, reso effettivo il 04/10/2026).
+            # `is_sport_due` dichiara dovuta una lega core (intervallo <= 7gg)
+            # quando la cache ha >= 1 giorno E oggi e' il suo giorno di fase:
+            # serve a spalmare le scadenze su giorni diversi (analisi
+            # giornaliere a costo INVARIATO, 1 refresh per lega per
+            # intervallo). Finche' qui il TTL restava l'INTERO intervallo,
+            # quel verdetto non aveva alcun effetto: la cache veniva servita
+            # lo stesso e la lega si rinfrescava solo a scadenza piena (tutte
+            # in blocco lo stesso giorno). Effetto reale misurato il
+            # 04/10/2026: 4 leghe "dovute" con cache di 4 giorni su TTL 7 ->
+            # 0 chiamate HTTP e 0 quote nuove per una settimana.
+            # Vale SOLO nella rotazione: l'oracolo a linea ha un TTL proprio
+            # (minuti) e non deve seguire il calendario della ricerca.
+            if (fresh and _default_ttl
+                    and cache_prefix != ORACLE_CACHE_PREFIX
+                    and is_sport_due(sport)):
+                fresh = False
+            if fresh:
                 return data.get("payload", []), data.get("remaining", 999)
         except Exception: pass
     key = _env("ODDS_API_KEY")

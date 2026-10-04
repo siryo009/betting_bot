@@ -360,6 +360,95 @@ def test_stagger_scadenza_per_intervallo_invariata(monkeypatch, tmp_path):
     assert odds_api.is_sport_due(key) is True
 
 
+def _phase_day(key):
+    """Un 'now' che cade nel giorno di fase della lega (e il giorno dopo)."""
+    import odds_api
+    interval = odds_api.interval_for_sport(key)
+    phase = odds_api._rotation_phase(key, interval)
+    base = 1_800_000_000 // 86400 + 1
+    d = base + ((phase - base) % interval)
+    return d * 86400 + 3600, (d + 1) * 86400 + 3600
+
+
+def test_giorno_di_fase_rinfresca_davvero_la_cache(monkeypatch, tmp_path):
+    """TRIPWIRE SUL CHIAMANTE (04/10/2026) — il bug del 24/09.
+
+    `is_sport_due` puo' dichiarare la lega dovuta quanto vuole: se `_get_odds`
+    serve comunque la cache, la rotazione non rinfresca NULLA. Misurato in
+    produzione il 04/10: 4 leghe "dovute" con cache di 4 giorni su TTL 7 ->
+    0 chiamate HTTP e 0 quote nuove. Qui si verifica il FETCH, non il resolver.
+    """
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    key = "soccer_italy_serie_a"
+    now, _ = _phase_day(key)
+    interval = odds_api.interval_for_sport(key)
+    monkeypatch.setattr(odds_api.time, "time", lambda: now)
+    # cache vecchia di 1 giorno: dentro il TTL dell'intervallo, ma il giorno
+    # di fase la rende non piu' valida per la rotazione
+    _write_cache(tmp_path, key, now - 86400)
+    assert odds_api.is_sport_due(key) is True
+    assert now - 86400 > now - interval * 86400     # controprova: era "fresca"
+
+    class _Resp:
+        status_code = 200
+        headers = {"x-requests-remaining": "300", "x-requests-last": "1"}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"id": "fresca"}]
+
+    calls = []
+    monkeypatch.setattr(odds_api, "_env", lambda name: "fake-key")
+    monkeypatch.setattr(odds_api, "should_query_sport", lambda k: True)
+    monkeypatch.setattr(odds_api.requests, "get",
+                        lambda *a, **k: calls.append(1) or _Resp())
+    payload, remaining = odds_api._get_odds(key, "2026-09-21", "2026-09-28")
+    assert calls, "il giorno di fase DEVE rinfrescare (non servire la cache)"
+    assert payload == [{"id": "fresca"}] and remaining == 300
+
+
+def test_fuori_giorno_di_fase_la_cache_e_servita(monkeypatch, tmp_path):
+    """Controprova: il giorno dopo la cache torna valida e NON si spende."""
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    key = "soccer_italy_serie_a"
+    _, other = _phase_day(key)
+    monkeypatch.setattr(odds_api.time, "time", lambda: other)
+    _write_cache(tmp_path, key, other - 86400)
+    assert odds_api.is_sport_due(key) is False
+
+    monkeypatch.setattr(odds_api, "_env", lambda name: "fake-key")
+    monkeypatch.setattr(odds_api.requests, "get",
+                        lambda *a, **k: pytest.fail("chiamata HTTP non dovuta"))
+    payload, remaining = odds_api._get_odds(key, "2026-09-21", "2026-09-28")
+    assert payload == [] and remaining == 500
+
+
+def test_cache_oracolo_non_segue_il_giorno_di_fase(monkeypatch, tmp_path):
+    """L'oracolo a linea ha un TTL PROPRIO (minuti): il calendario della
+    ricerca non deve forzare refresh di una cache oracolo fresca."""
+    import odds_api
+    monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+    key = "soccer_italy_serie_a"
+    now, _ = _phase_day(key)
+    monkeypatch.setattr(odds_api.time, "time", lambda: now)
+    f = tmp_path / f"{odds_api.ORACLE_CACHE_PREFIX}{key}.json"
+    f.write_text(__import__("json").dumps(
+        {"ts": now - 60, "payload": [{"id": "oracolo"}], "remaining": 300}))
+
+    monkeypatch.setattr(odds_api, "_env", lambda name: "fake-key")
+    monkeypatch.setattr(odds_api.requests, "get",
+                        lambda *a, **k: pytest.fail("chiamata HTTP non dovuta"))
+    payload, _ = odds_api._get_odds(key, "2026-09-21", "2026-09-28",
+                                    markets=odds_api.ORACLE_MARKETS_LIST,
+                                    cache_prefix=odds_api.ORACLE_CACHE_PREFIX,
+                                    ttl_s=odds_api.oracle_cache_ttl_s())
+    assert payload == [{"id": "oracolo"}]
+
+
 def test_scores_cache_persiste_i_crediti(monkeypatch, tmp_path):
     """Bug 12/09: `fetch_scores` non salvava `remaining` nella cache dei
     punteggi, quindi `get_remaining()`/`get_quota()` (guardia proattiva +
