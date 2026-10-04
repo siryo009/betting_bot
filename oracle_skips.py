@@ -71,9 +71,24 @@ def reset_dedup() -> None:
     _SEEN_DAY = None
 
 
+def _window_bucket(in_window: Optional[bool]) -> str:
+    """Bucket del dedup: 'in' / 'out' / '?' (finestra non valutabile)."""
+    if in_window is None:
+        return "?"
+    return "in" if in_window else "out"
+
+
 def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
-                ev: Optional[float] = None) -> Optional[dict]:
+                ev: Optional[float] = None,
+                in_window: Optional[bool] = None) -> Optional[dict]:
     """Registra uno scarto del gate top-down (fail-safe, dedup giornaliero).
+
+    `in_window` dice se il pick era nella FINESTRA ESECUTIVA
+    (`auto_bet.t60_window` = "within"): il gate gira su OGNI candidato del
+    board, PRIMA del controllo T-60, quindi fuori finestra uno scarto NON e'
+    un ordine perso. Il dedup tiene separati i due bucket, cosi' lo stesso
+    pick puo' comparire una volta fuori e una dentro la finestra (la
+    transizione e' l'informazione utile).
 
     Ritorna l'evento scritto, oppure None se era un duplicato del giorno o se
     la scrittura e' fallita (mai eccezioni).
@@ -85,7 +100,8 @@ def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
     mid = str((pick or {}).get("match_id") or "?")
     esito = str((pick or {}).get("esito_key") or "?")
     reason = str(reason or "unknown")
-    key = f"{day}|{mid}|{esito}|{reason}"
+    bucket = _window_bucket(in_window)
+    key = f"{day}|{mid}|{esito}|{reason}|{bucket}"
     if _SEEN.get(key):
         return None
     evt = {
@@ -98,6 +114,7 @@ def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
         "sport": (pick or {}).get("sport"),
         "quota": (pick or {}).get("quota"),
         "reason": reason,
+        "in_window": in_window,
     }
     if detail:
         evt["detail"] = detail
@@ -128,17 +145,42 @@ def iter_events(days: Optional[float] = None) -> List[dict]:
 
 
 def summary(days: float = 1.0) -> Dict[str, Any]:
-    """Conteggi per motivo, mercato e lega nella finestra."""
+    """Conteggi per motivo, mercato e lega, separando la FINESTRA esecutiva.
+
+    `orders_blocked` e' il numero che conta: scarti di pick che erano gia'
+    nella finestra T-120..T-15, cioe' ordini che NON sono partiti per colpa
+    dell'oracolo. Fuori finestra uno scarto e' atteso (il pick verra'
+    rivalutato quando entra in finestra) e finisce in `outside_window`.
+    """
     events = iter_events(days=days)
     by_reason: Dict[str, int] = defaultdict(int)
     by_market: Dict[str, int] = defaultdict(int)
     by_league: Dict[str, int] = defaultdict(int)
+    in_reason: Dict[str, int] = defaultdict(int)
+    in_market: Dict[str, int] = defaultdict(int)
+    counts = {"in": 0, "out": 0, "?": 0}
     for e in events:
-        by_reason[str(e.get("reason") or "unknown")] += 1
-        by_market[str(e.get("mercato") or "?")] += 1
+        reason = str(e.get("reason") or "unknown")
+        mkt = str(e.get("mercato") or "?")
+        by_reason[reason] += 1
+        by_market[mkt] += 1
         by_league[str(e.get("league") or "?")] += 1
+        win = e.get("in_window")
+        if win is True:
+            counts["in"] += 1
+            in_reason[reason] += 1
+            in_market[mkt] += 1
+        elif win is False:
+            counts["out"] += 1
+        else:
+            counts["?"] += 1
     return {"days": days, "events": len(events),
+            "orders_blocked": counts["in"],
+            "outside_window": counts["out"],
+            "window_unknown": counts["?"],
             "by_reason": dict(by_reason), "by_market": dict(by_market),
+            "by_reason_in_window": dict(in_reason),
+            "by_market_in_window": dict(in_market),
             "by_league": dict(sorted(by_league.items(),
                                      key=lambda kv: -kv[1]))}
 
@@ -150,8 +192,20 @@ def format_report(days: float = 1.0) -> str:
         lines.append("  nessuno scarto registrato")
         return "\n".join(lines)
     lines.append(f"  scarti: {s['events']} (unici per pick/motivo/giorno)")
+    # La riga che risponde a "l'oracolo sta bloccando ordini?": solo gli
+    # scarti IN FINESTRA sono ordini persi (fuori finestra il pick verra'
+    # rivalutato quando entra in finestra).
+    lines.append(f"  ordini bloccati (in finestra T-120..T-15): "
+                 f"{s['orders_blocked']} | fuori finestra: "
+                 f"{s['outside_window']}"
+                 + (f" | non valutabili: {s['window_unknown']}"
+                    if s["window_unknown"] else ""))
     for reason, n in sorted(s["by_reason"].items(), key=lambda kv: -kv[1]):
         lines.append(f"    • {reason:<10} {n}")
+    if s["by_reason_in_window"]:
+        lines.append("  motivi degli ORDINI BLOCCATI: " + ", ".join(
+            f"{k} {v}" for k, v in sorted(
+                s["by_reason_in_window"].items(), key=lambda kv: -kv[1])))
     mkt = ", ".join(f"{k} {v}" for k, v in sorted(s["by_market"].items(),
                                                  key=lambda kv: -kv[1]))
     lines.append(f"  per mercato: {mkt}")

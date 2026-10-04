@@ -370,6 +370,21 @@ def _h2h_cache_stantia(pick: dict) -> bool:
         return False
 
 
+def pick_window(pick: dict) -> str:
+    """Verdetto di finestra esecutiva di un pick (UNICA definizione).
+
+    'within' | 'before' | 'missed' | 'unknown', dal `t60_window` di
+    PRODUZIONE. Esiste cosi' il gate T-60 e la telemetria degli scarti
+    (`_note_top_down_skip`) giudicano con la STESSA regola: prima il conteggio
+    di `oracle_skips` registrava tutti i candidati come se fossero in
+    finestra, facendo sembrare bloccati anche i pick a ore dal kickoff.
+    """
+    try:
+        return t60_window(_parse_iso_utc(pick.get("commence")))
+    except Exception:
+        return "unknown"
+
+
 def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
                         ev: float | None = None) -> None:
     """Registra uno scarto del gate top-down (03/10/2026, fail-safe).
@@ -382,7 +397,14 @@ def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
     """
     try:
         import oracle_skips
-        oracle_skips.record_skip(pick, reason, detail=detail, ev=ev)
+        # IN FINESTRA ESECUTIVA (04/10/2026). Il gate gira PRIMA del controllo
+        # T-60, su OGNI candidato del board: un pick a 20 ore dal kickoff che
+        # salta per `linea` NON e' un ordine perso (l'oracolo viene fetchato
+        # quando entra in finestra). Senza questa distinzione il conteggio
+        # degli scarti faceva sembrare bloccati tutti i candidati del giorno.
+        # Il verdetto e' quello di PRODUZIONE (`t60_window`), non una copia.
+        oracle_skips.record_skip(pick, reason, detail=detail, ev=ev,
+                                 in_window=pick_window(pick) == "within")
     except Exception:
         pass
 
@@ -2812,7 +2834,7 @@ def run_today_bets(stake_eur: float | None = None,
         # e la catena shadow misurano tutto), ma nessun ordine parte: e' il
         # controllo del timing richiesto dal proprietario.
         if T60_EXECUTION_ONLY:
-            _tw = t60_window(_parse_iso_utc(pick.get("commence")))
+            _tw = pick_window(pick)
             if _tw != "within":
                 logger.info("auto_bet: %s (%s) fuori finestra T-60 (%s): solo "
                             "scansione, nessun ordine", pick["match_id"],

@@ -149,3 +149,77 @@ def test_rotazione_agganciata_al_backup():
 def test_env_dichiarate_in_iac():
     iac = (Path(__file__).parent / ".railway" / "railway.ts").read_text()
     assert "ORACLE_SKIP_LOG" in iac and "TELEMETRY_ROTATE_ENABLED" in iac
+
+
+# -------------------------------- finestra esecutiva: ordini BLOCCATI o no
+
+def test_scarto_in_finestra_e_ordine_bloccato(tmp_path, monkeypatch):
+    """FIX 04/10/2026: il gate gira PRIMA del controllo T-60, su TUTTI i
+    candidati. Senza distinguere la finestra, un pick a 20 ore dal kickoff che
+    salta per `linea` sembrava un ordine perso (e i conteggi erano gonfiati).
+    Il numero che conta e' `orders_blocked`."""
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.reset_dedup()
+    osk.record_skip(_pick(), "linea", in_window=False)
+    osk.record_skip(_pick(), "linea", in_window=True)
+    s = osk.summary(days=1)
+    assert s["events"] == 2              # due bucket distinti, nessun dedup
+    assert s["orders_blocked"] == 1
+    assert s["outside_window"] == 1
+    assert s["by_reason_in_window"] == {"linea": 1}
+
+
+def test_dedup_dentro_lo_stesso_bucket(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.reset_dedup()
+    for _ in range(5):
+        osk.record_skip(_pick(), "linea", in_window=True)
+    assert osk.summary(days=1)["events"] == 1
+
+
+def test_scarto_senza_finestra_non_conta_come_bloccato(tmp_path, monkeypatch):
+    """Finestra non valutabile (kickoff illeggibile) -> bucket '?', mai
+    contato come ordine bloccato."""
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.reset_dedup()
+    osk.record_skip(_pick(), "linea")          # in_window resta None
+    s = osk.summary(days=1)
+    assert s["orders_blocked"] == 0 and s["window_unknown"] == 1
+    assert "ordini bloccati" in osk.format_report(days=1)
+
+
+def test_hook_valuta_finestra_col_verdetto_di_produzione():
+    """Il hook usa `pick_window` (che delega a `t60_window`), non una copia.
+
+    E la regola vive in UN SOLO posto: `t60_window` compare una volta sola
+    nel sorgente (dentro `pick_window`), cosi' gate e telemetria non possono
+    divergere — e nessun percorso puo' aggirare la finestra.
+    """
+    src = (Path(__file__).parent / "auto_bet.py").read_text()
+    seg = src.split("def _note_top_down_skip")[1][:1600]
+    assert "pick_window(pick) == \"within\"" in seg
+    assert src.count('t60_window(_parse_iso_utc(pick.get("commence")))') == 1
+
+
+def test_hook_scrive_la_finestra(tmp_path, monkeypatch):
+    """End-to-end: un pick con kickoff fra 60' finisce nel bucket 'in'."""
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    monkeypatch.setenv("T60_EXECUTION_ONLY", "1")
+    osk.reset_dedup()
+    import auto_bet
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=60)).isoformat()
+    p = dict(_pick(), commence=soon)
+    auto_bet._note_top_down_skip(p, "linea")
+    assert osk.summary(days=1)["orders_blocked"] == 1
+
+
+def test_hook_fuori_finestra_non_blocca(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.reset_dedup()
+    import auto_bet
+    far = (datetime.now(timezone.utc) + timedelta(hours=20)).isoformat()
+    auto_bet._note_top_down_skip(dict(_pick(), commence=far), "linea")
+    s = osk.summary(days=1)
+    assert s["orders_blocked"] == 0 and s["outside_window"] == 1

@@ -511,15 +511,21 @@ class TestFinestraT15MercatiDerivati:
     def test_il_gate_finestra_e_applicato_a_ogni_mercato(self):
         """Il blocco `T60_EXECUTION_ONLY` in `run_today_bets` NON e'
         condizionato al tipo di mercato: se lo fosse, un mercato derivato
-        leggerebbe una finestra diversa (o nessuna)."""
+        leggerebbe una finestra diversa (o nessuna).
+
+        Dal 04/10 il verdetto passa da `pick_window` (UNICA definizione, usata
+        anche dalla telemetria degli scarti): il gate non puo' divergere dal
+        conteggio dei pick bloccati."""
         src = Path("auto_bet.py").read_text(encoding="utf-8")
         block = src.split("if T60_EXECUTION_ONLY:", 1)[1][:400]
-        assert "t60_window" in block
-        # tra il blocco e la chiamata di `t60_window` non compare nessuna
-        # condizione sul mercato: il gate non puo' essere saltato per tipo
-        assert "mercato" not in block.split("t60_window")[0]
+        assert "pick_window(pick)" in block
+        # tra il blocco e la chiamata non compare nessuna condizione sul
+        # mercato: il gate non puo' essere saltato per tipo
+        assert "mercato" not in block.split("pick_window(pick)")[0]
 
     def test_i_pick_derivati_hanno_lo_stesso_tetto(self):
-        """OU/AH non hanno una finestra propria: passano da `t60_window`."""
+        """OU/AH non hanno una finestra propria: passano da `pick_window`."""
         src = Path("auto_bet.py").read_text(encoding="utf-8")
+        # il verdetto di finestra vive in UN solo posto e delega a `t60_window`
+        assert src.count("def pick_window(") == 1
         assert src.count('t60_window(_parse_iso_utc(pick.get("commence")))') == 1
