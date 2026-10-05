@@ -304,10 +304,12 @@ export default defineRailway(() => {
       // preserve(), un `config apply` distruggerebbe gli override operativi.
       ORACLE_ENABLED: preserve(),
       ORACLE_BUDGET_DAY: preserve(),
-      // Finestra di fetch dell'oracolo a linea (minuti, default 70): si ordina
-      // solo nella finestra esecutiva T-60..T-5, quindi non si scarica piu'
-      // l'intero palinsesto della lega. Sostituisce ORACLE_PICK_WINDOW_H
-      // (orizzonte a ore, rimosso il 03/10/2026).
+      // Finestra di fetch dell'oracolo a linea (minuti, default 120 dal
+      // 05/10/2026, era 70): si ordina solo nella finestra esecutiva
+      // T-180..T-2, quindi non si scarica piu' l'intero palinsesto della lega.
+      // 120' e' anche cio' che rende pagabile il primo checkpoint di refetch
+      // (T-120'). Sostituisce ORACLE_PICK_WINDOW_H (orizzonte a ore, rimosso
+      // il 03/10/2026).
       ORACLE_FETCH_WINDOW_MIN: preserve(),
       ORACLE_LEAGUES_PER_PASS: preserve(),
       // Fetch ON-DEMAND (05/10/2026, `line_oracle.fetch_for_pick`): quando il
@@ -320,6 +322,17 @@ export default defineRailway(() => {
       // esplicito 0/false/no/off). Spegne l'UNICA spesa aggiuntiva possibile del
       // gate a linea senza toccare il resto dell'oracolo.
       ORACLE_ONDEMAND_ENABLED: preserve(),
+      // Stato PERSISTENTE dei checkpoint di refetch (05/10/2026): per ogni
+      // partita ricorda quale tentativo (T-120'/T-70') e' gia' stato onorato,
+      // cosi' un mercato che Pinnacle non pubblica non viene richiesto a ogni
+      // ciclo di 60s (fino a 1440 richieste/giorno sulla stessa partita).
+      ORACLE_CHECKPOINT_STATE: preserve(),
+      // Pre-filtro SX del candidato PRIMA di qualunque spesa oracolo
+      // (05/10/2026, `auto_bet._sx_prefilter`): quota fuori dalla fascia
+      // giocabile o profondita' SX insufficiente sulla leg giocata -> il pick
+      // non e' ordinabile, quindi non si paga l'EV per conoscerlo. Soglia in
+      // USDC (default 20.0).
+      SX_PREFILTER_MIN_DEPTH_USDC: preserve(),
     },
   });
 

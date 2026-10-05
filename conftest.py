@@ -188,6 +188,15 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # logica resta coperta da `test_line_oracle.TestFetchOnDemand`, che lo
     # riaccende esplicitamente con `fetch_line_odds` iniettato.
     monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "0")
+    # Stato dei CHECKPOINT di refetch (05/10/2026): le partite a cui e' gia'
+    # stato onorato il tentativo T-120'/T-70' vivono in un JSON persistente sul
+    # volume. Senza isolamento un test che onora un checkpoint lo segnerebbe
+    # per la PRODUZIONE (e per tutti i test successivi dello stesso processo):
+    # la memo va nella tmp dei test.
+    monkeypatch.setenv("ORACLE_CHECKPOINT_STATE",
+                       str(tmp_path / "oracle_checkpoints.json"))
+    import line_oracle as _lo
+    _lo.reset_checkpoints()
     # Corsia TENNIS (30/09/2026, telemetria): stato e cache dell'oracolo nella
     # tmp. Senza isolamento un `scan()` di test scriverebbe il file di stato e
     # (soprattutto) le cache `toa_tennis_*.json` nella cartella dati REALE, da

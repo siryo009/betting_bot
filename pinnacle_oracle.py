@@ -1239,7 +1239,7 @@ def scan_cache(cache_dir: Optional[Path] = None, *,
 def _fetch_window_min() -> int:
     """Finestra (minuti) della query `/odds`: la STESSA dell'oracolo a linea.
 
-    Delega a `odds_api.oracle_fetch_window_min()` (default 70 minuti, env
+    Delega a `odds_api.oracle_fetch_window_min()` (default 120 minuti, env
     `ORACLE_FETCH_WINDOW_MIN`) invece di duplicare la soglia: se i due
     percorsi usassero finestre diverse, un ramo scaricherebbe partite che
     l'altro non considera. Import PIGRO (il modulo resta leggero all'import)
@@ -1249,7 +1249,7 @@ def _fetch_window_min() -> int:
         from odds_api import oracle_fetch_window_min
         return int(oracle_fetch_window_min())
     except Exception:                                            # pragma: no cover
-        return 70
+        return 120
 
 
 def fetch_pinnacle_payload(sport_key: str, *, minutes_ahead: Optional[int] = None,

@@ -72,12 +72,12 @@ def test_oracle_a_linea_budget_e_cache_dedicate():
     import odds_api
     assert odds_api.ORACLE_MARKETS_LIST == "h2h,totals,spreads"
     assert odds_api.ORACLE_BUDGET_DAY >= 1
-    # Finestra di fetch a 70 minuti (03/10/2026) e TTL ALLINEATA: non piu' 24h.
-    # Una cache scritta su una finestra stretta non copre la giornata, quindi
-    # non puo' restare "fresca" 24h (sarebbe valida ma vuota dei match in
+    # Finestra di fetch a 120 minuti (05/10/2026, era 70) e TTL ALLINEATA: non
+    # piu' 24h. Una cache scritta su una finestra stretta non copre la giornata,
+    # quindi non puo' restare "fresca" 24h (sarebbe valida ma vuota dei match in
     # ingresso in finestra esecutiva).
-    assert odds_api.oracle_fetch_window_min() == 70
-    assert odds_api.oracle_cache_ttl_s() == 70 * 60
+    assert odds_api.oracle_fetch_window_min() == 120
+    assert odds_api.oracle_cache_ttl_s() == 120 * 60
     assert odds_api.ORACLE_CACHE_PREFIX == "toao_"
     # la cache oracolo NON e' la cache di ricerca
     assert odds_api.ORACLE_CACHE_PREFIX != ""

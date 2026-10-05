@@ -772,7 +772,9 @@ class TestFinestraFetchQuery:
         captured = self._capture(monkeypatch)
         assert po.fetch_pinnacle_payload("soccer_usa_mls")["status"] == 200
         span = self._span_minutes(captured)
-        assert 69.0 <= span <= 71.0, span
+        # Finestra di fetch 120' dal 05/10/2026 (era 70): il primo checkpoint di
+        # refetch e' a T-120', quindi la query deve arrivarci.
+        assert 119.0 <= span <= 121.0, span
 
     def test_minutes_ahead_esplicito_vince(self, monkeypatch):
         captured = self._capture(monkeypatch)

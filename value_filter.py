@@ -80,6 +80,27 @@ def ev_min_for_market(market: str | None) -> float:
 ODDS_MIN = 1.30          # quota minima: sotto, il ritorno non paga il rischio
 ODDS_MAX = 1.80          # quota massima: sopra e' "pantano" o sfavorita
 
+
+def odds_in_band(price, *, odds_min: float | None = None,
+                 odds_max: float | None = None) -> bool:
+    """True se la quota e' nella fascia giocabile (bordi INCLUSI).
+
+    UNICA definizione del confronto di fascia: la usano il pre-filtro SX di
+    `auto_bet` (che decide se PAGARE l'oracolo a linea, 05/10/2026) e la
+    diagnostica. I benchmark "quota entro ODDS_MIN..ODDS_MAX" sparsi nei
+    moduli non devono piu' essere riscritti a mano: una fascia, un posto.
+
+    FAIL-CLOSED su un valore assente o non numerico: una quota che non si sa
+    leggere NON e' nella fascia (non e' una quota giocabile).
+    """
+    try:
+        val = float(price)
+    except (TypeError, ValueError):
+        return False
+    lo = ODDS_MIN if odds_min is None else float(odds_min)
+    hi = ODDS_MAX if odds_max is None else float(odds_max)
+    return lo <= val <= hi
+
 # === DINAMIC KELLY ===
 # Stake proporzionale all'edge: piu' EV = piu' stake, meno rischio
 def dynamic_kelly(ev: float, max_ev: float = EV_MAX,
@@ -288,6 +309,22 @@ def league_allowed(league: str = "") -> bool:
     league = canonical_league(league)
     return bool(league and (league in STRATEGY_LEAGUES
                             or league in PROBATION_LEAGUES))
+
+
+def is_core_league(league: str = "") -> bool:
+    """True SOLO per le leghe Tier-1/Core (ROI storico misurato positivo).
+
+    Direttiva 05/10/2026 ("League Tiering"): il refetch a PAGAMENTO
+    dell'oracolo a linea e' riservato alle leghe Core. Le leghe in probation
+    (tier-2) restano giocabili ma si valutano SOLO sulla cache passiva: 3
+    crediti di fetch non si spendono su una lega di cui non e' stato ancora
+    misurato un ROI positivo.
+
+    E' la STESSA definizione di `league_tier` (un solo insieme di leghe nel
+    progetto): un nome non canonico viene normalizzato prima del confronto,
+    quindi non si puo' negare una lega Core per come la scrive la fonte.
+    """
+    return league_tier(league) == "core"
 
 
 def compute_ev(prob: float, odds: float) -> float:

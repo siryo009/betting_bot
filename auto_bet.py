@@ -499,20 +499,38 @@ def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
         pass
 
 
+def _oracle_code(info: dict) -> str | None:
+    """Codice della diagnosi del gate: `no_oracle/MISSING_MARKET` -> `MISSING_MARKET`.
+
+    Lo consuma `line_oracle.fetch_for_pick` per la regola dei CHECKPOINT (un
+    mercato mancante si richiede a T-120' e T-70'). Nessun codice ricavabile =
+    None: la funzione che spende NON indovina una causa che non legge.
+    """
+    reason = str((info or {}).get("reason") or "")
+    if "/" not in reason:
+        return None
+    code = reason.split("/", 1)[1].strip()
+    return code or None
+
+
 def _ondemand_fetch(pick: dict, info: dict, enabled: bool) -> str:
     """Avvia la fetch on-demand della lega del pick: ritorna il SUFFISSO di log.
 
     Il budget dell'oracolo a linea e' scarso e CONDIVISO con lo scheduler
-    (`ORACLE_BUDGET_DAY`), e il consumo misurato il 05/10 (33/giorno contro
-    13 sostenibili) non lascia margine per alzarlo: l'unica leva e' SPENDERE
-    MEGLIO. Qui si paga solo quando servirebbe davvero:
+    (`ORACLE_BUDGET_DAY`, 2 leghe/giorno = 6 crediti) e il consumo misurato il
+    05/10 (33/giorno contro 13,1 sostenibili) non lascia margine per alzarlo:
+    l'unica leva e' SPENDERE MEGLIO. Qui si paga solo quando servirebbe davvero:
       - la diagnosi dichiara il caso RECUPERABILE (`recoverable`: dato scaduto
         per il TTL dinamico oppure partita mai scaricata);
+      - la LEGA e' **Tier-1/Core** (`value_filter.is_core_league`, 05/10/2026):
+        il refetch a pagamento non si fa per una lega in probation, che si
+        valuta solo sulla cache passiva;
       - il pick e' nella FINESTRA ESECUTIVA (`pick_window == "within"`): fuori
         finestra il refetch sarebbe speso per una partita non ordinabile oggi
         (il gate gira su tutto il board, non solo sui pick in finestra);
       - il kickoff entra nella FINESTRA DEL PAYLOAD (`ORACLE_FETCH_WINDOW_MIN`,
-        70'): verificato DENTRO `fetch_for_pick`, che rifiuta e lo dichiara.
+        120') e — per `MISSING_MARKET` — siamo su un CHECKPOINT (T-120'/T-70'):
+        verificati DENTRO `fetch_for_pick`, che rifiuta e lo dichiara.
     Nessun credito in piu': `fetch_for_pick` passa da `odds_api.fetch_line_odds`,
     che applica lo STESSO tetto giornaliero dell'altro percorso.
 
@@ -529,8 +547,23 @@ def _ondemand_fetch(pick: dict, info: dict, enabled: bool) -> str:
     try:
         if pick_window(pick) != "within":
             return ""
+        # LEAGUE TIERING (05/10/2026): solo le leghe Core pagano il refetch.
+        # Fail-closed se il tier non e' leggibile: una spesa non autorizzata
+        # non deve passare per un errore di import.
+        try:
+            from value_filter import is_core_league
+            core = bool(is_core_league(str(pick.get("league") or "")))
+        except Exception as exc:
+            logger.debug("auto_bet: tier di lega non leggibile (%s): "
+                         "nessun refetch a pagamento", exc)
+            return (" — fetch on-demand non eseguita: tier di lega non "
+                    "leggibile (fail-closed)")
+        if not core:
+            return (f" — fetch on-demand non eseguita: lega "
+                    f"'{pick.get('league') or '?'}' non Tier-1/Core "
+                    f"(valutazione solo sulla cache passiva)")
         import line_oracle
-        res = line_oracle.fetch_for_pick(pick)
+        res = line_oracle.fetch_for_pick(pick, code=_oracle_code(info))
     except Exception:
         return ""
     if res.get("fetched"):
@@ -1021,6 +1054,236 @@ def required_depth(stake: float) -> float:
         return max(float(stake) * SX_DEPTH_MULTIPLIER, MIN_EXEC_DEPTH_USDC)
     except (TypeError, ValueError):
         return MIN_EXEC_DEPTH_USDC
+
+
+# --- PRE-FILTER SX (05/10/2026, direttiva del proprietario) ----------------
+# PERCHE'. Il gate top-down apre l'oracolo su OGNI candidato del board e,
+# quando il dato a linea manca, puo' anche PAGARE una fetch della lega (3
+# crediti). Per un pick che NON puo' diventare un ordine — quota fuori dalla
+# fascia dei favoriti, o book SX senza la liquidita' per eseguirlo — quella
+# spesa e' certa e il beneficio impossibile: si risponde PRIMA, senza toccare
+# l'oracolo ("zero spreco API").
+#
+# ⚠️ E' un filtro GROSSOLANO e volutamente LENIENTE. La profondita' che legge
+# e' quella del ledger `market_quotes` (TOTALE del book, scritta dall'ingest
+# SX: fino a 15 minuti fa, non il book vivo). La guardia ESATTA resta dove
+# deve stare — `_live_fill` confronta `required_depth(stake)` col book SX al
+# momento dell'ordine — qui serve solo a NON pagare per un pick che il ledger
+# dipinge gia' come non eseguibile.
+#
+# FAIL-OPEN SULLA LETTURA, fail-closed sul dato PRESENTE e insufficiente: se la
+# profondita' non e' nel ledger (e' il caso dell'1X2, che `multi_market` non
+# registra) il pick NON viene scartato — non si boccia un candidato per un dato
+# che non si e' misurato. E' la stessa direzione della guardia di liquidita' a
+# valle ("fail-open sulla lettura, fail-closed sulla size reale").
+SX_PREFILTER_MIN_DEPTH_USDC = float(
+    os.getenv("SX_PREFILTER_MIN_DEPTH_USDC", "20.0"))
+
+
+def _sx_pick_depth(pick: dict) -> float | None:
+    """Profondita' SX (USDC) della leg giocata, dal ledger `market_quotes`.
+
+    None = NON MISURABILE (nessuna riga per quel fixture/mercato, etichetta
+    non agganciata, lettura fallita): mai un numero inventato, perche' chi
+    chiama decide di NON scartare su un dato assente. Il pre-filtro copre OU e
+    AH, le uniche famiglie per cui il ledger porta la profondita'.
+    """
+    try:
+        mid = str(pick.get("match_id") or "")
+        market = str(pick.get("mercato") or "").upper()
+        if not mid or market not in ("OU", "AH"):
+            return None
+        from tracker import get_market_quotes
+        rows = get_market_quotes(fixture_id=mid, market_type=market) or []
+        if not rows:
+            return None
+        # 1) aggancio per ETICHETTA del ledger ('Over 2.5' / 'Home -0.75'): e'
+        #    la stessa stringa che il pick porta in `esito_key`, quindi non
+        #    serve ricostruire lato e linea.
+        label = str(pick.get("esito_key") or "").strip().lower()
+        if label:
+            for row in rows:
+                if str(row.get("selection_label") or "").strip().lower() == label:
+                    return _depth_of(row)
+        # 2) fallback: stessa LINEA, lato risolto dal lato d'ordine.
+        line_key = ""
+        if pick.get("market_line") is not None:
+            try:
+                from multi_market import line_key as _line_key
+                line_key = _line_key(pick.get("market_line"))
+            except Exception:
+                line_key = ""
+        side = str(pick.get("order_side") or "").strip().lower()
+        if market == "OU":
+            selection = {"over": "over", "under": "under"}.get(side)
+        else:
+            selection = {"home": "1", "away": "2"}.get(side)
+        if not selection:
+            return None
+        for row in rows:
+            if line_key and str(row.get("line_key") or "") != line_key:
+                continue
+            if str(row.get("selection") or "").strip().lower() == selection:
+                return _depth_of(row)
+        return None
+    except Exception:
+        return None
+
+
+def _depth_of(row: dict) -> float | None:
+    """`liquidity` di una riga di `market_quotes` come float (None se assente)."""
+    try:
+        return float(row.get("liquidity"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _sx_prefilter(pick: dict) -> dict | None:
+    """SKIP preventivo del candidato: None = passa, dict = si salta.
+
+    Requisiti SX Bet PRIMA dell'oracolo (e prima di qualunque spesa):
+      1. QUOTA nella fascia giocabile (`value_filter.odds_in_band`): fuori
+         fascia il pick non puo' diventare un ordine, quindi pagare l'oracolo
+         per conoscerne l'EV non cambia nulla.
+         ⚠️ Saltato con `TOP_DOWN_BYPASS` attivo: quella corsia esiste PROPRIO
+         per far giudicare il prezzo all'oracolo (fascia volutamente bypassata)
+         e filtrarla qui la spegnerebbe in silenzio.
+      2. LIQUIDITA' SX < `SX_PREFILTER_MIN_DEPTH_USDC` (20 USDC) sulla leg
+         giocata, quando il ledger la misura (OU/AH).
+
+    Il motivo e' machine-readable (`sx_prefilter/<causa>`) e finisce nella
+    telemetria degli scarti (`oracle_skips`), cosi' il costo evitato e' anche
+    contabile. Fail-safe: qualunque errore = nessuno skip (il percorso storico
+    resta intatto).
+    """
+    try:
+        mercato = str(pick.get("mercato") or "1X2").upper()
+        if not TOP_DOWN_BYPASS:
+            from value_filter import odds_in_band, ODDS_MIN, ODDS_MAX
+            price = pick.get("quota")
+            if price is None:
+                price = pick.get("price")
+            if not odds_in_band(price):
+                return {
+                    "reason": "sx_prefilter/quota_fuori_fascia",
+                    "detail": (f"quota {price!r} fuori dalla fascia "
+                               f"{ODDS_MIN:.2f}-{ODDS_MAX:.2f}: nessuna spesa "
+                               f"oracolo (il pick non e' ordinabile)"),
+                    "code": "quota_fuori_fascia",
+                }
+        if mercato in ("OU", "AH"):
+            depth = _sx_pick_depth(pick)
+            if depth is not None and depth < SX_PREFILTER_MIN_DEPTH_USDC:
+                return {
+                    "reason": "sx_prefilter/liquidita_bassa",
+                    "detail": (f"profondita' SX al ledger {depth:.2f} < "
+                               f"{SX_PREFILTER_MIN_DEPTH_USDC:.2f} USDC sulla "
+                               f"leg giocata: nessuna spesa oracolo"),
+                    "code": "liquidita_bassa",
+                }
+        return None
+    except Exception as exc:
+        logger.debug("auto_bet: pre-filtro SX non applicato (%s)", exc)
+        return None
+
+
+def _kickoff_ts(pick: dict) -> float:
+    """Epoch del kickoff del pick (`inf` se ignoto: mai il primo della coda)."""
+    dt = _parse_iso_utc(pick.get("commence") or pick.get("kickoff"))
+    try:
+        return float(dt.timestamp()) if dt is not None else float("inf")
+    except Exception:
+        return float("inf")
+
+
+def _harvest_oracle_board(board: list[dict]) -> dict:
+    """MULTI-MARKET HARVESTING: UN pagamento per lega PRIMA di valutare il board.
+
+    05/10/2026 (direttiva del proprietario). Il fetch on-demand nasce DENTRO il
+    ciclo dei pick: quando scatta per una lega, i pick di quella stessa lega che
+    il board aveva gia' incontrato PRIMA sono stati valutati sulla cache
+    vecchia e scartati (EXPIRED_CACHE), quindi la stessa partita veniva persa
+    per l'ORDINE di scansione e recuperata solo al giro dopo (60s). Con piu' pick
+    sulla stessa lega il costo era comunque pagato: si spendeva una volta e si
+    "irrigavano" solo i pick rimasti dopo.
+
+    Qui il pagamento avviene PRIMA del ciclo: per ogni lega con almeno un pick a
+    linea (OU/AH) in FINESTRA ESECUTIVA, ammesso dalla strategia (Tier-1/Core) e
+    non gia' scartabile dal pre-filtro SX, si fa UNA fetch `h2h,totals,spreads`
+    — il payload copre TUTTI i mercati e TUTTE le partite della finestra di
+    fetch — e TUTTI i pick di quella lega (Over/Under e Asian Handicap, cosi'
+    come li vede il board) vengono poi valutati sullo stesso dato appena
+    scaricato, in un unico passaggio.
+
+    Si paga SOLO quando una fetch puo' cambiare l'esito (`recoverable`: dato
+    scaduto per il TTL dinamico oppure partita mai scaricata). Un motivo NON
+    recuperabile (linea che Pinnacle non prezza, mercato non pubblicato) non
+    spende nulla: pagare non lo farebbe comparire.
+
+    Nessun credito in piu' del tetto: il percorso e' lo STESSO del fetch
+    on-demand (`line_oracle.fetch_for_pick` → budget giornaliero, hard-stop,
+    dedup per lega, finestra di fetch, checkpoint) e il pagamento avviene una
+    volta per lega. Fail-safe: qualunque errore torna come riepilogo vuoto e il
+    ciclo normale prosegue (il percorso storico resta intatto).
+    """
+    out: dict = {"leagues": [], "fetched": 0, "skipped": 0}
+    try:
+        import line_oracle
+        if not line_oracle.ondemand_enabled():
+            return out
+        from value_filter import is_core_league
+        from sx_signals import league_to_sport
+    except Exception as exc:                                     # pragma: no cover
+        logger.debug("auto_bet: harvesting non disponibile (%s)", exc)
+        return out
+    per_sport: dict[str, dict] = {}
+    for pick in board:
+        try:
+            mercato = str(pick.get("mercato") or "").upper()
+            # Il 1X2 legge un'ALTRA cache (la rotazione h2h): il payload
+            # dell'oracolo a linea serve i mercati a LINEA, e la dedup per lega
+            # impedisce comunque di pagare due volte la stessa lega.
+            if mercato not in ("OU", "AH"):
+                continue
+            if pick_window(pick) != "within":
+                continue                     # fuori finestra: non si ordina
+            if not is_core_league(str(pick.get("league") or "")):
+                continue                     # Tier-2/3: solo cache passiva
+            if _sx_prefilter(pick) is not None:
+                continue                     # non ordinabile: nessuna spesa
+            sport = league_to_sport(str(pick.get("league") or ""))
+            if not sport:
+                continue
+            info = _line_skip_reason(pick, mercato, _pick_line(pick))
+            if not info.get("recoverable"):
+                continue
+            ts = _kickoff_ts(pick)
+            cur = per_sport.get(sport)
+            if cur is None or ts < cur["ts"]:
+                per_sport[sport] = {"pick": pick, "ts": ts}
+        except Exception:
+            continue
+    if not per_sport:
+        return out
+    for sport, item in sorted(per_sport.items(), key=lambda kv: kv[1]["ts"]):
+        out["leagues"].append(sport)
+        try:
+            res = line_oracle.fetch_for_pick(item["pick"], code=None)
+        except Exception as exc:                                 # pragma: no cover
+            out["skipped"] += 1
+            logger.debug("auto_bet: harvesting %s fallito (%s)", sport, exc)
+            continue
+        if res.get("fetched"):
+            out["fetched"] += 1
+            logger.info("auto_bet: harvesting %s — %s match scaricati "
+                        "(crediti %s): board rivalutato in questo passaggio",
+                        sport, res.get("matches"), res.get("remaining"))
+        else:
+            out["skipped"] += 1
+            logger.debug("auto_bet: harvesting %s non eseguito: %s",
+                         sport, res.get("reason"))
+    return out
+
 
 # --- Flat-stake override (09/09) ---
 # In alternativa al Kelly dinamico si puo' piazzare un importo FISSO per
@@ -3166,6 +3429,26 @@ def run_today_bets(stake_eur: float | None = None,
         _seen_pick.add(_pk)
         _deduped.append(pick)
     board = _deduped
+
+    # --- MULTI-MARKET HARVESTING (05/10/2026, direttiva del proprietario) ---
+    # UNA fetch a pagamento per lega PRIMA del ciclo di valutazione: il
+    # payload (`h2h,totals,spreads`) copre tutti i mercati e tutte le partite
+    # della finestra, quindi TUTTI i pick di quella lega (OU e AH) vengono
+    # valutati sullo STESSO dato fresco, in un unico passaggio — invece di
+    # scoprire le partite una alla volta e perdere quelle incontrate prima del
+    # pagamento. Il costo segue la stessa disciplina del fetch on-demand
+    # (budget, hard-stop, dedup per lega, checkpoint): nessun credito in piu'.
+    if mode == "live" and TOP_DOWN_EV:
+        try:
+            _harvest = _harvest_oracle_board(board)
+            if _harvest.get("fetched"):
+                logger.info("auto_bet: harvesting oracolo — %s leghe, %s "
+                            "fetch riuscite, %s non eseguite",
+                            len(_harvest.get("leagues") or []),
+                            _harvest.get("fetched"), _harvest.get("skipped"))
+        except Exception as exc:                                 # pragma: no cover
+            logger.debug("auto_bet: harvesting non applicato (%s)", exc)
+
     for pick in board:
         if bet_exists_open(pick["match_id"], pick["esito_key"]):
             logger.debug("auto_bet: puntata gia' aperta per %s (%s), salto",
@@ -3194,6 +3477,23 @@ def run_today_bets(stake_eur: float | None = None,
         if (TOP_DOWN_EV and mode == "live"
                 and str(pick.get("mercato") or "1X2").upper()
                 not in ("ML", "TENNIS")):
+            # --- PRE-FILTER SX (05/10/2026, direttiva del proprietario):
+            # ZERO SPESE PER PICK NON ORDINABILI. Prima di qualunque fetch a
+            # pagamento si verificano i requisiti minimi di SX Bet (quota
+            # nella fascia giocabile, profondita' della leg giocata): se il
+            # pick non puo' diventare un ordine, pagare l'oracolo per
+            # conoscerne l'EV non cambia nulla. Il candidato esce con un
+            # motivo machine-readable (`sx_prefilter/<causa>`) che finisce
+            # nella telemetria degli scarti. Fail-safe: un errore del
+            # pre-filtro = nessuno skip (percorso storico intatto).
+            _pre = _sx_prefilter(pick)
+            if _pre:
+                logger.info("auto_bet: %s (%s) PRE-FILTER SX SKIP [%s]: %s",
+                            pick["match_id"], pick["esito_key"],
+                            _pre.get("reason"), _pre.get("detail") or "")
+                _note_top_down_skip(pick, _pre.get("reason") or "sx_prefilter",
+                                    detail=_pre.get("detail"))
+                continue
             verdict = _top_down_eval(pick, league=pick.get("league"),
                                      fetch_missing=True)
             if not verdict.get("ok"):

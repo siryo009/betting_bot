@@ -42,16 +42,18 @@ ORACLE_MARKETS_LIST = "h2h,totals,spreads"   # 3 crediti a chiamata (eu)
 ORACLE_EXTRA_CREDITS = 2                     # over h2h (1 gia' contato a parte)
 ORACLE_CACHE_PREFIX = "toao_"
 # FINESTRA DI FETCH dell'oracolo a linea, in MINUTI (03/10/2026, direttiva del
-# proprietario). Si ordina SOLO nella finestra esecutiva T-60..T-5: chiedere
-# l'INTERO palinsesto della lega (era 24h) significa scaricare e parsare
-# decine di partite che non entreranno MAI in finestra d'ordine. 70 minuti
-# coprono la finestra con margine.
+# proprietario; 120 dal 05/10/2026). Si ordina SOLO nella finestra esecutiva
+# T-180..T-2: chiedere l'INTERO palinsesto della lega (era 24h) significa
+# scaricare e parsare decine di partite che non entreranno MAI in finestra
+# d'ordine. 120 minuti coprono l'intera finestra esecutiva e sono cio' che
+# rende PAGABILE il primo checkpoint di refetch (T-120': vedi
+# `line_oracle.checkpoint_for`), che con 70' veniva rifiutato a monte.
 # ⚠️ Il costo the-odds-api e' per CHIAMATA, non per evento: restringere la
 # finestra NON riduce i crediti, riduce il PAYLOAD (byte/parsing). Per questo
 # la TTL della cache e' ALLINEATA alla finestra (`oracle_cache_ttl_s()`): una
-# cache da 70 minuti tenuta "fresca" 24h sarebbe valida ma vuota delle
+# cache da 120 minuti tenuta "fresca" 24h sarebbe valida ma vuota delle
 # partite che stanno entrando in finestra.
-ORACLE_FETCH_WINDOW_MIN = 70
+ORACLE_FETCH_WINDOW_MIN = 120
 
 
 def oracle_fetch_window_min() -> int:

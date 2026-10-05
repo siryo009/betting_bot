@@ -25,7 +25,7 @@ Cosa si verifica, senza rete ne' crediti:
 
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -71,9 +71,11 @@ class TestBudgetECacheOracolo:
     def test_costanti_dedicate(self):
         assert odds_api.ORACLE_MARKETS_LIST == "h2h,totals,spreads"
         assert odds_api.ORACLE_EXTRA_CREDITS == 2
-        # TTL allineata alla FINESTRA di fetch (03/10/2026), non piu' 24h.
-        assert odds_api.oracle_fetch_window_min() == 70
-        assert odds_api.oracle_cache_ttl_s() == 70 * 60
+        # TTL allineata alla FINESTRA di fetch (03/10/2026), non piu' 24h;
+        # 120 minuti dal 05/10/2026 (la finestra esecutiva e' T-180..T-2 e il
+        # primo checkpoint di refetch e' a T-120').
+        assert odds_api.oracle_fetch_window_min() == 120
+        assert odds_api.oracle_cache_ttl_s() == 120 * 60
         assert odds_api.ORACLE_CACHE_PREFIX == "toao_"
         assert odds_api.ORACLE_BUDGET_DAY >= 1
 
@@ -187,10 +189,10 @@ class TestFinestraFetch:
     evento: la finestra stretta riduce il PAYLOAD, non i crediti.
     """
 
-    def test_default_70_minuti(self, monkeypatch):
+    def test_default_120_minuti(self, monkeypatch):
         monkeypatch.delenv("ORACLE_FETCH_WINDOW_MIN", raising=False)
-        assert odds_api.oracle_fetch_window_min() == 70
-        assert odds_api.oracle_cache_ttl_s() == 70 * 60
+        assert odds_api.oracle_fetch_window_min() == 120
+        assert odds_api.oracle_cache_ttl_s() == 120 * 60
 
     def test_env_cambia_la_finestra(self, monkeypatch):
         monkeypatch.setenv("ORACLE_FETCH_WINDOW_MIN", "30")
@@ -200,7 +202,7 @@ class TestFinestraFetch:
     def test_env_impossibile_ricade_sul_default(self, monkeypatch):
         for bad in ("", "abc", "0", "-5"):
             monkeypatch.setenv("ORACLE_FETCH_WINDOW_MIN", bad)
-            assert odds_api.oracle_fetch_window_min() == 70, bad
+            assert odds_api.oracle_fetch_window_min() == 120, bad
 
     def test_la_vecchia_costante_24h_e_rimossa(self):
         """Una TTL da 24h su una finestra da 70' e' una bugia: non torni."""
@@ -230,7 +232,7 @@ class TestFinestraFetch:
         assert captured["sport"] == "soccer_a"
         frm = datetime.fromisoformat(captured["frm"].replace("Z", "+00:00"))
         to = datetime.fromisoformat(captured["to"].replace("Z", "+00:00"))
-        assert 69.0 <= (to - frm).total_seconds() / 60.0 <= 71.0
+        assert 119.0 <= (to - frm).total_seconds() / 60.0 <= 121.0
 
     def test_cache_oltre_la_finestra_e_rifatta(self, monkeypatch, tmp_path):
         """80 minuti di eta': NON fresca (a 24h lo sarebbe stata)."""
@@ -597,7 +599,7 @@ class TestTTLDinamico:
         assert po.minutes_to_kickoff("non-una-data", now=now) is None
 
     def test_oracle_cache_ttl_s_delega_la_formula(self):
-        assert odds_api.oracle_cache_ttl_s() == 70 * 60          # senza kickoff
+        assert odds_api.oracle_cache_ttl_s() == 120 * 60         # senza kickoff
         assert odds_api.oracle_cache_ttl_s(minutes_to_kickoff=300) == 30 * 60
         assert odds_api.oracle_cache_ttl_s(minutes_to_kickoff=120) == 5 * 60
         assert odds_api.oracle_cache_ttl_s(minutes_to_kickoff=30) == 2 * 60
@@ -791,7 +793,7 @@ class TestFetchOnDemand:
         assert line_oracle.ondemand_enabled() is True
 
     # Base temporale FISSA con kickoff a +13' (dentro la finestra del payload,
-    # 70'): un kickoff assoluto renderebbe i test dipendenti dall'orologio
+    # 120'): un kickoff assoluto renderebbe i test dipendenti dall'orologio
     # (lezione delle date relative del 15/09 e del 17/09).
     NOW = 1_000_000_000.0
     KICKOFF = "2001-09-09T01:59:40Z"          # NOW + 13 minuti (UTC)
@@ -826,9 +828,9 @@ class TestFetchOnDemand:
         calls = []
         monkeypatch.setattr(oa, "fetch_line_odds",
                             lambda *a, **k: (calls.append(1), ([], 300))[1])
-        # kickoff a +3h: oltre la finestra di fetch (70')
+        # kickoff a +3h (180'): oltre la finestra di fetch (120')
         res = line_oracle.fetch_for_pick(self._pick(
-            commence="2001-09-09T03:40:00Z"), now=self.NOW)
+            commence="2001-09-09T04:46:40Z"), now=self.NOW)
         assert calls == []
         assert res["fetched"] is False
         assert "oltre la finestra di fetch" in res["reason"]
@@ -928,12 +930,13 @@ class TestFetchOnDemand:
         import auto_bet, line_oracle
         paid = []
         monkeypatch.setattr(line_oracle, "fetch_for_pick",
-                            lambda p, now=None: (paid.append(p.get("match_id"))
-                                                 or {"fetched": True,
-                                                     "reason": "x",
-                                                     "sport_key": "soccer_epl",
-                                                     "matches": 1,
-                                                     "remaining": 300}))
+                            lambda p, now=None, code=None: (
+                                paid.append((p.get("match_id"), code))
+                                or {"fetched": True,
+                                    "reason": "x",
+                                    "sport_key": "soccer_epl",
+                                    "matches": 1,
+                                    "remaining": 300}))
         pick = self._pick()
         rec = {"reason": "no_oracle/EXPIRED_CACHE", "recoverable": True}
         nrec = {"reason": "no_oracle/MISSING_MARKET", "recoverable": False}
@@ -954,7 +957,9 @@ class TestFetchOnDemand:
         monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
         extra = auto_bet._ondemand_fetch(pick, rec, True)
         assert "FETCH ON-DEMAND" in extra and "soccer_epl" in extra
-        assert paid == ["m1"]
+        # Il CODICE della diagnosi viaggia col fetch: e' cio' che apre la
+        # regola dei checkpoint per MISSING_MARKET (05/10/2026).
+        assert paid == [("m1", "EXPIRED_CACHE")]
 
     def test_line_skip_reason_propaga_recoverable(self, monkeypatch, tmp_path):
         """La diagnosi del gate porta il campo su cui si decide di PAGARE."""
@@ -981,11 +986,10 @@ class TestFetchOnDemand:
         monkeypatch.setattr(po, "h2h_cache_is_stale", lambda *a, **k: True)
         monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
         monkeypatch.setattr(line_oracle, "fetch_for_pick",
-                            lambda p, now=None: {"fetched": True,
-                                                 "reason": "ok",
-                                                 "sport_key": "soccer_epl",
-                                                 "matches": 4,
-                                                 "remaining": 300})
+                            lambda p, now=None, code=None: {
+                                "fetched": True, "reason": "ok",
+                                "sport_key": "soccer_epl", "matches": 4,
+                                "remaining": 300})
         v = auto_bet._top_down_eval(self._pick(), fetch_missing=True)
         assert v["reason"] == "no_oracle/EXPIRED_CACHE"
         assert "FETCH ON-DEMAND" in v["detail"]
@@ -998,6 +1002,274 @@ class TestFetchOnDemand:
         assert sig.parameters["fetch_missing"].default is False
         src = Path("auto_bet.py").read_text()
         assert "fetch_missing=True" in src
+
+
+# ---------------------------------------------------------------------------
+# 3c. CHECKPOINT di refetch per MISSING_MARKET (05/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestCheckpointRefetch:
+    """Un mercato che Pinnacle non pubblica non si richiede a ogni ciclo di 60s.
+
+    Senza freno il gate lo ri-chiede OGNI volta su una partita in finestra
+    (fino a 1440 richieste/giorno sulla stessa partita): due soli checkpoint,
+    T-120' e T-70', con stato PERSISTENTE sul volume (un redeploy non riapre
+    la spesa).
+    """
+
+    NOW = 1_000_000_000.0
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch, tmp_path):
+        import line_oracle
+        monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "1")
+        monkeypatch.setenv("ORACLE_CHECKPOINT_STATE",
+                           str(tmp_path / "cp.json"))
+        line_oracle.reset_checkpoints()
+        line_oracle.reset_ondemand_dedup()
+        yield
+        line_oracle.reset_checkpoints()
+        line_oracle.reset_ondemand_dedup()
+
+    def _pick(self, minutes: float, **kw) -> dict:
+        ko = (datetime.fromtimestamp(self.NOW + minutes * 60,
+                                     tz=timezone.utc)
+              .strftime("%Y-%m-%dT%H:%M:%SZ"))
+        d = {"match_id": "m1", "home": "Arsenal", "away": "Everton",
+             "mercato": "OU", "esito_key": "Over 2.5", "quota": 2.10,
+             "league": "Premier League", "commence": ko}
+        d.update(kw)
+        return d
+
+    def test_checkpoint_for_apre_solo_t120_e_t70(self):
+        import line_oracle
+        assert line_oracle.checkpoint_for(180) is None      # troppo presto
+        assert line_oracle.checkpoint_for(121) is None
+        assert line_oracle.checkpoint_for(120) == "T-120"
+        assert line_oracle.checkpoint_for(100) == "T-120"
+        assert line_oracle.checkpoint_for(70) == "T-70"
+        assert line_oracle.checkpoint_for(30) == "T-70"
+        assert line_oracle.checkpoint_for(0) is None        # gia' iniziata
+        assert line_oracle.checkpoint_for(None) is None
+        assert line_oracle.checkpoint_for("x") is None
+
+    def test_missing_market_oltre_la_finestra_non_paga(self, monkeypatch):
+        """A T-150 si esce PRIMA dei checkpoint: fuori dalla finestra di fetch."""
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: (calls.append(1), ([], 300))[1])
+        res = line_oracle.fetch_for_pick(self._pick(150),
+                                         now=self.NOW,
+                                         code="MISSING_MARKET")
+        assert res["fetched"] is False and calls == []
+        assert "oltre la finestra di fetch" in res["reason"]
+
+    def test_missing_market_prima_del_checkpoint_non_paga(self, monkeypatch):
+        """Con una finestra di fetch piu' larga il freno e' il CHECKPOINT.
+
+        `T-120'` e' il primo tentativo ammesso: sopra quella soglia (qui resa
+        raggiungibile con `ORACLE_FETCH_WINDOW_MIN=180`) il mercato mancante
+        non e' ancora da chiedere — Pinnacle non ha ancora pubblicato.
+        """
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setenv("ORACLE_FETCH_WINDOW_MIN", "180")
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: (calls.append(1), ([], 300))[1])
+        res = line_oracle.fetch_for_pick(self._pick(150),
+                                         now=self.NOW,
+                                         code="MISSING_MARKET")
+        assert res["fetched"] is False and calls == []
+        assert "checkpoint non aperto" in res["reason"]
+
+    def test_missing_market_paga_una_volta_per_checkpoint(self, monkeypatch):
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: (calls.append(1), ([{"id": "m"}], 300))[1])
+        # T-100: primo tentativo (checkpoint T-120) -> si paga
+        r1 = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                        code="MISSING_MARKET")
+        assert r1["fetched"] is True and r1["checkpoint"] == "T-120"
+        # secondo giro (stessa partita, checkpoint NON ancora scaduto): zero HTTP
+        r2 = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                        code="MISSING_MARKET")
+        assert r2["fetched"] is False and "gia' onorato" in r2["reason"]
+        assert len(calls) == 1
+        # a T-60 si apre il SECONDO (e ultimo) checkpoint: si paga ancora
+        # (la dedup per lega e' azzerata: in produzione i due tentativi
+        # distano ~50 minuti, qui tutti i giri sono allo stesso istante).
+        line_oracle.reset_ondemand_dedup()
+        r3 = line_oracle.fetch_for_pick(self._pick(60), now=self.NOW,
+                                        code="MISSING_MARKET")
+        assert r3["checkpoint"] == "T-70" and r3["fetched"] is True
+        assert len(calls) == 2
+        # ...e da li' in poi MAI piu'
+        line_oracle.reset_ondemand_dedup()
+        r4 = line_oracle.fetch_for_pick(self._pick(30), now=self.NOW,
+                                        code="MISSING_MARKET")
+        assert r4["fetched"] is False and len(calls) == 2
+        assert "gia' onorato" in r4["reason"]
+
+    def test_il_tentativo_si_consuma_anche_con_payload_vuoto(self, monkeypatch):
+        """La regola e' "due tentativi", non "due riusciti"."""
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: (calls.append(1), ([], 300))[1])
+        r1 = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                        code="MISSING_MARKET")
+        assert r1["fetched"] is False and r1["checkpoint"] == "T-120"
+        r2 = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                        code="MISSING_MARKET")
+        assert "gia' onorato" in r2["reason"] and len(calls) == 1
+
+    def test_errore_di_rete_non_consuma_il_checkpoint(self, monkeypatch):
+        """Un errore transitorio non deve bruciare il tentativo."""
+        import line_oracle, odds_api as oa
+        state = {"n": 0}
+
+        def _boom(*a, **k):
+            state["n"] += 1
+            raise RuntimeError("rete giu")
+
+        monkeypatch.setattr(oa, "fetch_line_odds", _boom)
+        r1 = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                        code="MISSING_MARKET")
+        assert "errore fetch" in r1["reason"]
+        line_oracle.reset_ondemand_dedup()
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: ([{"id": "m"}], 300))
+        r2 = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                        code="MISSING_MARKET")
+        assert r2["fetched"] is True and r2["checkpoint"] == "T-120"
+
+    def test_le_cause_diverse_da_missing_market_restano_libere(self, monkeypatch):
+        """`EXPIRED_CACHE` = il dato esiste e va solo rinfrescato: nessun freno."""
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: (calls.append(1), ([{"id": "m"}], 300))[1])
+        for _ in range(3):
+            line_oracle.reset_ondemand_dedup()
+            line_oracle.fetch_for_pick(self._pick(50), now=self.NOW,
+                                       code="EXPIRED_CACHE")
+        assert len(calls) == 3
+
+    def test_stato_persistente_su_file(self, monkeypatch, tmp_path):
+        """Un redeploy non riapre la spesa: lo stato vive sul volume."""
+        import line_oracle, odds_api as oa
+        path = tmp_path / "cp.json"
+        monkeypatch.setenv("ORACLE_CHECKPOINT_STATE", str(path))
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: ([{"id": "m"}], 300))
+        line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                   code="MISSING_MARKET")
+        assert path.exists()
+        line_oracle.reset_checkpoints()          # simula un processo nuovo
+        assert line_oracle.checkpoint_honoured("m1") == "T-120"
+        res = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                         code="MISSING_MARKET")
+        assert res["fetched"] is False and "gia' onorato" in res["reason"]
+
+    def test_stato_corrotto_non_impedisce_e_non_propaga(self, monkeypatch,
+                                                        tmp_path):
+        import line_oracle
+        path = tmp_path / "cp.json"
+        path.write_text("non-json", encoding="utf-8")
+        monkeypatch.setenv("ORACLE_CHECKPOINT_STATE", str(path))
+        line_oracle.reset_checkpoints()
+        assert line_oracle.checkpoint_honoured("m1") is None
+
+    def test_default_state_dentro_data_dir(self, monkeypatch):
+        import line_oracle
+        monkeypatch.delenv("ORACLE_CHECKPOINT_STATE", raising=False)
+        assert "oracle_checkpoints.json" in str(line_oracle.checkpoint_state_path())
+
+    def test_mark_senza_match_o_label_non_scrive(self, monkeypatch, tmp_path):
+        import line_oracle
+        path = tmp_path / "cp.json"
+        monkeypatch.setenv("ORACLE_CHECKPOINT_STATE", str(path))
+        line_oracle.mark_checkpoint("", "T-120")
+        line_oracle.mark_checkpoint("m1", None)
+        assert not path.exists()
+
+
+# ---------------------------------------------------------------------------
+# 3d. LEAGUE TIERING sul refetch a pagamento (05/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestLeagueTiering:
+    """Il refetch a PAGAMENTO e' riservato alle leghe Tier-1/Core.
+
+    Le leghe in probation restano giocabili ma si valutano SOLO sulla cache
+    passiva: 3 crediti non si spendono su un campionato di cui non e' ancora
+    stato misurato un ROI positivo.
+    """
+
+    def _pick(self, league):
+        return {"match_id": "m1", "home": "A", "away": "B", "mercato": "OU",
+                "esito_key": "Over 2.5", "quota": 2.0, "league": league}
+
+    def test_lega_core_paga(self, monkeypatch):
+        import auto_bet, line_oracle
+        paid = []
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        monkeypatch.setattr(line_oracle, "fetch_for_pick",
+                            lambda p, now=None, code=None: (
+                                paid.append(p["league"])
+                                or {"fetched": True, "reason": "ok",
+                                    "sport_key": "soccer_epl", "matches": 1,
+                                    "remaining": 300}))
+        rec = {"reason": "no_oracle/EXPIRED_CACHE", "recoverable": True}
+        out = auto_bet._ondemand_fetch(self._pick("Premier League"), rec, True)
+        assert "FETCH ON-DEMAND" in out and paid == ["Premier League"]
+
+    def test_lega_in_probation_non_paga_e_lo_dichiara(self, monkeypatch):
+        import auto_bet, line_oracle
+        paid = []
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        monkeypatch.setattr(line_oracle, "fetch_for_pick",
+                            lambda p, now=None, code=None: (
+                                paid.append(1)
+                                or {"fetched": True, "reason": "ok"}))
+        rec = {"reason": "no_oracle/EXPIRED_CACHE", "recoverable": True}
+        out = auto_bet._ondemand_fetch(self._pick("Liga MX"), rec, True)
+        assert "non Tier-1/Core" in out and "cache passiva" in out
+        assert paid == []
+
+    def test_lega_vietata_non_paga(self, monkeypatch):
+        import auto_bet, line_oracle
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        monkeypatch.setattr(line_oracle, "fetch_for_pick",
+                            lambda p, now=None, code=None: {"fetched": True})
+        rec = {"reason": "no_oracle/EXPIRED_CACHE", "recoverable": True}
+        out = auto_bet._ondemand_fetch(self._pick("Serie A"), rec, True)
+        assert "non Tier-1/Core" in out
+
+    def test_tier_non_leggibile_non_paga(self, monkeypatch):
+        """Fail-closed: una spesa non autorizzata non passa per un import rotto."""
+        import builtins
+        import auto_bet, line_oracle
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        real_import = builtins.__import__
+
+        def _fake_import(name, *a, **k):
+            if name == "value_filter":
+                raise ImportError("rotto")
+            return real_import(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+        rec = {"reason": "no_oracle/EXPIRED_CACHE", "recoverable": True}
+        out = auto_bet._ondemand_fetch(self._pick("Premier League"), rec, True)
+        assert "tier di lega non leggibile" in out
+
+    def test_is_core_league_allineato_a_league_tier(self):
+        from value_filter import is_core_league, league_tier
+        for lega in ("Premier League", "Bundesliga", "Liga MX", "Serie A",
+                     "Lega Inventata", ""):
+            assert is_core_league(lega) is (league_tier(lega) == "core")
 
 
 # ---------------------------------------------------------------------------
@@ -1036,6 +1308,7 @@ class TestTripwire:
         for env in ("ORACLE_ENABLED", "ORACLE_BUDGET_DAY",
                     "ORACLE_FETCH_WINDOW_MIN", "ORACLE_LEAGUES_PER_PASS",
                     "ORACLE_ONDEMAND_DEDUP_S", "ORACLE_ONDEMAND_ENABLED",
+                    "ORACLE_CHECKPOINT_STATE",
                     "PINNACLE_TTL_LONG_MIN", "PINNACLE_TTL_MID_MIN",
                     "PINNACLE_TTL_SHORT_MIN"):
             assert env in src, f"{env} non dichiarata in preserve() IaC"

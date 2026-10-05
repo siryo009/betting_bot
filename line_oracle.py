@@ -18,16 +18,18 @@ FOLLOW-THE-MONEY:
   fetch (`odds_api.oracle_cache_ttl_s()`), budget giornaliero dedicato
   (`ORACLE_BUDGET_DAY`) e hard-stop crediti rispettati.
 
-FINESTRA DI FETCH (03/10/2026, direttiva del proprietario). Si ordina SOLO
-nella finestra esecutiva T-60..T-5: query e selezione usano la STESSA finestra
-(`odds_api.ORACLE_FETCH_WINDOW_MIN`, default **70 minuti**), quindi si scarica
-e si parsa solo cio' che puo' diventare un ordine — non l'intero palinsesto
-della lega (era 24h). ⚠️ Il costo the-odds-api e' per CHIAMATA, non per
-evento: restringere la finestra non riduce i crediti, riduce il payload.
+FINESTRA DI FETCH (03/10/2026, direttiva del proprietario; 120 minuti dal
+05/10/2026). Si ordina SOLO nella finestra esecutiva T-180..T-2: query e
+selezione usano la STESSA finestra (`odds_api.ORACLE_FETCH_WINDOW_MIN`, default
+**120 minuti**), quindi si scarica e si parsa solo cio' che puo' diventare un
+ordine — non l'intero palinsesto della lega (era 24h). ⚠️ Il costo the-odds-api
+e' per CHIAMATA, non per evento: restringere la finestra non riduce i crediti,
+riduce il payload. I 120 minuti sono anche cio' che rende PAGABILE il primo
+checkpoint di refetch (T-120'): con 70' la fetch veniva rifiutata a monte.
 
 Costo atteso misurato: ~118 crediti/mese con la finestra larga; con la
-finestra a 70 minuti il tetto resta `ORACLE_BUDGET_DAY` x 3 crediti/giorno
-(in produzione 3 x 3 = 9). La DIAGONALE `line_true_probs` (e' in
+finestra stretta il tetto resta `ORACLE_BUDGET_DAY` x 3 crediti/giorno
+(in produzione 2 x 3 = 6). La DIAGONALE `line_true_probs` (e' in
 `pinnacle_oracle`) resta sempre a costo ZERO: legge solo le cache.
 
 GARANZIE (tripwire in `test_line_oracle.py`):
@@ -64,7 +66,7 @@ def _window_h() -> float:
     UNA sola definizione (03/10/2026, direttiva del proprietario): si ordina
     solo nella finestra esecutiva T-60..T-5, quindi non ha senso pagare (ne'
     scaricare) le partite che entreranno in finestra fra mezza giornata.
-    Delegare a `odds_api.oracle_fetch_window_min()` (default 70 minuti, env
+    Delegare a `odds_api.oracle_fetch_window_min()` (default 120 minuti, env
     `ORACLE_FETCH_WINDOW_MIN`) impedisce che selezione dei pick e query HTTP
     usino orizzonti diversi: pagheremmo leghe le cui partite non entrano
     nell'intervallo scaricato (e salteremmo leghe che hanno pick in finestra).
@@ -73,7 +75,7 @@ def _window_h() -> float:
         import odds_api as oa
         return oa.oracle_fetch_window_min() / 60.0
     except Exception:                                            # pragma: no cover
-        return 70 / 60.0
+        return 120 / 60.0
 
 
 def budget_credits_per_day() -> float:
@@ -270,7 +272,7 @@ def ensure_oracle_payloads(max_leagues: Optional[int] = None
 # finire su una lega i cui pick non sono ordinabili (finestra T-180..T-2 non
 # ancora aperta) mentre il pick che sta per diventare un ordine resta con la
 # cache scaduta per il TTL dinamico -> `no_oracle/EXPIRED_CACHE` per sempre
-# (misurato in produzione il 05/10/2026: 11 pick/ciclo, tutti scaduti a 17'.
+# (misurato in produzione il 05/10/2026: 11 pick/ciclo, tutti scaduti a 17'
 # con TTL 2').
 #
 # COME. Il gate, quando incontra `EXPIRED_CACHE` su un pick IN FINESTRA,
@@ -278,6 +280,14 @@ def ensure_oracle_payloads(max_leagues: Optional[int] = None
 # successivo (60s) la cache e' fresca e la valutazione passa. Nessun credito
 # in piu' del tetto giornaliero: entrambi i percorsi passano per
 # `odds_api.fetch_line_odds`, che porta budget, hard-stop e `ORACLE_ENABLED`.
+#
+# 05/10/2026 — DUE FRENI AGGIUNTI (direttiva del proprietario):
+# 1. LEAGUE TIERING: il refetch a PAGAMENTO e' riservato alle leghe Tier-1/Core
+#    (`auto_bet._ondemand_fetch`, che e' l'unico chiamante). Le leghe in
+#    probation si valutano SOLO sulla cache passiva: 3 crediti non si spendono
+#    su un campionato di cui non e' ancora stato misurato un ROI positivo.
+# 2. CHECKPOINT su `MISSING_MARKET` (qui sotto): un mercato non pubblicato si
+#    richiede a T-120' e a T-70', non a ogni ciclo di 60s.
 _ONDEMAND_DEFAULT_DEDUP_S = 120.0
 _last_ondemand: Dict[str, float] = {}
 
@@ -326,19 +336,161 @@ def ondemand_enabled() -> bool:
     return raw not in ("0", "false", "no", "off", "disabled")
 
 
+# ---------------------------------------------------------------------------
+# CHECKPOINT DI REFETCH per MISSING_MARKET (05/10/2026, direttiva del proprietario)
+# ---------------------------------------------------------------------------
+# Un mercato che Pinnacle non ha pubblicato (MISSING_MARKET) non manca perche'
+# il dato sia scaduto: manca perche' lo si e' chiesto troppo presto. Senza un
+# freno il gate lo ri-chiede a OGNI ciclo di 60s (fino a 1440 richieste al
+# giorno per la stessa partita) bruciando il budget su un mercato che potrebbe
+# non arrivare mai. Due soli checkpoint, T-120' e T-70': quando la partita
+# scende sotto le 2 ore UNA richiesta, quando scende sotto i 70 minuti UNA
+# seconda. Stato PERSISTENTE sul volume: un redeploy non riapre la spesa.
+_CHECKPOINT_T120_MIN = 120.0
+_CHECKPOINT_T70_MIN = 70.0
+_CHECKPOINT_MAX_AGE_S = 7 * 24 * 3600.0
+_CHECKPOINT_MEMO: Dict[str, Any] = {"state": None, "path": None}
+
+
+def checkpoint_state_path():
+    """Path dello stato dei checkpoint (env `ORACLE_CHECKPOINT_STATE`).
+
+    Letto a RUNTIME (non all'import): i test e le diagnostiche lo spostano
+    senza toccare il volume di produzione.
+    """
+    from pathlib import Path
+    raw = (os.getenv("ORACLE_CHECKPOINT_STATE") or "").strip()
+    if raw:
+        return Path(raw)
+    try:
+        from config import DATA_DIR
+        return Path(DATA_DIR) / "decision" / "oracle_checkpoints.json"
+    except Exception:                                            # pragma: no cover
+        return Path("data") / "decision" / "oracle_checkpoints.json"
+
+
+def _read_checkpoint_file(path) -> Dict[str, Any]:
+    """Stato dal volume: `{}` se assente o illeggibile (con un warning).
+
+    Un file corrotto NON e' un motivo per pagare: la memo in-process continua
+    a valere, quindi il caso peggiore e' una richiesta per checkpoint per
+    processo (mai un ciclo di 60s che paga).
+    """
+    try:
+        from pathlib import Path
+        raw = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning("line_oracle: stato checkpoint illeggibile (%s)", exc)
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        logger.warning("line_oracle: stato checkpoint non JSON (%s)", exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key, val in data.items():
+        if isinstance(val, dict):
+            label = str(val.get("checkpoint") or "")
+            ts = val.get("ts")
+        else:
+            label, ts = str(val or ""), None
+        if label:
+            out[str(key)] = (label, ts)
+    return out
+
+
+def _checkpoint_memo() -> Dict[str, Any]:
+    """Memo in-process, ricaricata se il PATH e' cambiato (isolamento test)."""
+    path = str(checkpoint_state_path())
+    if _CHECKPOINT_MEMO["state"] is None or _CHECKPOINT_MEMO["path"] != path:
+        _CHECKPOINT_MEMO["path"] = path
+        _CHECKPOINT_MEMO["state"] = _read_checkpoint_file(path)
+    return _CHECKPOINT_MEMO["state"]
+
+
+def _write_checkpoint_file(path, state: Dict[str, Any]) -> None:
+    """Scrittura ATOMICA (tmp + os.replace); un errore non propaga."""
+    try:
+        from pathlib import Path
+        now = time.time()
+        payload = {k: {"checkpoint": v[0], "ts": v[1]}
+                   for k, v in state.items()
+                   if isinstance(v, (tuple, list)) and len(v) >= 1
+                   and (v[1] is None or now - float(v[1]) <= _CHECKPOINT_MAX_AGE_S)}
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, target)
+    except Exception as exc:
+        logger.debug("line_oracle: stato checkpoint non scritto (%s)", exc)
+
+
+def checkpoint_for(minutes_to_kickoff: Optional[float]) -> Optional[str]:
+    """Checkpoint di refetch aperto ADESSO (None = troppo presto).
+
+    `T-70` sotto i 70 minuti, `T-120` fino a 2 ore, `None` oltre: la prima
+    richiesta ammessa e' quella del checkpoint T-120 (per questo la finestra
+    di fetch deve arrivare a 120', `odds_api.ORACLE_FETCH_WINDOW_MIN`).
+    """
+    try:
+        mtk = float(minutes_to_kickoff)                          # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if mtk <= 0 or mtk > _CHECKPOINT_T120_MIN:
+        return None
+    return "T-70" if mtk <= _CHECKPOINT_T70_MIN else "T-120"
+
+
+def checkpoint_honoured(match_id: Any) -> Optional[str]:
+    """Checkpoint gia' onorato per quella partita (None = nessuno)."""
+    key = str(match_id or "").strip()
+    if not key:
+        return None
+    entry = _checkpoint_memo().get(key)
+    if isinstance(entry, (tuple, list)) and entry:
+        return str(entry[0])
+    return str(entry) if isinstance(entry, str) else None
+
+
+def mark_checkpoint(match_id: Any, label: Optional[str]) -> None:
+    """Segna il checkpoint come onorato (partita -> etichetta)."""
+    key = str(match_id or "").strip()
+    if not key or not label:
+        return
+    state = _checkpoint_memo()
+    state[key] = (str(label), time.time())
+    _write_checkpoint_file(checkpoint_state_path(), state)
+
+
+def reset_checkpoints() -> None:
+    """Azzera la memo in-process (test e diagnostica: nessun altro uso)."""
+    _CHECKPOINT_MEMO["state"] = None
+    _CHECKPOINT_MEMO["path"] = None
+
+
 def fetch_for_pick(pick: Dict[str, Any],
-                   now: Optional[float] = None) -> Dict[str, Any]:
+                   now: Optional[float] = None,
+                   code: Optional[str] = None) -> Dict[str, Any]:
     """Paga ORA la fetch `h2h,totals,spreads` della lega di QUESTO pick.
 
     Ritorna SEMPRE un dict con `fetched` (bool) e `reason` machine-readable:
     `fetch on-demand eseguita` | `dedup (...)` | `lega non mappata` |
     `budget oracolo esaurito` | `hard-stop crediti` | `errore fetch (...)` |
-    `nessun payload (nessuna partita in finestra)`.
+    `nessun payload (nessuna partita in finestra)` | `checkpoint ...`.
 
     Tetti (nessuno aggirabile da qui): budget giornaliero, hard-stop crediti,
     `ORACLE_ENABLED` e `should_query_sport` vivono in `odds_api.fetch_line_odds`
     (l'unico punto HTTP autorizzato del progetto). La dedup per lega e' locale
     al processo; il chiamante verifica la FINESTRA ESECUTIVA prima di invocare.
+
+    `code` e' la DIAGNOSI del gate (`EXPIRED_CACHE`/`MISSING_MARKET`/...). Con
+    `MISSING_MARKET` vale la regola dei CHECKPOINT (T-120'/T-70', 05/10/2026):
+    un mercato non pubblicato si richiede due volte, non a ogni ciclo.
 
     Fail-safe: mai un'eccezione (un problema dell'oracolo non ferma il bot).
     """
@@ -358,7 +510,7 @@ def fetch_for_pick(pick: Dict[str, Any],
                 "sport_key": None}
     ts_now = time.time() if now is None else float(now)
     # FINESTRA DEL PAYLOAD: la query scarica `now .. now + ORACLE_FETCH_WINDOW_MIN`
-    # (default 70'), quindi una partita a T-170 non entrerebbe nel payload: la
+    # (default 120'), quindi una partita a T-170 non entrerebbe nel payload: la
     # fetch sarebbe 3 crediti buttati e il pick resterebbe senza p_true. Si
     # paga SOLO se il kickoff e' dentro quella finestra (05/10/2026).
     window_min = _window_h() * 60.0
@@ -382,6 +534,27 @@ def fetch_for_pick(pick: Dict[str, Any],
         return {"fetched": False, "sport_key": sport,
                 "reason": (f"kickoff oltre la finestra di fetch "
                            f"({mtk:.0f}' > {window_min:.0f}')")}
+    # CHECKPOINT di refetch per MISSING_MARKET (05/10/2026, direttiva del
+    # proprietario). Un mercato che Pinnacle non pubblica non manca perche' il
+    # dato e' scaduto: manca perche' lo si e' chiesto troppo presto. Senza
+    # freno il gate lo ri-chiede a OGNI ciclo di 60s (fino a 1440 richieste al
+    # giorno sulla stessa partita) bruciando il budget su un mercato che
+    # potrebbe non arrivare mai. Due soli tentativi per partita, a T-120' e a
+    # T-70'; per le cause DIVERSE (es. `EXPIRED_CACHE`) il refresh resta
+    # libero: li' il dato esiste e va solo rinfrescato, e la frequenza la
+    # limitano gia' la dedup per lega e la TTL dinamica del pick.
+    label: Optional[str] = None
+    if code == "MISSING_MARKET":
+        label = checkpoint_for(mtk)
+        if label is None:
+            return {"fetched": False, "sport_key": sport,
+                    "reason": (f"checkpoint non aperto ({mtk:.0f}'): un "
+                               f"mercato mancante si richiede a T-120' e "
+                               f"T-70'")}
+        honoured = checkpoint_honoured(pick.get("match_id") or pick.get("id"))
+        if honoured == label:
+            return {"fetched": False, "sport_key": sport,
+                    "reason": f"checkpoint {label} gia' onorato"}
     dedup = ondemand_dedup_s()
     last = _last_ondemand.get(sport)
     if last is not None and (ts_now - last) < dedup:
@@ -408,14 +581,23 @@ def fetch_for_pick(pick: Dict[str, Any],
     try:
         payload, remaining = oa.fetch_line_odds(sport, frm, to, ttl_s=ttl_s)
     except Exception as exc:
+        # Nessun checkpoint consumato: non sappiamo se la richiesta e' partita
+        # (un errore di rete e' transitorio, un tentativo speso no).
         return {"fetched": False, "reason": f"errore fetch ({exc})",
                 "sport_key": sport}
+    # Il tentativo e' avvenuto: il checkpoint si consuma ANCHE se il payload e'
+    # tornato vuoto (budget finito o nessuna partita nella finestra). La regola
+    # e' "due tentativi", non "due riusciti": un payload vuoto non e' una
+    # ragione per riprovare fra 60 secondi.
+    if label:
+        mark_checkpoint(pick.get("match_id") or pick.get("id"), label)
     if payload:
         return {"fetched": True, "reason": "fetch on-demand eseguita",
                 "sport_key": sport, "matches": len(payload),
-                "remaining": remaining}
+                "remaining": remaining, "checkpoint": label}
     return {"fetched": False, "reason": _no_payload_reason(),
-            "sport_key": sport, "remaining": remaining}
+            "sport_key": sport, "remaining": remaining,
+            "checkpoint": label}
 
 
 def _no_payload_reason() -> str:
