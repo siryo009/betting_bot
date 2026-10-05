@@ -357,6 +357,31 @@ def fetch_for_pick(pick: Dict[str, Any],
         return {"fetched": False, "reason": "lega non mappata a uno sport key",
                 "sport_key": None}
     ts_now = time.time() if now is None else float(now)
+    # FINESTRA DEL PAYLOAD: la query scarica `now .. now + ORACLE_FETCH_WINDOW_MIN`
+    # (default 70'), quindi una partita a T-170 non entrerebbe nel payload: la
+    # fetch sarebbe 3 crediti buttati e il pick resterebbe senza p_true. Si
+    # paga SOLO se il kickoff e' dentro quella finestra (05/10/2026).
+    window_min = _window_h() * 60.0
+    mtk: Optional[float] = None
+    try:
+        import pinnacle_oracle as po
+        mtk = po.minutes_to_kickoff(pick.get("commence") or pick.get("kickoff"),
+                                    now=ts_now)
+    except Exception:                                            # pragma: no cover
+        mtk = None
+    if mtk is None:
+        return {"fetched": False, "sport_key": sport,
+                "reason": "kickoff ignoto: nessuna fetch (fail-closed)"}
+    if mtk < 0:
+        # Partita gia' iniziata: la finestra esecutiva la esclude a monte
+        # (`pick_window`), ma una funzione che spende non si fida del
+        # chiamante (fail-closed, motivo dichiarato).
+        return {"fetched": False, "sport_key": sport,
+                "reason": f"kickoff gia' passato ({mtk:.0f} min): nessuna fetch"}
+    if mtk > window_min:
+        return {"fetched": False, "sport_key": sport,
+                "reason": (f"kickoff oltre la finestra di fetch "
+                           f"({mtk:.0f}' > {window_min:.0f}')")}
     dedup = ondemand_dedup_s()
     last = _last_ondemand.get(sport)
     if last is not None and (ts_now - last) < dedup:
@@ -368,9 +393,7 @@ def fetch_for_pick(pick: Dict[str, Any],
     # sarebbe spesa per un dato che il gate scarterebbe di nuovo.
     ttl_s: Optional[float] = None
     try:
-        import pinnacle_oracle as po
-        ttl_s = float(po.cache_ttl_minutes(po.minutes_to_kickoff(
-            pick.get("commence") or pick.get("kickoff"), now=ts_now)) * 60.0)
+        ttl_s = float(po.cache_ttl_minutes(mtk) * 60.0)
     except Exception:                                            # pragma: no cover
         ttl_s = None
     now_dt = datetime.fromtimestamp(ts_now, tz=timezone.utc)

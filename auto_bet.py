@@ -448,7 +448,11 @@ def _line_skip_reason(pick: dict, mercato: str, line: float | None) -> dict:
             cache_dir=_TOP_DOWN_CACHE_DIR, kickoff=pick.get("commence"))
         code = str((info or {}).get("code") or "MISSING_MARKET")
         detail = str((info or {}).get("detail") or "")
-        return {"reason": f"no_oracle/{code}", "detail": detail}
+        # `recoverable` (05/10/2026): se una fetch della lega puo' cambiare
+        # l'esito. Lo consuma il fetch on-demand; qui si propaga senza
+        # inventarlo (assente -> False, mai una spesa per un motivo ignoto).
+        return {"reason": f"no_oracle/{code}", "detail": detail,
+                "recoverable": bool((info or {}).get("recoverable"))}
     except Exception as exc:                                # pragma: no cover
         return {"reason": "no_oracle",
                 "detail": f"Pinnacle assente/incompleto/stantio "
@@ -502,11 +506,13 @@ def _ondemand_fetch(pick: dict, info: dict, enabled: bool) -> str:
     (`ORACLE_BUDGET_DAY`), e il consumo misurato il 05/10 (33/giorno contro
     13 sostenibili) non lascia margine per alzarlo: l'unica leva e' SPENDERE
     MEGLIO. Qui si paga solo quando servirebbe davvero:
-      - motivo `no_oracle/EXPIRED_CACHE` (il dato esiste ma e' piu' vecchio del
-        TTL dinamico: il refetch ha un effetto misurabile);
+      - la diagnosi dichiara il caso RECUPERABILE (`recoverable`: dato scaduto
+        per il TTL dinamico oppure partita mai scaricata);
       - il pick e' nella FINESTRA ESECUTIVA (`pick_window == "within"`): fuori
         finestra il refetch sarebbe speso per una partita non ordinabile oggi
-        (il gate gira su tutto il board, non solo sui pick in finestra).
+        (il gate gira su tutto il board, non solo sui pick in finestra);
+      - il kickoff entra nella FINESTRA DEL PAYLOAD (`ORACLE_FETCH_WINDOW_MIN`,
+        70'): verificato DENTRO `fetch_for_pick`, che rifiuta e lo dichiara.
     Nessun credito in piu': `fetch_for_pick` passa da `odds_api.fetch_line_odds`,
     che applica lo STESSO tetto giornaliero dell'altro percorso.
 
@@ -515,7 +521,10 @@ def _ondemand_fetch(pick: dict, info: dict, enabled: bool) -> str:
     """
     if not enabled:
         return ""
-    if str(info.get("reason") or "") != "no_oracle/EXPIRED_CACHE":
+    # Si paga quando una fetch PUO' cambiare l'esito (`recoverable`): il dato
+    # scaduto e la partita mai scaricata sono recuperabili; il mercato/la linea
+    # non pubblicata da Pinnacle no (pagare non la farebbe comparire).
+    if not info.get("recoverable"):
         return ""
     try:
         if pick_window(pick) != "within":

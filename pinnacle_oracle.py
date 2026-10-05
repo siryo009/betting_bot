@@ -1712,9 +1712,15 @@ def line_oracle_reason(home: str, away: str, *, market_type: str,
       - `MISSING_MARKET` — la partita non e' in nessuna cache, oppure Pinnacle
         non pubblica il mercato: non recuperabile a credito (o non ancora).
 
+    `recoverable` (05/10/2026) dice SE una fetch della lega puo' cambiare
+    l'esito: True per il dato scaduto e per la partita mai scaricata, False
+    quando il mercato/la linea non e' pubblicata (pagare non servirebbe). E'
+    la condizione su cui il gate decide di pagare la fetch on-demand.
+
     Mai eccezioni: qualunque errore ricade su `MISSING_MARKET` con il motivo
     in `detail` (fail-closed, ma dichiarato).
     """
+
     mt = str(market_type or "").strip().upper()
     try:
         status = _oracle_fixture_status(home, away, market_type=mt,
@@ -1722,10 +1728,11 @@ def line_oracle_reason(home: str, away: str, *, market_type: str,
                                        sport_key=sport_key, now=now,
                                        kickoff=kickoff)
     except Exception as exc:                                     # pragma: no cover
-        return {"code": "MISSING_MARKET", "detail": f"lettura cache fallita ({exc})"}
+        return {"code": "MISSING_MARKET", "recoverable": False,
+                "detail": f"lettura cache fallita ({exc})"}
     if status["expired"]:
         ko = status.get("kickoff") or "kickoff ignoto"
-        return {"code": "EXPIRED_CACHE",
+        return {"code": "EXPIRED_CACHE", "recoverable": True,
                 "detail": (f"dato di {status['age_min']:.0f} min > TTL "
                            f"{status['ttl_min']:.0f} min ({ko}): serve un "
                            f"refetch follow-the-money")}
@@ -1741,23 +1748,31 @@ def line_oracle_reason(home: str, away: str, *, market_type: str,
         except Exception:                                    # pragma: no cover
             covered = False
         if covered:
-            return {"code": "EXPIRED_CACHE",
+            return {"code": "EXPIRED_CACHE", "recoverable": True,
                     "detail": "partita coperta dalla cache h2h ma oracolo a "
                               "linea non ancora pagato: serve fetch_line_odds "
                               "(follow-the-money)"}
-        return {"code": "MISSING_MARKET",
+        # Non e' in cache: una fetch della lega PUO' coprirla (l'oracolo a
+        # linea si paga solo per le leghe con pick in finestra, quindi la
+        # maggior parte delle partite non e' mai stata scaricata). `recoverable`
+        # distingue questo caso dal mercato NON pubblicato da Pinnacle, dove
+        # pagare di nuovo non cambierebbe nulla (05/10/2026).
+        return {"code": "MISSING_MARKET", "recoverable": True,
                 "detail": "partita assente dalle cache oracolo"}
     if not status["has_market"]:
-        return {"code": "MISSING_MARKET",
+        return {"code": "MISSING_MARKET", "recoverable": False,
                 "detail": f"Pinnacle non pubblica il mercato {mt}"}
     want = normalize_line_or_none(line)
     if want is not None and want not in _complete_lines(status["books"], mt,
                                                        home, away):
-        return {"code": "LINE_MISMATCH",
+        # Il mercato C'E' e la partita e' in cache: rifetchare non aggiunge la
+        # linea mancante -> non recuperabile (serve un'altra linea o aspettare
+        # che Pinnacle la pubblichi).
+        return {"code": "LINE_MISMATCH", "recoverable": False,
                 "detail": (f"linea {want:g} non prezzata su entrambi i lati "
                            f"da Pinnacle (linee disponibili: "
                            f"{sorted(_complete_lines(status['books'], mt, home, away))})")}
-    return {"code": "MISSING_MARKET",
+    return {"code": "MISSING_MARKET", "recoverable": False,
             "detail": "linea presente ma de-vig impossibile (lato incompleto)"}
 
 
