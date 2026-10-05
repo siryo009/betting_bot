@@ -8974,3 +8974,105 @@ quella chiamata stampava sempre `unknown`).
   beat calcolato su campioni reali con `clv_raw`, payload leggero con 40 righe,
   pick che espone il k dinamico nella banda 0.15-0.25). `npm run build` OK.
 
+
+### Sblocco dei pick AH/OU (`no_oracle`): normalizzazione linee, TTL dinamico, fetch on-demand (05/10/2026)
+
+Direttiva del proprietario: sbloccare i pick validi AH/OU scartati con
+`no_oracle`. Tre interventi richiesti + un quarto scelto dall'agente.
+Commits `efe94ad`, `ec01cab`, `cf9d8e7`, `0c68545`, `dadd9b1` (tutti pushati e
+deployati; deploy finale `87183366`, health 200, A-H tutti bloccanti).
+
+**1) NORMALIZZAZIONE CANONICA DELLE LINEE (`efe94ad`).** Prima del matching le
+linee dei due provider passano per UN'UNICA funzione
+(`pinnacle_oracle.normalize_line` / `normalize_line_or_none`,
+`NORMALIZED_DECIMALS=2`): `'2.50'`, `'+0.25'`, la quarter-line scritta come due
+mezze-linee `'0.0, 0.5'` ora agganciano. `multi_market.parse_line`/`line_key`
+delegano via `_canon_line` (import pigro); `totals_odds_of`/`spreads_odds_of`/
+`oracle_lines` normalizzano il `point` del payload (che, ricordato, sta
+sull'OUTCOME e non sull'oggetto mercato — bug del 30/09).
+
+**2) TTL DINAMICO DELLA CACHE ORACOLO (`efe94ad`).** Il TTL non e' piu' il solo
+tetto fisso a 24h: dipende dal TEMPO AL KICKOFF (`cache_ttl_minutes`), perche'
+un dato di tre ore nella finestra T-180 non e' il mercato.
+
+| tempo al kickoff | TTL |
+|---|---|
+| T > 180' | 30' (`PINNACLE_TTL_LONG_MIN`) |
+| 60' <= T <= 180' | 5' (`PINNACLE_TTL_MID_MIN`) |
+| T < 60' | 2' (`PINNACLE_TTL_SHORT_MIN`) |
+
+`_oracle_fixture_status` applica `min(TTL dinamico, CACHE_MAX_AGE_H*60)` (il
+tetto assoluto resta come ultima rete) e ritorna `found/expired/age_min/ttl_min/
+kickoff/books/has_market`. `odds_api.oracle_cache_ttl_s(minutes_to_kickoff=)`
+e `fetch_line_odds(..., ttl_s=)`; `line_oracle.leagues_needing_fetch` espone
+`ttl_min`/`ttl_s`.
+
+**3) MOTIVI GRANULARI DELLO SCARTO (`efe94ad`).**
+`pinnacle_oracle.line_oracle_reason()` sostituisce il generico "Pinnacle
+assente/incompleto/stantio" con tre sottocause che dicono COSA FARE:
+`no_oracle/EXPIRED_CACHE` (il dato c'e' ma e' oltre il TTL: si rifetcha),
+`no_oracle/LINE_MISMATCH` (Pinnacle prezza il mercato ma non questa linea:
+serve un'altra linea), `no_oracle/MISSING_MARKET` (partita assente o mercato non
+pubblicato).
+
+**4) FETCH ON-DEMAND (`cf9d8e7` + `0c68545`) — il budget segue il pick.**
+Lo scheduler fetcha ogni 30' "per kickoff piu' vicino": con i tier di TTL 2'/5'
+la cache risultava scaduta proprio sui pick in finestra esecutiva. Ora il GATE
+paga la fetch della lega di QUEL pick, con lo STESSO tetto giornaliero
+(`ORACLE_BUDGET_DAY`, **=2 in prod**), speso dove sta per partire un ordine:
+`line_oracle.fetch_for_pick(pick)` + dedup `ORACLE_ONDEMAND_DEDUP_S` (120s) +
+interruttore `ORACLE_ONDEMAND_ENABLED` (default ON); in `auto_bet`:
+`_ondemand_fetch()` e `_top_down_eval(..., fetch_missing=True)` dal solo call
+site live. `conftest.py` e `verify_guardrails.py` spengono la meccanica alla
+fonte.
+
+**5) DUE DIFETTI DI DIAGNOSTICA TROVATI E FIXATI (i test li rendono
+discriminanti, verificati con `git stash`).**
+- `ec01cab`: se l'oracolo **1X2** risponde ma quello **a linea** no, il dict 1X2
+  finiva in `probs` e il pick ricadeva sul generico `LINE_MISMATCH` invece della
+  diagnosi granulare. Fix: variabile locale `_line_probs` per OU/AH.
+- `dadd9b1`: the-odds-api scrive `Central Córdoba`, SX `Central Cordoba
+  Santiago del Estero` — nessuna delle due e' sottostringa dell'altra, quindi la
+  partita risultava ASSENTE e il pick restava `MISSING_MARKET` **dopo** aver
+  pagato la fetch on-demand. `_row_matches` ora ha due stadi (contenimento di
+  stringa, poi `team_names.same_team` con guardia di ambiguita') ed e' l'UNICA
+  definizione condivisa da `_oracle_fixture_status` (percorso a linea) e
+  `_iter_cached_matches` (percorso 1X2), che prima duplicava la sola
+  sottostringa.
+
+**6) EVIDENZA IN PRODUZIONE (container AMS, dopo il deploy `87183366`).**
+Il ledger contiene ENTRAMBE le righe della stessa partita: `e87f6e4b…`
+(the-odds-api, `Deportivo Riestra` / `Central Córdoba`) e `sx-L20161735` (SX,
+`Deportivo Riestra` / `Central Cordoba Santiago del Estero`). Sul container:
+`_oracle_fixture_status('Deportivo Riestra', 'Central Cordoba Santiago del
+Estero', market_type='OU')` → **`found=True, has_market=True`** (prima: assente)
+e il motivo e' la diagnosi corretta
+`EXPIRED_CACHE: dato di 41 min > TTL 2 min (kickoff 19:45): serve un refetch`.
+I log mostrano i motivi granulari (`no_oracle/MISSING_MARKET`,
+`no_oracle/EXPIRED_CACHE`) e il messaggio esplicito
+`fetch on-demand non eseguita: kickoff oltre la finestra di fetch (110' > 70')`.
+
+**7) ⚠️ DUE LIMITI STRUTTURALI RIMASTI APERTI (da decidere, non difetti).**
+- **La finestra di fetch (70') e' piu' STRETTA della finestra esecutiva
+  (T-180..T-2)**: un pick tra T-180 e T-70 riceve `MISSING_MARKET` a ogni giro
+  e l'on-demand rifiuta di pagare (la query non conterrebbe la partita). Non e'
+  allargabile senza far esplodere il budget: con il TTL di 5' nella fascia
+  T-60..180 il gate rifetcherebbe ogni 120s (dedup) = ~90 crediti/ora contro un
+  tetto di 2 leghe/giorno.
+- **Il budget oracolo e' il vincolo vero**: `ORACLE_BUDGET_DAY=2` (6
+  crediti/giorno) mentre il consumo MISURATO e' ~33/giorno contro **13,1/giorno
+  sostenibili** fino al reset (`remaining` 329, `days_to_reset` 26). Il fetch
+  on-demand va lasciato CAPpato: la sua meccanica e' corretta (paga sul pick in
+  finestra) ma il tetto resta basso di proposito.
+
+**8) TEST.** `test_line_oracle.py`: `TestNormalizzazioneLinee`, `TestTTLDinamico`,
+`TestMotiviGranulari`, `TestMatchingNomiTollerante` (5 nuovi: variante di nome
+trovata, diagnosi non piu' "partita assente", suffisso di club, controprova
+"Manchester United vs Manchester City non fuse", percorso 1X2 che usa lo stesso
+matcher) e `TestFetchOnDemand`, piu' il tripwire IaC esteso
+(`PINNACLE_TTL_LONG/MID/SHORT_MIN`, `ORACLE_ONDEMAND_DEDUP_S`,
+`ORACLE_ONDEMAND_ENABLED`). Lotti verdi: line_oracle/pinnacle/multi_market/
+top_down/oracle_skips/ou_exclusion/telemetry/market_quotes_store (410),
+auto_bet (37), auto_bet_live (33), capital_enclosure+exposure_gate+t60+favourites
+(102), secret_hygiene+league_gate+risk_guards (73). `verify_guardrails.py`:
+**A-H tutti bloccano** (exit 0). 0 marker di conflitto, `py_compile` OK.
