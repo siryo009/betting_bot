@@ -687,6 +687,75 @@ class TestMotiviGranulari:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Matching TOLLERANTE dei nomi nel percorso a cache (05/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestMatchingNomiTollerante:
+    """La partita si trova anche se i due provider scrivono il nome diverso.
+
+    Misurato in produzione il 05/10/2026: the-odds-api scrive
+    `Central Córdoba`, SX `Central Cordoba Santiago del Estero` — NESSUNA
+    delle due e' sottostringa dell'altra, quindi la partita risultava ASSENTE
+    e il pick restava `MISSING_MARKET` **dopo** aver pagato la fetch
+    on-demand. Il primo stadio (contenimento di stringa) copre le varianti di
+    suffisso; il secondo delega al matcher tollerante `team_names.same_team`
+    (lo stesso del settlement dal 12/09), con guardia di ambiguita'.
+    """
+
+    def test_variante_di_nome_trovata(self, tmp_path):
+        _write_oracle_cache(tmp_path, "soccer_argentina_primera_division",
+                            [_match_with_lines(home="Deportivo Riestra",
+                                               away="Central Córdoba")])
+        status = po._oracle_fixture_status(
+            "Deportivo Riestra", "Central Cordoba Santiago del Estero",
+            market_type="OU", cache_dir=tmp_path)
+        assert status["found"] is True
+        assert status["has_market"] is True
+
+    def test_la_diagnosi_non_e_piu_partita_assente(self, tmp_path):
+        """Il motivo granulare non deve piu' accusare la cache."""
+        _write_oracle_cache(tmp_path, "soccer_argentina_primera_division",
+                            [_match_with_lines(home="Deportivo Riestra",
+                                               away="Central Córdoba")])
+        info = po.line_oracle_reason(
+            "Deportivo Riestra", "Central Cordoba Santiago del Estero",
+            market_type="OU", line=2.5, cache_dir=tmp_path)
+        assert info["detail"] != "partita assente dalle cache oracolo"
+
+    def test_suffisso_di_club_coperto_dal_primo_stadio(self, tmp_path):
+        _write_oracle_cache(tmp_path, "soccer_italy_serie_a",
+                            [_match_with_lines(home="Inter", away="Cagliari")])
+        status = po._oracle_fixture_status("Inter", "Cagliari",
+                                          market_type="OU",
+                                          cache_dir=tmp_path)
+        assert status["found"] is True
+
+    def test_controprova_squadre_diverse_non_fuse(self, tmp_path):
+        """`same_team` non e' fuzzy: united e city NON sono la stessa squadra."""
+        _write_oracle_cache(tmp_path, "soccer_epl",
+                            [_match_with_lines(home="Manchester United",
+                                               away="Liverpool")])
+        status = po._oracle_fixture_status("Manchester City", "Liverpool",
+                                          market_type="OU",
+                                          cache_dir=tmp_path)
+        assert status["found"] is False
+
+    def test_percorso_1x2_usa_lo_stesso_matching(self, tmp_path):
+        """`load_oracle` soffriva dello stesso falso 'partita assente'."""
+        from datetime import datetime, timezone
+        kickoff = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        match = _match_with_lines(home="Deportivo Riestra",
+                                  away="Central Córdoba")
+        match["commence_time"] = kickoff
+        _write_oracle_cache(tmp_path, "soccer_argentina_primera_division",
+                            [match], prefix="toa_")
+        rows = list(po._iter_cached_matches(
+            "Deportivo Riestra", "Central Cordoba Santiago del Estero",
+            cache_dir=tmp_path))
+        assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
 # 3b. Fetch ON-DEMAND (05/10/2026): il budget segue il pick
 # ---------------------------------------------------------------------------
 

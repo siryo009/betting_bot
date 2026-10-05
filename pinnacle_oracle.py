@@ -960,14 +960,12 @@ def _iter_cached_matches(home: str, away: str, *, cache_dir: Optional[Path] = No
         if age_h > CACHE_MAX_AGE_H:
             continue
         for match in (data.get("payload") or []):
-            if not isinstance(match, dict):
-                continue
-            mh = _cf(match.get("home_team"))
-            ma = _cf(match.get("away_team"))
-            # Match per SOTTOSTRINGA, entrambe le squadre sulla STESSA riga
-            # (mai l'incrocio: due partite diverse non si fondono).
-            if (not mh or not ma) or (h not in mh and mh not in h) \
-                    or (a not in ma and ma not in a):
+            # Matching delegato a `_row_matches` (UNICA definizione: contenimento
+            # + fallback tollerante `team_names.same_team`). Prima questa
+            # funzione duplicava la sola sottostringa, quindi `load_oracle`
+            # (1X2) soffriva dello stesso falso "partita assente" del percorso a
+            # linea (05/10/2026).
+            if not _row_matches(match, h, a):
                 continue
             yield match, data, path
 
@@ -1485,16 +1483,38 @@ def _ah_label(home_line: float) -> str:
 
 
 def _row_matches(match: Any, h: str, a: str) -> bool:
-    """True se la riga del payload contiene ENTRAMBE le squadre (sottostringa).
+    """True se la riga del payload contiene ENTRAMBE le squadre.
 
     UNICA definizione del matching dei nomi del percorso a cache: mai
     l'incrocio (home contro away di righe diverse).
+
+    Due stadi: contenimento di stringa (veloce, copre le varianti di suffisso
+    tipo 'Tottenham' vs 'Tottenham Hotspur') e, se fallisce, il matcher
+    TOLLERANTE `team_names.same_team` — lo stesso usato dal settlement dal
+    12/09 (accenti, codici di stato RJ/SP/GO/BA, particelle, contenimento di
+    token, con guardia di ambiguita').
+
+    ⚠️ Perche' il secondo stadio e' necessario (misurato in produzione il
+    05/10/2026): l'oracolo a linea rispondeva `MISSING_MARKET` su una partita
+    CHE AVEVA IN CACHE — the-odds-api scrive `Central Córdoba`, SX
+    `Central Cordoba Santiago del Estero`: nessuna delle due e' sottostringa
+    dell'altra, quindi la partita risultava assente e il gate non pagava
+    nulla di utile (la fetch on-demand era appena stata eseguita).
     """
     if not isinstance(match, dict):
         return False
     mh = _cf(match.get("home_team"))
     ma = _cf(match.get("away_team"))
-    return bool(mh and ma) and (h in mh or mh in h) and (a in ma or ma in a)
+    if not (mh and ma) or not (h and a):
+        return False
+    if (h in mh or mh in h) and (a in ma or ma in a):
+        return True
+    try:
+        from team_names import same_team
+    except Exception:                                            # pragma: no cover
+        return False
+    return bool(same_team(match.get("home_team"), h)
+                and same_team(match.get("away_team"), a))
 
 
 def _oracle_fixture_status(home: str, away: str, *,
