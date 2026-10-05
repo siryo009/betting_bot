@@ -9076,3 +9076,99 @@ top_down/oracle_skips/ou_exclusion/telemetry/market_quotes_store (410),
 auto_bet (37), auto_bet_live (33), capital_enclosure+exposure_gate+t60+favourites
 (102), secret_hygiene+league_gate+risk_guards (73). `verify_guardrails.py`:
 **A-H tutti bloccano** (exit 0). 0 marker di conflitto, `py_compile` OK.
+
+### Contenimento crediti oracolo: pre-filtro SX, tier di lega, harvesting, checkpoint (05/10/2026)
+
+Direttiva del proprietario: aumentare il volume di giocate (target 15+ pick/giorno)
+riducendo il consumo crediti SOTTO i ~13,1/giorno sostenibili, senza alzare il
+budget (`ORACLE_BUDGET_DAY=2`). Le quattro modifiche NON aggiungono crediti: le
+spendono DOVE la spesa puo' cambiare l'esito.
+
+**1) PRE-FILTER SX (`auto_bet._sx_prefilter`, ZERO spreco API).** PRIMA di
+qualunque fetch a pagamento (e prima di `_top_down_eval(..., fetch_missing=True)`,
+che con `fetch_missing=True` puo' pagare) si verificano i requisiti SX del pick:
+  - **QUOTA** nella fascia `value_filter.odds_in_band` (1.30-1.80, bordi inclusi,
+    fail-closed su non-numerico): fuori fascia il pick non e' ordinabile, quindi
+    pagare l'oracolo per conoscerne l'EV non cambia nulla. SALTATO con
+    `TOP_DOWN_BYPASS` attivo (quella corsia esiste proprio per far giudicare il
+    prezzo all'oracolo fuori fascia: filtrarla qui la spegnerebbe in silenzio);
+  - **LIQUIDITA'** leg giocata (`market_quotes.liquidity` via label d'esito,
+    fallback linea+lato) < `SX_PREFILTER_MIN_DEPTH_USDC` (**20**, env, preserve IaC)
+    per OU/AH. Fail-open su lettura assente (nessuna misura nel ledger = nessun
+    falso skip) e fail-safe totale (errore = percorso storico intatto).
+  Skip con motivo machine-readable `sx_prefilter/quota_fuori_fascia` |
+  `sx_prefilter/liquidita_bassa` nella telemetria `oracle_skips`:
+  `auto_bet: <match> (<esito>) PRE-FILTER SX SKIP [<motivo>]: <dettaglio>`.
+
+**2) LEAGUE TIERING (`auto_bet._ondemand_fetch`).** Il refetch a pagamento
+(3 crediti) parte SOLO per leghe **Tier-1/Core**
+(`value_filter.is_core_league` == `league_tier=="core"`: PL, Bundesliga, Ligue 1,
+Eredivisie, Turchia, Nations League, AFCON). Tier-2/probation e leghe vietate:
+SOLO cache passiva, motivo dichiarato nel log
+("fetch on-demand non eseguita: lega 'X' non Tier-1/Core"). **Fail-closed** se il
+tier non e' leggibile (import rotto = nessuna spesa). Verificato IN PRODUZIONE
+allo stesso giro del deploy: `Argentina Primera` (probation) riceve SKIP di
+refetch con EXPIRED_CACHE e MISSING_MARKET (prima pagava).
+
+**3) MULTI-MARKET HARVESTING (`auto_bet._harvest_oracle_board` + wiring in
+`run_today_bets` PRIMA del ciclo dei pick).** Il fetch on-demand nasceva DENTRO
+il ciclo: le partite della STESSA lega incontrate PRIMA del pagamento venivano
+valutate sulla cache vecchia e scartate (EXPIRED_CACHE), perdite per l'ORDINE di
+scansione. Ora, quando il gate riconosce una fetch necessaria, si paga UNA
+volta per sport/lega (con pick a linea OU/AH in finestra, Tier-1/Core, non
+scartabile dal pre-filtro, motivo `recoverable`) PRIMA del ciclo: il payload
+`h2h,totals,spreads` copre TUTTI i mercati e TUTTE le partite della finestra, e
+TUTTI i pick di quella lega vengono valutati sullo STESSO dato fresco in un
+unico passaggio. UNA sola entry per sport (quella col kickoff minore via
+`_kickoff_ts`). Il costo segue la STESSA disciplina del fetch on-demand
+(budget, hard-stop, dedup, checkpoint) — nessun credito in piu'.
+
+**4) THROTTLING FINESTRE DISCRETE per MISSING_MARKET (`line_oracle`,
+commit `efe94ad..977c327`).** Un mercato NON pubblicato da Pinnacle manca perche'
+lo si chiede troppo presto, non perche' il dato sia scaduto: senza freno il gate
+lo ri-chiedeva a OGNI ciclo di 60s. Due soli checkpoint per partita: **T-120'** e
+**T-70'** (`_CHECKPOINT_T120_MIN=120`, `_CHECKPOINT_T70_MIN=70`, finestra di
+fetch allineata a 120' per rendere raggiungibile il T-70). Stato PERSISTENTE su
+volume (`ORACLE_CHECKPOINT_STATE`, default `DATA_DIR/decision/oracle_checkpoints.json`,
+scrittura atomica, memo in-process, cap età 7gg, `reset_checkpoints()`):
+sopravvive ai redeploy, un solo tentativo per checkpoint, tentativo consumato
+anche con payload vuoto ma MAI su errore di rete. `EXPIRED_CACHE` resta LIBERO
+(dato esistente da rinfrescare: limitato da dedup+TTL dinamico). Con
+`ORACLE_FETCH_WINDOW_MIN=120` una partita a T-152 viene rifiutata dal fetch
+("kickoff oltre la finestra") e riprova al checkpoint T-70' — comportamento VOLUTO.
+
+**5) `value_filter`**: nuove `odds_in_band(price)` (bordi inclusi, fail-closed) e
+`is_core_league(league)`. `odds_api.ORACLE_FETCH_WINDOW_MIN` 70→**120**
+(`oracle_cache_ttl_s()` coerente 120*60). `pinnacle_oracle._fetch_window_min()`
+fallback 120. IaC: `ORACLE_CHECKPOINT_STATE`, `SX_PREFILTER_MIN_DEPTH_USDC` in
+`preserve()`; `railway config plan` = **already up to date** (0 to destroy).
+
+**6) TEST (740+ verdi sui lotti mirati).** `test_line_oracle.py`: +`TestCheckpointRefetch`
+(13: bordi checkpoint 180/121/120/100/70/30/0/None, oltre finestra, un tentativo
+per checkpoint con dedup azzerata fra i giri, consumato anche con payload vuoto,
+errore di rete NON consuma, EXPIRED_CACHE libero, persistenza su file,
+stato corrotto, default DATA_DIR) e +`TestLeagueTiering` (5: core paga,
+probation non paga, lega vietata non paga, tier non leggibile fail-closed,
+coerenza con `league_tier=="core"`); span finestra 120' allineati in
+`test_pinnacle_api`/`test_ou_exclusion`; conftest isola
+`ORACLE_CHECKPOINT_STATE` + `reset_checkpoints()`. Lotti verdi: top_down+oracle_skips
+(68), auto_bet×3+multi_market (177), pinnacle+ou_exclusion+credit_diagnose (113),
+value_filter+t60+favourites+risk_guards+league_gate+railway_drift (190),
+bot+capital_enclosure+exposure_gate+order_watch+aggressive_kelly (191).
+`verify_guardrails.py` **A-H tutti bloccano** (exit 0), `py_compile` OK,
+0 marker di conflitto.
+
+**7) DEPLOY e VERIFICA (commit `977c327`, 05/10 sera).** Push su main → deploy
+SUCCESS; sul container `SX_PREFILTER_MIN_DEPTH_USDC=20.0` e
+`_CHECKPOINT_T120_MIN=120.0` confermati via `railway ssh`; nei log il tiering
+blocca i refetch di Argentina Primera (probation) e nessuna fetch on-demand a
+pagamento in finestra osservata. Crediti al momento: **remaining 329**,
+sustainable 12,7/giorno, consumo misurato 41,1/giorno (finestra PRE-fix: la
+riduzione si legge dopo alcuni giri/ore, il burn-rate e' misurato su finestra
+temporale che include il consumo pre-deploy).
+
+**⚠️ Cosa NON risolvono queste modifiche**: il volume di pick dipende dalla
+FASCIA/lega/EV (i gate di strategia restano congelati) e dalla liquidita' SX sui
+CANDIDATI: le quattro guardie rendono il refetch piu' economico e piu' mirato,
+non creano pick nuovi. Il consumo settlement+rotazione (fuori dal percorso
+oracolo) non e' toccato da questo giro.
