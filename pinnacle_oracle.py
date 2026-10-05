@@ -66,9 +66,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
+import re
 import statistics
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -157,6 +160,98 @@ def _cf(value: Any) -> str:
     return " ".join(str(value or "").strip().casefold().split())
 
 
+# ---------------------------------------------------------------------------
+# 0. NORMALIZZAZIONE CANONICA DELLE LINEE (05/10/2026)
+# ---------------------------------------------------------------------------
+# Il matching fra la linea di SX Bet e quella di Pinnacle/the-odds-api e' un
+# confronto NUMERICO, ma i provider scrivono la stessa linea in formati
+# diversi: `+0.25`, `2.50`, `'0.0, 0.5'` (linea quarter come DUE mezze-linee),
+# str vs float, testi con la linea dentro (`'Over 2.5'`). Due rappresentazioni
+# della stessa linea che non si agganciano producono un `no_oracle` per un
+# falso disallineamento: il pick viene scartato anche se l'oracolo lo prezza.
+# Qui c'e' l'UNICA definizione della forma canonica; la si applica SU ENTRAMBI
+# I LATI (SX in `multi_market._market_line`, the-odds-api in `totals_odds_of`/
+# `spreads_odds_of`/`oracle_lines`) PRIMA di qualunque lookup di matching.
+NORMALIZED_DECIMALS = 2
+
+#: Un numero con segno opzionale, intero o decimale (`2`, `2.5`, `-0.75`).
+_LINE_NUM_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
+def normalize_line(raw_line: Any) -> float:
+    """Linea canonica (float a 2 decimali) da qualunque formato dei provider.
+
+    Formati gestiti (tutti osservati sulle fonti reali):
+      - numeri (`2.5`, `-0.75`, `0`) e stringhe numeriche (`'2.50'`, `'+0.25'`);
+      - testi con la linea dentro (`'Over 2.5'`, `'Cagliari -0.75'`);
+      - linea quarter espressa come DUE mezze-linee: `'0.0, 0.5'` -> **0.25**
+        (la media delle due, che e' la convenzione del mercato).
+
+    Le linee reali sono multipli di 0.25, quindi 2 decimali non perdono nulla
+    e rendono ESATTO il confronto fra le due fonti.
+
+    Solleva `ValueError` su un input non interpretabile: **0.0 e' una linea
+    valida** (handicap pari), quindi non si puo' usare 0 come "assente" — un
+    valore inventato sarebbe peggio di un errore dichiarato. I chiamanti
+    fail-closed usano `normalize_line_or_none`.
+    """
+    if isinstance(raw_line, bool):
+        raise ValueError("linea booleana")
+    if isinstance(raw_line, (int, float)):
+        value = float(raw_line)
+        if not math.isfinite(value):
+            raise ValueError(f"linea non finita: {raw_line!r}")
+        return round(value, NORMALIZED_DECIMALS)
+    text = str(raw_line or "").strip()
+    if not text:
+        raise ValueError("linea vuota")
+    nums = _LINE_NUM_RE.findall(text)
+    if not nums:
+        raise ValueError(f"nessun numero in {text!r}")
+    # `'0.0, 0.5'` / `'+0.25, +0.5'`: linea quarter = MEDIA delle due mezze-linee.
+    if len(nums) >= 2 and "," in text:
+        a, b = float(nums[0]), float(nums[1])
+        if not (math.isfinite(a) and math.isfinite(b)):
+            raise ValueError(f"linea non finita in {text!r}")
+        return round((a + b) / 2.0, NORMALIZED_DECIMALS)
+    value = float(nums[0])
+    if not math.isfinite(value):
+        raise ValueError(f"linea non finita in {text!r}")
+    return round(value, NORMALIZED_DECIMALS)
+
+
+def normalize_line_or_none(raw_line: Any) -> Optional[float]:
+    """`normalize_line` in versione fail-closed: None invece di eccezione."""
+    try:
+        return normalize_line(raw_line)
+    except Exception:
+        return None
+
+
+def _epoch_of(ts: Any) -> Optional[float]:
+    """Istante epoch (secondi UTC) da ISO ('T'/'Z'/spazio), datetime o numero.
+
+    Un numero grande e' interpretato come MILLISECONDI (convenzione SX): senza
+    questa conversione `minutes_to_kickoff` darebbe milioni di minuti e il TTL
+    finirebbe nel tier sbagliato. None se non interpretabile (fail-closed).
+    """
+    if ts is None or isinstance(ts, bool):
+        return None
+    if isinstance(ts, (int, float)):
+        value = float(ts)
+        if not math.isfinite(value) or value <= 0:
+            return None
+        return value / 1000.0 if value > 1e11 else value
+    try:
+        dt = datetime.fromisoformat(str(ts).strip().replace("Z", "+00:00")
+                                    .replace(" ", "T"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def is_sharp(bookmaker: Any) -> bool:
     """True se la chiave/titolo del bookmaker e' un book sharp (Pinnacle)."""
     name = _cf(bookmaker)
@@ -217,8 +312,17 @@ def totals_odds_of(bookmaker: Dict[str, Any], line: float
     servono ENTRAMBI i lati alla STESSA linea (un solo lato non si puo'
     de-vigare) con prezzi > 1.0; confronto con tolleranza 1e-6 (i
     quarter-line 2.25/2.75 sono frazionari).
+
+    Entrambe le linee (quella richiesta e quella del payload) passano per
+    `normalize_line` PRIMA del confronto: `'2.50'`, `2.5` e `'2,50'` sono la
+    stessa linea e devono agganciarsi (05/10/2026).
     """
     if not isinstance(bookmaker, dict):
+        return None
+    # Linea richiesta in forma CANONICA: il confronto con il payload deve
+    # avvenire fra due valori normalizzati (lezione del falso disallineamento).
+    want = normalize_line_or_none(line)
+    if want is None:
         return None
     out: Dict[str, float] = {}
     for mkt in bookmaker.get("markets") or []:
@@ -229,10 +333,10 @@ def totals_odds_of(bookmaker: Dict[str, Any], line: float
                 continue
             try:
                 price = float(o.get("price"))
-                point = float(o.get("point"))
             except (TypeError, ValueError):
                 continue
-            if price <= 1.0 or abs(point - float(line)) > 1e-6:
+            point = normalize_line_or_none(o.get("point"))
+            if point is None or price <= 1.0 or abs(point - want) > 1e-6:
                 continue
             name = _cf(o.get("name"))
             if name.startswith("over"):
@@ -264,7 +368,9 @@ def spreads_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
     h, a = _cf(home), _cf(away)
     if not h or not a:
         return None
-    line = float(home_line)
+    line = normalize_line_or_none(home_line)
+    if line is None:
+        return None
     out: Dict[str, float] = {}
     fallback_home: Optional[float] = None
     fallback_away: Optional[float] = None
@@ -276,10 +382,10 @@ def spreads_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
                 continue
             try:
                 price = float(o.get("price"))
-                point = float(o.get("point"))
             except (TypeError, ValueError):
                 continue
-            if price <= 1.0:
+            point = normalize_line_or_none(o.get("point"))
+            if point is None or price <= 1.0:
                 continue
             name = _cf(o.get("name"))
             name_home = name == h or (h in name) or (name in h)
@@ -726,6 +832,78 @@ def _cache_candidates(cache_dir: Optional[Path] = None) -> List[Path]:
 #: palinsesto abbandonato (chiave sostituita, lega non piu' interrogata).
 #: Override: PINNACLE_CACHE_MAX_AGE_H.
 CACHE_MAX_AGE_H: float = float(os.getenv("PINNACLE_CACHE_MAX_AGE_H", "24"))
+
+#: --- TTL DINAMICO sul TEMPO AL KICKOFF (05/10/2026) -----------------------
+#: Nella finestra pre-match le linee di spread si muovono: un TTL FISSO (le 24h
+#: del tetto qui sopra) tiene per "valido" un dato che il mercato ha gia'
+#: cambiato, e il matching fallisce per un falso disallineamento. Il TTL e'
+#: quindi funzione del TEMPO AL KICKOFF: si e' severi dove il prezzo sta per
+#: diventare eseguibile, si risparmia quando il kickoff e' lontano.
+#:   T > 180 min    -> 30 min (risparmio crediti: la linea non e' ancora viva)
+#:   60 <= T <= 180 -> 5 min  (freschezza per la finestra T-180)
+#:   T < 60 min     -> 2 min  (alta frequenza: il prezzo puo' muoversi in fretta)
+#: Le SOGLIE di tempo (180/60) sono fisse; i VALORI di TTL sono da env, cosi'
+#: si possono tarare senza redeploy (valore impossibile -> default dichiarato).
+TTL_FAR_MINUTES: float = 180.0
+TTL_NEAR_MINUTES: float = 60.0
+DEFAULT_TTL_LONG_MIN: float = 30.0      # T > 180
+DEFAULT_TTL_MID_MIN: float = 5.0        # 60 <= T <= 180
+DEFAULT_TTL_SHORT_MIN: float = 2.0      # T < 60
+
+
+def _ttl_env(name: str, default: float) -> float:
+    """Valore di TTL da env; assente/impossibile -> default dichiarato.
+
+    Una guardia non si spegne con un env sbagliato: un valore non numerico o
+    non positivo ricade sul default con un warning (mai in silenzio).
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("pinnacle_oracle: %s=%r non numerico, uso %.1f",
+                       name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("pinnacle_oracle: %s=%r non positivo, uso %.1f",
+                       name, raw, default)
+        return default
+    return value
+
+
+def cache_ttl_minutes(minutes_to_kickoff: Optional[float]) -> float:
+    """TTL (minuti) dell'oracolo a linea per un kickoff a N minuti di distanza.
+
+    **UNICA definizione del TTL dinamico**: la usano la lettura della cache
+    (`_oracle_fixture_status`), `line_oracle.leagues_needing_fetch` (la
+    decisione di REFETCH) e `odds_api.oracle_cache_ttl_s`. Un tempo al kickoff
+    IGNOTO (None) o gia' passato usa il tier piu' CONSERVATIVO (2 min):
+    un'incertezza non allunga MAI la vita di un dato.
+    """
+    long_min = _ttl_env("PINNACLE_TTL_LONG_MIN", DEFAULT_TTL_LONG_MIN)
+    mid_min = _ttl_env("PINNACLE_TTL_MID_MIN", DEFAULT_TTL_MID_MIN)
+    short_min = _ttl_env("PINNACLE_TTL_SHORT_MIN", DEFAULT_TTL_SHORT_MIN)
+    try:
+        t = float(minutes_to_kickoff)
+    except (TypeError, ValueError):
+        return short_min
+    if not math.isfinite(t) or t < TTL_NEAR_MINUTES:
+        return short_min
+    if t > TTL_FAR_MINUTES:
+        return long_min
+    return mid_min
+
+
+def minutes_to_kickoff(kickoff: Any, *,
+                       now: Optional[float] = None) -> Optional[float]:
+    """Minuti che mancano al kickoff. None se il kickoff non e' interpretabile."""
+    ts = _epoch_of(kickoff)
+    if ts is None:
+        return None
+    ts_now = time.time() if now is None else float(now)
+    return (ts - ts_now) / 60.0
 
 
 _CACHE_MEMO: Dict[Path, tuple] = {}
@@ -1306,26 +1484,53 @@ def _ah_label(home_line: float) -> str:
     return f"{v:+g}" if abs(v) >= 1e-9 else "0"
 
 
-def _oracle_fixture_books(home: str, away: str, *,
-                          cache_dir: Optional[Path] = None,
-                          sport_key: Optional[str] = None,
-                          now: Optional[float] = None
-                          ) -> Optional[List[Dict[str, Any]]]:
-    """Bookmaker Pinnacle della partita dalle cache oracolo (0 crediti).
+def _row_matches(match: Any, h: str, a: str) -> bool:
+    """True se la riga del payload contiene ENTRAMBE le squadre (sottostringa).
 
-    UNICA lettura-cache del percorso a LINEA: la usano `line_true_probs` (il
-    p_true di UNA linea) e `oracle_lines` (l'elenco delle linee prezzabili).
-    Due letture separate divergerebbero (finestra di freschezza, matching dei
-    nomi, `canonical_book`), quindi la logica sta qui una volta sola.
-
-    Ritorna:
-      - `None` -> la partita NON e' in nessuna cache fresca: oracolo IGNOTO,
-        non si puo' concludere ne' "prezzabile" ne' "non prezzabile";
-      - lista (eventualmente VUOTA) -> la partita c'e'; la lista porta i
-        bookmaker Pinnacle trovati (vuota = partita presente ma Pinnacle non
-        ha ancora pubblicato). La distinzione conta: un "non prezzato" su un
-        oracolo NOTO e' un'informazione, su un oracolo ignoto e' rumore.
+    UNICA definizione del matching dei nomi del percorso a cache: mai
+    l'incrocio (home contro away di righe diverse).
     """
+    if not isinstance(match, dict):
+        return False
+    mh = _cf(match.get("home_team"))
+    ma = _cf(match.get("away_team"))
+    return bool(mh and ma) and (h in mh or mh in h) and (a in ma or ma in a)
+
+
+def _oracle_fixture_status(home: str, away: str, *,
+                           market_type: Optional[str] = None,
+                           cache_dir: Optional[Path] = None,
+                           sport_key: Optional[str] = None,
+                           now: Optional[float] = None,
+                           kickoff: Any = None) -> Dict[str, Any]:
+    """Stato della cache oracolo a LINEA per una partita (0 crediti).
+
+    UNICA lettura-cache del percorso a LINEA: la usano `_oracle_fixture_books`
+    (prezzabilita'), `line_oracle_reason` (diagnosi dello scarto) e, per
+    estensione, `line_true_probs`/`oracle_lines`. Due letture separate
+    divergerebbero su matching dei nomi, freschezza e `canonical_book`.
+
+    FRESCHEZZA = TTL DINAMICO sul tempo al kickoff (`cache_ttl_minutes`), non
+    il solo tetto fisso a 24h: un dato di tre ore nella finestra T-180 non e'
+    il mercato, e usarlo produce falsi disallineamenti di linea. Il tetto
+    assoluto `CACHE_MAX_AGE_H` resta come ultima rete (il TTL dinamico e'
+    sempre piu' stretto).
+
+    Ritorna SEMPRE un dict ben formato (mai None, mai eccezioni):
+      `found`      la partita e' in almeno una cache `toao_*`;
+      `expired`    il dato piu' fresco e' piu' vecchio del TTL applicato;
+      `age_min`    eta' (minuti) della cache piu' fresca che la contiene;
+      `ttl_min`    TTL applicato (dinamico);
+      `kickoff`    kickoff usato per il TTL (del chiamante o `commence_time`);
+      `books`      bookmaker Pinnacle della riga PIU' FRESCA della partita;
+      `has_market` Pinnacle pubblica il mercato richiesto (totals/spreads).
+    """
+    out: Dict[str, Any] = {"found": False, "expired": False, "age_min": None,
+                           "ttl_min": None, "kickoff": kickoff, "books": [],
+                           "has_market": False}
+    h, a = _cf(home), _cf(away)
+    if not h or not a:
+        return out
     folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
     # Prefisso della cache oracolo: costante GEMELLA di `odds_api.
     # ORACLE_CACHE_PREFIX` (import pigro con fallback al letterale — il
@@ -1344,69 +1549,146 @@ def _oracle_fixture_books(home: str, away: str, *,
                                           if p.exists() else 0.0),
                            reverse=True)
         except Exception:                                        # pragma: no cover
-            return None
+            paths = []
     ts_now = time.time() if now is None else float(now)
-    h, a = _cf(home), _cf(away)
-    if not h or not a:
-        return None
-    found = False
-    books: List[Dict[str, Any]] = []
+    matches: List[Tuple[float, Any, List[Dict[str, Any]]]] = []
     for path in paths:
         data = _read_cache(path)
         if not isinstance(data, dict):
             continue
-        age_h = (ts_now - float(data.get("ts") or 0)) / 3600.0
-        if age_h > CACHE_MAX_AGE_H:
-            continue
+        age_min = (ts_now - float(data.get("ts") or 0)) / 60.0
         for match in (data or {}).get("payload") or []:
-            if not isinstance(match, dict):
+            if not _row_matches(match, h, a):
                 continue
-            mh = _cf(match.get("home_team"))
-            ma = _cf(match.get("away_team"))
-            # Match per SOTTOSTRINGA (come `load_oracle`): mai l'incrocio.
-            if (not mh or not ma) or (h not in mh and mh not in h) \
-                    or (a not in ma and ma not in a):
+            books = [bm for bm in match.get("bookmakers") or []
+                     if isinstance(bm, dict)
+                     and canonical_book(bm) == PRIMARY_BOOK]
+            matches.append((age_min, match.get("commence_time"), books))
+    if not matches:
+        return out
+    # La riga PIU' FRESCA della partita: un dato vecchio in un'altra cache
+    # (lega precedente, altra competizione) non deve decidere la freschezza.
+    age_min, payload_kickoff, books = min(matches, key=lambda m: m[0])
+    out["found"] = True
+    out["age_min"] = round(age_min, 3)
+    out["books"] = books
+    out["kickoff"] = kickoff or payload_kickoff
+    ttl = cache_ttl_minutes(minutes_to_kickoff(out["kickoff"], now=ts_now))
+    ttl = min(ttl, CACHE_MAX_AGE_H * 60.0)      # tetto assoluto di sicurezza
+    out["ttl_min"] = round(ttl, 3)
+    out["expired"] = bool(age_min > ttl)
+    mt = str(market_type or "").strip().upper()
+    if mt in ("OU", "AH"):
+        key = "totals" if mt == "OU" else "spreads"
+        out["has_market"] = any(
+            isinstance(mkt, dict) and str(mkt.get("key") or "").lower() == key
+            for bm in books for mkt in (bm.get("markets") or []))
+    return out
+
+
+def _oracle_fixture_books(home: str, away: str, *,
+                          cache_dir: Optional[Path] = None,
+                          sport_key: Optional[str] = None,
+                          now: Optional[float] = None,
+                          kickoff: Any = None
+                          ) -> Optional[List[Dict[str, Any]]]:
+    """Bookmaker Pinnacle della partita dalle cache oracolo (0 crediti).
+
+    Wrapper di `_oracle_fixture_status`: INCAPSULA la regola di freschezza,
+    cosi' `line_true_probs` e `oracle_lines` non possono divergere.
+
+    Ritorna:
+      - `None` -> la partita NON e' in nessuna cache (o il dato e' SCADUTO
+        per il TTL dinamico): oracolo IGNOTO, non si puo' concludere ne'
+        "prezzabile" ne' "non prezzabile";
+      - lista (eventualmente VUOTA) -> la partita c'e' e il dato e' fresco;
+        la lista porta i bookmaker Pinnacle (vuota = Pinnacle non ha ancora
+        pubblicato). La distinzione conta: un "non prezzato" su un oracolo
+        NOTO e' un'informazione, su un oracolo ignoto e' rumore.
+    """
+    status = _oracle_fixture_status(home, away, cache_dir=cache_dir,
+                                   sport_key=sport_key, now=now,
+                                   kickoff=kickoff)
+    if not status["found"] or status["expired"]:
+        return None
+    return list(status["books"])
+
+
+def _complete_lines(books: Sequence[Dict[str, Any]], market_type: str,
+                    home: str, away: str) -> Set[float]:
+    """Linee del mercato prezzate su ENTRAMBI i lati (de-vigabile).
+
+    Delega il matching a `totals_odds_of`/`spreads_odds_of` (nessuna copia
+    della convenzione di nome/linea): una linea con un solo lato pubblicato
+    non e' negoziabile e non entra.
+    """
+    mt = str(market_type or "").strip().upper()
+    if mt not in ("OU", "AH"):
+        return set()
+    key = "totals" if mt == "OU" else "spreads"
+    candidates: Set[float] = set()
+    for bm in books:
+        for mkt in bm.get("markets") or []:
+            if not isinstance(mkt, dict) \
+                    or str(mkt.get("key") or "").lower() != key:
                 continue
-            found = True
-            for bm in match.get("bookmakers") or []:
-                if not isinstance(bm, dict):
+            for o in mkt.get("outcomes") or []:
+                if not isinstance(o, dict):
                     continue
-                if canonical_book(bm) == PRIMARY_BOOK:
-                    books.append(bm)
-    return books if found else None
+                try:
+                    if float(o.get("price")) <= 1.0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                point = normalize_line_or_none(o.get("point"))
+                if point is not None:
+                    candidates.add(point)
+    out: Set[float] = set()
+    for bm in books:
+        for point in candidates:
+            quotes = (totals_odds_of(bm, point) if mt == "OU"
+                      else spreads_odds_of(bm, home, away, point))
+            if quotes:
+                out.add(point)
+    return out
 
 
 def line_true_probs(home: str, away: str, *, market_type: str,
                     line: float, cache_dir: Optional[Path] = None,
                     sport_key: Optional[str] = None,
                     devig_method: Optional[str] = None,
-                    now: Optional[float] = None
+                    now: Optional[float] = None,
+                    kickoff: Any = None
                     ) -> Optional[Dict[str, Any]]:
     """p_true {"Over"/"Under" (OU) oppure "Home"/"Away" (AH)} da Pinnacle.
 
     De-vig a 2 esiti (`line_probabilities`) del mercato a linea della
-    partita (match per sottostinga case-insensitive, entrambe le squadre
+    partita (match per sottostringa case-insensitive, entrambe le squadre
     sulla STESSA riga — come `load_oracle`). AH: la linea del payload e'
-    quella del lato CASA (convenzione SX = `sx_line_of_esito`).
+    quella del lato CASA (convenzione SX = `sx_line_of_esito`). La LINEA
+    richiesta viene normalizzata (`normalize_line`) prima del matching, cosi'
+    `'2.50'` e `2.5` sono la stessa linea.
 
-    Fail-closed (None): cache assente/stantia (> `CACHE_MAX_AGE_H` ore),
-    partita non trovata, Pinnacle senza ENTRAMBI i lati alla linea, de-vig
-    impossibile. ZERO crediti: legge solo le cache gia' scaricate.
+    Fail-closed (None): partita non trovata, dato SCADUTO per il TTL
+    dinamico (`cache_ttl_minutes` sul tempo al kickoff), Pinnacle senza
+    ENTRAMBI i lati alla linea, de-vig impossibile. ZERO crediti: legge solo
+    le cache gia' scaricate.
     """
     mt = str(market_type or "").strip().upper()
     if mt not in ("OU", "AH"):
         return None
-    if not (line == line) or not (abs(float(line)) < float("inf")):  # NaN/inf
+    want = normalize_line_or_none(line)
+    if want is None:
         return None
     books = _oracle_fixture_books(home, away, cache_dir=cache_dir,
-                                  sport_key=sport_key, now=now)
+                                  sport_key=sport_key, now=now, kickoff=kickoff)
     if not books:
         return None
     for bm in books:
         if mt == "OU":
-            quotes = totals_odds_of(bm, float(line))
+            quotes = totals_odds_of(bm, want)
         else:
-            quotes = spreads_odds_of(bm, home, away, float(line))
+            quotes = spreads_odds_of(bm, home, away, want)
         if quotes:
             probs = line_probabilities(quotes, devig_method=devig_method)
             if probs:
@@ -1414,10 +1696,76 @@ def line_true_probs(home: str, away: str, *, market_type: str,
     return None
 
 
+def line_oracle_reason(home: str, away: str, *, market_type: str,
+                       line: Any = None, cache_dir: Optional[Path] = None,
+                       sport_key: Optional[str] = None,
+                       now: Optional[float] = None,
+                       kickoff: Any = None) -> Dict[str, str]:
+    """PERCHE' l'oracolo a LINEA non ha dato una p_true: causa machine-readable.
+
+    Sostituisce il generico "Pinnacle assente/incompleto/stantio" con tre
+    sottocause che dicono COSA FARE (05/10/2026):
+      - `EXPIRED_CACHE` — il dato c'e' ma e' piu' vecchio del TTL dinamico:
+        si rifetcha (follow-the-money) e il pick non e' perso per sempre;
+      - `LINE_MISMATCH` — Pinnacle prezza il mercato ma NON questa linea (o
+        non entrambi i lati): un altro fetch non serve, serve un'altra linea;
+      - `MISSING_MARKET` — la partita non e' in nessuna cache, oppure Pinnacle
+        non pubblica il mercato: non recuperabile a credito (o non ancora).
+
+    Mai eccezioni: qualunque errore ricade su `MISSING_MARKET` con il motivo
+    in `detail` (fail-closed, ma dichiarato).
+    """
+    mt = str(market_type or "").strip().upper()
+    try:
+        status = _oracle_fixture_status(home, away, market_type=mt,
+                                       cache_dir=cache_dir,
+                                       sport_key=sport_key, now=now,
+                                       kickoff=kickoff)
+    except Exception as exc:                                     # pragma: no cover
+        return {"code": "MISSING_MARKET", "detail": f"lettura cache fallita ({exc})"}
+    if status["expired"]:
+        ko = status.get("kickoff") or "kickoff ignoto"
+        return {"code": "EXPIRED_CACHE",
+                "detail": (f"dato di {status['age_min']:.0f} min > TTL "
+                           f"{status['ttl_min']:.0f} min ({ko}): serve un "
+                           f"refetch follow-the-money")}
+    if not status["found"]:
+        # La rotazione h2h puo' coprire la partita mentre l'oracolo a LINEA non
+        # e' ancora stato pagato (o la sua cache e' vecchia): in quel caso il
+        # rimedio e' un REFETCH follow-the-money, non un'altra linea. Il nome
+        # storicamente usato dal gate per questo caso era `linea`; qui diventa
+        # la sotto-causa granulare `EXPIRED_CACHE` (05/10/2026).
+        try:
+            covered = h2h_cache_is_stale(home, away, cache_dir=cache_dir,
+                                        now=now)
+        except Exception:                                    # pragma: no cover
+            covered = False
+        if covered:
+            return {"code": "EXPIRED_CACHE",
+                    "detail": "partita coperta dalla cache h2h ma oracolo a "
+                              "linea non ancora pagato: serve fetch_line_odds "
+                              "(follow-the-money)"}
+        return {"code": "MISSING_MARKET",
+                "detail": "partita assente dalle cache oracolo"}
+    if not status["has_market"]:
+        return {"code": "MISSING_MARKET",
+                "detail": f"Pinnacle non pubblica il mercato {mt}"}
+    want = normalize_line_or_none(line)
+    if want is not None and want not in _complete_lines(status["books"], mt,
+                                                       home, away):
+        return {"code": "LINE_MISMATCH",
+                "detail": (f"linea {want:g} non prezzata su entrambi i lati "
+                           f"da Pinnacle (linee disponibili: "
+                           f"{sorted(_complete_lines(status['books'], mt, home, away))})")}
+    return {"code": "MISSING_MARKET",
+            "detail": "linea presente ma de-vig impossibile (lato incompleto)"}
+
+
 def oracle_lines(home: str, away: str, *, market_type: str,
                  cache_dir: Optional[Path] = None,
                  sport_key: Optional[str] = None,
-                 now: Optional[float] = None) -> Optional[Set[float]]:
+                 now: Optional[float] = None,
+                 kickoff: Any = None) -> Optional[Set[float]]:
     """Linee che l'oracolo Pinnacle PREZZA per la partita (0 crediti).
 
     PERCHE' ESISTE (fix linee 01/10/2026). SX Bet quota MOLTE linee
@@ -1458,10 +1806,13 @@ def oracle_lines(home: str, away: str, *, market_type: str,
                     continue
                 try:
                     price = float(o.get("price"))
-                    point = float(o.get("point"))
                 except (TypeError, ValueError):
                     continue
-                if price <= 1.0:
+                # Linea canonica (05/10/2026): le linee raccolte qui vengono
+                # confrontate con quelle di SX Bet da `multi_market`: senza la
+                # stessa forma il confronto fallisce per un falso disallineamento.
+                point = normalize_line_or_none(o.get("point"))
+                if point is None or price <= 1.0:
                     continue
                 if mt == "OU":
                     lines.add(point)
@@ -1479,7 +1830,8 @@ def oracle_lines(home: str, away: str, *, market_type: str,
 def line_oracle_probs(pick: Dict[str, Any],
                       cache_dir: Optional[Path] = None,
                       devig_method: Optional[str] = None,
-                      now: Optional[float] = None
+                      now: Optional[float] = None,
+                      kickoff: Any = None
                       ) -> Optional[Dict[str, Any]]:
     """p_true per un pick a linea del ledger (ponte verso il gate top-down:
     il chiamante e' il MODULO che orchestra le puntate, qui non si importa
@@ -1504,7 +1856,7 @@ def line_oracle_probs(pick: Dict[str, Any],
                             market_type=str(target.get("market_type") or ""),
                             line=float(target["line"]),
                             cache_dir=cache_dir, devig_method=devig_method,
-                            now=now)
+                            now=now, kickoff=kickoff)
     if probs:
         probs = dict(probs)
         probs["line_key"] = str(target.get("side") or "")

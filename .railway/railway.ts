@@ -220,6 +220,14 @@ export default defineRailway(() => {
       // questa env, senza redeploy di codice.
       PINNACLE_DEVIG_METHOD: preserve(),
       PINNACLE_CACHE_MAX_AGE_H: preserve(),
+      // TTL DINAMICA della cache oracolo per tempo al kickoff (05/10/2026,
+      // direttiva del proprietario): T > 180' -> 30', T-60..T-180 -> 5',
+      // T < 60' -> 2'. La formula vive in `pinnacle_oracle.cache_ttl_minutes`
+      // (gate + scheduler); queste env ne tarano solo i VALORI. Senza
+      // preserve(), un `config apply` distruggerebbe la taratura.
+      PINNACLE_TTL_LONG_MIN: preserve(),
+      PINNACLE_TTL_MID_MIN: preserve(),
+      PINNACLE_TTL_SHORT_MIN: preserve(),
       // Steam move sullo sharp (02/10/2026, `steam_move.py`): ΔQ/Δt della
       // quota Pinnacle sugli ultimi 15-30', crollo >= 4% = priorita'
       // d'esecuzione prima che SX riallinei. Senza preserve(), un `config

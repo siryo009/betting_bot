@@ -179,13 +179,36 @@ def leagues_needing_fetch(now: Optional[float] = None) -> List[Dict[str, Any]]:
                                            p["kickoff_ts"])
     out: List[Dict[str, Any]] = []
     for sp, info in per_sport.items():
+        # TTL DINAMICO (05/10/2026, direttiva del proprietario): piu' il kickoff
+        # e' vicino, piu' corta e' la vita utile del dato — 30 min oltre T-180,
+        # 5 min nella finestra T-60..T-180, 2 min sotto T-60. La formula vive in
+        # `pinnacle_oracle.cache_ttl_minutes` (UNICA definizione: la STESSA che
+        # applica il GATE in `_oracle_fixture_status`). Se qui si usasse la TTL
+        # di finestra (70 min) il refresh chiesto dallo scheduler sarebbe un
+        # cache-hit (nessuna spesa, nessun aggiornamento) e il gate avrebbe
+        # continuato a scartare per cache scaduta.
+        #
+        # ⚠️ Il refresh CONSUMA il budget `ORACLE_BUDGET_DAY` (3 crediti/lega):
+        # le leghe sono ordinate per kickoff CRESCENTE e `ensure_oracle_payloads`
+        # taglia a `LEAGUES_PER_PASS`, quindi il budget va alla partita piu'
+        # vicina (quella che sta per entrare in finestra esecutiva). A budget
+        # esaurito il gate resta fail-closed e il pick e' saltato: onesto, non
+        # silenzioso.
+        try:
+            import pinnacle_oracle as po
+            ttl_s = float(po.cache_ttl_minutes(
+                po.minutes_to_kickoff(info["min_kickoff"], now=ts_now)) * 60.0)
+        except Exception:                                    # pragma: no cover
+            ttl_s = float(oa.oracle_cache_ttl_s())
+        info["ttl_min"] = round(ttl_s / 60.0, 1)
+        info["ttl_s"] = ttl_s
         cache = Path(DATA_DIR) / f"{oa.ORACLE_CACHE_PREFIX}{sp}.json"
         age = None
         try:
             if cache.exists():
                 data = json.loads(cache.read_text())
                 age = (ts_now - float(data.get("ts") or 0))
-                if age < oa.oracle_cache_ttl_s():
+                if age < ttl_s:
                     continue        # cache fresca: la lega e' gia' coperta
         except Exception:
             age = None              # cache corrotta = da rifare
@@ -221,7 +244,8 @@ def ensure_oracle_payloads(max_leagues: Optional[int] = None
     for info in pending:
         sp = info["sport_key"]
         try:
-            payload, remaining = oa.fetch_line_odds(sp, frm, to)
+            payload, remaining = oa.fetch_line_odds(sp, frm, to,
+                                                    ttl_s=info.get("ttl_s"))
         except Exception as exc:
             res["errors"] += 1
             res["rows"].append({"sport": sp, "error": str(exc)})

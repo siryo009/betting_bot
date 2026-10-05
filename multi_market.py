@@ -302,34 +302,43 @@ def live_markets() -> Tuple[str, ...]:
 _LINE_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
 
+def _canon_line(value: Any) -> Optional[float]:
+    """Linea canonica via l'UNICA definizione del progetto (05/10/2026).
+
+    La forma canonica (`+0.25` -> 0.25, `'2.50'` -> 2.5, linea quarter scritta
+    come DUE mezze-linee `'0.0, 0.5'` -> 0.25, str vs float) vive in
+    `pinnacle_oracle.normalize_line`: qui si DELEGA (import pigro, come per le
+    altre dipendenze pesanti) perche' una seconda implementazione divergerebbe
+    e riaprirebbe il falso disallineamento SX-vs-Pinnacle che questo fix
+    chiude. Fail-safe: un valore non interpretabile -> None (mai una linea
+    inventata).
+    """
+    try:
+        from pinnacle_oracle import normalize_line
+    except Exception:                                       # pragma: no cover
+        return None
+    try:
+        return normalize_line(value)
+    except Exception:
+        return None
+
+
 def line_key(line: Any) -> str:
     """Chiave canonica della linea per il ledger (`2.5`, `-0.75`)."""
-    try:
-        return f"{float(line):g}"
-    except (TypeError, ValueError):
-        return ""
+    value = _canon_line(line)
+    return f"{value:g}" if value is not None else ""
 
 
 def parse_line(value: Any) -> Optional[float]:
-    """Prima linea numerica nel testo ('Over 3.25' -> 3.25). None se assente.
+    """Linea numerica CANONICA ('Over 3.25' -> 3.25, '0.0, 0.5' -> 0.25).
 
-    Zero E' una linea valida per l'Asian Handicap (handicap pari): il valore 0
-    non viene mai confuso con "assente".
+    Delega a `pinnacle_oracle.normalize_line` (UNICA definizione della forma
+    canonica, applicata sia sul lato SX sia su quello Pinnacle/the-odds-api
+    PRIMA del lookup di matching). Zero E' una linea valida per l'Asian
+    Handicap (handicap pari): il valore 0 non viene mai confuso con "assente".
+    None se il valore non e' interpretabile (fail-closed).
     """
-    if value is None:
-        return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-    match = _LINE_RE.search(str(value))
-    if not match:
-        return None
-    try:
-        return float(match.group(0))
-    except (TypeError, ValueError):
-        return None
+    return _canon_line(value)
 
 
 def ledger_esito(market_type: str, selection: str, line: Any) -> str:

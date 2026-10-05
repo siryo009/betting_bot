@@ -76,17 +76,30 @@ def oracle_fetch_window_min() -> int:
     return val
 
 
-def oracle_cache_ttl_s() -> int:
-    """TTL della cache `toao_*`, ALLINEATO alla finestra di fetch.
+def oracle_cache_ttl_s(minutes_to_kickoff: Optional[float] = None) -> float:
+    """TTL della cache `toao_*`. DUE usi DICHIARATI (05/10/2026).
 
-    Una cache scritta con una finestra di 70 minuti copre SOLO
-    `[ts, ts + finestra]`: considerarla fresca 24h (com'era prima del
-    03/10/2026) significherebbe fidarsi di un payload che non contiene piu'
-    le partite in ingresso in finestra — il gate top-down ripiegherebbe su
-    `linea`/`no_oracle` pur avendo una cache "valida". Finestra e TTL sono
-    percio' la STESSA grandezza, con una sola env a governarle.
+    SENZA argomento — TTL ALLINEATA alla finestra di fetch
+    (`oracle_fetch_window_min`). E' la regola del PAGAMENTO: una cache scritta
+    con una finestra di 70 minuti copre SOLO `[ts, ts + finestra]`, quindi
+    non si ripaga la stessa chiamata prima. Finestra e TTL sono la STESSA
+    grandezza, con una sola env a governarle.
+
+    CON `minutes_to_kickoff` — TTL **DINAMICO** (direttiva del proprietario,
+    05/10/2026) usata dal gate e dalla decisione di REFETCH: `T > 180 min` ->
+    30 min (si risparmia dove la linea non e' ancora viva), `60 <= T <= 180`
+    -> 5 min (freschezza per la finestra T-180), `T < 60` -> 2 min (alta
+    frequenza: il prezzo puo' muoversi in fretta). La FORMULA vive in un solo
+    posto (`pinnacle_oracle.cache_ttl_minutes`): qui si converte soltanto in
+    secondi, cosi' gate e scheduler non possono divergere.
     """
-    return oracle_fetch_window_min() * 60
+    if minutes_to_kickoff is None:
+        return oracle_fetch_window_min() * 60
+    try:
+        import pinnacle_oracle as po
+        return float(po.cache_ttl_minutes(minutes_to_kickoff) * 60.0)
+    except Exception:                                        # pragma: no cover
+        return oracle_fetch_window_min() * 60
 # TETTO di leghe fetchate al giorno (3 crediti l'una = 6 crediti/giorno =
 # 180/mese): con la rotazione a 7gg (~169 crediti/mese) il totale ~349 resta
 # sotto il tetto 460 del piano free con margine per /scores. E' un TETTO,
@@ -767,7 +780,7 @@ def _get_odds(sport, frm, to, *, markets="h2h", cache_prefix="toa_", ttl_s=None)
     return payload, remaining
 
 
-def fetch_line_odds(sport, frm, to):
+def fetch_line_odds(sport, frm, to, ttl_s: Optional[float] = None):
     """Quote `h2h,totals,spreads` per UNA lega (oracolo a linea, 3 crediti).
 
     Follow-the-money (30/09/2026): chiamata fatta SOLO per le leghe con pick
@@ -781,7 +794,15 @@ def fetch_line_odds(sport, frm, to):
     palinsesto della lega. La freschezza della cache segue la STESSA
     grandezza (`oracle_cache_ttl_s()`), altrimenti una cache di 70 minuti
     resterebbe considerata valida per 24h pur non coprendo piu' nulla.
+
+    `ttl_s` (05/10/2026): TTL **dinamica sul tempo al kickoff** calcolata dal
+    chiamante (`oracle_cache_ttl_s(minutes_to_kickoff=...)`) e applicata sia al
+    pre-check sia alla scrittura. Serve a REFRESHARE davvero: con la sola TTL
+    di finestra il refresh chiesto dallo scheduler sarebbe stato un cache-hit
+    (nessuna spesa, nessun aggiornamento) e il gate avrebbe continuato a
+    vedere un dato scaduto. None = comportamento storico (TTL di finestra).
     """
+    ttl = oracle_cache_ttl_s() if ttl_s is None else float(ttl_s)
     # Budget giornaliero dedicato: l'oracolo a linea NON puo' sfinire la
     # stessa risorsa (crediti) della ricerca — un tetto proprio rende il
     # costo massimo misurabile a prescindere da quante leghe abbiano pick.
@@ -803,13 +824,13 @@ def fetch_line_odds(sport, frm, to):
     if cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            if time.time() - data.get("ts", 0) < oracle_cache_ttl_s():
+            if time.time() - data.get("ts", 0) < ttl:
                 return data.get("payload", []), data.get("remaining", 999)
         except Exception:
             pass
     payload, remaining = _get_odds(sport, frm, to, markets=ORACLE_MARKETS_LIST,
                                    cache_prefix=ORACLE_CACHE_PREFIX,
-                                   ttl_s=oracle_cache_ttl_s())
+                                   ttl_s=ttl)
     if payload or remaining != 999:
         _oracle_req_day["n"] += 1
     return payload, remaining

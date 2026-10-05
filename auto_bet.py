@@ -406,26 +406,54 @@ def _top_down_load(home: str, away: str):
     return po.load_oracle(home, away, cache_dir=_TOP_DOWN_CACHE_DIR)
 
 
-def _h2h_cache_stantia(pick: dict) -> bool:
-    """True se la cache h2h del pick ESISTE ma e' stantia (> CACHE_MAX_AGE_H).
+def _pick_line(pick: dict) -> float | None:
+    """Linea (lato teamOne) di un pick a linea OU/AH.
 
-    Distingue 'Pinnacle non ha la partita' (nessuna cache la contiene:
-    no_oracle, non e' recuperabile) da 'la cache e' vecchia' (il match c'e'
-    ma fuori finestra: l'oracolo a linea puo' arrivare col refresh
-    follow-the-money della lega). Fail-closed su errore di lettura: False
-    (il motivo resta no_oracle, che e' la condizione certa).
+    Ricostruita con `multi_market.order_target`, l'UNICA fonte della
+    convenzione ('Over 2.5' -> 2.5, 'Home -0.75' -> -0.75): nessuna seconda
+    mappa che divergerebbe. None se il pick non e' riconducibile (fail-safe).
+    """
+    try:
+        from multi_market import order_target
+        target = order_target(pick)
+        if not target or target.get("line") is None:
+            return None
+        return float(target["line"])
+    except Exception:
+        return None
+
+
+def _line_skip_reason(pick: dict, mercato: str, line: float | None) -> dict:
+    """Motivo GRANULARE (`no_oracle/<CODE>`) di uno scarto OU/AH (05/10/2026).
+
+    Il generico "Pinnacle assente/incompleto/stantio" non dice COSA FARE (il
+    01/10 la domanda "quanti pick perde l'oracolo e perche'?" non aveva
+    risposta misurabile). `pinnacle_oracle.line_oracle_reason` distingue:
+      - `EXPIRED_CACHE`  -> il dato c'e' ma e' piu' vecchio del TTL dinamico
+        (o la lega e' coperta e la linea non e' ancora stata pagata): si
+        rifetcha follow-the-money, il pick NON e' perso per sempre;
+      - `LINE_MISMATCH`  -> Pinnacle prezza il mercato ma NON questa linea:
+        un altro fetch non serve, serve un'altra linea;
+      - `MISSING_MARKET` -> partita/mercato assente: non recuperabile a credito.
+
+    Ritorna SEMPRE un dict con `reason`/`detail`; un errore della diagnosi
+    ricade sul generico (fail-safe: la telemetria non deve mai fermare il
+    giro puntate).
     """
     try:
         import pinnacle_oracle as po
-        from config import DATA_DIR
-        from pathlib import Path
-        folder = (Path(_TOP_DOWN_CACHE_DIR) if _TOP_DOWN_CACHE_DIR
-                  else Path(DATA_DIR))
-        return bool(po.h2h_cache_is_stale(pick.get("home") or "",
-                                          pick.get("away") or "",
-                                          cache_dir=folder))
-    except Exception:
-        return False
+        info = po.line_oracle_reason(
+            pick.get("home") or "", pick.get("away") or "",
+            market_type=mercato, line=line,
+            cache_dir=_TOP_DOWN_CACHE_DIR, kickoff=pick.get("commence"))
+        code = str((info or {}).get("code") or "MISSING_MARKET")
+        detail = str((info or {}).get("detail") or "")
+        return {"reason": f"no_oracle/{code}", "detail": detail}
+    except Exception as exc:                                # pragma: no cover
+        return {"reason": "no_oracle",
+                "detail": f"Pinnacle assente/incompleto/stantio "
+                          f"(fail-closed: senza verita' non si decide; "
+                          f"diagnosi non disponibile: {exc})"}
 
 
 def pick_window(pick: dict) -> str:
@@ -510,10 +538,14 @@ def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
         # paga la fetch della lega e l'oracolo arriva al giro dopo) invece
         # di un no_oracle che nasconderebbe la causa.
         mercato = str(pick.get("mercato") or "").upper()
+        # Linea del pick (lato teamOne): serve sia alla lettura dell'oracolo a
+        # linea sia alla DIAGNOSI granulare dello scarto (05/10/2026).
+        _linea = _pick_line(pick) if mercato in ("OU", "AH") else None
         if mercato in ("OU", "AH"):
             lp = None
             try:
-                lp = po.line_oracle_probs(pick, cache_dir=_TOP_DOWN_CACHE_DIR)
+                lp = po.line_oracle_probs(pick, cache_dir=_TOP_DOWN_CACHE_DIR,
+                                          kickoff=pick.get("commence"))
             except Exception as exc:
                 logger.debug("oracolo a linea non disponibile (%s)", exc)
             if lp:
@@ -529,15 +561,15 @@ def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
                     probs = dict(lp)
                     probs["__key"] = _lato
         if not probs:
-            # Nessuna verita' (ne' 1X2 ne' a linea): se la cache h2h copre la
-            # lega ma e' STANTIA, la causa e' dichiarata ('linea': la verita'
-            # serve e si puo' pagare con fetch_line_odds); altrimenti e' il
-            # no_oracle secco (partita fuori dai payload: non recuperabile).
-            if mercato in ("OU", "AH") and _h2h_cache_stantia(pick):
-                return {"ok": False, "reason": "linea",
-                        "detail": "oracolo a linea non ancora scaricato per "
-                                  "questa lega (cache h2h stantia): serve "
-                                  "fetch_line_odds (follow-the-money)"}
+            # Nessuna verita' (ne' 1X2 ne' a linea). Per i mercati a LINEA la
+            # causa e' DICHIARATA e granulare (`no_oracle/EXPIRED_CACHE`,
+            # `no_oracle/LINE_MISMATCH`, `no_oracle/MISSING_MARKET`): il vecchio
+            # generico "Pinnacle assente/incompleto/stantio" non diceva COSA
+            # FARE (05/10/2026). Il 1X2 conserva il motivo secco.
+            if mercato in ("OU", "AH"):
+                info = _line_skip_reason(pick, mercato, _linea)
+                return {"ok": False, "reason": info["reason"],
+                        "detail": info["detail"]}
             return {"ok": False, "reason": "no_oracle",
                     "detail": "Pinnacle assente/incompleto/stantio "
                               "(fail-closed: senza verita' non si decide)"}
@@ -546,11 +578,13 @@ def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
             _esito_key = str(probs["__key"])
         p_true = float(probs.get(_esito_key) or 0)
         if not (0.0 < p_true <= 1.0):
-            if mercato in ("OU", "AH") and _h2h_cache_stantia(pick):
-                return {"ok": False, "reason": "linea",
-                        "detail": "oracolo a linea non ancora scaricato per "
-                                  "questa lega (cache h2h stantia): serve "
-                                  "fetch_line_odds (follow-the-money)"}
+            if mercato in ("OU", "AH"):
+                # L'oracolo a linea ha risposto ma non copre QUESTO lato/linea:
+                # e' un disallineamento di selezione, non una cache scaduta.
+                return {"ok": False, "reason": "no_oracle/LINE_MISMATCH",
+                        "detail": f"esito '{_esito_key}' non coperto "
+                                  "dall'oracolo a linea (lato/linea non "
+                                  "riconosciuti)"}
             return {"ok": False, "reason": "no_oracle",
                     "detail": f"esito '{_esito_key}' senza "
                               "probabilita' fair"}
