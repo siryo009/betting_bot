@@ -251,6 +251,23 @@ T60_ORDER_VALIDATION = os.getenv("T60_ORDER_VALIDATION", "1").strip().lower() \
 T60_EXECUTION_ONLY = os.getenv("T60_EXECUTION_ONLY", "1").strip().lower() \
     in ("1", "true", "yes", "on")
 
+
+def _mins_label(value: float) -> str:
+    """Minuti senza decimali quando sono interi (180.0 -> "180", 2.5 -> "2.5")."""
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
+def window_label() -> str:
+    """Etichetta della finestra esecutiva, DERIVATA dalle costanti di produzione.
+
+    Non e' un testo fisso: dopo lo spostamento a **T-180..T-2** (04/10/2026)
+    un'etichetta hardcoded "T-60" sarebbe rimasta a mentire nei log e nel
+    messaggio di avvio del bot (stessa classe di bug dei testi stantii del
+    13/09). Formato: "T-180..T-2".
+    """
+    return (f"T-{_mins_label(T60_WINDOW_MIN_MIN)}.."
+            f"T-{_mins_label(T60_WINDOW_MAX_MIN)}")
+
 # --- STRATEGIA TOP-DOWN "STEAM CHASING" (fase 2, direttiva del proprietario
 # 25/09/2026) -------------------------------------------------------------
 # Il modello bottom-up (Poisson) resta a monte di tutto (genera i candidati
@@ -3131,9 +3148,9 @@ def run_today_bets(stake_eur: float | None = None,
         if T60_EXECUTION_ONLY:
             _tw = pick_window(pick)
             if _tw != "within":
-                logger.info("auto_bet: %s (%s) fuori finestra T-60 (%s): solo "
+                logger.info("auto_bet: %s (%s) fuori finestra %s (%s): solo "
                             "scansione, nessun ordine", pick["match_id"],
-                            pick["esito_key"], _tw)
+                            pick["esito_key"], window_label(), _tw)
                 continue
 
         # Timing filter: piazza solo nel momento ottimale (0.5-24h prima)

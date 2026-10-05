@@ -18,6 +18,7 @@ const DEMO = {
   per_mercato: {},
   streaks: { current_streak: 0, current_type: 'none', max_win_streak: 0, max_loss_streak: 0 },
   clv: { n: 0, avg_raw: 0, avg_vf: 0, avg_vs_pinnacle: 0, pending: 0 },
+  closing: { closed_n: 0, with_closing: 0, beat_positive: 0, avg_beat: null },
   auto_bets: { n: 0, won: 0, lost: 0, total_stake: 0, pnl: 0, roi: 0 },
   bankroll_stats: { current: 500, peak: 500, drawdown_pct: 0, risk_level: '🟢 OK' },
   market_signals: {
@@ -48,6 +49,7 @@ export default function Dashboard() {
   const d = data || DEMO
   const streaks = d.streaks || {}
   const clv = d.clv || {}
+  const cl = d.closing || {}
   const ab = d.auto_bets || {}
   const pm = d.per_mercato || {}
   const bs = d.bankroll_stats || {}
@@ -92,10 +94,11 @@ export default function Dashboard() {
         <Card title="🎯 Segnali Oggi" value={String(d.segnali_oggi)} color="purple" />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
         <Card title="🔥 Streak attuale" value={streakTxt} color="orange" small />
         <Card title="✅ Hit Rate (30gg)" value={`${Number(d.hit_rate).toFixed(1)}%`} color="teal" small />
         <Card title="📈 CLV vig-free" value={clv.n ? `${Number(clv.avg_vf).toFixed(2)}%` : '—'} color="blue" small />
+        <Card title="📉 Beat sul mercato (T-0)" value={cl.with_closing ? `${cl.beat_positive}/${cl.with_closing}` : '—'} color="purple" small />
       </div>
 
       {/* Monitor Value Bet + Movimenti di linea */}
@@ -235,6 +238,27 @@ export default function Dashboard() {
             <p>vs Pinnacle: <b className={Number(clv.avg_vs_pinnacle ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>{Number(clv.avg_vs_pinnacle ?? 0).toFixed(2)}%</b></p>
             {Number(clv.pending ?? 0) > 0 && <p className="text-amber-400">⏳ {clv.pending} segnali in attesa di chiusura</p>}
           </div>
+          {/* BEAT SUL MERCATO (direttiva 04/10): la closing line Pinnacle
+              catturata a T-0 e' la prova che il prezzo battuto era quello
+              giusto, non solo un CLV stimato. */}
+          <h3 className="text-lg font-bold mt-6 mb-2">📉 Closing line Pinnacle (T-0)</h3>
+          {!(cl.with_closing ?? 0) ? (
+            <p className="text-gray-500 text-sm">Nessun campione di closing line catturato finora.
+              <br /><span className="text-xs">La routine gira ogni 5&apos; e cattura lo sharp nei minuti del fischio (T-10..T+5).</span>
+            </p>
+          ) : (
+            <div className="text-sm text-gray-400 space-y-1">
+              <p>Campioni con closing: <b className="text-gray-200">{cl.with_closing}</b> su {cl.closed_n ?? 0} righe CLV</p>
+              <p>Closing battuta (beat positivo): <b className={Number(cl.beat_positive ?? 0) > 0 ? 'text-emerald-400' : 'text-gray-200'}>
+                {cl.beat_positive ?? 0}/{cl.with_closing}</b>{' '}
+                <span className="text-gray-500">({((Number(cl.beat_positive ?? 0) / Number(cl.with_closing || 1)) * 100).toFixed(0)}%)</span>
+              </p>
+              {cl.avg_beat != null && (
+                <p>Beat medio: <b className={Number(cl.avg_beat) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                  {(Number(cl.avg_beat) * 100).toFixed(2)}%</b></p>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </main>

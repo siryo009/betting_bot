@@ -143,6 +143,16 @@ def _dashboard_json(params=None):
         }
     except Exception:
         pass
+    # BEAT SUL MERCATO (direttiva 04/10, punto 5): quante closing line Pinnacle
+    # a T-0 sono state battute e di quanto. `rows` e' accorciato: la dashboard
+    # mostra l'aggregato, il dettaglio resta nella CLI `closing_line.py`.
+    closing = {}
+    try:
+        from closing_line import report as _closing_report
+        closing = _closing_report()
+        closing["rows"] = (closing.get("rows") or [])[:20]
+    except Exception:
+        pass
     return {
         "bankroll": bankroll,
         "roi_30gg": roi,
@@ -152,6 +162,7 @@ def _dashboard_json(params=None):
         "ultime_value": value,
         "per_mercato": per_mercato,
         "market_signals": market,
+        "closing": closing,
         **extra,
     }
 
@@ -215,6 +226,22 @@ def _schedina_json(params=None):
             pick_data["stake"] = round(min(stake, bankroll * 0.03), 2)
             pick_data["stake_kelly"] = 0.25
             pick_data["stake_reason"] = "fallback (1/4 Kelly)"
+        # KELLY DINAMICO del MOTORE (direttiva 04/10, punto 2): la banda
+        # 0.15-0.25 scalata da EV/edge/confidenza della lega (`dynamic_
+        # kelly_fraction`). E' il k che l'EXECUTION ENGINE applica davvero:
+        # la schedina lo mostra accanto al frazionamento storico, cosi'
+        # l'operatore vede la size che verrebbe ordinata. Fail-safe: se il
+        # modulo non e' importabile la schedina resta com'era.
+        try:
+            from decision.stake_engine import dynamic_kelly_fraction
+            _dyn = dynamic_kelly_fraction(ev=p.get("ev"),
+                                          edge=p.get("market_edge"),
+                                          league=p.get("league"))
+            pick_data["kelly_dynamic"] = _dyn["kelly_fraction"]
+            pick_data["kelly_strength"] = _dyn["strength"]
+            pick_data["kelly_reason"] = _dyn["reason"]
+        except Exception:
+            pass
         out.append(pick_data)
 
     mp = build_multipla(picks)

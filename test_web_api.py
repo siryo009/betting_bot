@@ -77,6 +77,39 @@ class TestDashboard:
         assert d["market_signals"]["summary"]["total"] >= 0
 
 
+class TestDashboardClosingLine:
+    """BEAT SUL MERCATO (direttiva 04/10, punto 5): la dashboard espone la
+    closing line Pinnacle catturata a T-0 con il beat realizzato."""
+
+    def test_sezione_presente_anche_senza_campioni(self):
+        d = web_api._dashboard_json()
+        assert "closing" in d
+        assert {"closed_n", "with_closing", "beat_positive", "avg_beat"} \
+            <= set(d["closing"])
+
+    def test_beat_calcolato_dai_campioni_reali(self):
+        # beat = signal/closing - 1. Preso a 1.70 e chiuso a 1.65 = battuto
+        # (+3.03%); preso a 2.00 e chiuso a 2.10 = NON battuto (-4.76%).
+        tracker.save_clv("m1", "1", 1.70, signal_started=True,
+                         closing_odds=1.65)
+        tracker.save_clv("m2", "2", 2.00, signal_started=True,
+                         closing_odds=2.10)
+        cl = web_api._dashboard_json()["closing"]
+        assert cl["with_closing"] == 2
+        assert cl["beat_positive"] == 1
+        assert cl["avg_beat"] == pytest.approx(-0.00866, abs=1e-3)
+
+    def test_payload_leggero(self):
+        """La dashboard non deve trascinare l'intero registro CLV: `rows`
+        resta un campione breve (il dettaglio e' nella CLI)."""
+        for i in range(40):
+            tracker.save_clv(f"m{i}", "1", 2.0, signal_started=True,
+                             closing_odds=2.1)
+        cl = web_api._dashboard_json()["closing"]
+        assert len(cl["rows"]) <= 20
+        assert cl["with_closing"] == 40
+
+
 class TestStorico:
     def test_storico_vuoto(self, monkeypatch):
         s = web_api._storico_json()
@@ -96,6 +129,24 @@ class TestSchedina:
         assert s["picks"] == []
         assert s["multipla"] is None
         assert s["bankroll"] == pytest.approx(100.0)
+
+    def test_pick_espone_il_kelly_dinamico_del_motore(self, monkeypatch):
+        """Direttiva 04/10, punto 2: la schedina mostra il k che l'execution
+        engine applica davvero (banda 0.15-0.25), non solo il frazionamento
+        del percorso storico."""
+        import fixture_engine
+        pick = {"league": "Serie A", "home": "Inter", "away": "Napoli",
+                "evento": "Serie A - Inter vs Napoli", "esito": "1",
+                "quota": 1.65, "bookmaker": "SX Bet", "ev": 0.06,
+                "market_edge": 0.05, "status": "value"}
+        monkeypatch.setattr(fixture_engine, "get_value_picks_for_schedina",
+                            lambda: [pick])
+        monkeypatch.setattr(fixture_engine, "build_multipla", lambda picks: None)
+        s = web_api._schedina_json()
+        assert len(s["picks"]) == 1
+        row = s["picks"][0]
+        assert 0.15 <= row["kelly_dynamic"] <= 0.25
+        assert row["kelly_reason"]
 
 
 class TestCalibration:

@@ -8943,3 +8943,34 @@ T-60..T-5): `KELLY_AGGRESSIVE_FRACTION=0.25`,
 `T60_WINDOW_MIN_MIN=180`, `T60_WINDOW_MAX_MIN=2`, `EV_MIN_LIQUID=0.01`; le
 `CLOSING_LINE_*` restano ai default di codice. Tutte dichiarate in `preserve()`
 → un `config apply` non le distrugge.
+
+#### Follow-up 04/10 (sera): etichetta finestra + webapp (k dinamico e beat sul mercato)
+
+**1) L'etichetta della finestra non puo' piu' mentire (`auto_bet.window_label`).**
+Dopo lo spostamento a T-180..T-2 i log e il messaggio di avvio Telegram
+dicevano ancora "T-60": nuova **`window_label()`** che DERIVA il testo da
+`T60_WINDOW_MIN_MIN`/`T60_WINDOW_MAX_MIN` ("T-180..T-2") — stessa lezione dei
+testi stantii del 13/09, cosi' un prossimo ritocco della banda aggiorna i
+messaggi da solo. Usata nella riga di skip della finestra in `run_today_bets`
+e nel messaggio di avvio (`bot.main`, che non usa piu' `t60_window(None)`:
+quella chiamata stampava sempre `unknown`).
+
+**2) Webapp: k dinamico + beat sul mercato.**
+- `GET /api/schedina`: ogni pick porta ora **`kelly_dynamic`, `kelly_strength`,
+  `kelly_reason`** da `decision.stake_engine.dynamic_kelly_fraction` — il k che
+  l'execution engine applica davvero, accanto al frazionamento storico
+  (`stake_kelly`). Fail-safe: se il modulo non e' importabile la schedina resta
+  com'era.
+- `GET /api/dashboard`: nuovo blocco **`closing`** da `closing_line.report()`
+  (`closed_n`, `with_closing`, `beat_positive`, `avg_beat`) con `rows`
+  ACCORCIATO a 20 (la dashboard non trascina l'intero registro; il dettaglio
+  resta nella CLI).
+- `webapp/app/schedina/page.tsx`: la cella Kelly mostra il **k dinamico**
+  (etichetta "Kelly dinamico") e il suo motivo.
+- `webapp/app/dashboard/page.tsx`: nuova card **"📉 Beat sul mercato (T-0)"**
+  e nuova sezione "Closing line Pinnacle (T-0)" (campioni, beat positivi,
+  beat medio) — cosi' il CLV stimato e la prova sul mercato non si confondono.
+- Test: `test_web_api.py` +4 (sezione `closing` presente anche senza campioni,
+  beat calcolato su campioni reali con `clv_raw`, payload leggero con 40 righe,
+  pick che espone il k dinamico nella banda 0.15-0.25). `npm run build` OK.
+

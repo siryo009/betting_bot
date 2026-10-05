@@ -3251,7 +3251,7 @@ def send_telegram_message_direct(text: str) -> None:
 def main() -> None:
     if not TOKEN: raise ValueError("Token non configurato.")
     init_db()
-    from auto_bet import kill_switch_status, _execution_mode, t60_window
+    from auto_bet import kill_switch_status, _execution_mode, window_label
     from decision.models import Mode
     mode = os.getenv("AUTO_BET_MODE", "sim").strip().lower()
     # Bankroll del messaggio di avvio: SEMPRE un valore reale (equity wallet
@@ -3276,10 +3276,10 @@ def main() -> None:
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Stato circuito:</b> {ks.get('effective', 'unknown')}\n"
         f"🔧 <b>Modalità esecuzione:</b> {_execution_mode()}\n"
-        f"⏰ <b>Finestra T-60:</b> {t60_window(None)}\n"
+        f"⏰ <b>Finestra esecutiva:</b> {window_label()}\n"
         f"{bankroll_line}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"✅ Sistema pronto. Primo ciclo T-60 tra 60s."
+        f"✅ Sistema pronto. Primo ciclo tra 60s."
     )
     send_telegram_message_direct(summary)
     application = Application.builder().token(TOKEN).build()

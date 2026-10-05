@@ -6,8 +6,8 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 
 const DEMO = {
   picks: [
-    { league: 'Serie A', home: 'Inter', away: 'Napoli', evento: 'Serie A – Inter vs Napoli', esito: 'Over 2.5', quota: 2.10, bookmaker: 'Bet365', ev: 0.155, prob: 0.626 },
-    { league: 'Liga Italia', home: 'Roma', away: 'Milan', evento: 'Liga Italia – Roma vs Milan', esito: '1', quota: 2.40, bookmaker: 'Sbobet', ev: 0.08, prob: 0.497 },
+    { league: 'Serie A', home: 'Inter', away: 'Napoli', evento: 'Serie A – Inter vs Napoli', esito: 'Over 2.5', quota: 2.10, bookmaker: 'Bet365', ev: 0.155, prob: 0.626, kelly_dynamic: 0.25, kelly_reason: 'EV alto · lega core' },
+    { league: 'Liga Italia', home: 'Roma', away: 'Milan', evento: 'Liga Italia – Roma vs Milan', esito: '1', quota: 2.40, bookmaker: 'Sbobet', ev: 0.08, prob: 0.497, kelly_dynamic: 0.17, kelly_reason: 'EV contenuto · lega core' },
   ],
   multipla: {
     esiti: 'Over 2.5 + 1',
@@ -55,8 +55,12 @@ export default function Schedina() {
       return {
         stake: Number(p.stake),
         pct: (Number(p.stake) / bankroll) * 100,
-        kelly: Number(p.stake_kelly || 0.25),
-        reason: p.stake_reason || '',
+        // Il KELLY mostrato e' quello del MOTORE (banda dinamica 0.15-0.25,
+        // direttiva 04/10): se il backend non lo espone si ripiega sul
+        // frazionamento del percorso storico per non lasciare il campo vuoto.
+        kelly: Number(p.kelly_dynamic ?? p.stake_kelly ?? 0.25),
+        reason: p.kelly_reason || p.stake_reason || '',
+        dynamic: p.kelly_dynamic != null,
       }
     }
     // Fallback client-side: 1/4 Kelly cap 3%
@@ -66,7 +70,7 @@ export default function Schedina() {
     const kelly = Math.max(0, kellyFull) / 4
     const cap = bankroll * 0.03
     const stake = Math.min(kelly * bankroll, cap)
-    return { stake, pct: (stake / bankroll) * 100, kelly: 0.25, reason: 'fallback' }
+    return { stake, pct: (stake / bankroll) * 100, kelly: 0.25, reason: 'fallback', dynamic: false }
   }
 
   const totalStake = picks.reduce((s, p) => s + getStake(p).stake, 0)
@@ -107,7 +111,7 @@ export default function Schedina() {
                   <div><span className="text-gray-400 block">🏦 Bandar</span>{p.bookmaker}</div>
                   <div><span className="text-gray-400 block">📈 EV</span><b className={ev >= 0 ? 'text-emerald-400' : 'text-red-400'}>+{ev.toFixed(1)}%</b></div>
                   <div><span className="text-gray-400 block">💵 Stake</span><b className="text-emerald-300">€{getStake(p).stake.toFixed(2)}</b> <span className="text-gray-500">({getStake(p).pct.toFixed(1)}%)</span></div>
-                  <div><span className="text-gray-400 block">📊 Kelly</span><b>{(getStake(p).kelly * 100).toFixed(0)}%</b> <span className="text-gray-500 text-xs">{getStake(p).reason}</span></div>
+                  <div><span className="text-gray-400 block">📊 Kelly{getStake(p).dynamic ? ' dinamico' : ''}</span><b>{(getStake(p).kelly * 100).toFixed(0)}%</b> <span className="text-gray-500 text-xs">{getStake(p).reason}</span></div>
                 </div>
               </div>
             )
