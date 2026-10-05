@@ -548,18 +548,29 @@ def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
                                           kickoff=pick.get("commence"))
             except Exception as exc:
                 logger.debug("oracolo a linea non disponibile (%s)", exc)
+            _line_probs = None
             if lp:
                 _lato = str(lp.pop("line_key", "") or "")
                 if _lato:
                     # Lato della convenzione SX ('over'/'under'/'home'/'away')
                     # -> etichetta del de-vig binario ('Over'/'Under'/
                     # 'Home'/'Away'). Sconosciuto = chiave non trovata ->
-                    # p_true 0 -> rami no_oracle/linea (mai un lato a caso).
+                    # nessuna p_true -> diagnosi granulare (mai un lato a caso).
                     _lato = {"over": "Over", "under": "Under",
                              "home": "Home", "away": "Away"}.get(
                         _lato.lower(), _lato)
-                    probs = dict(lp)
-                    probs["__key"] = _lato
+                    _line_probs = dict(lp)
+                    _line_probs["__key"] = _lato
+            # ⚠️ Per un mercato A LINEA il dict 1X2 NON e' un oracolo: le sue
+            # chiavi ('1'/'X'/'2') non coprono 'Over 2.5'/'Home -0.75'.
+            # Lasciandolo in `probs` il flusso ricadeva sul ramo generico
+            # `LINE_MISMATCH` ("lato/linea non riconosciuti") ANCHE quando la
+            # cache h2h esisteva e la diagnosi granulare sapeva dire la causa
+            # vera (linea non prezzata / cache scaduta / mercato non pubblicato):
+            # misurato in produzione il 05/10/2026 sui log delle 18:23. Senza
+            # `probs` si entra in `_line_skip_reason`, l'unica fonte della
+            # causa machine-readable.
+            probs = _line_probs
         if not probs:
             # Nessuna verita' (ne' 1X2 ne' a linea). Per i mercati a LINEA la
             # causa e' DICHIARATA e granulare (`no_oracle/EXPIRED_CACHE`,

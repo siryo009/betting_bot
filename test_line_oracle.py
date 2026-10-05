@@ -435,6 +435,34 @@ class TestGateTopDownConLinea:
         assert v.get("reason") == "no_oracle/LINE_MISMATCH"
         assert "3.5" in (v.get("detail") or "")
 
+    def test_oracolo_1x2_non_maschera_la_diagnosi_a_linea(self, monkeypatch,
+                                                         tmp_path):
+        """Regressione 05/10/2026 (log di produzione delle 18:23).
+
+        Se l'oracolo 1X2 risponde ma quello A LINEA no, il dict 1X2 non deve
+        essere usato come verita' per un mercato a linea: lasciandolo in
+        `probs` il flusso ricadeva sul ramo generico `LINE_MISMATCH`
+        ("lato/linea non riconosciuti") ANZICHE' sulla diagnosi granulare che
+        sa dire la causa vera (linea non prezzata + linee disponibili).
+        """
+        import auto_bet
+        _write_oracle_cache(tmp_path, "soccer_italy_serie_a",
+                            [_match_with_lines()])
+        # La cache 1X2 ESISTE e risponde (e' il caso reale dei log).
+        monkeypatch.setattr(auto_bet, "_top_down_load",
+                            lambda h, a: {"1": 0.60, "X": 0.25, "2": 0.15})
+        monkeypatch.setattr(auto_bet, "_TOP_DOWN_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(po, "line_oracle_probs", lambda *a, **k: None)
+        v = auto_bet._top_down_eval(self._pick(esito_key="Over 2"))
+        assert v.get("ok") is False
+        assert v.get("reason") == "no_oracle/LINE_MISMATCH"
+        # Il dettaglio e' quello della DIAGNOSI ("non prezzata su entrambi i
+        # lati" + linee disponibili), NON il generico "lato/linea non
+        # riconosciuti" che il fall-through 1X2 produceva in produzione.
+        det = v.get("detail") or ""
+        assert "prezzata" in det, det
+        assert "non coperto" not in det, det
+
 
 # ---------------------------------------------------------------------------
 # 5. Normalizzazione canonica delle linee (05/10/2026)
