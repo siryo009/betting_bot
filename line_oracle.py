@@ -262,6 +262,171 @@ def ensure_oracle_payloads(max_leagues: Optional[int] = None
     return res
 
 
+# ---------------------------------------------------------------------------
+# FETCH ON-DEMAND (05/10/2026) — il budget segue il PICK, non il calendario
+# ---------------------------------------------------------------------------
+# PERCHE'. Lo scheduler fetcha ogni 30' scegliendo per "kickoff piu' vicino":
+# il budget giornaliero (`odds_api.ORACLE_BUDGET_DAY`, CONDIVISO) puo' cosi'
+# finire su una lega i cui pick non sono ordinabili (finestra T-180..T-2 non
+# ancora aperta) mentre il pick che sta per diventare un ordine resta con la
+# cache scaduta per il TTL dinamico -> `no_oracle/EXPIRED_CACHE` per sempre
+# (misurato in produzione il 05/10/2026: 11 pick/ciclo, tutti scaduti a 17'.
+# con TTL 2').
+#
+# COME. Il gate, quando incontra `EXPIRED_CACHE` su un pick IN FINESTRA,
+# paga SUBITO la fetch della SUA lega (3 crediti) e salta il pick: al giro
+# successivo (60s) la cache e' fresca e la valutazione passa. Nessun credito
+# in piu' del tetto giornaliero: entrambi i percorsi passano per
+# `odds_api.fetch_line_odds`, che porta budget, hard-stop e `ORACLE_ENABLED`.
+_ONDEMAND_DEFAULT_DEDUP_S = 120.0
+_last_ondemand: Dict[str, float] = {}
+
+
+def ondemand_dedup_s() -> float:
+    """Secondi minimi fra due fetch on-demand della STESSA lega.
+
+    Env `ORACLE_ONDEMAND_DEDUP_S` (default 120s). Una tornata di 12 pick sulla
+    stessa lega paga UNA volta: senza dedup il gate brucerebbe l'intero budget
+    giornaliero in una manciata di secondi. Un valore assente, non numerico o
+    non positivo ricade sul default (una guardia non si spegne con un env
+    sbagliato).
+    """
+    raw = os.getenv("ORACLE_ONDEMAND_DEDUP_S")
+    if raw in (None, ""):
+        return _ONDEMAND_DEFAULT_DEDUP_S
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("line_oracle: ORACLE_ONDEMAND_DEDUP_S=%r non numerico, "
+                       "uso %s", raw, _ONDEMAND_DEFAULT_DEDUP_S)
+        return _ONDEMAND_DEFAULT_DEDUP_S
+    if val <= 0:
+        logger.warning("line_oracle: ORACLE_ONDEMAND_DEDUP_S=%r non positivo, "
+                       "uso %s", raw, _ONDEMAND_DEFAULT_DEDUP_S)
+        return _ONDEMAND_DEFAULT_DEDUP_S
+    return val
+
+
+def reset_ondemand_dedup() -> None:
+    """Azzera la memo in-process (test e diagnostica: nessun altro uso)."""
+    _last_ondemand.clear()
+
+
+def ondemand_enabled() -> bool:
+    """Interruttore del fetch on-demand (env `ORACLE_ONDEMAND_ENABLED`).
+
+    Default ATTIVO (una funzione nuova non si spegne da sola su un deploy);
+    per disattivarla serve un valore esplicito fra `0/false/no/off/disabled`.
+    Spenta, il gate resta fail-closed come prima (nessuna spesa): e' cio' che
+    serve a test e diagnostiche che esercitano il percorso reale senza toccare
+    la rete (`verify_guardrails.py` lo imposta a 0 insieme a `LIVE_INTEL=0` e
+    `ESPORTS_LIVE=0`).
+    """
+    raw = (os.getenv("ORACLE_ONDEMAND_ENABLED") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off", "disabled")
+
+
+def fetch_for_pick(pick: Dict[str, Any],
+                   now: Optional[float] = None) -> Dict[str, Any]:
+    """Paga ORA la fetch `h2h,totals,spreads` della lega di QUESTO pick.
+
+    Ritorna SEMPRE un dict con `fetched` (bool) e `reason` machine-readable:
+    `fetch on-demand eseguita` | `dedup (...)` | `lega non mappata` |
+    `budget oracolo esaurito` | `hard-stop crediti` | `errore fetch (...)` |
+    `nessun payload (nessuna partita in finestra)`.
+
+    Tetti (nessuno aggirabile da qui): budget giornaliero, hard-stop crediti,
+    `ORACLE_ENABLED` e `should_query_sport` vivono in `odds_api.fetch_line_odds`
+    (l'unico punto HTTP autorizzato del progetto). La dedup per lega e' locale
+    al processo; il chiamante verifica la FINESTRA ESECUTIVA prima di invocare.
+
+    Fail-safe: mai un'eccezione (un problema dell'oracolo non ferma il bot).
+    """
+    if not ondemand_enabled():
+        return {"fetched": False, "sport_key": None,
+                "reason": "fetch on-demand disattivata (ORACLE_ONDEMAND_ENABLED)"}
+    sport = None
+    try:
+        import odds_api as oa
+        from sx_signals import league_to_sport
+    except Exception as exc:                                     # pragma: no cover
+        return {"fetched": False, "reason": f"dipendenze non disponibili ({exc})",
+                "sport_key": None}
+    sport = league_to_sport(str(pick.get("league") or ""))
+    if not sport:
+        return {"fetched": False, "reason": "lega non mappata a uno sport key",
+                "sport_key": None}
+    ts_now = time.time() if now is None else float(now)
+    dedup = ondemand_dedup_s()
+    last = _last_ondemand.get(sport)
+    if last is not None and (ts_now - last) < dedup:
+        return {"fetched": False,
+                "reason": f"dedup ({ts_now - last:.0f}s < {dedup:.0f}s)",
+                "sport_key": sport}
+    # TTL dinamico del PICK (stessa formula del gate): il payload appena
+    # scaricato deve risultare FRESCO al prossimo giro, altrimenti la fetch
+    # sarebbe spesa per un dato che il gate scarterebbe di nuovo.
+    ttl_s: Optional[float] = None
+    try:
+        import pinnacle_oracle as po
+        ttl_s = float(po.cache_ttl_minutes(po.minutes_to_kickoff(
+            pick.get("commence") or pick.get("kickoff"), now=ts_now)) * 60.0)
+    except Exception:                                            # pragma: no cover
+        ttl_s = None
+    now_dt = datetime.fromtimestamp(ts_now, tz=timezone.utc)
+    frm = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    to = (now_dt + timedelta(hours=_window_h())).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Override LOCALE della sola dedup: `fetch_line_odds` ha il suo
+    # `cache_min_age_s` (protegge dalla ri-scrittura della cache) e non deve
+    # essere confuso con la dedup per lega del budget on-demand.
+    # La memo si aggiorna PRIMA della chiamata: un errore di rete non deve
+    # produrre un nuovo tentativo a ogni pick dello stesso giro.
+    _last_ondemand[sport] = ts_now
+    try:
+        payload, remaining = oa.fetch_line_odds(sport, frm, to, ttl_s=ttl_s)
+    except Exception as exc:
+        return {"fetched": False, "reason": f"errore fetch ({exc})",
+                "sport_key": sport}
+    if payload:
+        return {"fetched": True, "reason": "fetch on-demand eseguita",
+                "sport_key": sport, "matches": len(payload),
+                "remaining": remaining}
+    return {"fetched": False, "reason": _no_payload_reason(),
+            "sport_key": sport, "remaining": remaining}
+
+
+def _no_payload_reason() -> str:
+    """PERCHE' la fetch non ha prodotto payload (causa DICHIARATA, non 'vuoto').
+
+    Ordine di lettura: hard-stop crediti -> budget oracolo del giorno ->
+    cache non ri-scritta / nessuna partita nella finestra. Non inventa una
+    causa che non puo' verificare: se nessuna sonda risponde, resta il
+    generico (onesto).
+    """
+    try:
+        import odds_api as oa
+        try:
+            if oa.credits_hard_stopped():                        # pragma: no cover
+                return "hard-stop crediti"
+        except Exception:
+            pass
+        try:
+            used = int(getattr(oa, "_oracle_req_day", {}).get("n") or 0)
+            cap = int(getattr(oa, "ORACLE_BUDGET_DAY", 0) or 0)
+            if cap > 0 and used >= cap:
+                return f"budget oracolo esaurito ({used}/{cap} oggi)"
+        except Exception:
+            pass
+        try:
+            if not bool(oa.ORACLE_ENABLED):
+                return "ORACLE_ENABLED=0"
+        except Exception:
+            pass
+    except Exception:                                            # pragma: no cover
+        pass
+    return "nessun payload (nessuna partita in finestra o cache non riscritta)"
+
+
 def format_report(res: Dict[str, Any]) -> str:
     lines = ["🎯 Oracolo a linea OU/AH (follow-the-money)"]
     leagues = res.get("leagues") or []

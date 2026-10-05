@@ -687,6 +687,193 @@ class TestMotiviGranulari:
 
 
 # ---------------------------------------------------------------------------
+# 3b. Fetch ON-DEMAND (05/10/2026): il budget segue il pick
+# ---------------------------------------------------------------------------
+
+class TestFetchOnDemand:
+    """Il budget dell'oracolo (scarso e CONDIVISO) va speso sul pick in finestra.
+
+    Lo scheduler fetcha ogni 30' per "kickoff piu' vicino": con i tier di TTL
+    dinamici (2'/5'/30') la cache risultava scaduta proprio sui pick in
+    finestra esecutiva e l'AH/OU restava a zero ordini (misurato il 05/10).
+    Il gate paga ORA la fetch della lega di QUEL pick: stesso tetto
+    giornaliero, speso dove sta per partire un ordine.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_memo(self, monkeypatch):
+        import line_oracle
+        # `conftest` spegne la meccanica alla fonte (il percorso live nei test
+        # non deve pagare rete): qui si RIACCENDE, perche' questa classe la
+        # esercita con `odds_api.fetch_line_odds` iniettato.
+        monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "1")
+        line_oracle.reset_ondemand_dedup()
+        yield
+        line_oracle.reset_ondemand_dedup()
+
+    def test_interruttore_default_on_e_valori_di_off(self, monkeypatch):
+        import line_oracle
+        monkeypatch.delenv("ORACLE_ONDEMAND_ENABLED", raising=False)
+        assert line_oracle.ondemand_enabled() is True
+        for off in ("0", "false", "no", "off", "disabled", "OFF"):
+            monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", off)
+            assert line_oracle.ondemand_enabled() is False
+        monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "1")
+        assert line_oracle.ondemand_enabled() is True
+
+    def test_spento_non_paga_e_lo_dichiara(self, monkeypatch):
+        import line_oracle, odds_api as oa
+        monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "0")
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: calls.append(1))
+        res = line_oracle.fetch_for_pick(self._pick())
+        assert res["fetched"] is False and calls == []
+        assert "disattivata" in res["reason"]
+
+    def _pick(self, league="Premier League", **kw):
+        d = {"match_id": "m1", "home": "Arsenal", "away": "Everton",
+             "mercato": "OU", "esito_key": "Over 2.5", "quota": 2.10,
+             "league": league, "commence": "2026-10-05T19:45:00Z"}
+        d.update(kw)
+        return d
+
+    def test_lega_non_mappata_non_paga_nulla(self):
+        import line_oracle
+        res = line_oracle.fetch_for_pick(self._pick(league="Lega Inventata"))
+        assert res["fetched"] is False
+        assert "lega non mappata" in res["reason"]
+
+    def test_paga_una_volta_per_lega_nella_stessa_tornata(self, monkeypatch):
+        """12 pick sulla stessa lega = UNA fetch (dedup in-process)."""
+        import line_oracle, odds_api as oa
+        calls = []
+
+        def fake_fetch(sport, frm, to, ttl_s=None, **kw):
+            calls.append(sport)
+            return ([{"id": "m1"}], 300)
+
+        monkeypatch.setattr(oa, "fetch_line_odds", fake_fetch)
+        r1 = line_oracle.fetch_for_pick(self._pick())
+        r2 = line_oracle.fetch_for_pick(self._pick())
+        assert r1["fetched"] is True and r1["matches"] == 1
+        assert r2["fetched"] is False and "dedup" in r2["reason"]
+        assert calls == ["soccer_epl"]
+
+    def test_dedup_scade_dopo_l_intervallo(self, monkeypatch):
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda s, f, t, ttl_s=None, **k: (calls.append(s)
+                                                              or ([{}], 1)))
+        line_oracle.fetch_for_pick(self._pick(), now=1000.0)
+        line_oracle.fetch_for_pick(self._pick(), now=1000.0 + 3600.0)
+        assert len(calls) == 2
+
+    def test_env_dedup_default_e_valori_impossibili(self, monkeypatch):
+        import line_oracle
+        monkeypatch.delenv("ORACLE_ONDEMAND_DEDUP_S", raising=False)
+        assert line_oracle.ondemand_dedup_s() == 120.0
+        for bad in ("abc", "0", "-5"):
+            monkeypatch.setenv("ORACLE_ONDEMAND_DEDUP_S", bad)
+            assert line_oracle.ondemand_dedup_s() == 120.0
+        monkeypatch.setenv("ORACLE_ONDEMAND_DEDUP_S", "30")
+        assert line_oracle.ondemand_dedup_s() == 30.0
+
+    def test_budget_esaurito_dichiarato(self, monkeypatch):
+        """Nessun payload: la causa e' DICHIARATA (budget), non un 'vuoto'."""
+        import line_oracle, odds_api as oa
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda s, f, t, ttl_s=None, **k: ([], 250))
+        monkeypatch.setattr(oa, "_oracle_req_day",
+                            {"day": "2099-01-01", "n": oa.ORACLE_BUDGET_DAY})
+        res = line_oracle.fetch_for_pick(self._pick())
+        assert res["fetched"] is False
+        assert "budget oracolo esaurito" in res["reason"]
+
+    def test_errore_di_rete_non_propaga(self, monkeypatch):
+        import line_oracle, odds_api as oa
+
+        def boom(*a, **k):
+            raise RuntimeError("rete giu")
+
+        monkeypatch.setattr(oa, "fetch_line_odds", boom)
+        res = line_oracle.fetch_for_pick(self._pick())
+        assert res["fetched"] is False and "errore fetch" in res["reason"]
+
+    def test_ttl_del_pick_passata_al_fetch(self, monkeypatch):
+        """Il TTL dinamico del PICK arriva al fetch (payload fresco al gate)."""
+        import line_oracle, odds_api as oa
+        seen = {}
+
+        def fake_fetch(sport, frm, to, ttl_s=None, **kw):
+            seen["ttl_s"] = ttl_s
+            seen["sport"] = sport
+            return ([{}], 300)
+
+        monkeypatch.setattr(oa, "fetch_line_odds", fake_fetch)
+        line_oracle.fetch_for_pick(self._pick(), now=1000.0)
+        assert seen["sport"] == "soccer_epl"
+        assert seen["ttl_s"] is not None and seen["ttl_s"] > 0
+
+    def test_gate_paga_solo_in_finestra_e_solo_su_expired(self, monkeypatch):
+        """Il gate NON paga fuori finestra ne' per cause diverse da EXPIRED."""
+        import auto_bet, line_oracle
+        paid = []
+        monkeypatch.setattr(line_oracle, "fetch_for_pick",
+                            lambda p, now=None: (paid.append(p.get("match_id"))
+                                                 or {"fetched": True,
+                                                     "reason": "x",
+                                                     "sport_key": "soccer_epl",
+                                                     "matches": 1,
+                                                     "remaining": 300}))
+        pick = self._pick()
+        # (a) interruttore spento: nessuna spesa
+        assert auto_bet._ondemand_fetch(
+            pick, {"reason": "no_oracle/EXPIRED_CACHE"}, False) == ""
+        # (b) motivo diverso: nessuna spesa
+        assert auto_bet._ondemand_fetch(
+            pick, {"reason": "no_oracle/MISSING_MARKET"}, True) == ""
+        # (c) fuori finestra esecutiva: nessuna spesa
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "before")
+        assert auto_bet._ondemand_fetch(
+            pick, {"reason": "no_oracle/EXPIRED_CACHE"}, True) == ""
+        assert paid == []
+        # (d) in finestra + EXPIRED: si paga e lo si DICHIARA nel log
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        extra = auto_bet._ondemand_fetch(
+            pick, {"reason": "no_oracle/EXPIRED_CACHE"}, True)
+        assert "FETCH ON-DEMAND" in extra and "soccer_epl" in extra
+        assert paid == ["m1"]
+
+    def test_gate_end_to_end_espone_il_fetch(self, monkeypatch, tmp_path):
+        import auto_bet, line_oracle
+        monkeypatch.setattr(auto_bet, "_top_down_load", lambda h, a: None)
+        monkeypatch.setattr(auto_bet, "_TOP_DOWN_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(po, "line_oracle_probs", lambda *a, **k: None)
+        monkeypatch.setattr(po, "h2h_cache_is_stale", lambda *a, **k: True)
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        monkeypatch.setattr(line_oracle, "fetch_for_pick",
+                            lambda p, now=None: {"fetched": True,
+                                                 "reason": "ok",
+                                                 "sport_key": "soccer_epl",
+                                                 "matches": 4,
+                                                 "remaining": 300})
+        v = auto_bet._top_down_eval(self._pick(), fetch_missing=True)
+        assert v["reason"] == "no_oracle/EXPIRED_CACHE"
+        assert "FETCH ON-DEMAND" in v["detail"]
+
+    def test_default_off_nei_test_e_on_in_produzione(self):
+        """I chiamanti non-live non devono poter spendere crediti."""
+        import inspect
+        import auto_bet
+        sig = inspect.signature(auto_bet._top_down_eval)
+        assert sig.parameters["fetch_missing"].default is False
+        src = Path("auto_bet.py").read_text()
+        assert "fetch_missing=True" in src
+
+
+# ---------------------------------------------------------------------------
 # 4. Tripwire
 # ---------------------------------------------------------------------------
 
@@ -721,6 +908,7 @@ class TestTripwire:
         src = Path(".railway/railway.ts").read_text()
         for env in ("ORACLE_ENABLED", "ORACLE_BUDGET_DAY",
                     "ORACLE_FETCH_WINDOW_MIN", "ORACLE_LEAGUES_PER_PASS",
+                    "ORACLE_ONDEMAND_DEDUP_S", "ORACLE_ONDEMAND_ENABLED",
                     "PINNACLE_TTL_LONG_MIN", "PINNACLE_TTL_MID_MIN",
                     "PINNACLE_TTL_SHORT_MIN"):
             assert env in src, f"{env} non dichiarata in preserve() IaC"

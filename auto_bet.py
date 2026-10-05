@@ -495,7 +495,44 @@ def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
         pass
 
 
-def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
+def _ondemand_fetch(pick: dict, info: dict, enabled: bool) -> str:
+    """Avvia la fetch on-demand della lega del pick: ritorna il SUFFISSO di log.
+
+    Il budget dell'oracolo a linea e' scarso e CONDIVISO con lo scheduler
+    (`ORACLE_BUDGET_DAY`), e il consumo misurato il 05/10 (33/giorno contro
+    13 sostenibili) non lascia margine per alzarlo: l'unica leva e' SPENDERE
+    MEGLIO. Qui si paga solo quando servirebbe davvero:
+      - motivo `no_oracle/EXPIRED_CACHE` (il dato esiste ma e' piu' vecchio del
+        TTL dinamico: il refetch ha un effetto misurabile);
+      - il pick e' nella FINESTRA ESECUTIVA (`pick_window == "within"`): fuori
+        finestra il refetch sarebbe speso per una partita non ordinabile oggi
+        (il gate gira su tutto il board, non solo sui pick in finestra).
+    Nessun credito in piu': `fetch_for_pick` passa da `odds_api.fetch_line_odds`,
+    che applica lo STESSO tetto giornaliero dell'altro percorso.
+
+    Fail-safe: qualunque errore torna come stringa vuota (la telemetria non
+    deve mai fermare un giro puntate).
+    """
+    if not enabled:
+        return ""
+    if str(info.get("reason") or "") != "no_oracle/EXPIRED_CACHE":
+        return ""
+    try:
+        if pick_window(pick) != "within":
+            return ""
+        import line_oracle
+        res = line_oracle.fetch_for_pick(pick)
+    except Exception:
+        return ""
+    if res.get("fetched"):
+        return (f" — FETCH ON-DEMAND su {res.get('sport_key')} "
+                f"({res.get('matches')} match, crediti {res.get('remaining')}): "
+                f"il pick viene rivalutato al giro successivo")
+    return f" — fetch on-demand non eseguita: {res.get('reason')}"
+
+
+def _top_down_eval(pick: dict, league: str | None = None, *,
+                   fetch_missing: bool = False) -> dict | None:
     """Valutazione TOP-DOWN di un candidato: EV contro l'ORACOLO Pinnacle.
 
     Fase 2 del pivot (25/09/2026): la p_true NON arriva dal modello di gol
@@ -579,8 +616,12 @@ def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
             # FARE (05/10/2026). Il 1X2 conserva il motivo secco.
             if mercato in ("OU", "AH"):
                 info = _line_skip_reason(pick, mercato, _linea)
+                # FETCH ON-DEMAND (05/10/2026): la cache a linea e' scaduta per
+                # il TTL dinamico mentre lo scheduler la rinfresca ogni 30' ->
+                # senza questo il pick resterebbe `EXPIRED_CACHE` per sempre.
+                extra = _ondemand_fetch(pick, info, fetch_missing)
                 return {"ok": False, "reason": info["reason"],
-                        "detail": info["detail"]}
+                        "detail": (info["detail"] + extra) if extra else info["detail"]}
             return {"ok": False, "reason": "no_oracle",
                     "detail": "Pinnacle assente/incompleto/stantio "
                               "(fail-closed: senza verita' non si decide)"}
@@ -3144,7 +3185,8 @@ def run_today_bets(stake_eur: float | None = None,
         if (TOP_DOWN_EV and mode == "live"
                 and str(pick.get("mercato") or "1X2").upper()
                 not in ("ML", "TENNIS")):
-            verdict = _top_down_eval(pick, league=pick.get("league"))
+            verdict = _top_down_eval(pick, league=pick.get("league"),
+                                     fetch_missing=True)
             if not verdict.get("ok"):
                 logger.info("auto_bet: %s (%s) top-down SKIP [%s]: %s",
                             pick["match_id"], pick["esito_key"],

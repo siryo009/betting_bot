@@ -310,6 +310,16 @@ export default defineRailway(() => {
       // (orizzonte a ore, rimosso il 03/10/2026).
       ORACLE_FETCH_WINDOW_MIN: preserve(),
       ORACLE_LEAGUES_PER_PASS: preserve(),
+      // Fetch ON-DEMAND (05/10/2026, `line_oracle.fetch_for_pick`): quando il
+      // gate incontra `no_oracle/EXPIRED_CACHE` su un pick IN FINESTRA paga
+      // subito la fetch della SUA lega. Dedup per lega in secondi (default
+      // 120): senza, una tornata di pick sulla stessa lega brucerebbe l'intero
+      // budget `ORACLE_BUDGET_DAY` (condiviso con lo scheduler) in un attimo.
+      ORACLE_ONDEMAND_DEDUP_S: preserve(),
+      // Interruttore del fetch on-demand (default ON: spento solo con un valore
+      // esplicito 0/false/no/off). Spegne l'UNICA spesa aggiuntiva possibile del
+      // gate a linea senza toccare il resto dell'oracolo.
+      ORACLE_ONDEMAND_ENABLED: preserve(),
     },
   });
 

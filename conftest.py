@@ -181,6 +181,13 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     monkeypatch.setenv("ESPORTS_LIVE", "0")
     monkeypatch.setenv("ESPORTS_CACHE", str(tmp_path / "esports_state.json"))
     monkeypatch.setenv("ESPORTS_MIN_INTERVAL_S", "0")   # pacing: niente attese
+    # Fetch ON-DEMAND dell'oracolo a linea (05/10/2026): quando il gate incontra
+    # `no_oracle/EXPIRED_CACHE` su un pick in finestra PAGA una chiamata
+    # the-odds-api (3 crediti). Nei test sarebbe rete e consumo reali per
+    # misurare altro (cap, wallet, liquidita', T-60...): spento alla fonte, la
+    # logica resta coperta da `test_line_oracle.TestFetchOnDemand`, che lo
+    # riaccende esplicitamente con `fetch_line_odds` iniettato.
+    monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "0")
     # Corsia TENNIS (30/09/2026, telemetria): stato e cache dell'oracolo nella
     # tmp. Senza isolamento un `scan()` di test scriverebbe il file di stato e
     # (soprattutto) le cache `toa_tennis_*.json` nella cartella dati REALE, da

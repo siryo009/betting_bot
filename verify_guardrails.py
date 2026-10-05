@@ -66,6 +66,12 @@ os.environ["LIVE_INTEL"] = "0"
 # rete reale e quota a consumo. Questa diagnostica misura i GUARDRAIL, non il
 # flusso eSports (coperto da `test_esports_lane.py` con provider finti).
 os.environ["ESPORTS_LIVE"] = "0"
+# Fetch ON-DEMAND dell'oracolo a linea OFF (05/10/2026): gli scenari esercitano
+# `run_today_bets` in MODALITA' LIVE, quindi il gate potrebbe pagare una fetch
+# the-odds-api (3 crediti) per un pick in finestra. Questa diagnostica misura i
+# GUARDRAIL, non l'oracolo: qui la rete non si tocca (la meccanica e' coperta da
+# `test_line_oracle.TestFetchOnDemand` con il fetch iniettato).
+os.environ["ORACLE_ONDEMAND_ENABLED"] = "0"
 
 # --- Cattura dei log --------------------------------------------------------
 _RECORDS: list[str] = []
