@@ -123,11 +123,18 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     monkeypatch.setattr("auto_bet._LAST_BANKROLL", 0.0)
     # Parametri del motore Kelly: fissati ai default di codice, cosi' un `.env`
     # dell'operatore non rende i test dipendenti dall'ambiente.
-    monkeypatch.setenv("KELLY_AGGRESSIVE_FRACTION", "0.65")
+    # Direttiva 04/10/2026 (punto 2): banda dinamica 0.15-0.25 e ticket 1.00
+    # (il floor operativo dell'exchange).
+    monkeypatch.setenv("KELLY_AGGRESSIVE_FRACTION", "0.25")
+    monkeypatch.setenv("KELLY_AGGRESSIVE_MIN_FRACTION", "0.15")
     monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.12")
-    monkeypatch.setenv("KELLY_MIN_TICKET_USDC", "2.00")
+    monkeypatch.setenv("KELLY_MIN_TICKET_USDC", "1.00")
     # Stato del juice (Agente Analisi): sul volume in produzione, nella tmp qui.
     monkeypatch.setenv("ANALYSIS_JUICE_STATE", str(tmp_path / "juice_state.json"))
+    # Closing line a T-0 (04/10/2026): la routine legge il ledger VERO; nei
+    # test che non isolano il DB la si spegne (i suoi test la riaccendono).
+    if "test_closing_line" not in request.node.nodeid:
+        monkeypatch.setenv("CLOSING_LINE_ENABLED", "0")
     # Stato degli ORDINI APERTI (direttiva 28/09/2026): la lettura reale
     # interroga il ledger (`tracker`) e nei test che non isolano il DB sarebbe
     # una scrittura silenziosa sul data dir vero (le migrazioni girano alla

@@ -234,6 +234,22 @@ class AnalysisAgent:
         juice_anomaly = False
         juice_reason = ""
         oracle = self._oracle(home, away) if (home and away) else None
+        # --- DE-VIG (direttiva 04/10/2026) ---------------------------------
+        # L'EV NON si calcola sulle quote grezze: l'oracolo consegna la
+        # probabilita' fair (de-vig, `shin` di default) e la sua quota equa.
+        # Qui si ESPONE la provenienza, cosi' il gate EV a valle e' ispezionabile
+        # (`devig_method`, parametro `z` di Shin) senza ricalcolare nulla.
+        devig_method = str((oracle or {}).get("devig_method") or "")
+        shin_z = (oracle or {}).get("shin_z")
+        fair_odds = None
+        if oracle:
+            _p = oracle.get(str(getattr(signal, "outcome", "") or ""))
+            try:
+                _p = float(_p)
+                if 0.0 < _p <= 1.0:
+                    fair_odds = round(1.0 / _p, 6)
+            except (TypeError, ValueError):
+                fair_odds = None
         if oracle and oracle.get("overround") is not None:
             try:
                 juice = round(float(oracle["overround"]), 6)
@@ -276,6 +292,7 @@ class AnalysisAgent:
             price=float(getattr(signal, "price", 0.0) or 0.0),
             true_prob=getattr(signal, "blended_prob", None),
             ev=getattr(signal, "ev", None),
+            edge=getattr(signal, "edge", None),
             league=league,
             home=home,
             away=away,
@@ -293,4 +310,7 @@ class AnalysisAgent:
             max_age_s=age_limit,
             sources=list(oracle.get("sources") or []) if oracle else [],
             depth_usdc=float(depth) if depth is not None else None,
+            devig_method=devig_method,
+            shin_z=float(shin_z) if shin_z is not None else None,
+            fair_odds=fair_odds,
         )

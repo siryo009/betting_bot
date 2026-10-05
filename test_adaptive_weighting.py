@@ -51,9 +51,14 @@ def _seed_clv(match_id, esito, sig, clos, league=None, *,
         tracker.save_match(match_id, league or "", "Casa", "Ospite",
                            datetime.now(timezone.utc).isoformat())
     conn = tracker._get_conn()
-    conn.execute("INSERT OR REPLACE INTO clv_history VALUES (?,?,?,?,?,?)",
-                 (match_id, esito, sig, clos,
-                  updated_at or datetime.now().isoformat(), None))
+    # Colonne NOMINATE (non posizionali): dal 04/10/2026 `clv_history` ha la
+    # colonna `closing_odds` e un INSERT posizionale si romperebbe a ogni
+    # colonna nuova (osservato: "table clv_history has 7 columns but 6 values").
+    conn.execute(
+        "INSERT OR REPLACE INTO clv_history (match_id, esito, signal_quota, "
+        "closing_quota, updated_at, pinnacle_quota) VALUES (?,?,?,?,?,?)",
+        (match_id, esito, sig, clos,
+         updated_at or datetime.now().isoformat(), None))
     conn.commit()
     conn.close()
 

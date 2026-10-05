@@ -2855,6 +2855,34 @@ async def multi_market_job(context: ContextTypes.DEFAULT_TYPE):
                 len(found), live_n)
 
 
+async def closing_line_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Cattura la closing line di Pinnacle a T-0 (direttiva 04/10, punto 5).
+
+    Ogni giro: trova le righe APERTE (previsioni giocabili + puntate live) col
+    kickoff imminente (T-10..T+5), legge la quota GREZZA dello sharp dalle
+    cache della rotazione e la scrive in `clv_history.closing_odds`. Da li'
+    `closing_line.beat_pct` misura la % di beat sul mercato di ogni ordine.
+
+    Sola lettura dalla cache (ZERO crediti, nessuna rete, nessun ordine) e
+    fail-safe totale: un errore non ferma il giro puntate e non solleva.
+    Spegnibile con `CLOSING_LINE_ENABLED=0`.
+    """
+    if os.getenv("CLOSING_LINE_ENABLED", "1").strip().lower() \
+            in ("0", "false", "no", "off"):
+        return
+    try:
+        import closing_line
+        loop = asyncio.get_running_loop()
+        got = await loop.run_in_executor(None, closing_line.capture_closing_lines)
+    except Exception as exc:
+        logger.debug("closing_line_job: %s", exc)
+        return
+    if got.get("captured"):
+        logger.info("closing_line_job: %d closing line catturate su %d in "
+                    "finestra (salti: %s)", got.get("captured"),
+                    got.get("checked"), got.get("skipped") or "nessuno")
+
+
 async def market_shadow_job(context: ContextTypes.DEFAULT_TYPE):
     """Telemetria OMbra sui mercati SX NON calcistici (01/10/2026).
 
@@ -3451,6 +3479,12 @@ def main() -> None:
         # Piu' frequente degli altri monitor perche' un ordine fuori regola va
         # visto adesso, non fra 6 ore.
         job_queue.run_repeating(order_watch_job, interval=1800, first=420)
+        # Closing line Pinnacle a T-0 (04/10/2026): ogni 5' cattura la quota
+        # finale dello sharp per le righe in finestra (T-10..T+5). Sola
+        # lettura dalla cache quote: zero crediti, zero ordini. Piu' frequente
+        # degli altri monitor perche' il fischio cade fra due giri.
+        job_queue.run_repeating(closing_line_job, interval=300, first=180,
+                                job_kwargs={"max_instances": 1})
         # Flusso dell'order book SX (26/09): ogni 6h legge il registro degli
         # ingressi di liquidita' e allerta SOLO se ce ne sono nelle ultime
         # 24h (anti-spam 1/giorno). TELEMETRIA: zero costi API, zero ordini.

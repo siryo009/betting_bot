@@ -150,12 +150,17 @@ export default defineRailway(() => {
       ESPORTS_ODDS_TTL_MIN: preserve(),
       ESPORTS_ODDS_MISS_TTL_MIN: preserve(),
       ESPORTS_CACHE: preserve(),
-      // KELLY AGGRESSIVO (04/10/2026, direttiva del proprietario): k=0.65,
-      // cap DINAMICO 12% del bankroll (sostituisce i tetti fissi 1.50/1.00),
-      // ticket minimo 2.00 USDC del MOTORE (il floor dell'EXCHANGE resta
-      // 1.00). `KELLY_AGGRESSIVE_ENABLED=0` ripristina il percorso storico;
-      // `ORDER_FIXED_STAKE_USDC` > 0 ripristina l'importo fisso del 28/09.
+      // KELLY DINAMICO (04/10/2026 sera, direttiva "Ottimizzazione
+      // Quantitativa" punto 2): k non piu' fisso a 0.65 ma nella BANDA
+      // 0.15-0.25 scalata da EV/edge/confidenza della lega
+      // (`stake_engine.dynamic_kelly_fraction`), con cap DINAMICO 12% del
+      // bankroll e ticket minimo **1.00 USDC** del MOTORE (= floor
+      // dell'EXCHANGE SX). `KELLY_AGGRESSIVE_ENABLED=0` ripristina il percorso
+      // storico; `ORDER_FIXED_STAKE_USDC` > 0 ripristina l'importo fisso del
+      // 28/09. `KELLY_AGGRESSIVE_FRACTION` e' il MASSIMO della banda,
+      // `KELLY_AGGRESSIVE_MIN_FRACTION` il minimo.
       KELLY_AGGRESSIVE_FRACTION: preserve(),
+      KELLY_AGGRESSIVE_MIN_FRACTION: preserve(),
       KELLY_MAX_STAKE_PCT: preserve(),
       KELLY_MIN_TICKET_USDC: preserve(),
       KELLY_AGGRESSIVE_ENABLED: preserve(),
@@ -173,7 +178,36 @@ export default defineRailway(() => {
       OPEN_EXPOSURE_CAP_PCT: preserve(),
       ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),
+      T60_MAX_STAKE_USDC: preserve(),
+      // Finestra esecutiva **T-180..T-2** (04/10/2026, direttiva
+      // "Ottimizzazione Quantitativa" punto 3): era T-60..T-5. L'apertura a
+      // 3 ore cattura le formazioni ufficiali e i volumi dei sindacati
+      // quantitativi; la chiusura a 2 minuti e' ALLINEATA al pavimento
+      // assoluto `MIN_MINUTES_TO_START` (2) — le due guardie devono
+      // coincidere, altrimenti l'ultima fascia e' una zona morta silenziosa.
+      // Le env sono l'unico modo di tararla senza redeploy.
+      T60_WINDOW_MIN_MIN: preserve(),
+      T60_WINDOW_MAX_MIN: preserve(),
+      // Interruttori della strategia T-60: `T60_EXECUTION_ONLY=0` ripristina
+      // l'orizzonte aperto (usato da test e diagnostica) e
+      // `T60_ORDER_VALIDATION=0` spegne il contratto CB3 sui payload.
+      T60_EXECUTION_ONLY: preserve(),
+      T60_ORDER_VALIDATION: preserve(),
       OU_LIVE_MIN_CLOSURES: preserve(),
+      // Gate EV dei MERCATI LIQUIDI (04/10/2026, punto 4): AH/OU/Totals/BTTS/ML
+      // usano una soglia dedicata (default 1.0%) mentre 1X2/eSports/tennis
+      // restano a `value_filter.EV_MIN`. `EV_LIQUID_MARKETS` e' il CSV dei
+      // mercati a cui applicarla (una sola definizione, in `value_filter`).
+      EV_MIN_LIQUID: preserve(),
+      EV_LIQUID_MARKETS: preserve(),
+      // Closing line a T-0 (04/10/2026, punto 5): la routine `closing_line.py`
+      // scrive `clv_history.closing_odds` DENTRO la finestra T-PRE..T+POST
+      // rispetto al kickoff (default 10' prima / 5' dopo). Sola lettura dalle
+      // cache sharp: zero crediti, zero ordini.
+      CLOSING_LINE_ENABLED: preserve(),
+      CLOSING_LINE_PRE_MIN: preserve(),
+      CLOSING_LINE_POST_MIN: preserve(),
+      CLOSING_LINE_MAX_ROWS: preserve(),
       // Oracolo top-down (25/09/2026): `PINNACLE_CONSENSUS=0` (03/10/2026)
       // usa la SOLA Pinnacle de-vigata con Shin — Betfair e Matchbook fuori,
       // per togliere lag e rumore dal confronto. `TOP_DOWN_BYPASS` resta 0: il
@@ -206,13 +240,8 @@ export default defineRailway(() => {
       SX_BOOK_LEVELS_KEPT: preserve(),
       SX_PRIVATE_KEY: preserve(),
       T60_KILL_WALLET_USDC: preserve(),
-      // Finestra esecutiva T-60..T-5 (03/10/2026, direttiva del proprietario):
-      // era T-120..T-15. La banda non deve avere zone d'ombra negli ultimi
-      // minuti, dove arrivano gli steam move dello sharp. La chiusura e'
-      // allineata al pavimento assoluto `MIN_MINUTES_TO_START` (5) e le env
-      // sono l'unico modo di tararla senza redeploy.
-      T60_WINDOW_MIN_MIN: preserve(),
-      T60_WINDOW_MAX_MIN: preserve(),
+      // (la FINESTRA esecutiva ha le sue env dichiarate piu' sopra, nel
+      // blocco dei circuit breakers T-60: T-180..T-2 dal 04/10/2026.)
       TENNIS_SANDBOX_ENABLED: preserve(),
       // Corsia TENNIS (30/09/2026, `tennis_lane.py`): interruttore, identita'
       // SX (sport 6 / type 52), soglia EV PROPRIA (2.5%), FASCIA QUOTA della

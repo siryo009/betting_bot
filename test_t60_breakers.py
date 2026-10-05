@@ -8,7 +8,8 @@ Il proprietario ha chiesto TASSATIVAMENTE, prima di qualunque dispatch reale:
    REGISTRATO sul ledger SQLite (mai verso il provider);
 4. CB4 — filtro liquidità/order book prima dell'invio.
 
-Più la finestra esecutiva T-60..T-50: fuori finestra SOLO scansione.
+Piu' la finestra esecutiva (T-60..T-50 il 17/09, **T-180..T-2** dal
+04/10/2026): fuori finestra SOLO scansione, nessun ordine.
 
 Tutti i test sono OFFLINE: DB SQLite temporaneo, wallet/provider finti,
 nessuna rete, nessun ordine reale.
@@ -348,40 +349,39 @@ class TestCB4Liquidita:
 
 
 class TestFinestraT60:
-    """Strategia T-60: decisione esecutiva in finestra T-60..T-5.
+    """Strategia **T-180..T-2**: decisione esecutiva da 3 ore a 2 minuti.
 
-    La CHIUSURA e' scesa a **T-5** il 03/10/2026 (direttiva del proprietario,
-    era T-15 e T-50 prima): la banda esecutiva non deve avere zone d'ombra
-    negli ultimi minuti, dove arrivano gli steam move dello sharp. Il test
-    asserisce la politica NUOVA per intero: un ulteriore spostamento deve
-    rompere qui.
+    Direttiva 04/10/2026 (era T-60..T-5, e T-50/T-15 prima): la banda si
+    allarga per catturare le variazioni di quota delle formazioni ufficiali e
+    i volumi dei sindacati quantitativi, e si chiude a 2 minuti per non avere
+    zone d'ombra. Il test asserisce la politica NUOVA per intero: un ulteriore
+    spostamento deve rompere qui.
     """
 
     def test_classificazione_finestra(self):
         now = datetime.now(timezone.utc)
-        assert auto_bet.t60_window(now + timedelta(minutes=90)) == "before"
+        assert auto_bet.t60_window(now + timedelta(minutes=200)) == "before"
+        assert auto_bet.t60_window(now + timedelta(minutes=175)) == "within"
+        assert auto_bet.t60_window(now + timedelta(minutes=120)) == "within"
         assert auto_bet.t60_window(now + timedelta(minutes=55)) == "within"
-        assert auto_bet.t60_window(now + timedelta(minutes=52)) == "within"
-        # Fascia che la direttiva 03/10 ha reso ordinabile fino a T-5:
-        assert auto_bet.t60_window(now + timedelta(minutes=45)) == "within"
         assert auto_bet.t60_window(now + timedelta(minutes=30)) == "within"
-        assert auto_bet.t60_window(now + timedelta(minutes=15)) == "within"
         assert auto_bet.t60_window(now + timedelta(minutes=10)) == "within"
+        assert auto_bet.t60_window(now + timedelta(minutes=5)) == "within"
         # Il bordo NON si asserisce esatto: `t60_window` ricalcola il suo
-        # `now`, quindi a +5 esatti i microsecondi trascorsi lo portano
+        # `now`, quindi a +2 esatti i microsecondi trascorsi lo portano
         # sotto soglia (deterministicamente flaky). Si BRACKETTA il valore:
-        # +6 dentro, +4 fuori -> la chiusura e' 5.
-        assert auto_bet.t60_window(now + timedelta(minutes=6)) == "within"
-        assert auto_bet.t60_window(now + timedelta(minutes=4)) == "missed"
+        # +3 dentro, +1 fuori -> la chiusura e' 2.
+        assert auto_bet.t60_window(now + timedelta(minutes=3)) == "within"
+        assert auto_bet.t60_window(now + timedelta(minutes=1)) == "missed"
         assert auto_bet.t60_window(now - timedelta(minutes=5)) == "missed"
         assert auto_bet.t60_window(None) == "unknown"
 
-    def test_apertura_a_T60 (self):
-        """L'apertura resta T-60: fuori, solo scansione (fail-closed)."""
-        assert auto_bet.T60_WINDOW_MIN_MIN == 60.0
+    def test_apertura_a_T180(self):
+        """L'apertura e' **T-180** (3 ore): fuori, solo scansione."""
+        assert auto_bet.T60_WINDOW_MIN_MIN == 180.0
 
     def test_chiusura_allineata_al_pavimento_assoluto(self):
-        """Le due guardie COINCIDONO a T-5 (direttiva 03/10/2026).
+        """Le due guardie COINCIDONO a **T-2** (direttiva 04/10/2026).
 
         Se la chiusura scendesse sotto `MIN_MINUTES_TO_START` l'esecuzione
         tenterebbe ordini che l'altra guardia salta comunque (lavoro sprecato
@@ -389,7 +389,7 @@ class TestFinestraT60:
         sarebbe una ZONA MORTA silenziosa. La costante di codice e' DERIVATA
         dal pavimento (una sola sorgente).
         """
-        assert auto_bet.MIN_MINUTES_TO_START == 5
+        assert auto_bet.MIN_MINUTES_TO_START == 2
         assert auto_bet.T60_WINDOW_MAX_MIN == auto_bet.MIN_MINUTES_TO_START
 
     def test_dispatch_fuori_finestra_non_ordina(self, temp_db, monkeypatch):
@@ -399,17 +399,18 @@ class TestFinestraT60:
                             lambda *a, **k: calls.append(a) or None)
         _seed_validated_decision(mid="early",
                                  kickoff=datetime.now(timezone.utc)
-                                 + timedelta(hours=3))
-        # +3 e' SOTTO la chiusura (T-5 dal 03/10, era T-15): resta fail-closed.
+                                 + timedelta(hours=4))
+        # +1 minuto e' SOTTO la chiusura (T-2 dal 04/10, era T-5): fail-closed.
         _seed_validated_decision(mid="late",
                                  kickoff=datetime.now(timezone.utc)
-                                 + timedelta(minutes=3))
+                                 + timedelta(minutes=1))
         assert auto_bet.t60_dispatch_pending(bankroll=34.0) == []
         assert calls == []
 
     def test_dispatch_in_finestra_ordina(self, temp_db, monkeypatch):
         _live_mode(monkeypatch)
-        # +20: dentro la banda T-60..T-5 di OGNI politica (30/09 e 03/10).
+        # +20: dentro la banda di OGNI politica (T-60..T-5 il 03/10,
+        # T-180..T-2 dal 04/10): il caso che il cablaggio deve esercitare.
         # E' il caso che il test del cablaggio deve esercitare.
         _seed_validated_decision(mid="ok",
                                  kickoff=datetime.now(timezone.utc)
@@ -525,14 +526,14 @@ class TestContrattoT60:
 class TestFinestraT15MercatiDerivati:
     """I mercati DERIVATI (OU/AH) leggono la stessa costante di scansione.
 
-    Direttiva 30/09/2026, aggiornata il 03/10/2026: la chiusura della finestra
-    esecutiva e' T-5 e deve valere per OGNI mercato, derivati inclusi. Non
+    Direttiva 30/09/2026, aggiornata il 04/10/2026: la chiusura della finestra
+    esecutiva e' **T-2** e deve valere per OGNI mercato, derivati inclusi. Non
     basta che il codice lo faccia oggi: serve che NON PUO' regredire a una
     costante diversa per mercato (bug del 09/09: un `over` trattato come 1X2).
     """
 
-    def test_costante_di_chiusura_e_t5(self):
-        assert auto_bet.T60_WINDOW_MAX_MIN == 5.0
+    def test_costante_di_chiusura_e_t2(self):
+        assert auto_bet.T60_WINDOW_MAX_MIN == 2.0
 
     def test_il_gate_finestra_e_applicato_a_ogni_mercato(self):
         """Il blocco `T60_EXECUTION_ONLY` in `run_today_bets` NON e'

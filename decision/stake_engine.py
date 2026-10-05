@@ -50,15 +50,27 @@ def _round_step(value: float, step: float) -> float:
 # significherebbe due Kelly che divergono il giorno che qualcuno ne tocca uno
 # (lezione del doppio scaling, 13/09).
 KELLY_FRACTION_ENV = "KELLY_AGGRESSIVE_FRACTION"
+KELLY_MIN_FRACTION_ENV = "KELLY_AGGRESSIVE_MIN_FRACTION"
 KELLY_CAP_PCT_ENV = "KELLY_MAX_STAKE_PCT"
 KELLY_MIN_TICKET_ENV = "KELLY_MIN_TICKET_USDC"
-DEFAULT_KELLY_AGGRESSIVE_FRACTION = 0.65
+#: BANDA del Kelly dinamico (direttiva 04/10/2026, punto 2): k non e' piu'
+#: fisso. Il MAX e' `KELLY_AGGRESSIVE_FRACTION` (0.25), il MIN
+#: `KELLY_AGGRESSIVE_MIN_FRACTION` (0.15); il valore effettivo e' scalato
+#: dentro la banda da edge e confidenza della lega (`dynamic_kelly_fraction`).
+DEFAULT_KELLY_AGGRESSIVE_FRACTION = 0.25
+DEFAULT_KELLY_AGGRESSIVE_MIN_FRACTION = 0.15
 DEFAULT_KELLY_MAX_STAKE_PCT = 0.12
-#: Ticket minimo SX Bet per il MOTORE Kelly (scelta del proprietario, 04/10):
-#: sotto questa soglia l'operazione viene scartata (stake 0.0). Il floor
-#: dell'EXCHANGE resta 1.00 USDC (dato misurato): qui e' una soglia di
-#: sizing, non una dichiarazione sul minimo dell'exchange.
-DEFAULT_KELLY_MIN_TICKET = 2.00
+#: Ticket minimo per il MOTORE Kelly: **1.00 USDC** (direttiva 04/10/2026,
+#: punto 2). Coincide col floor operativo dell'exchange SX Bet: sotto questa
+#: soglia l'operazione viene scartata (stake 0.0). Era 2.00 nella direttiva
+#: precedente; con k piu' basso (0.15-0.25) il ticket 2.00 avrebbe scartato
+#: quasi tutto il flusso, quindi il proprietario ha chiesto l'allineamento.
+DEFAULT_KELLY_MIN_TICKET = 1.00
+#: Riferimenti per NORMALIZZARE edge ed EV dentro la banda di k. Letti da
+#: `value_filter`/`market_calib` (mai copiati): qui solo i fallback.
+_KELLY_EV_REF_FALLBACK = 0.04
+_KELLY_LEAGUE_MULT_MIN = 0.4
+_KELLY_LEAGUE_MULT_MAX = 1.3
 
 
 def _num_env(name: str, default: float) -> float:
@@ -79,14 +91,110 @@ def _num_env(name: str, default: float) -> float:
 
 
 def aggressive_config() -> dict[str, float]:
-    """Parametri del motore aggressivo, letti a RUNTIME (tarabili da env)."""
+    """Parametri del motore, letti a RUNTIME (tarabili da env).
+
+    `kelly_fraction` e' il MASSIMO della banda dinamica, `kelly_min_fraction`
+    il minimo: il valore applicato a un trade lo calcola
+    `dynamic_kelly_fraction` (edge + confidenza lega).
+    """
     frac = _num_env(KELLY_FRACTION_ENV, DEFAULT_KELLY_AGGRESSIVE_FRACTION)
+    frac = min(max(frac, 0.0), 1.0)
+    k_min = _num_env(KELLY_MIN_FRACTION_ENV, DEFAULT_KELLY_AGGRESSIVE_MIN_FRACTION)
+    k_min = min(max(k_min, 0.0), 1.0)
+    if k_min > frac:          # banda coerente: il max non puo' stare sotto il min
+        k_min = frac
     pct = _num_env(KELLY_CAP_PCT_ENV, DEFAULT_KELLY_MAX_STAKE_PCT)
     ticket = _num_env(KELLY_MIN_TICKET_ENV, DEFAULT_KELLY_MIN_TICKET)
     return {
-        "kelly_fraction": min(max(frac, 0.0), 1.0),
+        "kelly_fraction": frac,
+        "kelly_min_fraction": k_min,
         "max_stake_pct": min(max(pct, 0.0), 1.0),
         "min_ticket": max(ticket, 0.0),
+    }
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def dynamic_kelly_fraction(*, ev: Optional[float] = None,
+                           edge: Optional[float] = None,
+                           league: Optional[str] = None) -> dict[str, Any]:
+    """k effettivo nella banda [k_min, k_max] da edge + confidenza lega.
+
+    Direttiva 04/10/2026 (punto 2): il frazionamento scende da 0.65 fisso a
+    **0.15-0.25 dinamico**. Il valore sale verso il massimo quando:
+
+    - l'**EV** del trade e' forte (normalizzato fra la soglia minima di
+      progetto e `EV_STRONG_REF`, 4%): un margine grande regge piu' Kelly;
+    - l'**edge** sul mercato e' ampio (normalizzato fra `MARKET_EDGE_MIN` e
+      `MARKET_EDGE_STRONG`);
+    - la **lega** e' affidabile (`value_filter.get_league_strategy`):
+      `kelly_mult` 0.4 (probation) -> 1.3 (core) normalizzato a [0, 1].
+
+    Determinisico e senza metriche inventate: i componenti mancanti non
+    contano, e senza alcun dato la forza e' 0.5 (meta' banda). Il risultato e'
+    SEMPRE dentro [k_min, k_max]: la banda non si allarga con un input strano.
+    """
+    cfg = aggressive_config()
+    k_min = cfg["kelly_min_fraction"]
+    k_max = cfg["kelly_fraction"]
+    components: dict[str, float] = {}
+    reasons: list[str] = []
+
+    try:
+        if ev is not None:
+            import value_filter as _vf
+            ev_lo = float(_vf.ev_min_for_market(""))
+            ev_hi = _KELLY_EV_REF_FALLBACK
+            try:
+                from market_calib import MARKET_EDGE_STRONG as _strong
+                ev_hi = min(max(float(_strong) + 0.01, ev_lo + 1e-9),
+                            _KELLY_EV_REF_FALLBACK)
+            except Exception:
+                ev_hi = max(ev_hi, ev_lo + 1e-9)
+            span = max(ev_hi - ev_lo, 1e-9)
+            components["ev"] = _clamp01((float(ev) - ev_lo) / span)
+            reasons.append(f"ev {components['ev']:.2f}")
+    except Exception:
+        pass
+
+    try:
+        if edge is not None:
+            from market_calib import MARKET_EDGE_MIN as _e0, MARKET_EDGE_STRONG as _e1
+            span = max(float(_e1) - float(_e0), 1e-9)
+            components["edge"] = _clamp01((float(edge) - float(_e0)) / span)
+            reasons.append(f"edge {components['edge']:.2f}")
+    except Exception:
+        pass
+
+    try:
+        if league:
+            from value_filter import get_league_strategy
+            mult = float(get_league_strategy(league).get("kelly_mult", 1.0))
+            span = max(_KELLY_LEAGUE_MULT_MAX - _KELLY_LEAGUE_MULT_MIN, 1e-9)
+            components["league"] = _clamp01(
+                (mult - _KELLY_LEAGUE_MULT_MIN) / span)
+            reasons.append(f"lega {components['league']:.2f}")
+    except Exception:
+        pass
+
+    if components:
+        weights = {"ev": 0.45, "edge": 0.35, "league": 0.20}
+        total_w = sum(weights[k] for k in components)
+        strength = sum(components[k] * weights[k] for k in components) / total_w
+    else:
+        strength = 0.5          # nessun segnale: centro banda (mai 0 o 1)
+        reasons.append("nessun dato (centro banda)")
+    strength = _clamp01(strength)
+    k = k_min + (k_max - k_min) * strength
+    return {
+        "kelly_fraction": round(min(max(k, k_min), k_max), 6),
+        "kelly_min_fraction": k_min,
+        "kelly_max_fraction": k_max,
+        "strength": round(strength, 4),
+        "components": {k2: round(v, 4) for k2, v in components.items()},
+        "reason": "; ".join(reasons),
     }
 
 
@@ -94,15 +202,20 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
                          bankroll: Money, *,
                          kelly_fraction: Optional[float] = None,
                          max_stake_pct: Optional[float] = None,
-                         min_ticket: Optional[float] = None) -> dict[str, Any]:
+                         min_ticket: Optional[float] = None,
+                         ev: Optional[float] = None,
+                         edge: Optional[float] = None,
+                         league: Optional[str] = None) -> dict[str, Any]:
     """Stake aggressivo: Kelly frazionato + cap dinamico + ticket minimo.
 
     `f = (b*p - q)/b` con `b` = quota decimale: la formula vive in
     `value_filter.kelly_fraction` (mai ricopiata). Sull'importo:
 
-    1. `stake_raw = bankroll x kelly_pieno x kelly_fraction` (k = 0.65);
+    1. `stake_raw = bankroll x kelly_pieno x k` con **k dinamico** nella banda
+       0.15-0.25 scalata da EV/edge/lega (`dynamic_kelly_fraction`); passare
+       `kelly_fraction` esplicito la vince (test e override);
     2. cap dinamico: `bankroll x max_stake_pct` (12%) — TRONCA, mai alza;
-    3. ticket minimo (2.00 USDC): sotto soglia lo stake e' **0.0**
+    3. ticket minimo (1.00 USDC): sotto soglia lo stake e' **0.0**
        (operazione scartata) — mai un ordine piu' piccolo del ticket.
 
     Ritorna SEMPRE un dict (mai eccezioni): `executable` dice se l'operazione
@@ -110,7 +223,12 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
     ogni chiamata: e' cosi' che il compounding usa il capitale aggiornato.
     """
     cfg = aggressive_config()
-    frac = cfg["kelly_fraction"] if kelly_fraction is None else float(kelly_fraction)
+    dyn = None
+    if kelly_fraction is None:
+        dyn = dynamic_kelly_fraction(ev=ev, edge=edge, league=league)
+        frac = float(dyn["kelly_fraction"])
+    else:
+        frac = float(kelly_fraction)
     pct = cfg["max_stake_pct"] if max_stake_pct is None else float(max_stake_pct)
     ticket = cfg["min_ticket"] if min_ticket is None else float(min_ticket)
     out: dict[str, Any] = {
@@ -118,6 +236,11 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
         "kelly_fraction": frac, "max_stake_pct": pct, "min_ticket": ticket,
         "cap_usdc": 0.0, "bankroll": 0.0, "capped": False,
         "executable": False, "reason": "",
+        # Provenienza del k applicato (telemetria del sizing: il Cervello
+        # alimenta EV/edge/lega e la Finanza li passa qui — tracciabile).
+        "kelly_dynamic": bool(dyn is not None),
+        "kelly_strength": None if dyn is None else dyn["strength"],
+        "kelly_reason": "" if dyn is None else dyn["reason"],
     }
     try:
         # `Money` a riposo, `float` in transito: la conversione passa da

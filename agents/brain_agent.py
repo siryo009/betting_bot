@@ -91,10 +91,16 @@ def volatility_ref_pct_min() -> float:
     return _num_env(VOL_REF_ENV, DEFAULT_VOL_REF_PCT_MIN, minimum=1e-6)
 
 
-def base_ev_min() -> float:
-    """Soglia base di EV: la STESSA di tutta la pipeline (mai copiata qui)."""
-    from value_filter import EV_MIN
-    return float(EV_MIN)
+def base_ev_min(market: str = "") -> float:
+    """Soglia EV di base per il MERCATO (mai copiata qui).
+
+    Direttiva 04/10/2026 (punto 4): i mercati LIQUIDI (Asian Handicap,
+    Over/Under, Totals, BTTS, Moneyline) hanno una soglia piu' bassa
+    (`value_filter.ev_min_for_market`, EV > 1.0%); tutto il resto resta alla
+    soglia unica del progetto. Una sola definizione, in `value_filter`.
+    """
+    from value_filter import ev_min_for_market
+    return float(ev_min_for_market(market))
 
 
 def shield_cap_pct() -> float:
@@ -107,7 +113,8 @@ def shield_cap_pct() -> float:
 
 
 def dynamic_ev_min(*, depth_usdc: Optional[float] = None,
-                   velocity_pct_min: Optional[float] = None) -> dict[str, Any]:
+                   velocity_pct_min: Optional[float] = None,
+                   market: str = "") -> dict[str, Any]:
     """Soglia EV dinamica: parte dalla base e puo' solo SALIRE.
 
     Ritorna `{base_ev_min, ev_min, ev_multiplier, dynamic_reason}`. La
@@ -116,7 +123,7 @@ def dynamic_ev_min(*, depth_usdc: Optional[float] = None,
     la riferimento). Deterministico e senza metriche inventate: se un dato
     manca, quel componente non aggiunge nulla.
     """
-    base = base_ev_min()
+    base = base_ev_min(market)
     mult = 1.0
     reasons: list[str] = []
 
@@ -334,7 +341,8 @@ class BrainAgent:
              read_err: str, min_ticket: float) -> Optional[ValidatedTrade]:
         ev = _signal_ev(signal)
         dyn = dynamic_ev_min(depth_usdc=signal.depth_usdc,
-                             velocity_pct_min=signal.velocity_pct_min)
+                             velocity_pct_min=signal.velocity_pct_min,
+                             market=signal.market)
         if ev is not None and ev < dyn["ev_min"]:
             logger.debug("brain: %s EV %.4f < soglia dinamica %.4f (%s)",
                          signal.signal_id, ev, dyn["ev_min"],
@@ -362,7 +370,11 @@ class BrainAgent:
             price=signal.price,
             true_prob=signal.true_prob,
             ev=ev,
+            edge=getattr(signal, "edge", None),
             depth_usdc=signal.depth_usdc,
+            devig_method=getattr(signal, "devig_method", "") or "",
+            shin_z=getattr(signal, "shin_z", None),
+            fair_odds=getattr(signal, "fair_odds", None),
             base_ev_min=dyn["base_ev_min"],
             dynamic_ev_min=dyn["ev_min"],
             ev_multiplier=dyn["ev_multiplier"],
@@ -379,5 +391,8 @@ class BrainAgent:
                 "juice_anomaly": signal.juice_anomaly,
                 "fresh": signal.fresh,
                 "sources": list(signal.sources or []),
+                "devig_method": getattr(signal, "devig_method", "") or "",
+                "shin_z": getattr(signal, "shin_z", None),
+                "fair_odds": getattr(signal, "fair_odds", None),
             },
         )

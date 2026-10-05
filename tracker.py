@@ -105,10 +105,18 @@ def _get_conn():
         match_id TEXT, esito TEXT,
         signal_quota REAL, closing_quota REAL, updated_at TEXT,
         pinnacle_quota REAL,
+        closing_odds REAL,
         PRIMARY KEY (match_id, esito))''')
     clv_cols = [r[1] for r in c.execute("PRAGMA table_info(clv_history)")]
     if "pinnacle_quota" not in clv_cols:
         c.execute("ALTER TABLE clv_history ADD COLUMN pinnacle_quota REAL")
+    if "closing_odds" not in clv_cols:
+        # Direttiva 04/10/2026 (punto 5): quota FINALE di Pinnacle catturata a
+        # T-0 dalla routine `closing_line.py`. E' il riferimento per la
+        # percentuale di beat sul mercato di ogni ordine (`beat_pct`);
+        # `closing_quota` resta invece la chiusura del miglior bookmaker
+        # (convenzione storica di `save_clv`).
+        c.execute("ALTER TABLE clv_history ADD COLUMN closing_odds REAL")
     c.execute('''CREATE TABLE IF NOT EXISTS cassa (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         data TEXT, partita TEXT, esito TEXT, quota REAL,
@@ -2460,7 +2468,8 @@ def mark_notified(match_id, date_str):
     c.execute("INSERT OR IGNORE INTO notifications VALUES (?,?)", (match_id, date_str))
     conn.commit(); conn.close()
 
-def save_clv(match_id, esito, quota, signal_started=False, pinnacle_quota=None):
+def save_clv(match_id, esito, quota, signal_started=False, pinnacle_quota=None,
+             closing_odds=None):
     """Registra un campione CLV per una coppia match+esito.
 
     - Prima analisi del match (signal_started=True): la quota corrente diventa la
@@ -2469,25 +2478,32 @@ def save_clv(match_id, esito, quota, signal_started=False, pinnacle_quota=None):
       che converge verso il prezzo di mercato finale (CLV).
     - pinnacle_quota (opz.): prezzo Pinnacle per lo stesso esito, la closing
       line piu' sharp. Se assente, si usa solo la chiusura del miglior bookmaker.
+    - closing_odds (opz., 04/10/2026): quota FINALE di Pinnacle a T-0, scritta
+      dalla routine `closing_line.py`. E' il riferimento del "beat the market"
+      per ogni ordine (`closing_line.beat_pct`).
     """
     conn = _get_conn(); c = conn.cursor()
     now = datetime.now().isoformat()
-    c.execute("SELECT signal_quota, closing_quota, pinnacle_quota FROM clv_history "
-              "WHERE match_id=? AND esito=?", (match_id, esito))
+    pin = pinnacle_quota if pinnacle_quota and pinnacle_quota > 0 else None
+    close = closing_odds if closing_odds and closing_odds > 0 else None
+    c.execute("SELECT signal_quota, closing_quota, pinnacle_quota, closing_odds "
+              "FROM clv_history WHERE match_id=? AND esito=?", (match_id, esito))
     row = c.fetchone()
     if row is None or signal_started:
-        pin = pinnacle_quota if pinnacle_quota and pinnacle_quota > 0 else None
-        c.execute("INSERT OR REPLACE INTO clv_history VALUES (?,?,?,?,?,?)",
-                  (match_id, esito, quota, quota, now, pin))
+        c.execute("INSERT OR REPLACE INTO clv_history "
+                  "(match_id, esito, signal_quota, closing_quota, "
+                  " pinnacle_quota, closing_odds, updated_at) "
+                  "VALUES (?,?,?,?,?,?,?)",
+                  (match_id, esito, quota, quota, pin, close, now))
     else:
-        if pinnacle_quota and pinnacle_quota > 0:
-            c.execute("UPDATE clv_history SET closing_quota=?, updated_at=?, pinnacle_quota=? "
-                      "WHERE match_id=? AND esito=?",
-                      (quota, now, pinnacle_quota, match_id, esito))
-        else:
-            c.execute("UPDATE clv_history SET closing_quota=?, updated_at=? "
-                      "WHERE match_id=? AND esito=?",
-                      (quota, now, match_id, esito))
+        # COALESCE sui valori opzionali: una scrittura senza `closing_odds`
+        # NON cancella quella gia' catturata a T-0 (la routine gira una volta
+        # sola, mentre `fixture_engine` aggiorna la chiusura a ogni analisi).
+        c.execute("UPDATE clv_history SET closing_quota=?, updated_at=?, "
+                  "pinnacle_quota=COALESCE(?, pinnacle_quota), "
+                  "closing_odds=COALESCE(?, closing_odds) "
+                  "WHERE match_id=? AND esito=?",
+                  (quota, now, pin, close, match_id, esito))
     conn.commit(); conn.close()
 
 def clear_old_matches():

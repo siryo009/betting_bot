@@ -8,9 +8,10 @@ temporaneo e MAI un provider reale (nessun ordine, nessuna rete).
 Scenari:
   A. Kill-switch OFF           -> il giro non parte
   B. Stop-loss giornaliero -5% -> puntate bloccate 24h
-  C. Kelly aggressivo           -> k=0.65 con CAP DINAMICO 12% del bankroll
+  C. Kelly DINAMICO             -> k nella banda 0.15-0.25 (scalata da EV/edge/
+                                  lega) con CAP DINAMICO 12% del bankroll
                                   (il Kelly tronca, il capitale scala col
-                                  capitale); sotto il ticket minimo 2.00 USDC
+                                  capitale); sotto il ticket minimo 1.00 USDC
                                   lo stake e' 0.0 e l'ordine non parte; il
                                   percorso LEGACY a importo fisso resta
                                   ripristinabile via ORDER_FIXED_STAKE_USDC
@@ -21,8 +22,9 @@ Scenari:
                                   (lega) restano
   E. Liquidita' SX             -> book sottile: ordine rifiutato (no slippage)
   F. Lega STRATEGY_LEAGUES     -> campionati non vincenti mai candidati
-  G. Circuit breakers T-60     -> finestra esecutiva T-120..T-15, CB1 cap per
-                                  ordine, CB2 kill switch patrimoniale 30 USDC
+  G. Circuit breakers T-60     -> finestra esecutiva T-180..T-2 (04/10/2026),
+                                  CB1 cap per ordine, CB2 kill switch
+                                  patrimoniale (soglia da env)
   H. Recinto esposizione       -> 8 ordini aperti (40% impegnato): l'Advisor
                                   respinge i nuovi piani, il giro non ordina
 
@@ -132,8 +134,9 @@ ALLOWED_LEAGUE = "Premier League"
 
 
 def _seed(mid: str, esito: str, quota: float, market_prob: float,
-          edge: float, home: str = "Osasuna", away: str = "Getafe") -> None:
-    tracker.save_match(mid, ALLOWED_LEAGUE, home, away, _start())
+          edge: float, home: str = "Osasuna", away: str = "Getafe",
+          hours: float = 3.0) -> None:
+    tracker.save_match(mid, ALLOWED_LEAGUE, home, away, _start(hours))
     tracker.save_prediction(mid, "1X2", esito, quota, 0.60, 0.08,
                             market_prob=market_prob, market_edge=edge,
                             status="value")
@@ -248,7 +251,7 @@ def main() -> int:
           f"{len(placed)}  (atteso 0){RESET}")
 
     # ------------------------------------------- C. KELLY AGGRESSIVO 04/10 ---
-    _head("C. KELLY AGGRESSIVO k=0.65 + CAP DINAMICO 12% + TICKET 2.00")
+    _head("C. KELLY DINAMICO k 0.15-0.25 + CAP DINAMICO 12% + TICKET 1.00")
     from decision.stake_engine import aggressive_config
     _reset_state()
     # Forza la modalita' LIVE con un wallet di 38 USDC (mai un ordine vero:
@@ -280,15 +283,16 @@ def main() -> int:
     # mai un importo fisso. Con bankroll 38 il tetto e' 4.56.
     _cap_atteso = round(38.0 * _cfg["max_stake_pct"], 2)
     ok_c1 = (calls["fill"] == 1 and 0 < calls["stake"] <= _cap_atteso + 1e-9)
-    print(f"  {GREEN if ok_c1 else RED}→ Kelly aggressivo: ordini "
+    print(f"  {GREEN if ok_c1 else RED}→ Kelly dinamico: ordini "
           f"{calls['fill']} con stake {calls['stake']:.2f} USDC "
-          f"(k={_cfg['kelly_fraction']:.2f}, cap 12% di 38 = "
+          f"(k in [{_cfg['kelly_min_fraction']:.2f}, "
+          f"{_cfg['kelly_fraction']:.2f}], cap 12% di 38 = "
           f"{_cap_atteso:.2f}, atteso 1 ordine sotto il cap){RESET}")
 
-    # C2 — TICKET MINIMO 2.00: con un wallet piccolo lo stake Kelly scende
+    # C2 — TICKET MINIMO 1.00: con un wallet piccolo lo stake Kelly scende
     # sotto il ticket e l'ordine NON parte (mai un ordine piu' piccolo).
     _reset_state()
-    _piccolo = 4.00     # cap 12% = 0.48 < ticket 2.00
+    _piccolo = 4.00     # cap 12% = 0.48 < ticket 1.00
     auto_bet._live_wallet_snapshot = lambda: {
         "available": _piccolo, "exposure": 0.0, "equity": _piccolo}
     # (il ticket morde: lo stake Kelly cappato sta sotto la soglia)
@@ -523,27 +527,37 @@ def main() -> int:
         f"  {DIM}│ (alert CB2 intercettato) {reason}{RESET}")
     auto_bet._execution_mode = lambda allow_sim=True: "sim"
 
-    # G1 — FINESTRA T-60: il giro esecutivo ordina SOLO dentro la finestra
-    # esecutiva (T-120..T-15 dal 30/09: la chiusura e' scesa da T-50 per
-    # rendere ordinabili i ritentativi tardivi dell'oracolo eSports).
-    _seed("t60-nofin", "Osasuna", 1.65, 0.58, 0.07)   # kickoff a +3h
+    # G1 — FINESTRA ESECUTIVA: il giro ordina SOLO dentro la banda.
+    # Politica dal 04/10/2026: **T-180..T-2**. Due accorgimenti NECESSARI:
+    # (a) il kickoff del seed sta a **+5h** (non +3h): a +3h esatti si cadrebbe
+    #     SUL bordo di apertura T-180 e la diagnostica misurerebbe i
+    #     microsecondi invece del guardrail;
+    # (b) si PULISCE il ledger prima: con la banda allargata da T-60 a T-180 le
+    #     righe residue degli scenari A-F (+3h) sono diventate ordinabili, e
+    #     misurare "0 ordini" su un palinsesto ereditato non e' misurare il
+    #     guardrail (osservato eseguendo la diagnostica: 2 ordini residui,
+    #     scenario G rosso senza che nulla fosse rotto).
+    _conn_clean = tracker._get_conn()
+    _conn_clean.execute("DELETE FROM bets")
+    _conn_clean.execute("DELETE FROM predictions")
+    _conn_clean.execute("DELETE FROM matches")
+    _conn_clean.commit()
+    _conn_clean.close()
+    _seed("t60-nofin", "Osasuna", 1.65, 0.58, 0.07, hours=5.0)
     auto_bet.T60_EXECUTION_ONLY = True
     mark = len(_RECORDS)
     fuori = auto_bet.run_today_bets(stake_eur=1.0)
     _print_logs(mark)
     ok_g1 = fuori == []
-    print(f"  {GREEN if ok_g1 else RED}→ kickoff a +3h con T-60 attivo: "
-          f"ordini {len(fuori)} (atteso 0: solo scansione){RESET}")
-    # Controprova: la stessa riga ordina se la finestra T-60 e' disattivata.
-    # (Si verifica la PRESENZA di t60-nofin, non il totale: il ledger della
-    # diagnostica contiene anche le righe degli scenari A-F, anch'esse
-    # giocabili a orizzonte aperto.)
+    print(f"  {GREEN if ok_g1 else RED}→ kickoff a +5h con T-60 attivo "
+          f"(banda T-180..T-2): ordini {len(fuori)} "
+          f"(atteso 0: solo scansione){RESET}")
+    # Controprova: la stessa riga ordina se la finestra esecutiva e' spenta.
     auto_bet.T60_EXECUTION_ONLY = False
     dentro = auto_bet.run_today_bets(stake_eur=1.0)
     ok_g2 = any(p.get("match_id") == "t60-nofin" for p in dentro)
     print(f"  {DIM}controprova con T60_EXECUTION_ONLY=0: t60-nofin ordinata: "
-          f"{'si' if ok_g2 else 'NO'} ({len(dentro)} ordini totali nel "
-          f"palinsesto della diagnostica){RESET}")
+          f"{'si' if ok_g2 else 'NO'} ({len(dentro)} ordini){RESET}")
     auto_bet.T60_EXECUTION_ONLY = True
 
     # G2 — CB1 DINAMICO: nessun calcolo supera il tetto per ordine (12%).
@@ -651,7 +665,7 @@ def main() -> int:
               and ok_h)
     for name, ok in (("A kill-switch OFF", ok_a),
                      ("B stop-loss 24h", ok_b),
-                     ("C Kelly aggressivo k=0.65 / cap 12% / ticket 2.00", ok_c),
+                     ("C Kelly dinamico k 0.15-0.25 / cap 12% / ticket 1.00", ok_c),
                      ("D filtro prezzo/oracolo", ok_d),
                      ("E liquidita' SX", ok_e),
                      ("F lega strategia", ok_f),

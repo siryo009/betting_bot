@@ -1,5 +1,6 @@
 """Value bet filter e Kelly Criterion Pro"""
 
+import os
 from typing import List, Dict, Any
 
 from market_calib import (
@@ -39,6 +40,42 @@ from market_calib import (
 EV_MIN = 0.025           # +2.5% minimo
 EV_MAX = 0.20            # +20% massimo (oltre = anomalia)
 
+# ---------------------------------------------------------------------------
+# GATE EV DEDICATO AI MERCATI LIQUIDI (direttiva 04/10/2026, punto 4)
+# ---------------------------------------------------------------------------
+# Perche': sui mercati a DUE esiti e ad alta liquidita' (Handicap Asiatico,
+# Over/Under, Totals, BTTS, Moneyline) il margine devigato e' piu' stretto e
+# il prezzo SX e' piu' spesso allineato: chiedere il 2.5% spegneva il volume
+# proprio dove il ritardo di prezzo e' misurabile. La soglia scende a EV >1.0%
+# **solo per quei mercati** — 1X2, eSports e tennis restano alla soglia unica
+# `EV_MIN` (il modello e' piu' debole, e li' allentare sarebbe un allargamento
+# silenzioso). MLB e BTTS sono dichiarati liquidi ma oggi NON hanno un feed
+# attivo (BTTS: 0 mercati su SX; the-odds-api e' h2h-only), quindi la voce
+# resta pronta e senza effetto finche' non si collega un oracolo.
+#: Env: `EV_MIN_LIQUID` (default 1.0%) e `EV_LIQUID_MARKETS` (CSV).
+EV_MIN_LIQUID = float(os.getenv("EV_MIN_LIQUID", "0.01"))
+_DEFAULT_LIQUID_MARKETS = "AH,OU,TOTALS,BTTS,ML"
+LIQUID_MARKETS = frozenset(
+    m.strip().upper()
+    for m in os.getenv("EV_LIQUID_MARKETS", _DEFAULT_LIQUID_MARKETS).split(",")
+    if m.strip()
+)
+
+
+def is_liquid_market(market: str | None) -> bool:
+    """True se il mercato ha la soglia EV dedicata (mercati liquidi)."""
+    return str(market or "").strip().upper() in LIQUID_MARKETS
+
+
+def ev_min_for_market(market: str | None) -> float:
+    """Soglia EV di un mercato: 1.0% se liquido, altrimenti la soglia unica.
+
+    UNICA definizione della regola: la usano il Cervello (`base_ev_min`), il
+    multi-mercato AH/OU, l'oracolo top-down e `is_sane`. Nessun consumatore
+    ricopia la soglia.
+    """
+    return EV_MIN_LIQUID if is_liquid_market(market) else EV_MIN
+
 # Fascia quote: favoriti NETTI (guardrail 11/09)
 ODDS_MIN = 1.30          # quota minima: sotto, il ritorno non paga il rischio
 ODDS_MAX = 1.80          # quota massima: sopra e' "pantano" o sfavorita
@@ -59,9 +96,18 @@ MOVEMENT_THRESHOLD = -0.05  # -5% di movimento = segnale forte
 MOVEMENT_BONUS_MULTIPLIER = 1.2  # +20% stake su segnali con momentum
 
 # === TIMING FILTER ===
-# Momento ottimale per piazzare: 30min - 24h prima del kickoff
-TIMING_OPTIMAL_MIN_HOURS = 0.5   # 30 min minimi prima del kickoff
-TIMING_OPTIMAL_MAX_HOURS = 24.0  # 24h massimo prima (troppo presto = noise)
+# Momento ottimale per piazzare: da 2 minuti a 24h prima del kickoff.
+# ⚠️ La FINESTRA ESECUTIVA (T-180..T-2, direttiva 04/10/2026 punto 3) NON vive
+# qui: la decide `auto_bet.T60_WINDOW_MIN_MIN/MAX_MIN`, che e' l'autorita' del
+# giro puntate. Questo filtro resta il pavimento anti-ordine-a-partita-
+# imminente (2 minuti, allineato al pavimento condiviso dei moduli di scan) e
+# la guardia "troppo presto = rumore" a 24h: duplicare qui il valore T-180
+# creerebbe una SECONDA soglia
+# capace di bloccare ordini fuori dal giro T-60 (test, diagnostica, corsia
+# Chief) — la classe di bug del 13/09 (due copie della stessa regola che
+# divergono).
+TIMING_OPTIMAL_MIN_HOURS = 2.0 / 60.0   # 2 minuti minimi prima del kickoff
+TIMING_OPTIMAL_MAX_HOURS = 24.0         # oltre = troppo presto (quote noise)
 
 # === CORRELATION CHECK ===
 # Massimo esposizione per lega + finestra temporale
@@ -313,7 +359,8 @@ def is_sane(prob: float, odds: float, ev: float,
             market_edge_min: float | None = None,
             odds_max: float = ODDS_MAX,
             favourites_only: bool = FAVOURITES_ONLY,
-            odds_movement: float | None = None) -> tuple[bool, str]:
+            odds_movement: float | None = None,
+            market: str = "") -> tuple[bool, str]:
     """Verifica se il segnale supera i filtri di sanita' con strategia per lega.
 
     Con market_prob disponibile, aggiunge il vincolo "beating the market":
@@ -325,7 +372,13 @@ def is_sane(prob: float, odds: float, ev: float,
     - edge minimo differenziato per lega (core +2/+2.5pp, probation +4pp)
     - fascia quote 1.30-1.80
     - odds_movement: se la quota scende > 5%, segnale +20% (sharp money)
+
+    `market` (opzionale) seleziona la soglia EV: i mercati liquidi (AH/OU/
+    Totals/BTTS/ML) usano `EV_MIN_LIQUID` (1.0%), il resto `EV_MIN` (2.5%) —
+    vedi `ev_min_for_market`. Chiamanti storici senza `market` restano
+    esattamente come prima.
     """
+    ev_min_eff = ev_min_for_market(market)
     # Lega vietata?
     if league and not league_allowed(league):
         return False, (f"lega '{league}' esclusa per ROI negativo "
@@ -339,10 +392,10 @@ def is_sane(prob: float, odds: float, ev: float,
         return False, (f"non e' il favorito di mercato (prob. "
                        f"{market_prob*100:.1f}% < "
                        f"{MIN_FAVOURITE_MARKET_PROB*100:.0f}%)")
-    if ev < EV_MIN:
+    if ev < ev_min_eff:
         # `:g` e non `:.0f`: con EV_MIN = 2.5% il `:.0f` arrotterebbe a "2%"
         # (round-half-even) e il messaggio mentirebbe sulla soglia.
-        return False, f"EV troppo basso ({ev*100:.1f}% < {EV_MIN*100:g}%)"
+        return False, f"EV troppo basso ({ev*100:.1f}% < {ev_min_eff*100:g}%)"
     if ev > EV_MAX:
         return False, f"ANOMALIA: EV troppo alto ({ev*100:.1f}% > {EV_MAX*100:.0f}%)"
     if market_prob is not None:
@@ -523,8 +576,9 @@ def get_optimal_timing(kickoff_str: str) -> dict:
     """Verifica se e' il momento ottimale per piazzare una scommessa.
 
     Ritorna: {"optimal": bool, "hours_before": float, "reason": str}
-    Piazza 0.5-24h prima del kickoff per evitare insider info tardivo
-    e troppo presto (quote noise).
+    Piazza da 2 minuti a 24h prima del kickoff per evitare insider info
+    tardivo e troppo presto (quote noise). La finestra ESECUTIVA vera
+    (T-180..T-2, direttiva 04/10/2026) e' in `auto_bet.T60_WINDOW_*`.
     """
     from datetime import datetime, timezone
     try:

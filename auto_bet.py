@@ -61,14 +61,14 @@ BET_STAKE_DEFAULT_EUR = 5.0
 #: Pavimento assoluto: sotto questo numero di minuti al kickoff non si ordina
 #: MAI (un ordine a partita imminente rischia di arrivare su un mercato gia'
 #: chiuso o su un prezzo non piu' rappresentativo).
-#: 03/10/2026 (direttiva del proprietario): 15 -> **5**, in COPPIA con
-#: `T60_WINDOW_MAX_MIN`. Le due guardie DEVONO restare allineate: se la
-#: chiusura della finestra scende sotto questo pavimento l'esecuzione tenta
-#: ordini che l'altra guardia salta comunque (lavoro sprecato, log
-#: contraddittori); se sale sopra, l'ultima parte della banda e' una ZONA
-#: MORTA silenziosa — esattamente il buco che la direttiva "nessuna zona
-#: d'ombra negli ultimi 10 minuti" vuole chiudere.
-MIN_MINUTES_TO_START = 5
+#: 04/10/2026 (direttiva del proprietario): 5 -> **2**, in COPPIA con
+#: `T60_WINDOW_MAX_MIN` (finestra T-180..T-2). Le due guardie DEVONO restare
+#: allineate: se la chiusura della finestra scende sotto questo pavimento
+#: l'esecuzione tenta ordini che l'altra guardia salta comunque (lavoro
+#: sprecato, log contraddittori); se sale sopra, l'ultima parte della banda e'
+#: una ZONA MORTA silenziosa. Il pavimento e' CONDIVISO con i moduli di scan
+#: (`sx_signals`, `multi_market`), anch'essi portati a 2 minuti.
+MIN_MINUTES_TO_START = 2
 
 # --- Esecuzione reale via execution_engine (wiring dal 08/09) ---
 # AUTO_BET_MODE=live|real -> ordini REALI sul provider configurato
@@ -207,16 +207,16 @@ STAKE_CAP_HARD = os.getenv("STAKE_CAP_HARD", "1").strip().lower() \
 # finestra la strategia NON ordina: i segnali vengono scansionati e
 # classificati dai giri normali (che restano ogni 60s), la decisione
 # esecutiva arriva alla T-60.
-T60_WINDOW_MIN_MIN = float(os.getenv("T60_WINDOW_MIN_MIN", "60"))   # apertura (minuti al kickoff)
-# CHIUSURA (minuti al kickoff): **5** dal 03/10/2026 (era 15, e 50 prima del
-# 30/09). Direttiva del proprietario: la banda esecutiva e' T-60..T-5 e non
-# deve avere ZONE D'OMBRA negli ultimi minuti, dove arrivano gli steam move
-# dello sharp. L'APERTURA resta 60 (T-60):
-#   T60_WINDOW_MIN_MIN = 60  ->  T60_WINDOW_MAX_MIN = 5
+T60_WINDOW_MIN_MIN = float(os.getenv("T60_WINDOW_MIN_MIN", "180"))   # apertura (minuti al kickoff)
+# CHIUSURA (minuti al kickoff): **2** dal 04/10/2026 (era 5, 15 prima del
+# 30/09). Direttiva del proprietario: la banda esecutiva e' **T-180..T-2** —
+# da 3 ore a 2 minuti dal fischio — per catturare le formazioni ufficiali e i
+# volumi dei sindacati quantitativi, senza zone d'ombra negli ultimi minuti.
+#   T60_WINDOW_MIN_MIN = 180  ->  T60_WINDOW_MAX_MIN = 2
 # La chiusura e' DERIVATA da `MIN_MINUTES_TO_START` (unica sorgente): le due
 # guardie devono coincidere, altrimenti o si tenta l'ultima fascia.
 # ⚠️ Le env sono l'unico modo di tararla in produzione senza redeploy
-# (Railway: T60_WINDOW_MIN_MIN=60, T60_WINDOW_MAX_MIN=5).
+# (Railway: T60_WINDOW_MIN_MIN=180, T60_WINDOW_MAX_MIN=2).
 T60_WINDOW_MAX_MIN = float(os.getenv("T60_WINDOW_MAX_MIN",
                                      str(MIN_MINUTES_TO_START)))   # chiusura (fail-closed: oltre, non si ordina)
 # CB1 — TETTO PER ORDINE: NESSUN calcolo dinamico (Kelly incluso) puo'
@@ -286,11 +286,13 @@ DRY_RUN = os.getenv("AUTO_BET_DRY_RUN", "0").strip().lower() \
 
 
 def t60_window(kickoff: "datetime | None") -> str:
-    """Posizione di un kickoff rispetto alla finestra esecutiva T-60.
+    """Posizione di un kickoff rispetto alla finestra esecutiva.
 
-    Ritorna: "before" (kickoff oltre T-60: non ancora), "within" (dentro
-    T-60..T-50: finestra esecutiva), "missed" (meno di T-50: non si ordina,
-    fail-closed), "unknown" (kickoff non parsabile: non si ordina).
+    Politica dal 04/10/2026: **T-180..T-2** (da 3 ore a 2 minuti dal fischio),
+    per catturare le formazioni ufficiali e i volumi dei sindacati. Ritorna:
+    "before" (kickoff oltre T-180: non ancora), "within" (nella banda:
+    finestra esecutiva), "missed" (sotto T-2: non si ordina, fail-closed),
+    "unknown" (kickoff non parsabile: non si ordina).
     """
     if kickoff is None:
         return "unknown"
@@ -537,8 +539,13 @@ def _top_down_eval(pick: dict, league: str | None = None) -> dict | None:
                               "probabilita' fair"}
         ev = p_true * (quota - 1.0) - (1.0 - p_true)
         true_odd = 1.0 / p_true
+        # Soglia EV del MERCATO (direttiva 04/10, punto 4): OU/AH (liquidi)
+        # usano EV_MIN_LIQUID (1.0%), 1X2 la soglia unica. `ev_min_for_market`
+        # e' l'unica definizione della regola: se manca (import fallito) si
+        # ricade sulla soglia dichiarata dall'oracolo.
         try:
-            from value_filter import EV_MIN as ev_min
+            from value_filter import ev_min_for_market as _ev_min_for_market
+            ev_min = _ev_min_for_market(mercato)
         except Exception:                                       # pragma: no cover
             ev_min = po.DEFAULT_EV_MIN
         # Probation: soglia EV piu' severa per le leghe non ancora validate
@@ -1337,13 +1344,13 @@ def aggressive_cap_pct() -> float:
 
 
 def aggressive_min_ticket() -> float:
-    """Ticket minimo del motore Kelly (KELLY_MIN_TICKET_USDC, default 2.00)."""
+    """Ticket minimo del motore Kelly (KELLY_MIN_TICKET_USDC, default 1.00)."""
     try:
         from decision.stake_engine import aggressive_config
         return float(aggressive_config()["min_ticket"])
     except Exception as exc:                                  # pragma: no cover
-        logger.warning("auto_bet: ticket minimo non leggibile (%s), uso 2.00", exc)
-        return 2.00
+        logger.warning("auto_bet: ticket minimo non leggibile (%s), uso 1.00", exc)
+        return 1.00
 
 
 def set_last_bankroll(bankroll: float | None) -> None:
@@ -1509,12 +1516,12 @@ def true_probability(pick: dict, price: float) -> float | None:
 def kelly_size_for_pick(pick: dict, *, price: float, bankroll: float,
                         spendable: float | None = None,
                         label: str = "Kelly aggressivo") -> dict:
-    """Size del motore Kelly aggressivo per un pick (dict pronto + log).
+    """Size del motore Kelly dinamico per un pick (dict pronto + log).
 
-    UNICO punto di chiamata del motore (k=0.65, cap 12%, ticket 2.00): le
-    corsie non ricopiano ne' la formula ne' le soglie. Il vincolo di CASSA
-    (fondi liberi) resta separato dal cap percentuale: non si spendono soldi
-    in escrow.
+    UNICO punto di chiamata del motore (k dinamico 0.15-0.25 da EV/edge/lega,
+    cap 12%, ticket 1.00): le corsie non ricopiano ne' la formula ne' le
+    soglie. Il vincolo di CASSA (fondi liberi) resta separato dal cap
+    percentuale: non si spendono soldi in escrow.
     """
     try:
         from decision.stake_engine import calculate_kelly_stake
@@ -1524,7 +1531,15 @@ def kelly_size_for_pick(pick: dict, *, price: float, bankroll: float,
     prob = true_probability(pick, price)
     if prob is None:
         return {"stake": 0.0, "reason": "no_true_prob"}
-    res = dict(calculate_kelly_stake(prob, price, bankroll))
+    # k DINAMICO (04/10/2026): EV/edge/lega del pick scalano il frazionamento
+    # dentro la banda 0.15-0.25. Sono dati che il pick porta gia' (il Cervello
+    # li usa per il gate EV) — nessun ricalcolo, un solo motore.
+    _ev = pick.get("top_down_ev")
+    if _ev is None:
+        _ev = pick.get("ev")
+    res = dict(calculate_kelly_stake(
+        prob, price, bankroll,
+        ev=_ev, edge=pick.get("market_edge"), league=pick.get("league")))
     res["true_prob"] = round(prob, 6)
     if not res.get("executable"):
         return res

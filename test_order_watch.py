@@ -124,17 +124,17 @@ class TestStake:
 
     def test_kelly_aggressivo_cambia_la_regola_non_sospende_il_controllo(
             self, tmp_env, monkeypatch):
-        """Dal 04/10/2026 il default e' il Kelly aggressivo: con lo stake
-        fisso spento un importo diverso da 1.50 NON e' una violazione, ma il
-        controllo NON e' sospeso — valgono il cap dinamico (12%) e il ticket
-        minimo del motore. Un ordine sotto il ticket e' un percorso che ha
-        aggirato il motore."""
+        """Dal 04/10/2026 il default e' il Kelly **dinamico** (k 0.15-0.25):
+        con lo stake fisso spento un importo diverso da 1.50 NON e' una
+        violazione, ma il controllo NON e' sospeso — valgono il cap dinamico
+        (12%) e il ticket minimo del motore (**1.00**). Un ordine sotto il
+        ticket e' un percorso che ha aggirato il motore."""
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
         _bet(tmp_env["db"], stake=3.00)          # entro il cap, sopra il ticket
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
         assert data["fixed_active"] is False
         assert data["verdict"] == "ok"
-        _bet(tmp_env["db"], stake=1.00, match="m2")   # sotto il ticket 2.00
+        _bet(tmp_env["db"], stake=0.50, match="m2")   # sotto il ticket 1.00
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
         kinds = [v["kind"] for v in data["violations"]]
         assert order_watch.VIOL_STAKE_UNDER_TICKET in kinds

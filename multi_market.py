@@ -145,7 +145,9 @@ SOURCE = "sxbet"
 
 #: Finestra dei fixture candidati (identica a sx_signals/auto_bet: 24h).
 HOURS_AHEAD = _env_float("MM_HOURS_AHEAD", 24.0)
-MIN_MINUTES_TO_START = _env_int("MM_MIN_MINUTES_TO_START", 5)
+#: Pavimento condiviso con `auto_bet`/`sx_signals`: 2 minuti (direttiva
+#: 04/10/2026, finestra T-180..T-2).
+MIN_MINUTES_TO_START = _env_int("MM_MIN_MINUTES_TO_START", 2)
 #: 26/09/2026 (direttiva "piu' volume su AH/OU"): 400 -> 600 mercati grezzi
 #: e 12 -> 20 linee per mercato. Si allarga SOLO la COPERTURA: fascia quota,
 #: edge, EV, gate di lega e soglie di liquidita' restano quelle congelate del
@@ -970,9 +972,12 @@ def analyze_fixture(fixture_id: str, lam_h: float, lam_a: float, *,
                     and ODDS_MIN <= c["quota"] <= ODDS_MAX]
         chosen = max(eligible, key=lambda c: c["ev"]) if eligible else None
         for cand in cands:
+            # `market=market_type`: i mercati liquidi (OU/AH) usano la soglia
+            # EV dedicata del 04/10 (1.0%); il resto la soglia unica.
             sane, reason = is_sane(cand["prob"], cand["quota"], cand["ev"],
                                    market_prob=cand["market_prob"],
-                                   league=league, favourites_only=False)
+                                   league=league, favourites_only=False,
+                                   market=market_type)
             depth_ok = (market_ok and cand["depth"] >= MIN_EXEC_DEPTH_USDC)
             if cand is chosen and sane and depth_ok:
                 cand["tier"] = get_signal_tier(cand["ev"], cand["market_edge"])

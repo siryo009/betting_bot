@@ -30,30 +30,36 @@ from decision import stake_engine as se
 class TestConfigurazione:
     def test_default_di_codice(self, monkeypatch):
         monkeypatch.delenv("KELLY_AGGRESSIVE_FRACTION", raising=False)
+        monkeypatch.delenv("KELLY_AGGRESSIVE_MIN_FRACTION", raising=False)
         monkeypatch.delenv("KELLY_MAX_STAKE_PCT", raising=False)
         monkeypatch.delenv("KELLY_MIN_TICKET_USDC", raising=False)
         cfg = se.aggressive_config()
-        assert cfg["kelly_fraction"] == 0.65
+        # Direttiva 04/10/2026 (punto 2): banda dinamica 0.15-0.25 e ticket 1.00.
+        assert cfg["kelly_fraction"] == 0.25      # MASSIMO della banda
+        assert cfg["kelly_min_fraction"] == 0.15  # MINIMO della banda
         assert cfg["max_stake_pct"] == 0.12
-        assert cfg["min_ticket"] == 2.00
+        assert cfg["min_ticket"] == 1.00
 
     def test_env_tara_i_parametri(self, monkeypatch):
         monkeypatch.setenv("KELLY_AGGRESSIVE_FRACTION", "0.5")
+        monkeypatch.setenv("KELLY_AGGRESSIVE_MIN_FRACTION", "0.2")
         monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.05")
         monkeypatch.setenv("KELLY_MIN_TICKET_USDC", "1.0")
         cfg = se.aggressive_config()
-        assert cfg == {"kelly_fraction": 0.5, "max_stake_pct": 0.05,
-                       "min_ticket": 1.0}
+        assert cfg == {"kelly_fraction": 0.5, "kelly_min_fraction": 0.2,
+                       "max_stake_pct": 0.05, "min_ticket": 1.0}
 
     def test_valore_impossibile_ricade_sul_default(self, monkeypatch):
         """Una soglia di rischio non si spegne con una variabile sbagliata."""
         monkeypatch.setenv("KELLY_AGGRESSIVE_FRACTION", "abc")
+        monkeypatch.setenv("KELLY_AGGRESSIVE_MIN_FRACTION", "x")
         monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "")
         monkeypatch.setenv("KELLY_MIN_TICKET_USDC", "molto")
         cfg = se.aggressive_config()
-        assert cfg["kelly_fraction"] == 0.65
+        assert cfg["kelly_fraction"] == 0.25
+        assert cfg["kelly_min_fraction"] == 0.15
         assert cfg["max_stake_pct"] == 0.12          # stringa vuota = default
-        assert cfg["min_ticket"] == 2.00
+        assert cfg["min_ticket"] == 1.00
 
     def test_frazioni_clampate(self, monkeypatch):
         monkeypatch.setenv("KELLY_AGGRESSIVE_FRACTION", "3.0")
@@ -61,6 +67,14 @@ class TestConfigurazione:
         cfg = se.aggressive_config()
         assert cfg["kelly_fraction"] == 1.0
         assert cfg["max_stake_pct"] == 1.0
+
+    def test_banda_coerente_se_il_min_supera_il_max(self, monkeypatch):
+        """La banda non puo' invertirsi: il min viene riportato al max."""
+        monkeypatch.setenv("KELLY_AGGRESSIVE_FRACTION", "0.10")
+        monkeypatch.setenv("KELLY_AGGRESSIVE_MIN_FRACTION", "0.40")
+        cfg = se.aggressive_config()
+        assert cfg["kelly_min_fraction"] <= cfg["kelly_fraction"]
+        assert cfg["kelly_min_fraction"] == 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -73,16 +87,18 @@ class TestCalculateKellyStake:
 
         Il bug del 13/09 nasceva dal doppio scaling. Qui il valore atteso e'
         verificato col Kelly pieno letto dalla STESSA fonte di produzione.
+        Senza EV/edge/lega k cade al CENTRO della banda (0.20).
         """
         full = vf.kelly_fraction(0.60, 1.66, fraction=1.0)
         res = se.calculate_kelly_stake(0.60, 1.66, 30.0)
         assert res["kelly_full"] == full
-        assert res["raw_stake"] == round(30.0 * full * 0.65, 6)
-        assert res["kelly_fraction"] == 0.65
+        assert res["kelly_fraction"] == 0.20          # centro banda
+        assert res["kelly_dynamic"] is True
+        assert res["raw_stake"] == round(30.0 * full * 0.20, 6)
 
     def test_cap_dinamico_tronca(self):
-        """Con bankroll alto il 12% vince sul Kelly: stake = cap, capped True."""
-        res = se.calculate_kelly_stake(0.60, 1.66, 100.0)
+        """Con k esplicito alto il 12% vince sul Kelly: stake = cap, capped True."""
+        res = se.calculate_kelly_stake(0.60, 1.66, 100.0, kelly_fraction=0.65)
         assert res["cap_usdc"] == 12.0
         assert res["capped"] is True
         assert res["stake"] == 12.0
@@ -90,22 +106,22 @@ class TestCalculateKellyStake:
 
     def test_cap_dinamico_sotto_il_kelly_non_tronca(self):
         """Quando il Kelly sta sotto il cap il cap NON tocca nulla."""
-        # p=0.45 a quota 2.00: kelly pieno 0.175 -> raw 11.375 (< 12.00 di cap)
         res = se.calculate_kelly_stake(0.45, 2.00, 100.0)
         assert res["capped"] is False
         assert res["stake"] == round(res["raw_stake"], 2)
 
     def test_ticket_minimo_scarta_l_operazione(self):
-        """Sotto il ticket del motore lo stake e' 0.0: mai un ordine piu'
-        piccolo del ticket."""
-        res = se.calculate_kelly_stake(0.60, 1.66, 10.0)   # cap 1.20 < 2.00
+        """Sotto il ticket del motore (1.00) lo stake e' 0.0: mai un ordine
+        piu' piccolo del ticket (bankroll 10 -> k=0.20 -> raw 0.72)."""
+        res = se.calculate_kelly_stake(0.60, 1.66, 10.0)
         assert res["stake"] == 0.0
         assert res["executable"] is False
         assert res["reason"] == "below_min_ticket"
 
     def test_sopra_il_ticket_passa(self):
-        res = se.calculate_kelly_stake(0.60, 1.66, 20.0)   # cap 2.40 >= 2.00
-        assert res["stake"] == 2.40
+        res = se.calculate_kelly_stake(0.60, 1.66, 20.0)
+        assert res["stake"] == round(res["raw_stake"], 2)  # 1.44 >= ticket 1.00
+        assert res["stake"] >= 1.00
         assert res["executable"] is True
         assert res["reason"] == "ok"
 
@@ -241,9 +257,20 @@ class TestKellySizeForPick:
     def test_size_dal_motore(self):
         pick = {"match_id": "m1", "esito_key": "1", "p_true": 0.60}
         res = auto_bet.kelly_size_for_pick(pick, price=1.66, bankroll=100.0)
-        assert res["stake"] == 12.0          # cap 12% = 12.00
-        assert res["kelly_fraction"] == 0.65
+        # k = centro banda (0.20) senza EV/edge/lega nel pick
+        assert res["stake"] == round(100.0 * res["kelly_full"] * 0.20, 2)
+        assert res["kelly_fraction"] == 0.20
         assert res["true_prob"] == 0.60
+
+    def test_ev_e_lega_alzano_il_k_dentro_la_banda(self):
+        """EV forte + lega core -> k verso il massimo della banda (0.25)."""
+        base = {"match_id": "m1", "esito_key": "1", "p_true": 0.60}
+        forte = {**base, "ev": 0.20, "market_edge": 0.05,
+                 "league": "Premier League"}
+        a = auto_bet.kelly_size_for_pick(base, price=1.66, bankroll=100.0)
+        b = auto_bet.kelly_size_for_pick(forte, price=1.66, bankroll=100.0)
+        assert b["kelly_fraction"] > a["kelly_fraction"]
+        assert b["kelly_fraction"] <= 0.25
 
     def test_senza_probabilita_non_si_ordina(self):
         res = auto_bet.kelly_size_for_pick({}, price=1.66, bankroll=100.0)
@@ -259,7 +286,7 @@ class TestKellySizeForPick:
         """Anche col vincolo di cassa il ticket minimo vale."""
         pick = {"p_true": 0.60}
         res = auto_bet.kelly_size_for_pick(pick, price=1.66, bankroll=100.0,
-                                           spendable=1.0)
+                                           spendable=0.50)
         assert res["stake"] == 0.0
         assert res["reason"] == "below_min_ticket_cassa"
 
@@ -289,8 +316,8 @@ class TestRefreshLiveStakes:
         kept, info = auto_bet.refresh_live_stakes(cand)
         assert info["ok"] is True and info["equity"] == 100.0
         assert len(kept) == 1
-        # cap 12% di 100 = 12.00, troncato dalla cassa libera (100)
-        assert kept[0]["stake"] == 12.0
+        # k = centro banda (0.20) su equity 100: raw 7.18, sotto il cap 12.00
+        assert kept[0]["stake"] == 7.18
         assert kept[0]["kelly"]["max_stake_pct"] == 0.12
 
     def test_il_capitale_fresco_alimenta_il_compounding(self, monkeypatch):
@@ -299,7 +326,7 @@ class TestRefreshLiveStakes:
         cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
                  "price": 1.66, "stake": 1.0}]
         kept, _ = auto_bet.refresh_live_stakes(cand)
-        assert kept[0]["stake"] == 24.0     # 12% di 200
+        assert kept[0]["stake"] == 14.36    # raddoppia col bankroll (compounding)
 
     def test_cap_di_portafoglio_non_viene_ri_kelly(self, monkeypatch):
         """corr_cap/total_cap decidono SE e QUANTO: il Kelly non li scavalca."""
@@ -313,7 +340,7 @@ class TestRefreshLiveStakes:
 
     def test_scarta_sotto_il_ticket(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=10.0))   # cap 1.20
+                            lambda: _snapshot(available=10.0))   # raw 0.72 < ticket
         cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
                  "price": 1.66, "stake": 1.0}]
         kept, info = auto_bet.refresh_live_stakes(cand)

@@ -8781,3 +8781,165 @@ dichiarate `preserve()` in `.railway/railway.ts`. `railway config plan`:
 percorso storico; `ORDER_FIXED_STAKE_USDC=1.50` ripristina l'importo fisso del
 28/09. Il floor dell'EXCHANGE resta **1.00 USDC**: il ticket 2.00 e' una soglia
 di sizing, non una dichiarazione sul minimo dell'exchange.
+
+### Ottimizzazione quantitativa: de-vig dichiarato, Kelly dinamico, T-180..T-2, gate EV liquidi, closing line (04/10/2026, sera)
+
+Direttiva del proprietario in cinque punti. Due vincoli espliciti del proprietario
+registrati con `ask_user`:
+1. **Kelly dinamico** e' una scala su **edge + confidenza lega** dentro la banda
+   **k ∈ [0.15, 0.25]** (non piu' k fisso 0.65).
+2. **Ticket minimo del MOTORE Kelly = 1.00 USDC** (era 2.00).
+3. **Finestra esecutiva T-180..T-2** (si abbassano anche i pavimenti condivisi).
+4. **Gate EV > 1.0% SOLO sui mercati liquidi** (non soglia globale).
+5. **CLV**: colonna `closing_odds` in ledger + routine di background a **T-0**.
+
+**RICOGNIZIONE PRIMA DI SCRIVERE (meta' della direttiva era gia' implementata).**
+- **Punto 1 (de-vig Pinnacle)**: **era gia' soddisfatto** dal 02/10 —
+  `market_calib.shin_devig(ps) -> (fair, z)`, `devig(odds, method)` con
+  `multiplicative|power|shin`, `devig_with_z`, `market_implied(odds_map, method)`;
+  `pinnacle_oracle.DEVIG_METHOD` = `shin` di default (override
+  `PINNACLE_DEVIG_METHOD`), `shin_z()` + metadati `devig_method`/`shin_z` in
+  `_META_KEYS` (mai nei calcoli), EV dell'oracolo gia' sulla p̄ de-vigata.
+  → Intervento ridotto a **propagare/dichiarare la provenienza** nella catena.
+- **Punto 5 (CLV)**: `clv_history` esisteva con `signal_quota`/`closing_quota`/
+  `pinnacle_quota` + `tracker.save_clv`; `market_calib.clv_raw`/`clv_vig_free`;
+  `decision/clv.py` (WriteCLVCommand, ClvGateway audit_only, wiring shadow).
+  Mancava solo la routine a T-0 e la colonna `closing_odds`.
+- **Punto 4**: `value_filter.EV_MIN=0.025` era soglia **unica condivisa**.
+  **MLB e BTTS non hanno feed attivo**: BTTS su SX type 17 ha **0 mercati**
+  (sentinella `multi_market.py btts`); the-odds-api e' `markets="h2h"` only;
+  MLB e' solo cron surebet.
+- **Punto 3**: `MIN_MINUTES_TO_START` era pavimento CONDIVISO (`auto_bet`,
+  `sx_signals`, `multi_market`) → T-2 richiede di abbassarli TUTTI.
+- **Punto 2**: k era fisso (`KELLY_AGGRESSIVE_FRACTION`), ticket 2.00.
+
+**1) DE-VIG DICHIARATO NELLA CATENA** (`agents/contracts.py`, `agents/`).
+`OracleSignal` e `ValidatedTrade` hanno `edge`, `devig_method`, `shin_z`,
+`fair_odds`; `AnalysisAgent.process` espone `devig_method`/`shin_z`/`fair_odds`
+(quota equa = `1/p̄`) dall'oracolo; `BrainAgent` propaga i tre campi al
+`ValidatedTrade` e nei `reasons`. La provenienza del de-vig e' cosi' leggibile
+lungo tutta la catena, senza ricalcolare nulla.
+
+**2) KELLY FRAZIONARIO DINAMICO** (`decision/stake_engine.py`).
+- `DEFAULT_KELLY_AGGRESSIVE_FRACTION = 0.25` (MAX); nuovo
+  `KELLY_MIN_FRACTION_ENV = "KELLY_AGGRESSIVE_MIN_FRACTION"` /
+  `DEFAULT_KELLY_AGGRESSIVE_MIN_FRACTION = 0.15`; `DEFAULT_KELLY_MIN_TICKET = 1.00`.
+- `aggressive_config()` ritorna `{kelly_fraction (max), kelly_min_fraction,
+  max_stake_pct, min_ticket}` con banda resa coerente (`k_min = min(k_min, frac)`).
+- Nuova **`dynamic_kelly_fraction(*, ev=None, edge=None, league=None) -> dict`**:
+  forza = media pesata (ev 0.45, edge 0.35, league 0.20) di componenti
+  normalizzati su `value_filter.ev_min_for_market("")` /
+  `market_calib.MARKET_EDGE_*` / `get_league_strategy()["kelly_mult"]`
+  (range 0.4-1.3); senza dati → **0.5 = centro banda**; risultato sempre in
+  `[k_min, k_max]`. Ritorna `kelly_fraction, kelly_min_fraction, kelly_max_fraction,
+  strength, components, reason`.
+- `calculate_kelly_stake(..., ev=None, edge=None, league=None)`: usa
+  `dynamic_kelly_fraction` se `kelly_fraction` non e' esplicito; aggiunge a
+  output `kelly_dynamic`, `kelly_strength`, `kelly_reason`.
+- **`auto_bet.kelly_size_for_pick`** passa `ev=pick.get("top_down_ev") or
+  pick.get("ev")`, `edge=pick["market_edge"]`, `league=pick["league"]`;
+  `aggressive_min_ticket()` fallback 1.00. **`agents/finance_agent.size_trade`**
+  passa `ev=trade.ev, edge=trade.edge, league=trade.league` (solo `as_float`
+  per il denaro, direttiva tipizzazione).
+
+**3) FINESTRA T-180..T-2** (`auto_bet`, `sx_signals`, `multi_market`).
+`auto_bet.T60_WINDOW_MIN_MIN` default **180**, `MIN_MINUTES_TO_START` **2**,
+`T60_WINDOW_MAX_MIN` derivato (=2); docstring di `t60_window` aggiornata;
+`sx_signals.MIN_MINUTES_TO_START=2`; `multi_market.MIN_MINUTES_TO_START`
+default **2**.
+
+**4) GATE EV SUI MERCATI LIQUIDI** (`value_filter.py`).
+`EV_MIN_LIQUID = float(os.getenv("EV_MIN_LIQUID", "0.01"))`,
+`_DEFAULT_LIQUID_MARKETS = "AH,OU,TOTALS,BTTS,ML"`,
+`LIQUID_MARKETS = frozenset(...EV_LIQUID_MARKETS...)`, `is_liquid_market(market)`,
+**`ev_min_for_market(market)`** (UNICA definizione). `is_sane(..., market: str = "")`
+usa `ev_min_for_market`. Consumatori aggiornati: `agents/brain_agent.base_ev_min(market="")`
++ `dynamic_ev_min(..., market=)`; `BrainAgent._validate_trade` passa
+`market=signal.market`; `multi_market.analyze_fixture` passa `market=market_type`;
+`auto_bet._top_down_eval` usa `ev_min_for_market(mercato)`.
+
+**5) CLOSING LINE A T-0.**
+- `tracker.py`: `clv_history` con colonna **`closing_odds REAL`** (ALTER
+  idempotente in `_get_conn`); `save_clv(..., closing_odds=None)` con INSERT/
+  UPDATE a colonne nominate e **`COALESCE`** (una scrittura senza `closing_odds`
+  NON cancella quella catturata).
+- **Nuovo `closing_line.py`**: `pre_minutes()` (env `CLOSING_LINE_PRE_MIN`, 10),
+  `post_minutes()` (`CLOSING_LINE_POST_MIN`, 5), `_max_rows()`
+  (`CLOSING_LINE_MAX_ROWS`, 60), `SKIP_REASONS = ("no_sharp_cache",
+  "unsupported_market", "already_captured", "read_error", "write_error")`,
+  `_parse_ts`, `candidates(conn=None, now=None)` (UNION previsioni giocabili
+  aperte + bet live aperte, JOIN `matches m ON m.id = p.match_id`, dedup per
+  `(match_id, esito)`, ordinati per kickoff), `_outcomes_for` (1X2 → `("1","X","2")`;
+  TENNIS/ML → `("1","2")`; OU/AH → None), `_canonical`, `sharp_closing`
+  (usa `pinnacle_oracle.pinnacle_odds_from_cache(..., outcomes=)`), `beat_pct`
+  (delega a `market_calib.clv_raw`), `_existing`, `capture_closing_lines(*,
+  conn=None, now=None) -> {checked, captured, skipped, rows}` (fail-safe per
+  riga), `report(limit=200)`, `format_report`, CLI `--capture/--json`.
+- **`bot.py`**: nuova `closing_line_job` (gate `CLOSING_LINE_ENABLED`, chiama
+  `closing_line.capture_closing_lines` in executor) registrata in `main()` con
+  `run_repeating(..., interval=300, first=180, max_instances=1)`.
+
+**BUG REALI trovati durante l'implementazione (tutti corretti).**
+1. **`closing_line._canonical` chiamava `canonical_outcome(home, away, esito)`**
+   ma la firma reale e' **`canonical_outcome(esito, home, away, resolve=None)`**
+   (`decision/adapters.py` riga 127) → il nome squadra combaciava con l'esito
+   SBAGLIATO e restituiva il prezzo di un ALTRO esito (test:
+   `sharp_closing("Osasuna","Getafe","1X2","Osasuna")` dava 4.5 invece di
+   1.70).
+2. **`closing_line` non era idempotente**: la routine gira ogni 5' e riscriveva
+   `closing_odds` con l'ultima lettura di cache. Aggiunto `_existing()` →
+   (riga presente?, `closing_odds` gia' presa) e nuovo motivo
+   `already_captured`: **il valore resta quello del PRIMO T-0**.
+3. **`capture_closing_lines` non era fail-safe per riga**: un'eccezione di
+   `sharp_closing` usciva al chiamante. Ora `try/except` per riga → motivo
+   `read_error`.
+4. **`verify_guardrails.py` scenario G1 era rosso** dopo l'allargamento a T-180:
+   le righe residue degli scenari A-F (kickoff +3h) erano diventate ordinabili e
+   il test misurava 2 ordini ereditati. Fix: **pulizia del ledger in G1**
+   (`DELETE FROM bets/predictions/matches`) + seed a **+5h** (a +3h si sta sul
+   bordo esatto di apertura) + rimozione del blocco controprova duplicato.
+5. **`value_filter.TIMING_OPTIMAL_MIN/MAX_HOURS` portati a 2min/3h era un
+   ERRORE**: avrebbe creato una SECONDA soglia capace di bloccare ordini fuori
+   dal giro T-60 (classe di bug del 13/09). Riportati a **2 minuti / 24h**, con
+   commento che dichiara che la finestra esecutiva vive SOLO in
+   `auto_bet.T60_WINDOW_*`.
+6. **`test_adaptive_weighting._seed_clv` usava un INSERT posizionale su
+   `clv_history`** → `sqlite3.OperationalError: table clv_history has 7 columns
+   but 6 values were supplied` dopo l'aggiunta di `closing_odds` (23 test rossi).
+   Fix: colonne NOMINATE.
+7. **`test_order_watch.test_kelly_aggressivo_...`** usava stake 1.00 come "sotto
+   il ticket 2.00": aggiornato a **0.50** (ticket ora 1.00).
+
+**IaC** (`.railway/railway.ts`, `preserve()`): aggiunte
+`KELLY_AGGRESSIVE_MIN_FRACTION`, `T60_WINDOW_MIN_MIN`, `T60_WINDOW_MAX_MIN`,
+`T60_EXECUTION_ONLY`, `T60_ORDER_VALIDATION`, `T60_MAX_STAKE_USDC` (era gia'),
+`EV_MIN_LIQUID`, `EV_LIQUID_MARKETS`, `CLOSING_LINE_ENABLED`,
+`CLOSING_LINE_PRE_MIN`, `CLOSING_LINE_POST_MIN`, `CLOSING_LINE_MAX_ROWS`;
+commenti di blocco aggiornati a k 0.15-0.25 / T-180..T-2; rimossa la
+**dichiarazione DUPLICATA** di `T60_WINDOW_*` nel blocco tennis.
+`railway config plan` = **"already up to date"** (0 to add, 0 to change,
+0 to destroy).
+
+**Test**: `test_closing_line.py` **NUOVO, 41 verdi** (beat% delegato,
+finestra/candidati/dedup/ISO con `Z`/data illeggibile/max_rows, `sharp_closing`
+2 esiti, mercato a linea saltato, canonicalizzazione nome squadra, cattura con
+scrittura/idempotenza `already_captured`/`save_clv` con COALESCE/semina da bet
+live/motivi machine-readable/`read_error` fail-safe/DB assente, report/CLI,
+tripwire — nessun percorso d'ordine/formula copiata/rete all'import, job
+registrato, migrazione colonna). Aggiornati e verdi: `test_aggressive_kelly.py`
+(default 0.25/0.15/1.00, banda, k dinamico, centro banda 0.20, ticket),
+`test_t60_breakers.py` (finestra T-180..T-2 con bordo brackettato +3/+1,
+`test_apertura_a_T180`, `MIN_MINUTES_TO_START == 2`, `test_costante_di_chiusura_e_t2`),
+`test_order_watch.py` (stake 0.50), `test_adaptive_weighting.py` (INSERT
+nominato). `conftest.py`: env Kelly a 0.25/0.15/1.00 e `CLOSING_LINE_ENABLED=0`
+fuori da `test_closing_line`. `verify_guardrails.py` = **A-H tutti bloccano
+(exit 0)**, con dicitura C "Kelly dinamico k 0.15-0.25 / cap 12% / ticket 1.00"
+e G "T-180..T-2". `compileall` OK su tutti i moduli toccati, 0 marker di
+conflitto.
+
+**⚠️ Da impostare su Railway** (le vecchie erano k=0.65 / ticket 2.00 /
+T-60..T-5): `KELLY_AGGRESSIVE_FRACTION=0.25`,
+`KELLY_AGGRESSIVE_MIN_FRACTION=0.15`, `KELLY_MIN_TICKET_USDC=1.00`,
+`T60_WINDOW_MIN_MIN=180`, `T60_WINDOW_MAX_MIN=2`, `EV_MIN_LIQUID=0.01`; le
+`CLOSING_LINE_*` restano ai default di codice. Tutte dichiarate in `preserve()`
+→ un `config apply` non le distrugge.

@@ -176,8 +176,13 @@ class FinanceAgent:
         # Denaro in transito: l'unica conversione passa da `as_float` (regola
         # "Decimal a riposo, float in transito"), mai da un `float()` locale —
         # il tripwire di `test_money_decimal` la difende.
+        # k DINAMICO (04/10/2026): EV/edge/lega del trade scalano il
+        # frazionamento dentro la banda 0.15-0.25 (`dynamic_kelly_fraction`).
+        # I tre valori arrivano dal Cervello: la Finanza non ricalcola nulla.
         res = calculate_kelly_stake(as_float(trade.true_prob),
-                                    as_float(trade.price), bk)
+                                    as_float(trade.price), bk,
+                                    ev=trade.ev, edge=getattr(trade, "edge", None),
+                                    league=trade.league)
         trade.kelly_fraction = as_float(res.get("kelly_fraction") or 0.0)
         trade.kelly_full = as_float(res.get("kelly_full") or 0.0)
         trade.raw_stake = as_float(res.get("raw_stake") or 0.0)

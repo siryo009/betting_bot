@@ -3,8 +3,9 @@
 La Finanza e' l'UNICO agente che trasforma una decisione in un importo. Qui si
 verifica che:
 
-1. usi il motore Kelly aggressivo (k=0.65, cap 12%, ticket 2.00) — la stessa
-   fonte della corsia storica (`decision.stake_engine`), mai una copia;
+1. usi il motore Kelly dinamico (k 0.15-0.25 da EV/edge/lega, cap 12%,
+   ticket 1.00) — la stessa fonte della corsia storica
+   (`decision.stake_engine`), mai una copia;
 2. rispetti il Portfolio Shield del Cervello (`block` = non eseguibile,
    `scale` = tetto allo spazio residuo del blocco correlato);
 3. legga il saldo USDC fresco SUBITO prima del sizing (compounding), con una
@@ -62,13 +63,15 @@ class TestSizeTrade:
         fin = FinanceAgent(bankroll=100.0)
         trade = fin.size_trade(_trade())
         assert trade.executable is True
-        assert trade.stake == 12.0                 # cap 12% di 100
-        assert trade.kelly_fraction == 0.65
-        assert trade.min_ticket == 2.00
+        # k dinamico (EV 10% + lega core -> verso il massimo della banda)
+        assert 0.15 <= trade.kelly_fraction <= 0.25
+        full = vf.kelly_fraction(0.60, 1.66, fraction=1.0)
+        assert trade.stake == round(100.0 * full * trade.kelly_fraction, 2)
+        assert trade.min_ticket == 1.00
         assert trade.reason == "ok"
 
     def test_motore_sotto_il_ticket_non_esegue(self):
-        fin = FinanceAgent(bankroll=10.0)          # cap 1.20 < 2.00
+        fin = FinanceAgent(bankroll=10.0)          # raw ~0.88 < ticket 1.00
         trade = fin.size_trade(_trade())
         assert trade.stake == 0.0 and trade.executable is False
         assert trade.reason == "below_min_ticket"
@@ -132,7 +135,8 @@ class TestFreshBankroll:
                            balance_fn=lambda: {"equity": 200.0})
         trade = fin.size_trade(_trade())
         assert trade.bankroll == 200.0
-        assert trade.stake == 24.0                 # 12% di 200
+        # il capitale scala col capitale (compounding sul saldo fresco)
+        assert trade.stake == round(200.0 * trade.kelly_full * trade.kelly_fraction, 2)
 
     def test_dict_senza_equity_usa_il_disponibile(self):
         fin = FinanceAgent(bankroll=100.0,
@@ -229,7 +233,7 @@ class TestCatenaEndToEnd:
                                 if t.shield_action != "block"])
         assert s.executable == 1
         trade = s.trades[0]
-        assert trade.stake == 12.0
+        assert trade.stake == round(100.0 * trade.kelly_full * trade.kelly_fraction, 2)
         assert trade.analysis["steam_move"] is True
         assert trade.analysis["juice"] == 0.045
 

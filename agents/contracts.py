@@ -71,6 +71,9 @@ class OracleSignal(BaseModel):
     price: float = Field(gt=1.0)
     true_prob: Optional[float] = Field(default=None, gt=0.0, le=1.0)
     ev: Optional[float] = None
+    #: Edge del modello sul mercato (prob. modello - prob. devigata): la
+    #: Finanza lo usa per il k DINAMICO (04/10/2026), non per i gate.
+    edge: Optional[float] = None
     league: str = ""
     #: Nomi squadra (dalla riga `matches`, mai da match_id opachi): la corsia
     #: d'ordine li usa per risolvere il mercato exchange.
@@ -97,6 +100,15 @@ class OracleSignal(BaseModel):
     sources: list[str] = Field(default_factory=list)
     depth_usdc: Optional[float] = None
     notes: str = ""
+    # --- de-vig (direttiva 04/10/2026) ---
+    #: Metodo di rimozione dell'aggio usato dall'oracolo per ricavare la
+    #: probabilita' REALE ("fair"): `shin` e' il default di progetto (corregge
+    #: il favourite-longshot bias), gli altri sono `power`/`multiplicative`.
+    #: L'EV non si calcola MAI sulle quote grezze: `fair_odds` e' la quota
+    #: equa (senza vig) dello sharp per l'esito di questo segnale.
+    devig_method: str = ""
+    shin_z: Optional[float] = None
+    fair_odds: Optional[float] = None
 
     @field_validator("observed_at", mode="before")
     @classmethod
@@ -156,7 +168,12 @@ class ValidatedTrade(BaseModel):
     price: float = Field(gt=1.0)
     true_prob: Optional[float] = Field(default=None, gt=0.0, le=1.0)
     ev: Optional[float] = None
+    edge: Optional[float] = None
     depth_usdc: Optional[float] = None
+    # --- de-vig (propagato dall'Analisi, direttiva 04/10/2026) ---
+    devig_method: str = ""
+    shin_z: Optional[float] = None
+    fair_odds: Optional[float] = None
     # --- gate dinamico ---
     base_ev_min: float = 0.0
     dynamic_ev_min: float = 0.0
