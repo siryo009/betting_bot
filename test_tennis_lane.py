@@ -520,6 +520,101 @@ class TestBudget:
 
 
 # ---------------------------------------------------------------------------
+# 6bis. TELEMETRIA CREDITI del refresh oracolo (06/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestTelemetriaCrediti:
+    """Il refresh dell'oracolo tennis deve lascare traccia del consumo.
+
+    BUG REALE: `refresh_oracle` chiamava `requests.get` direttamente e NON
+    passava da `odds_api.record_credit_call`, quindi i ~4 crediti/giorno erano
+    invisibili a `credit_calls.jsonl` e all'attribuzione di `credit_diagnose`.
+    """
+
+    @staticmethod
+    def _rows():
+        import odds_api
+        p = odds_api.credit_calls_log_path()
+        if not p.exists():
+            return []
+        return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines()
+                if ln.strip()]
+
+    def _http(self, calls):
+        def http(url, params=None, timeout=None):
+            calls.append(url)
+            if url.endswith("/sports"):
+                return FakeResp(200, [{"key": "tennis_atp_x", "active": True},
+                                      {"key": "tennis_wta_y", "active": True}])
+            return FakeResp(200, _oracle_payload(),
+                            {"x-requests-remaining": "300",
+                             "x-requests-last": "1"})
+        return http
+
+    def test_registra_la_spesa_nella_telemetria(self, monkeypatch):
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        calls = []
+        res = tl.refresh_oracle(http_get=self._http(calls))
+        assert res["fetched"] == 2
+        rows = self._rows()
+        assert len(rows) == 2, rows
+        for row in rows:
+            assert row["source"] == "oracle"        # e' l'oracolo, non la rotazione
+            assert row["endpoint"] == "/odds"
+            assert row["markets"] == "h2h"
+            assert row["credits"] == 1
+            assert row["credits_source"] == "header"   # costo REALE, non stima
+            assert row["remaining"] == 300
+            assert row["status"] == 200
+        assert {r["sport"] for r in rows} == {"tennis_atp_x", "tennis_wta_y"}
+
+    def test_cache_fresca_non_scrive_telemetria(self, monkeypatch):
+        """Nessuna chiamata pagata -> nessuna riga (non si inventa una spesa)."""
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        calls = []
+        http = self._http(calls)
+        tl.refresh_oracle(http_get=http)          # primo giro: paga e popola
+        before = len(self._rows())
+        tl.refresh_oracle(http_get=http)          # cache fresca: nessun fetch
+        assert len(self._rows()) == before
+        assert not any(u.endswith("/odds") for u in calls[3:]), calls
+
+    def test_hard_stop_globale_blocca_il_refresh(self, monkeypatch):
+        """Sotto la soglia crediti globale la corsia non spende (via budget_left)."""
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        import odds_api
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: True)
+        calls = []
+        res = tl.refresh_oracle(http_get=self._http(calls))
+        assert res["fetched"] == 0
+        assert not any(u.endswith("/odds") for u in calls), calls
+        assert self._rows() == []
+
+    def test_telemetria_fail_safe(self, monkeypatch):
+        """Una telemetria rotta non ferma il refresh (il costo si paga comunque)."""
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        monkeypatch.setattr(tl, "_log_credit_call",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+        calls = []
+
+        def http(url, params=None, timeout=None):
+            calls.append(url)
+            if url.endswith("/sports"):
+                return FakeResp(200, [{"key": "tennis_atp_x", "active": True}])
+            return FakeResp(200, _oracle_payload(), {"x-requests-remaining": "300"})
+
+        # `_log_credit_call` e' chiamata DENTRO il try del fetch: l'eccezione
+        # viene raccolta dal `except` del torneo e il riepilogo resta coerente.
+        res = tl.refresh_oracle(http_get=http)
+        assert res["keys"] == 1
+
+    def test_sorgente_chiama_record_credit_call(self):
+        src = TestTripwire._src()
+        assert "record_credit_call" in src
+        assert "_log_credit_call(key, remaining, r)" in src
+
+
+# ---------------------------------------------------------------------------
 # 7. TRIPWIRE: nessun ordine, nessuna dipendenza pesante all'import
 # ---------------------------------------------------------------------------
 

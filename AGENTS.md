@@ -9251,3 +9251,46 @@ credit_diagnose/decision_limits/decision_feed/aggressive_kelly/sx_signals (150).
 probation restano valutate sulla **cache passiva** (l'oracolo 1X2 non basta per
 gli esiti a linea): se la loro cache non esiste, i loro pick OU/AH restano
 `no_oracle` — per scelta di costo, non per un difetto.
+
+**Sorveglianza post-deploy (06/10, deploy `636b260`).** Al primo controllo
+(09:3x UTC, ~7,5h dopo il deploy) il fix **non era ancora esercitato**: l'ultima
+chiamata oracle in `credit_calls.jsonl` resta `10-06T00:03:54` (rem 305,
+**pre**-deploy) e dopo il deploy ci sono solo 2 chiamate di rotazione (04:00).
+Il `credit_diagnose --days 1` mostra ancora `oracle 14 chiamate | 42 cr` perché
+la finestra include la sera del 05/10: il ritmo reale si legge solo quando la
+finestra scorre oltre il deploy. Stato verificato sul container: `budget_used 0`,
+`oracle_budget.json` **non ancora creato** (si scrive alla prima fetch),
+`leagues_needing_fetch()` e `leagues_blocked_by_tier()` **entrambi vuoti**. Non è
+un difetto: i 7 pick OU aperti (AFCON e Nations League = Core, MLS = probation)
+hanno kickoff 18:45-19:00 UTC e 00:30 UTC, quindi **fuori dalla finestra di fetch
+di 120'**. La prima prova reale del tiering è alle ~16:45 UTC (apertura finestra
+AFCON/Nations League): attesi ≤2 leghe fetchate = 6 crediti, e il pick OU di MLS
+(probation) **non** pagato (resta sulla cache passiva).
+Telemetria nuova già viva: `by_action {'assenti': 109, 'outside_window': 7}`,
+`by_refusal {}` — `assenti` = righe pre-fix (senza il campo), `outside_window` =
+rifiuti dichiarati del nuovo percorso, **0 crediti spesi**.
+
+**SECONDO DIFETTO (della stessa classe) trovato dalla sorveglianza — telemetria
+del tennis invisibile.** `tennis_lane.refresh_oracle` chiama `requests.get`
+direttamente e **non** passava da `odds_api.record_credit_call`: i suoi
+**~4 crediti/giorno** (4 tornei attivi, `h2h` = 1 cr, TTL 12h) non comparivano in
+`credit_calls.jsonl`, quindi `credit_diagnose` attribuiva il 100% del consumo a
+oracle/rotation **nascondendo questa sorgente**. Trovato per contrasto: il
+contatore globale era sceso di 4 crediti (`304 → 300`) senza nessuna riga nel
+log, e la lista `sports` di `/api/credits` mostrava i 4 tornei tennis riscritti
+alle 08:03 con `remaining 303/302/301/300`. Fix: nuovo `_log_credit_call(sport,
+remaining, resp)` (import pigro di `odds_api`, `source="oracle"`, `sport` =
+torneo, costo REALE da `x-requests-last` via `getattr(oa, "_request_cost", None)`) chiamato
+dopo ogni scrittura di cache. **Corretto anche un testo fuorviante**: il log del
+budget diceva "budget **OddsPapi** esaurito" mentre la chiamata è a
+**the-odds-api** (OddsPapi è il provider eSports).
+⚠️ **Non è stata aggiunta una seconda guardia sull'hard-stop globale**: il
+controllo esisteva già dentro `budget_left` (l'unico punto della regola), quindi
+un check esplicito nel loop sarebbe stata una **duplicazione** della stessa
+soglia — evitata.
+Test: `test_tennis_lane.py` +`TestTelemetriaCrediti` (5: riga per ogni chiamata
+pagata con `credits_source="header"`, nessuna riga senza fetch, hard-stop che
+blocca, telemetria rotta che non ferma il refresh, tripwire sul sorgente). File:
+**77 verdi**; lotto `tennis_lane`+`bot`+`credit_diagnose`+`railway_drift_check`
+= **189 passed**. `DEPLOY.md` §1quater aggiornato (il tennis ora compare nel
+profilo di consumo e fra le voci attribuibili).

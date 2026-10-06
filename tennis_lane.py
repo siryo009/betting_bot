@@ -22,7 +22,11 @@ Cosa fa:
    (**1 credito/torneo**), scrivendo `toa_<key>.json` nella stessa cartella
    delle cache del calcio: cosi' `pinnacle_oracle.load_oracle` la legge senza
    sapere nulla del tennis. Budget giornaliero e rispetto dell'hard-stop
-   crediti; fail-closed senza chiave.
+   crediti; fail-closed senza chiave. Ogni chiamata PAGATA e' registrata in
+   `credit_calls.jsonl` (`odds_api.record_credit_call`, source `oracle`):
+   senza, i ~4 crediti/giorno di questa corsia erano invisibili
+   all'attribuzione di `credit_diagnose` (corretto il 06/10/2026 — il costo
+   c'era nel contatore globale ma non era attribuibile a nessuna sorgente).
 2. `discover()` — match SX tennis in finestra (lettura PUBBLICA: zero chiavi,
    zero crediti, zero ordini).
 3. `picks()` — per ogni match: oracolo a 2 esiti + gate EV + **fascia quota
@@ -278,13 +282,40 @@ def active_tennis_keys(*, http_get: Any = None) -> List[str]:
     return out
 
 
+def _log_credit_call(sport: str, remaining: Any, resp: Any) -> None:
+    """Registra la chiamata PAGATA nella telemetria crediti (fail-safe).
+
+    BUG REALE corretto il 06/10/2026: `refresh_oracle` chiamava `requests.get`
+    direttamente e NON passava da `odds_api.record_credit_call`, quindi i
+    ~4 crediti/giorno del tennis erano invisibili a `credit_calls.jsonl` e
+    all'attribuzione di `credit_diagnose` (che il 06/10 attribuiva il 100% del
+    costo a oracle/rotation, nascondendo questa sorgente). La `source` resta
+    `oracle` — e' l'oracolo, non la rotazione — e il campo `sport` dice QUALE
+    torneo, cosi' il costo e' attribuibile.
+    """
+    try:
+        import odds_api as oa
+        rem = remaining
+        if str(rem or "").strip().isdigit():
+            rem = int(str(rem).strip())
+        cost_fn = getattr(oa, "_request_cost", None)
+        oa.record_credit_call(
+            "oracle", sport, "h2h", rem,
+            status=getattr(resp, "status_code", 200), endpoint="/odds",
+            credits=cost_fn(resp) if callable(cost_fn) else None)
+    except Exception:
+        pass
+
+
 def refresh_oracle(*, http_get: Any = None, now: Optional[float] = None
                    ) -> dict:
     """Aggiorna le cache dell'oracolo tennis. Ritorna un riepilogo, mai eccezioni.
 
     Costo: 1 credito per torneo la cui cache e' scaduta (`ORACLE_TTL_MIN`).
     L'elenco delle chiavi e' gratuito, quindi il costo dipende dai TORNEI
-    ATTIVI, non dai giri. Rispetta il budget giornaliero e l'hard-stop crediti.
+    ATTIVI, non dai giri. Rispetta il budget giornaliero e l'hard-stop crediti
+    globale (dentro `budget_left`, l'UNICA definizione della regola) e registra
+    ogni spesa pagata in `credit_calls.jsonl`.
     """
     out: dict = {"keys": 0, "fetched": 0, "skipped": 0, "requests": 0,
                  "remaining": None, "error": None, "cached": []}
@@ -312,11 +343,13 @@ def refresh_oracle(*, http_get: Any = None, now: Optional[float] = None
             out["skipped"] += 1
             out["cached"].append(key)
             continue
+        # Budget della corsia E hard-stop crediti globale: entrambi dentro
+        # `budget_left` (una sola definizione, nessun controllo duplicato qui).
         if not budget_left(state, healthy=healthy):
             out["skipped"] += 1
-            logger.info("tennis_lane: budget OddsPapi esaurito (%d/%d) — cache "
-                        "di %s non aggiornata", int(state.get("requests") or 0),
-                        REQ_BUDGET_DAY, key)
+            logger.info("tennis_lane: budget the-odds-api esaurito (%d/%d) — "
+                        "cache di %s non aggiornata",
+                        int(state.get("requests") or 0), REQ_BUDGET_DAY, key)
             continue
         try:
             r = http_get(f"{ODDS_BASE}/sports/{key}/odds",
@@ -344,6 +377,8 @@ def refresh_oracle(*, http_get: Any = None, now: Optional[float] = None
             out["cached"].append(key)
             if remaining is not None:
                 out["remaining"] = remaining
+            # Telemetria del consumo: 1 riga per chiamata PAGATA.
+            _log_credit_call(key, remaining, r)
             changed = True
         except Exception as exc:
             out["error"] = f"{key}: {exc}"

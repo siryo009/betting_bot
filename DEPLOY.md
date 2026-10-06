@@ -290,10 +290,10 @@ Architettura attuale:
 
 Il piano free di the-odds-api e' **500 crediti/mese** (reset il 1° del mese) e
 il costo di ogni chiamata dipende dai mercati richiesti: `markets=h2h` = **1
-credito**, `markets=h2h,totals,spreads` = **3 crediti**, `/scores` = 1-2. Le due
-voci che consumano budget sono quindi la **rotazione quote** (1 cr/lega) e
+credito**, `markets=h2h,totals,spreads` = **3 crediti**, `/scores` = 1-2. Le tre
+voci che consumano budget sono quindi la **rotazione quote** (1 cr/lega),
 l'**oracolo a linea** usato per dare un prezzo sharp agli esiti OU/AH (3
-cr/lega).
+cr/lega) e l'**oracolo tennis** (`tennis_lane.refresh_oracle`, 1 cr/torneo).
 
 ### Profilo di consumo e perimetro
 
@@ -302,6 +302,7 @@ cr/lega).
 | Rotazione quote (`SPORTS_INTERVAL_DAYS`) | 1 cr/lega interrogata | leghe Core a 7gg, resto 7/14/30gg |
 | Oracolo a linea (`odds_api.fetch_line_odds`) | **3 cr/lega** | `ORACLE_BUDGET_DAY=2` → **6 cr/giorno** |
 | Refertazione (`fetch_scores`) | 1-2 cr/lega | solo leghe con puntate aperte (dal 15/09) |
+| Oracolo tennis (`tennis_lane.refresh_oracle`) | **1 cr/torneo** | TTL 12h → ~4 tornei attivi = **~4-8 cr/giorno** |
 
 L'oracolo segue il denaro: paga **solo le leghe che hanno davvero un pick OU/AH
 in finestra d'ordine**, e solo se non ha gia' una cache fresca. La cache e'
@@ -334,6 +335,13 @@ curl -s https://bettingbot-production-2538.up.railway.app/api/credits
 # Dettaglio per fonte (on rotation / oracle / settlement) — sul container
 venv/bin/python credit_diagnose.py --days 2
 ```
+
+⚠️ **Il costo del tennis e' stato invisibile fino al 06/10/2026**: quel refresh
+chiamava `requests.get` direttamente, senza passare da
+`odds_api.record_credit_call`. Il numero globale era corretto (la cache scrive
+`remaining`) ma `credit_diagnose` attribuiva il 100% del consumo a
+oracle/rotation e questa sorgente non compariva. Ora ogni chiamata pagata
+del tennis produce una riga con `source="oracle"` e `sport="tennis_*"`.
 
 ### ⚠️ Incidente del 05-06/10/2026 — "spesa oracolo fuori tetto"
 
