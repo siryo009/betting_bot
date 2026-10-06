@@ -331,6 +331,22 @@ class TestTieringNelPiano:
         assert [b["sport_key"] for b in res["tier_excluded"]] == ["soccer_arg"]
         assert "Argentina Primera" in line_oracle.format_report(res)
 
+    def test_fallback_ritorna_una_coppia(self, monkeypatch):
+        """Il ramo di FALLBACK deve tornare `([], [])`, non `[]`.
+
+        Ogni chiamante legge il ritorno come coppia
+        (`pending, blocked = _league_plan()` oppure `_league_plan()[0]`): una
+        lista secca faceva sollevare `ValueError`/`IndexError` proprio nel
+        percorso di fallback, cioe' il ramo che deve essere sicuro era l'unico
+        che rompeva (corretto il 06/10/2026).
+        """
+        import sys
+        import line_oracle
+        monkeypatch.setitem(sys.modules, "odds_api", None)   # import fallisce
+        assert line_oracle._league_plan() == ([], [])
+        assert line_oracle.leagues_needing_fetch() == []
+        assert line_oracle.leagues_blocked_by_tier() == []
+
 
 # ---------------------------------------------------------------------------
 # 2. Follow-the-money

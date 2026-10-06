@@ -191,7 +191,13 @@ def _league_plan(now: Optional[float] = None
         from pathlib import Path
     except Exception as exc:                                     # pragma: no cover
         logger.warning("line_oracle: odds_api non disponibile (%s)", exc)
-        return []
+        # `([], [])`, NON `[]`: ogni chiamante tratta il ritorno come COPPIA
+        # (`pending, blocked = _league_plan()` oppure `_league_plan()[0]`),
+        # quindi una lista secca faceva sollevare `ValueError`/`IndexError`
+        # PROPRIO nel percorso di fallback — il ramo che deve essere sicuro
+        # era l'unico che rompeva (corretto il 06/10/2026, stessa classe del
+        # fail-safe-che-fallisce del 21/09).
+        return [], []
     ts_now = time.time() if now is None else float(now)
     # Finestra "in gioco": un pick oltre l'orizzonte non genera ordini oggi
     # (la sua linea si paga quando si avvicina il kickoff).
