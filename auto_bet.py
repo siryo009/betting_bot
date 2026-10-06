@@ -476,7 +476,9 @@ def pick_window(pick: dict) -> str:
 
 
 def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
-                        ev: float | None = None) -> None:
+                        ev: float | None = None,
+                        action: str | None = None,
+                        refusal: str | None = None) -> None:
     """Registra uno scarto del gate top-down (03/10/2026, fail-safe).
 
     Dal 03/10 la misura "quanti pick perde l'oracolo e perche'" e' leggibile:
@@ -484,6 +486,10 @@ def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
     motivo) e `oracle_skips.py` la aggrega. Il log del bot non e' persistente,
     quindi senza questa telemetria la domanda non aveva risposta misurabile.
     Import pigro e doppia cintura: la telemetria non deve MAI fermare un giro.
+
+    `action`/`refusal` (06/10/2026) sono l'ESITO STRUTTURATO dell'eventuale
+    fetch on-demand (`fetched`/`refused`/`tier_not_core`/...). Prima esisteva
+    solo dentro il testo di `detail`: leggibile a occhio, non contabile.
     """
     try:
         import oracle_skips
@@ -494,7 +500,8 @@ def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
         # degli scarti faceva sembrare bloccati tutti i candidati del giorno.
         # Il verdetto e' quello di PRODUZIONE (`t60_window`), non una copia.
         oracle_skips.record_skip(pick, reason, detail=detail, ev=ev,
-                                 in_window=pick_window(pick) == "within")
+                                 in_window=pick_window(pick) == "within",
+                                 action=action, refusal=refusal)
     except Exception:
         pass
 
@@ -513,7 +520,8 @@ def _oracle_code(info: dict) -> str | None:
     return code or None
 
 
-def _ondemand_fetch(pick: dict, info: dict, enabled: bool) -> str:
+def _ondemand_fetch(pick: dict, info: dict, enabled: bool,
+                    out: dict | None = None) -> str:
     """Avvia la fetch on-demand della lega del pick: ritorna il SUFFISSO di log.
 
     Il budget dell'oracolo a linea e' scarso e CONDIVISO con lo scheduler
@@ -536,16 +544,25 @@ def _ondemand_fetch(pick: dict, info: dict, enabled: bool) -> str:
 
     Fail-safe: qualunque errore torna come stringa vuota (la telemetria non
     deve mai fermare un giro puntate).
+
+    `out` (opzionale, 06/10/2026): se passato, viene riempito con l'ESITO
+    STRUTTURATO dell'esito (`{"action": ..., "refusal": ...}`) — cosi' il
+    chiamante puo' registrarlo nella telemetria senza leggere il testo. Il
+    valore di ritorno resta la stringa di log (retrocompatibile coi test).
     """
+    if out is None:
+        out = {}
     if not enabled:
         return ""
     # Si paga quando una fetch PUO' cambiare l'esito (`recoverable`): il dato
     # scaduto e la partita mai scaricata sono recuperabili; il mercato/la linea
     # non pubblicata da Pinnacle no (pagare non la farebbe comparire).
     if not info.get("recoverable"):
+        out["action"] = "not_recoverable"
         return ""
     try:
         if pick_window(pick) != "within":
+            out["action"] = "outside_window"
             return ""
         # LEAGUE TIERING (05/10/2026): solo le leghe Core pagano il refetch.
         # Fail-closed se il tier non e' leggibile: una spesa non autorizzata
@@ -556,20 +573,26 @@ def _ondemand_fetch(pick: dict, info: dict, enabled: bool) -> str:
         except Exception as exc:
             logger.debug("auto_bet: tier di lega non leggibile (%s): "
                          "nessun refetch a pagamento", exc)
+            out["action"] = "tier_unreadable"
             return (" — fetch on-demand non eseguita: tier di lega non "
                     "leggibile (fail-closed)")
         if not core:
+            out["action"] = "tier_not_core"
             return (f" — fetch on-demand non eseguita: lega "
                     f"'{pick.get('league') or '?'}' non Tier-1/Core "
                     f"(valutazione solo sulla cache passiva)")
         import line_oracle
         res = line_oracle.fetch_for_pick(pick, code=_oracle_code(info))
     except Exception:
+        out["action"] = "error"
         return ""
     if res.get("fetched"):
+        out["action"] = "fetched"
         return (f" — FETCH ON-DEMAND su {res.get('sport_key')} "
                 f"({res.get('matches')} match, crediti {res.get('remaining')}): "
                 f"il pick viene rivalutato al giro successivo")
+    out["action"] = "refused"
+    out["refusal"] = res.get("reason")
     return f" — fetch on-demand non eseguita: {res.get('reason')}"
 
 
@@ -661,9 +684,13 @@ def _top_down_eval(pick: dict, league: str | None = None, *,
                 # FETCH ON-DEMAND (05/10/2026): la cache a linea e' scaduta per
                 # il TTL dinamico mentre lo scheduler la rinfresca ogni 30' ->
                 # senza questo il pick resterebbe `EXPIRED_CACHE` per sempre.
-                extra = _ondemand_fetch(pick, info, fetch_missing)
+                _fetch_action: dict = {}
+                extra = _ondemand_fetch(pick, info, fetch_missing,
+                                        out=_fetch_action)
                 return {"ok": False, "reason": info["reason"],
-                        "detail": (info["detail"] + extra) if extra else info["detail"]}
+                        "detail": (info["detail"] + extra) if extra else info["detail"],
+                        "action": _fetch_action.get("action"),
+                        "refusal": _fetch_action.get("refusal")}
             return {"ok": False, "reason": "no_oracle",
                     "detail": "Pinnacle assente/incompleto/stantio "
                               "(fail-closed: senza verita' non si decide)"}
@@ -3501,7 +3528,9 @@ def run_today_bets(stake_eur: float | None = None,
                             pick["match_id"], pick["esito_key"],
                             verdict.get("reason"), verdict.get("detail") or "")
                 _note_top_down_skip(pick, verdict.get("reason") or "unknown",
-                                    detail=verdict.get("detail"))
+                                    detail=verdict.get("detail"),
+                                    action=verdict.get("action"),
+                                    refusal=verdict.get("refusal"))
                 continue
             pick["p_true"] = verdict["p_true"]
             pick["top_down_ev"] = verdict["ev"]

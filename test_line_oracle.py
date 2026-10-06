@@ -80,15 +80,26 @@ class TestBudgetECacheOracolo:
         assert odds_api.ORACLE_BUDGET_DAY >= 1
 
     def test_tetto_budget_blocca_la_chiamata(self, monkeypatch, tmp_path):
-        """Dopo ORACLE_BUDGET_DAY chiamate la fetch NON parte: zero HTTP."""
+        """Dopo ORACLE_BUDGET_DAY chiamate la fetch NON parte: zero HTTP.
+
+        ⚠️ Il giorno e' quello VERO. Col vecchio `2099-01-01` il contatore
+        veniva azzerato dal controllo di cambio-giorno e il test passava
+        perche' non c'era la chiave API, NON per il tetto: il tripwire non
+        proteggeva nulla (classe di difetto del 24/09 — "testa il resolver,
+        non il chiamante").
+        """
         monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
         monkeypatch.setattr(odds_api, "ORACLE_BUDGET_DAY", 2)
-        odds_api._oracle_req_day.update({"day": "2099-01-01", "n": 2})
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        monkeypatch.setattr(odds_api, "should_query_sport", lambda s: True)
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: False)
+        odds_api.reset_oracle_budget()
+        odds_api._oracle_req_day["n"] = 2
         calls = []
         monkeypatch.setattr(odds_api.requests, "get",
                             lambda *a, **k: calls.append(1))
         payload, remaining = odds_api.fetch_line_odds("soccer_x", "f", "t")
-        assert payload == [] and calls == []
+        assert payload == [] and calls == [] and remaining == 999
 
     def test_budget_conta_solo_le_chiamate_fatte(self, monkeypatch, tmp_path):
         monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
@@ -104,7 +115,7 @@ class TestBudgetECacheOracolo:
             def raise_for_status(self): pass
             def json(self): return []
         monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _R())
-        odds_api._oracle_req_day.update({"day": "2099-01-01", "n": 0})
+        odds_api.reset_oracle_budget()
         odds_api.fetch_line_odds("soccer_x", "f", "t")
         assert odds_api._oracle_req_day["n"] == 1
 
@@ -131,13 +142,194 @@ class TestBudgetECacheOracolo:
     def test_cache_fresca_zero_http(self, monkeypatch, tmp_path):
         _write_oracle_cache(tmp_path, "soccer_x", [{"id": "m1"}])
         monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
-        odds_api._oracle_req_day.update({"day": "2099-01-01", "n": 0})
+        odds_api.reset_oracle_budget()
         calls = []
         monkeypatch.setattr(odds_api.requests, "get",
                             lambda *a, **k: calls.append(1))
         payload, _ = odds_api.fetch_line_odds("soccer_x", "f", "t")
         assert payload == [{"id": "m1"}] and calls == []
         assert odds_api._oracle_req_day["n"] == 0   # cache = zero spesa
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+class TestBudgetPersistente:
+    """Il tetto vale sul GIORNO, non sul PROCESSO (06/10/2026).
+
+    Difetto misurato il 05/10: `ORACLE_BUDGET_DAY=2` e **14 fetch a linea nello
+    stesso giorno** (42 crediti su 6 di tetto). Il contatore era in-process,
+    quindi ogni riavvio (deploy, restart della piattaforma) ripartiva da
+    `{"day": None, "n": 0}` e riapriva il tetto: il taglio del budget non
+    stava tagliando nulla.
+    """
+
+    def test_path_da_env(self, monkeypatch, tmp_path):
+        target = tmp_path / "budget.json"
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(target))
+        assert odds_api.oracle_budget_state_path() == target
+
+    def test_path_default_sotto_decision(self, monkeypatch):
+        monkeypatch.delenv("ORACLE_BUDGET_STATE", raising=False)
+        assert odds_api.oracle_budget_state_path().parent.name == "decision"
+        assert odds_api.oracle_budget_state_path().name == "oracle_budget.json"
+
+    def test_il_riavvio_non_riapre_il_tetto(self, monkeypatch, tmp_path):
+        """Contatore in-process azzerato (riavvio), volume intatto -> bloccato."""
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(tmp_path / "b.json"))
+        monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(odds_api, "ORACLE_BUDGET_DAY", 2)
+        assert odds_api.save_oracle_budget(_today(), 2)
+        # "riavvio": esattamente lo stato che il modulo ha alla prima import.
+        odds_api._oracle_req_day = {"day": None, "n": 0}
+        called = []
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: called.append(1))
+        payload, remaining = odds_api.fetch_line_odds("soccer_x", "f", "t")
+        assert (payload, remaining) == ([], 999) and called == []
+        assert odds_api._oracle_req_day == {"day": _today(), "n": 2}
+
+    def test_il_giorno_nuovo_riarma(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(tmp_path / "b.json"))
+        monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(odds_api, "ORACLE_BUDGET_DAY", 2)
+        assert odds_api.save_oracle_budget("2020-01-01", 2)
+        odds_api._oracle_req_day = {"day": None, "n": 0}
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        monkeypatch.setattr(odds_api, "should_query_sport", lambda s: True)
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: False)
+
+        class _R:
+            status_code = 200
+            headers = {"x-requests-remaining": "300"}
+            text = "[]"
+            def raise_for_status(self): pass
+            def json(self): return []
+        monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _R())
+        odds_api.fetch_line_odds("soccer_x", "f", "t")
+        assert odds_api._oracle_req_day["n"] == 1   # il conteggio di ieri non conta
+
+    def test_la_spesa_viene_scritta_sul_volume(self, monkeypatch, tmp_path):
+        target = tmp_path / "b.json"
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(target))
+        monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(odds_api, "should_query_sport", lambda s: True)
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: False)
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+
+        class _R:
+            status_code = 200
+            headers = {"x-requests-remaining": "300"}
+            text = "[]"
+            def raise_for_status(self): pass
+            def json(self): return [{"id": "m1"}]
+        monkeypatch.setattr(odds_api.requests, "get", lambda *a, **k: _R())
+        odds_api._oracle_req_day = {"day": None, "n": 0}
+        odds_api.fetch_line_odds("soccer_x", "f", "t")
+        assert json.loads(target.read_text())["n"] == 1
+        assert odds_api.oracle_budget_used() == 1
+
+    def test_stato_corrotto_non_blocca_e_non_inventa(self, monkeypatch, tmp_path):
+        target = tmp_path / "b.json"
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(target))
+        target.write_text("{rotto")
+        assert odds_api.oracle_budget_used() == 0
+        target.write_text(json.dumps(["lista", "non", "dict"]))
+        assert odds_api.oracle_budget_used() == 0
+        target.write_text(json.dumps({"day": _today(), "n": "abc"}))
+        assert odds_api.oracle_budget_used() == 0
+
+    def test_stato_di_un_altro_giorno_non_conta(self, monkeypatch, tmp_path):
+        target = tmp_path / "b.json"
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(target))
+        odds_api.save_oracle_budget("2020-01-01", 9)
+        assert odds_api.oracle_budget_used() == 0
+        assert odds_api.oracle_budget_used("2020-01-01") == 9
+
+    def test_reset_azzera_memoria_e_volume(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(tmp_path / "b.json"))
+        odds_api._oracle_req_day = {"day": _today(), "n": 2}
+        odds_api.reset_oracle_budget()
+        assert odds_api._oracle_req_day["n"] == 0
+        assert odds_api.oracle_budget_used() == 0
+
+
+class TestTieringNelPiano:
+    """Lo SCHEDULER non paga le leghe non Core (difetto del 05/10/2026).
+
+    `leagues_needing_fetch` filtrava solo per finestra e cache: le leghe in
+    probation venivano pagate (3 crediti a fetch) mentre il percorso on-demand
+    e l'harvesting le filtravano gia'. Caso reale: Argentina Primera (Tier-2)
+    fetchata ~ogni 30' = ~39 crediti in un giorno con tetto 6.
+    """
+
+    def _pick(self, league, sport="soccer_a", ts=None):
+        return {"match_id": "m1", "esito_key": "Over 2.5", "league": league,
+                "sport_key": sport, "kickoff": "x",
+                "kickoff_ts": time.time() + (600 if ts is None else ts)}
+
+    def test_lega_probation_non_pagata(self, monkeypatch, tmp_path):
+        import line_oracle
+        monkeypatch.setattr("config.DATA_DIR", tmp_path)
+        monkeypatch.setattr(line_oracle, "line_picks",
+                            lambda: [self._pick("Argentina Primera")])
+        assert line_oracle.leagues_needing_fetch(time.time()) == []
+
+    def test_lega_probation_riportata_come_esclusa(self, monkeypatch, tmp_path):
+        import line_oracle
+        monkeypatch.setattr("config.DATA_DIR", tmp_path)
+        monkeypatch.setattr(line_oracle, "line_picks",
+                            lambda: [self._pick("Argentina Primera")])
+        blocked = line_oracle.leagues_blocked_by_tier(time.time())
+        assert [b["sport_key"] for b in blocked] == ["soccer_a"]
+        assert blocked[0]["league"] == "Argentina Primera"
+        assert blocked[0]["picks"] == 1
+
+    def test_lega_core_pagata(self, monkeypatch, tmp_path):
+        import line_oracle
+        monkeypatch.setattr("config.DATA_DIR", tmp_path)
+        monkeypatch.setattr(line_oracle, "line_picks",
+                            lambda: [self._pick("Premier League")])
+        assert [x["sport_key"] for x in
+                line_oracle.leagues_needing_fetch(time.time())] == ["soccer_a"]
+        assert line_oracle.leagues_blocked_by_tier(time.time()) == []
+
+    def test_lega_bloccata_non_pagata(self, monkeypatch, tmp_path):
+        """Serie A/La Liga (ROI misurato negativo) non pagano il refetch."""
+        import line_oracle
+        monkeypatch.setattr("config.DATA_DIR", tmp_path)
+        for lega in ("Serie A", "La Liga", "Greek Super League", ""):
+            monkeypatch.setattr(line_oracle, "line_picks",
+                                lambda lega=lega: [self._pick(lega)])
+            assert line_oracle.leagues_needing_fetch(time.time()) == [], lega
+
+    def test_tier_illeggibile_non_paga(self, monkeypatch, tmp_path):
+        """Fail-closed: se il tier non e' leggibile NON si spende."""
+        import line_oracle
+        import value_filter
+        monkeypatch.setattr("config.DATA_DIR", tmp_path)
+        monkeypatch.setattr(line_oracle, "line_picks",
+                            lambda: [self._pick("Premier League")])
+
+        def _boom(_name):
+            raise RuntimeError("value_filter rotto")
+        monkeypatch.setattr(value_filter, "is_core_league", _boom)
+        assert line_oracle.leagues_needing_fetch(time.time()) == []
+
+    def test_il_piano_dichiara_le_escluse(self, monkeypatch, tmp_path):
+        """`ensure_oracle_payloads` respinge le escluse e le DICHIARA."""
+        import line_oracle
+        monkeypatch.setattr(line_oracle, "line_picks", lambda: [
+            self._pick("Premier League", sport="soccer_pl"),
+            self._pick("Argentina Primera", sport="soccer_arg")])
+        paid = []
+        monkeypatch.setattr(odds_api, "fetch_line_odds",
+                            lambda sp, f, t, **kw: (paid.append(sp), ([], 300))[1])
+        res = line_oracle.ensure_oracle_payloads(max_leagues=6)
+        assert paid == ["soccer_pl"]
+        assert [b["sport_key"] for b in res["tier_excluded"]] == ["soccer_arg"]
+        assert "Argentina Primera" in line_oracle.format_report(res)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +341,7 @@ class TestFollowTheMoney:
         _write_oracle_cache(tmp_path, "soccer_a", [{"id": "old"}])
         monkeypatch.setattr("config.DATA_DIR", tmp_path)
         monkeypatch.setattr("line_oracle.line_picks", lambda: [
-            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Serie A",
+            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Premier League",
              "sport_key": "soccer_a", "kickoff": "2026-10-01T19:45:00+00:00",
              "kickoff_ts": time.time() + 3600}])
         import line_oracle
@@ -159,7 +351,7 @@ class TestFollowTheMoney:
     def test_lega_senza_cache_e_nel_piano(self, monkeypatch, tmp_path):
         monkeypatch.setattr("config.DATA_DIR", tmp_path)
         monkeypatch.setattr("line_oracle.line_picks", lambda: [
-            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Serie A",
+            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Premier League",
              "sport_key": "soccer_a", "kickoff": "2026-10-01T19:45:00+00:00",
              "kickoff_ts": time.time() + 3600}])
         import line_oracle
@@ -170,7 +362,7 @@ class TestFollowTheMoney:
         monkeypatch.setattr("config.DATA_DIR", tmp_path)
         far = time.time() + 6 * 86400
         monkeypatch.setattr("line_oracle.line_picks", lambda: [
-            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Serie A",
+            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Premier League",
              "sport_key": "soccer_a", "kickoff": "x", "kickoff_ts": far}])
         import line_oracle
         assert line_oracle.leagues_needing_fetch(time.time()) == []
@@ -225,8 +417,11 @@ class TestFinestraFetch:
             return [{"id": "m1"}], 300
 
         monkeypatch.setattr(odds_api, "fetch_line_odds", _fake_fetch)
-        monkeypatch.setattr(line_oracle, "leagues_needing_fetch",
-                            lambda: [{"sport_key": "soccer_a"}])
+        # Il seam e' il PIANO (`_league_plan`), non piu' la sola lista: dal
+        # 06/10 il piano porta anche le leghe escluse per tier, che il
+        # report deve poter dichiarare.
+        monkeypatch.setattr(line_oracle, "_league_plan",
+                            lambda now=None: ([{"sport_key": "soccer_a"}], []))
         res = line_oracle.ensure_oracle_payloads(max_leagues=1)
         assert res["fetched"] == 1
         assert captured["sport"] == "soccer_a"
@@ -240,7 +435,7 @@ class TestFinestraFetch:
                             ts=time.time() - 80 * 60)
         monkeypatch.setattr("config.DATA_DIR", tmp_path)
         monkeypatch.setattr("line_oracle.line_picks", lambda: [
-            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Serie A",
+            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Premier League",
              "sport_key": "soccer_a", "kickoff": "x",
              "kickoff_ts": time.time() + 600}])
         import line_oracle
@@ -251,7 +446,7 @@ class TestFinestraFetch:
         """3h era DENTRO il vecchio orizzonte (24h): ora e' fuori."""
         monkeypatch.setattr("config.DATA_DIR", tmp_path)
         monkeypatch.setattr("line_oracle.line_picks", lambda: [
-            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Serie A",
+            {"match_id": "m1", "esito_key": "Over 2.5", "league": "Premier League",
              "sport_key": "soccer_a", "kickoff": "x",
              "kickoff_ts": time.time() + 3 * 3600}])
         import line_oracle
@@ -1272,6 +1467,90 @@ class TestLeagueTiering:
             assert is_core_league(lega) is (league_tier(lega) == "core")
 
 
+class TestEsitoStrutturatoDelFetch:
+    """L'esito del fetch e' anche STRUTTURATO, non solo testo (06/10/2026).
+
+    `_ondemand_fetch` restituisce la stringa di log (retrocompatibile) e
+    riempie `out`, che il chiamante passa a `oracle_skips`: cosi' "quante
+    fetch pagate / rifiutate / saltate per tier" e' CONTABILE.
+    """
+
+    def _pick(self, league, match_id="m1"):
+        return {"match_id": match_id, "home": "A", "away": "B",
+                "mercato": "OU", "esito_key": "Over 2.5", "quota": 2.0,
+                "league": league}
+
+    def test_tier_non_core(self, monkeypatch):
+        import auto_bet
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        act = {}
+        auto_bet._ondemand_fetch(self._pick("Liga MX"),
+                                 {"recoverable": True}, True, out=act)
+        assert act == {"action": "tier_not_core"}
+
+    def test_fuori_finestra(self, monkeypatch):
+        import auto_bet
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "before")
+        act = {}
+        auto_bet._ondemand_fetch(self._pick("Premier League"),
+                                 {"recoverable": True}, True, out=act)
+        assert act == {"action": "outside_window"}
+
+    def test_non_recuperabile(self, monkeypatch):
+        import auto_bet
+        act = {}
+        auto_bet._ondemand_fetch(self._pick("Premier League"),
+                                 {"recoverable": False}, True, out=act)
+        assert act == {"action": "not_recoverable"}
+
+    def test_pagata(self, monkeypatch):
+        import auto_bet, line_oracle
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        monkeypatch.setattr(line_oracle, "fetch_for_pick",
+                            lambda p, now=None, code=None: {
+                                "fetched": True, "reason": "ok",
+                                "sport_key": "soccer_epl", "matches": 3,
+                                "remaining": 300})
+        act = {}
+        auto_bet._ondemand_fetch(self._pick("Premier League"),
+                                 {"recoverable": True}, True, out=act)
+        assert act == {"action": "fetched"}
+
+    def test_rifiutata_col_motivo(self, monkeypatch):
+        import auto_bet, line_oracle
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        monkeypatch.setattr(line_oracle, "fetch_for_pick",
+                            lambda p, now=None, code=None: {
+                                "fetched": False,
+                                "reason": "budget oracolo esaurito (2/2 oggi)"})
+        act = {}
+        auto_bet._ondemand_fetch(self._pick("Premier League"),
+                                 {"recoverable": True}, True, out=act)
+        assert act["action"] == "refused"
+        assert "budget" in act["refusal"]
+
+    def test_il_gate_espone_l_azione_nel_verdetto(self, monkeypatch, tmp_path):
+        """Il verdetto di `_top_down_eval` porta `action`/`refusal` al hook."""
+        import auto_bet
+        monkeypatch.setattr(auto_bet, "_top_down_load", lambda h, a: None)
+        monkeypatch.setattr(auto_bet, "_TOP_DOWN_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(po, "line_oracle_probs", lambda *a, **k: None)
+        monkeypatch.setattr(po, "h2h_cache_is_stale", lambda *a, **k: True)
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        pick = dict(self._pick("Liga MX"), commence="x")
+        v = auto_bet._top_down_eval(pick, fetch_missing=True)
+        assert v.get("ok") is False
+        assert v.get("action") == "tier_not_core"
+
+    def test_senza_out_il_ritorno_e_la_stringa(self, monkeypatch):
+        """Retrocompatibilita': la firma a 3 argomenti resta valida."""
+        import auto_bet
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        out = auto_bet._ondemand_fetch(self._pick("Liga MX"),
+                                       {"recoverable": True}, True)
+        assert isinstance(out, str) and "non Tier-1/Core" in out
+
+
 # ---------------------------------------------------------------------------
 # 4. Tripwire
 # ---------------------------------------------------------------------------
@@ -1306,6 +1585,7 @@ class TestTripwire:
     def test_iac_dichiara_le_env_oracolo(self):
         src = Path(".railway/railway.ts").read_text()
         for env in ("ORACLE_ENABLED", "ORACLE_BUDGET_DAY",
+                    "ORACLE_BUDGET_STATE",
                     "ORACLE_FETCH_WINDOW_MIN", "ORACLE_LEAGUES_PER_PASS",
                     "ORACLE_ONDEMAND_DEDUP_S", "ORACLE_ONDEMAND_ENABLED",
                     "ORACLE_CHECKPOINT_STATE",

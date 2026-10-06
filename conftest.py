@@ -234,6 +234,16 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     monkeypatch.setenv("CREDIT_CALLS_LOG", str(tmp_path / "credit_calls.jsonl"))
     monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "oracle_skips.jsonl"))
     monkeypatch.setenv("TELEMETRY_ROTATE_ENABLED", "0")
+    # Budget dell'oracolo a linea (06/10/2026): il contatore del giorno e'
+    # PERSISTITO sul volume e seminato alla prima fetch del processo. Senza
+    # isolamento un test che paga una fetch scriverebbe il contatore nel data
+    # dir VERO e — peggio — il contatore in-process resterebbe carico fra i
+    # test dello stesso processo, facendo apparire "budget esaurito" in prove
+    # che non hanno speso nulla. Stato nella tmp + contatore azzerato.
+    monkeypatch.setenv("ORACLE_BUDGET_STATE",
+                       str(tmp_path / "oracle_budget.json"))
+    import odds_api as _oa
+    _oa._oracle_req_day = {"day": None, "n": 0}
     import oracle_skips as _oracle_skips
     _oracle_skips.reset_dedup()
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di

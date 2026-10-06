@@ -256,3 +256,70 @@ def test_etichetta_finestra_fail_safe_senza_costanti(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", _boom)
     assert osk.window_label() == "finestra esecutiva"
+
+
+# ------------------------------- esito del FETCH ON-DEMAND (06/10/2026)
+#
+# Prima l'esito del fetch viveva solo nel TESTO di `detail`: leggibile a
+# occhio, non contabile. La domanda "quante fetch ha pagato l'oracolo e quante
+# ne ha rifiutate il tetto crediti o il tiering?" non aveva risposta numerica.
+
+def test_action_e_refusal_sono_persistiti(tmp_path, monkeypatch):
+    p = tmp_path / "s.jsonl"
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(p))
+    osk.reset_dedup()
+    osk.record_skip(_pick(), "no_oracle/EXPIRED_CACHE", action="refused",
+                    refusal="budget oracolo esaurito (2/2 oggi)")
+    row = json.loads(p.read_text().splitlines()[0])
+    assert row["action"] == "refused"
+    assert "budget" in row["refusal"]
+
+
+def test_righe_senza_action_non_inventano_un_azione(tmp_path, monkeypatch):
+    """Le righe scritte prima del 06/10 non hanno il campo: restano 'assenti'."""
+    p = tmp_path / "s.jsonl"
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(p))
+    p.write_text(json.dumps({"reason": "linea", "ts_epoch": time.time()}) + "\n")
+    assert osk.summary(days=1)["by_action"] == {"assenti": 1}
+
+
+def test_summary_aggrega_per_azione_e_rifiuto(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.reset_dedup()
+    osk.record_skip(_pick(match_id="a"), "linea",
+                    action="fetched")
+    osk.record_skip(_pick(match_id="b"), "linea", action="refused",
+                    refusal="checkpoint non aperto (150')")
+    osk.record_skip(_pick(match_id="c"), "linea", action="refused",
+                    refusal="checkpoint non aperto (140')")
+    osk.record_skip(_pick(match_id="d"), "no_oracle/EXPIRED_CACHE",
+                    action="tier_not_core")
+    s = osk.summary(days=1)
+    assert s["by_action"] == {"refused": 2, "fetched": 1, "tier_not_core": 1}
+    assert s["by_refusal"] == {"checkpoint non aperto (150')": 1,
+                              "checkpoint non aperto (140')": 1}
+    txt = osk.format_report(days=1)
+    assert "fetch on-demand:" in txt and "tier_not_core 1" in txt
+    assert "rifiuti dichiarati:" in txt
+
+
+def test_la_transizione_di_azione_non_e_un_duplicato(tmp_path, monkeypatch):
+    """Lo stesso pick puo' essere rifiutato per tier e poi PAGATO: due righe."""
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.reset_dedup()
+    assert osk.record_skip(_pick(), "no_oracle/EXPIRED_CACHE",
+                           action="tier_not_core") is not None
+    assert osk.record_skip(_pick(), "no_oracle/EXPIRED_CACHE",
+                           action="tier_not_core") is None      # duplicato
+    assert osk.record_skip(_pick(), "no_oracle/EXPIRED_CACHE",
+                           action="fetched") is not None
+    assert osk.summary(days=1)["events"] == 2
+
+
+def test_note_top_down_skip_propaga_l_azione(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    import auto_bet
+    auto_bet._note_top_down_skip(_pick(), "no_oracle/EXPIRED_CACHE",
+                                 detail="d", action="tier_not_core")
+    row = osk.iter_events(days=1)[0]
+    assert row["action"] == "tier_not_core"

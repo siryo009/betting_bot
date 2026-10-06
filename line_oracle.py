@@ -149,13 +149,41 @@ def line_picks() -> List[Dict[str, Any]]:
     return out
 
 
-def leagues_needing_fetch(now: Optional[float] = None) -> List[Dict[str, Any]]:
-    """Sport key DISTINTI con pick a linea in gioco e cache oracolo stantia.
+def is_core_league(league: Any) -> bool:
+    """True SOLO per le leghe Tier-1/Core — regola dei fetch a PAGAMENTO.
+
+    Direttiva "League Tiering" (05/10/2026): il refetch a pagamento e' riservato
+    alle leghe Core; le leghe in probation si valutano SOLO sulla cache passiva.
+    La definizione vive in `value_filter.is_core_league` (un solo insieme di
+    leghe nel progetto) e qui si consuma — mai copiata.
+
+    FAIL-CLOSED: se il tier non e' leggibile (import rotto) si risponde False,
+    cioe' NON si spende. Una guardia di spesa non si apre per un errore.
+    """
+    name = str(league or "").strip()
+    if not name:
+        return False
+    try:
+        from value_filter import is_core_league as _vf_is_core
+        return bool(_vf_is_core(name))
+    except Exception as exc:                                     # pragma: no cover
+        logger.warning("line_oracle: tier di lega non leggibile (%s): "
+                       "nessun fetch a pagamento", exc)
+        return False
+
+
+def _league_plan(now: Optional[float] = None
+                 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Piano di fetch: `(leghe da pagare, leghe escluse per tier)`.
+
+    Estratto da `leagues_needing_fetch` il 06/10/2026 perche' la stessa
+    classificazione serve a DUE lettori: chi paga (che vede solo le leghe Core)
+    e la telemetria (che deve poter DICHIARARE quante leghe sono state escluse
+    per tier: un'esclusione non misurata e' indistinguibile da un'assenza di
+    pick).
 
     La cache `toao_<sport>.json` copre la FINESTRA (`oracle_fetch_window_min()`
-    minuti): se e' fresca (eta' < `odds_api.oracle_cache_ttl_s()`) la lega non
-    serve (gia' pagata). `expired` e' letto a runtime dal file di cache, come
-    fa `odds_api._get_odds`.
+    minuti): se e' fresca (eta' < TTL dinamica) la lega non serve (gia' pagata).
     """
     try:
         import odds_api as oa
@@ -169,8 +197,23 @@ def leagues_needing_fetch(now: Optional[float] = None) -> List[Dict[str, Any]]:
     # (la sua linea si paga quando si avvicina il kickoff).
     deadline = ts_now + _window_h() * 3600.0
     per_sport: Dict[str, Dict[str, Any]] = {}
+    blocked: Dict[str, Dict[str, Any]] = {}
     for p in line_picks():
         if float(p.get("kickoff_ts") or 0) > deadline:
+            continue
+        # LEAGUE TIERING (06/10/2026). Il filtro mancava QUI: lo scheduler
+        # (`bot.line_oracle_job` -> `ensure_oracle_payloads`) pagava 3 crediti
+        # anche per le leghe in probation, mentre il percorso on-demand
+        # (`auto_bet._ondemand_fetch`) e l'harvesting li filtravano gia'. Ecco
+        # il difetto misurato il 05/10: `soccer_argentina_primera_division`
+        # (Tier-2) fetchata ~ogni 30' per un totale di ~39 crediti in un giorno
+        # con `ORACLE_BUDGET_DAY=2`. La lega resta nel ledger e nella
+        # valutazione: cambia solo CHI paga.
+        if not is_core_league(p.get("league")):
+            b = blocked.setdefault(p["sport_key"],
+                                   {"sport_key": p["sport_key"],
+                                    "league": p.get("league"), "picks": 0})
+            b["picks"] += 1
             continue
         sp = p["sport_key"]
         if sp not in per_sport:
@@ -217,7 +260,27 @@ def leagues_needing_fetch(now: Optional[float] = None) -> List[Dict[str, Any]]:
         info["cache_age_h"] = round(age / 3600.0, 1) if age is not None else None
         out.append(info)
     out.sort(key=lambda x: x["min_kickoff"])
-    return out
+    tier_blocked = sorted(blocked.values(), key=lambda x: -x["picks"])
+    return out, tier_blocked
+
+
+def leagues_needing_fetch(now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Sport key DISTINTI con pick a linea **Core** in gioco e cache stantia.
+
+    Le leghe in probation NON sono qui: si valutano solo sulla cache passiva
+    (direttiva League Tiering). Restano leggibili con `leagues_blocked_by_tier`.
+    """
+    return _league_plan(now)[0]
+
+
+def leagues_blocked_by_tier(now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Leghe con pick a linea in gioco ESCLUSE dal fetch a pagamento (probation).
+
+    Telemetria, non decisione: serve a distinguere "nessun pick a linea" da
+    "pick presenti ma lega non Tier-1/Core" (la domanda del 06/10: quante
+    occasioni restano sulla cache passiva per scelta di tier?).
+    """
+    return _league_plan(now)[1]
 
 
 def ensure_oracle_payloads(max_leagues: Optional[int] = None
@@ -234,11 +297,19 @@ def ensure_oracle_payloads(max_leagues: Optional[int] = None
         return {"leagues": [], "fetched": 0, "skipped": 0, "errors": 1,
                 "error": str(exc), "requests_today": 0}
     cap = LEAGUES_PER_PASS if max_leagues is None else int(max_leagues)
-    pending = leagues_needing_fetch()[:max(0, cap)]
+    plan, tier_blocked = _league_plan()
+    pending = plan[:max(0, cap)]
     res: Dict[str, Any] = {"leagues": [x["sport_key"] for x in pending],
                            "fetched": 0, "skipped": 0, "errors": 0,
-                           "rows": [], "requests_today":
+                           "rows": [], "tier_excluded": tier_blocked,
+                           "requests_today":
                            getattr(oa, "_oracle_req_day", {}).get("n", 0)}
+    if tier_blocked:
+        logger.info("oracolo a linea: %d leghe in gioco, %d escluse dal fetch "
+                    "a pagamento (non Tier-1/Core: valutazione solo sulla "
+                    "cache passiva) — %s", len(pending), len(tier_blocked),
+                    ", ".join(f"{b['league']} ({b['picks']})"
+                              for b in tier_blocked[:4]))
     now = datetime.now(timezone.utc)
     frm = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     to = (now + timedelta(hours=_window_h())).strftime(
@@ -634,9 +705,16 @@ def _no_payload_reason() -> str:
 
 def format_report(res: Dict[str, Any]) -> str:
     lines = ["🎯 Oracolo a linea OU/AH (follow-the-money)"]
+    budget = budget_credits_per_day()
+    excluded = res.get("tier_excluded") or []
+    lines.append(f"  tetto giornaliero: {budget:g} crediti ({len(excluded)} "
+                 f"leghe in gioco fuori dal perimetro Tier-1/Core)")
+    if excluded:
+        lines.append("  escluse per tier (cache passiva): " + ", ".join(
+            f"{b.get('league')} ({b.get('picks')})" for b in excluded[:5]))
     leagues = res.get("leagues") or []
     if not leagues:
-        lines.append("  nessuna lega da fetchare (nessun pick a linea in "
+        lines.append("  nessuna lega da fetchare (nessun pick a linea Core in "
                      "gioco o cache fresche)")
         return "\n".join(lines)
     lines.append(f"  leghe richieste: {len(leagues)} | fetch {res.get('fetched', 0)}"

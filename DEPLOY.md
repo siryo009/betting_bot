@@ -286,6 +286,86 @@ Architettura attuale:
 
 ---
 
+## 1quater. Budget crediti the-odds-api (oracolo a linea)
+
+Il piano free di the-odds-api e' **500 crediti/mese** (reset il 1° del mese) e
+il costo di ogni chiamata dipende dai mercati richiesti: `markets=h2h` = **1
+credito**, `markets=h2h,totals,spreads` = **3 crediti**, `/scores` = 1-2. Le due
+voci che consumano budget sono quindi la **rotazione quote** (1 cr/lega) e
+l'**oracolo a linea** usato per dare un prezzo sharp agli esiti OU/AH (3
+cr/lega).
+
+### Profilo di consumo e perimetro
+
+| Voce | Costo | Default di codice |
+|---|---|---|
+| Rotazione quote (`SPORTS_INTERVAL_DAYS`) | 1 cr/lega interrogata | leghe Core a 7gg, resto 7/14/30gg |
+| Oracolo a linea (`odds_api.fetch_line_odds`) | **3 cr/lega** | `ORACLE_BUDGET_DAY=2` → **6 cr/giorno** |
+| Refertazione (`fetch_scores`) | 1-2 cr/lega | solo leghe con puntate aperte (dal 15/09) |
+
+L'oracolo segue il denaro: paga **solo le leghe che hanno davvero un pick OU/AH
+in finestra d'ordine**, e solo se non ha gia' una cache fresca. La cache e'
+separata da quella della rotazione (`toao_<sport>.json` vs `toa_<sport>.json`).
+
+### Parametri (tutti da env, default di codice in `.railway/railway.ts`)
+
+| Variabile | Default | Cosa fa |
+|---|---|---|
+| `ORACLE_ENABLED` | `1` | Spegne del tutto l'oracolo a linea |
+| `ORACLE_BUDGET_DAY` | `2` | **Leghe/giorno** pagabili (×3 crediti) |
+| `ORACLE_BUDGET_STATE` | `DATA_DIR/decision/oracle_budget.json` | Stato del tetto **persistito sul volume** (vedi fix 06/10) |
+| `ORACLE_FETCH_WINDOW_MIN` | `120` | Finestra `now..now+N'` scaricata dalla query (deve combaciare con la finestra esecutiva) |
+| `ORACLE_LEAGUES_PER_PASS` | `3` | Leghe massime per singolo job |
+| `ORACLE_CHECKPOINT_STATE` | `DATA_DIR/decision/oracle_checkpoints.json` | Checkpoint T-120'/T-70' del refetch on-demand |
+| `SX_PREFILTER_MIN_DEPTH_USDC` | `20.0` | Pre-filtro liquidita' SX **prima** di pagare l'oracolo (un pick senza book non vale 3 crediti) |
+
+**Freschezza della cache**: TTL **dinamica** sul tempo al kickoff
+(`pinnacle_oracle.cache_ttl_minutes`) — `30'` oltre le 3h, `5'` tra 1h e 3h,
+`2'` sotto l'ora. Cosi' il prezzo sharp si aggiorna quando conta (vicino al
+calcio d'inizio) senza ripagare la stessa lega tutto il giorno. Override:
+`PINNACLE_TTL_LONG_MIN` / `PINNACLE_TTL_MID_MIN` / `PINNACLE_TTL_SHORT_MIN`.
+
+### Verifica dei consumi
+
+```bash
+# Ritmo reale (misurato vs sostenibile) — API di produzione
+curl -s https://bettingbot-production-2538.up.railway.app/api/credits
+
+# Dettaglio per fonte (on rotation / oracle / settlement) — sul container
+venv/bin/python credit_diagnose.py --days 2
+```
+
+### ⚠️ Incidente del 05-06/10/2026 — "spesa oracolo fuori tetto"
+
+Misurato: **36 crediti/giorno** consumati contro **13,2 sostenibili** fino al
+reset, con l'oracolo a **24-42 cr/giorno** (tetto dichiarato 6). Due cause
+concorrenti, entrambe in produzione fino al fix:
+
+1. **Tiering assente nello scheduler.** `line_oracle.leagues_needing_fetch()`
+   non applicava il filtro di tier di lega che invece era attivo in
+   `auto_bet`. Il job `bot.line_oracle_job` (ogni 30') pagava quindi anche le
+   leghe in **probation** (es. `Argentina Primera`, Tier-2): ~39 crediti in un
+giorno da sole.
+2. **Budget in-process.** Il contatore del tetto viveva solo in memoria
+   (`odds_api._oracle_req_day`) e si **azzerava a ogni riavvio del container**:
+   il tetto `ORACLE_BUDGET_DAY=2` era di fatto inefficace (14 fetch/giorno
+   misurati).
+
+**Fix (06/10)**: il tiering e' applicato dentro lo scheduler
+(`line_oracle._league_plan`, con le leghe escluse **dichiarate** in
+`tier_excluded` e nel report) e il contatore del budget e' **persistito sul
+volume** (`ORACLE_BUDGET_STATE`): sopravvive ai redeploy, si azzera solo al
+cambio di giorno. La telemetria dei salti espone ora l'**esito strutturato**
+del fetch on-demand (`action`/`refusal`), cosi' "pagato", "rifiutato per tier"
+e "non recuperabile" sono distinguibili nel report:
+
+```bash
+venv/bin/python oracle_skips.py --days 1     # in-window / per motivo / per azione
+venv/bin/python line_oracle.py --dry-run     # quali leghe pagherebbe adesso, senza spendere
+```
+
+---
+
 ## 2. Webapp su Vercel
 
 1. Importa il progetto su [Vercel](https://vercel.com) con **Root Directory** = `webapp`.

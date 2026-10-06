@@ -9172,3 +9172,82 @@ FASCIA/lega/EV (i gate di strategia restano congelati) e dalla liquidita' SX sui
 CANDIDATI: le quattro guardie rendono il refetch piu' economico e piu' mirato,
 non creano pick nuovi. Il consumo settlement+rotazione (fuori dal percorso
 oracolo) non e' toccato da questo giro.
+
+### Fix "spesa oracolo fuori tetto" + telemetria esito fetch (06/10/2026)
+
+**Sintomo misurato** (sola lettura, API + container): `GET /api/credits` →
+`remaining 329`, `estimated_daily_consumption 36.0` (measured),
+`sustainable_daily 13.2` (25 giorni al reset 01/11). `credit_diagnose --days 2`
+attribuiva **24 cr/g all'oracolo a linea** (42 cr/g su finestra 1 giorno),
+contro un tetto dichiarato di **6 cr/g** (`ORACLE_BUDGET_DAY=2` × 3 crediti).
+
+**DUE CAUSE CONCORRENTI, entrambe in produzione fino al fix.**
+1. **Tiering assente nello scheduler**: il filtro di tier di lega era attivo in
+   `auto_bet._ondemand_fetch` e in `_harvest_oracle_board`, ma **non** in
+   `line_oracle.leagues_needing_fetch()`. Il job `bot.line_oracle_job` (30')
+   pagava quindi anche le leghe in **probation** — la lega ripetuta nel
+   `credit_calls.jsonl` era `soccer_argentina_primera_division` (Tier-2), con
+   ~14 fetch in un giorno (~39 crediti). Stessa classe del difetto del 24/09:
+   *il tripwire testava un percorso, il difetto viveva nell'altro*.
+2. **Budget in-process**: `odds_api._oracle_req_day = {"day": None, "n": 0}`
+   viveva solo in memoria e si **azzerava a ogni riavvio** del container →
+   `ORACLE_BUDGET_DAY` inefficace (14 fetch/giorno misurati con tetto 2).
+
+**FIX APPLICATO (commit in corso).**
+- `odds_api.py`: **budget persistito sul volume** — nuove
+  `oracle_budget_state_path()` (env `ORACLE_BUDGET_STATE`, default
+  `DATA_DIR/decision/oracle_budget.json`, letto a RUNTIME), `oracle_budget_used(day)`
+  (fail-safe: assente/corrotto/altro giorno → 0), `save_oracle_budget(day, n)`
+  (scrittura atomica tmp+`os.replace`, mai eccezioni), `reset_oracle_budget()`.
+  In `fetch_line_odds` il contatore è **seminato dal volume** alla prima fetch
+  del processo (`day is None` → `oracle_budget_used(_today)`), si azzera al
+  cambio di giorno UTC e viene salvato dopo ogni incremento.
+- `line_oracle.py`: **tiering nello scheduler** — nuova `is_core_league()`
+  (delega a `value_filter.is_core_league`, **fail-closed** → False con warning)
+  e nuova **`_league_plan(now) -> (pending, blocked_by_tier)`** che filtra il
+  tier PRIMA di accumulare `per_sport`; `leagues_needing_fetch` = `_league_plan()[0]`,
+  nuova `leagues_blocked_by_tier()` per la telemetria. `ensure_oracle_payloads`
+  espone **`tier_excluded`** e logga le escluse; `format_report` dichiara il
+  tetto e le leghe fuori dal perimetro Tier-1/Core.
+- `auto_bet.py`: **esito strutturato del fetch on-demand** —
+  `_ondemand_fetch(pick, info, enabled, out=...)` riempie `out` con `action`
+  ∈ {`not_recoverable`, `outside_window`, `tier_unreadable`, `tier_not_core`,
+  `error`, `fetched`, `refused`} (+`refusal`); `_top_down_eval` lo propaga nel
+  verdetto (`action`/`refusal`) e `_note_top_down_skip` lo registra.
+- `oracle_skips.py`: `record_skip(..., action, refusal)` — **`action` entra
+  nella chiave di dedup** (la transizione `tier_not_core` → `fetched` è una
+  riga nuova, non un duplicato); `summary` aggiunge `by_action`/`by_refusal`
+  (righe senza campo → `"assenti"`, mai un'azione inventata); `format_report`
+  stampa "fetch on-demand: …" e "rifiuti dichiarati: …". Così "pagato",
+  "rifiutato per tier/budget" e "non recuperabile" sono contabili, non solo
+  leggibili nel testo.
+- `bot.py` `line_oracle_job`: docstring corretta (default **2 leghe = 6 crediti/giorno**,
+  contatore persistito, TTL dinamica 30/5/2) + log con **`escluse per tier %s`**
+  (senza, un'esclusione era indistinguibile da "nessun pick").
+- `.railway/railway.ts`: `ORACLE_BUDGET_STATE: preserve()` accanto a
+  `ORACLE_BUDGET_DAY` (un `config apply` non lo distrugge).
+- `conftest.py`: isola `ORACLE_BUDGET_STATE` nella tmp e azzera
+  `odds_api._oracle_req_day` (senza, il contatore persistito e quello in-process
+  "sporcherebbero" i test facendo apparire budget esaurito in prove che non
+  hanno speso nulla).
+
+**⚠️ Trappola trovata nei test (bonificata)**: il falso tripwire
+`test_tetto_budget_blocca_la_chiamata` usava `{"day": "2099-01-01"}`, che il
+controllo di cambio giorno azzera → passava **solo perché mancava `ODDS_API_KEY`**.
+Ora i test usano `reset_oracle_budget()` + giorno reale. Stessa bonifica su
+`test_budget_conta_solo_le_chiamate_fatte` / `test_cache_fresca_zero_http`;
+nei test follow-the-money `"Serie A"` → `"Premier League"` (Serie A è `blocked`
+e non sarebbe più fetchabile).
+
+**Test**: `test_line_oracle.py` + `test_oracle_skips.py` (nuove classi
+`TestBudgetPersistente`, `TestTieringNelPiano`, `TestEsitoStrutturatoDelFetch`),
+con regressioni verdi su odds_api/top_down (87), auto_bet×2/capital_enclosure/
+multi_market (198), bot/t60/liquidity/secret_hygiene/railway_drift (151),
+credit_diagnose/decision_limits/decision_feed/aggressive_kelly/sx_signals (150).
+`verify_guardrails.py` **A-H tutti bloccano** (exit 0), `compileall` OK,
+0 marker di conflitto, `railway config plan` **already up to date** (0 to destroy).
+
+**⚠️ Cosa NON risolve**: il tiering blocca la SPESA, non crea pick. Le leghe in
+probation restano valutate sulla **cache passiva** (l'oracolo 1X2 non basta per
+gli esiti a linea): se la loro cache non esiste, i loro pick OU/AH restano
+`no_oracle` — per scelta di costo, non per un difetto.

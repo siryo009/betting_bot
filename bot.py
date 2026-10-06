@@ -3007,10 +3007,16 @@ async def line_oracle_job(context: ContextTypes.DEFAULT_TYPE):
     a chiamata) SOLO per le leghe con pick OU/AH aperti in finestra d'ordine:
     senza questo payload ogni pick a linea muore con `no_oracle` (il gate
     top-down legge un oracolo 1X2 che non ha mai le chiavi 'Over 2.5' /
-    'Home -0.75'). Cache separata `toao_<sport>.json` (TTL 24h), budget
-    giornaliero `ORACLE_BUDGET_DAY` (default 12 leghe = 36 crediti max/giorno),
-    hard-stop crediti rispettato. `ORACLE_ENABLED=0` spegne tutto. Fail-safe:
-    un errore non ferma il bot.
+    'Home -0.75'). Cache separata `toao_<sport>.json`, con TTL DINAMICA sul
+    tempo al kickoff (`pinnacle_oracle.cache_ttl_minutes`: 30/5/2 minuti).
+
+    Tetti, tutti applicati a monte in `odds_api.fetch_line_odds`:
+    `ORACLE_BUDGET_DAY` (default **2 leghe = 6 crediti/giorno**, e dal 06/10 il
+    contatore e' PERSISTITO sul volume: un riavvio non riapre il tetto),
+    hard-stop crediti, `ORACLE_ENABLED`. Alle sole leghe **Tier-1/Core**
+    (`value_filter.is_core_league`, 05-06/10/2026): le leghe in probation si
+    valutano solo sulla cache passiva.
+    `ORACLE_ENABLED=0` spegne tutto. Fail-safe: un errore non ferma il bot.
     """
     if os.getenv("ORACLE_ENABLED", "1").strip().lower() in ("0", "false", "no"):
         return
@@ -3025,11 +3031,16 @@ async def line_oracle_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error("line_oracle_job: %s", e)
         return
-    if res.get("fetched") or res.get("errors"):
+    # `tier_excluded` va SEMPRE dichiarato quando c'e': un'esclusione non
+    # misurata e' indistinguibile da "nessun pick a linea" (lezione del 06/10:
+    # l'Argentina Primera veniva pagata ~ogni 30' senza che si vedesse da qui).
+    if res.get("fetched") or res.get("errors") or res.get("tier_excluded"):
         logger.info("line_oracle_job: leghe %s, fetch %s, skip %s, errori %s, "
-                    "richieste oggi %s", res.get("leagues"),
+                    "escluse per tier %s, richieste oggi %s", res.get("leagues"),
                     res.get("fetched"), res.get("skipped"),
-                    res.get("errors"), res.get("requests_today"))
+                    res.get("errors"),
+                    [b.get("league") for b in res.get("tier_excluded") or []],
+                    res.get("requests_today"))
 
 
 async def btts_watch_job(context: ContextTypes.DEFAULT_TYPE = None):

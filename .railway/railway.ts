@@ -304,6 +304,12 @@ export default defineRailway(() => {
       // preserve(), un `config apply` distruggerebbe gli override operativi.
       ORACLE_ENABLED: preserve(),
       ORACLE_BUDGET_DAY: preserve(),
+      // Stato del budget GIORNALIERO dell'oracolo (06/10/2026). Il contatore
+      // era solo in-process: ogni riavvio (deploy, restart della piattaforma)
+      // riapriva il tetto e il 05/10 sono state pagate 14 leghe con
+      // `ORACLE_BUDGET_DAY=2` (42 crediti su 6 di tetto). Ora e' persistito sul
+      // volume e seminato alla prima fetch del processo.
+      ORACLE_BUDGET_STATE: preserve(),
       // Finestra di fetch dell'oracolo a linea (minuti, default 120 dal
       // 05/10/2026, era 70): si ordina solo nella finestra esecutiva
       // T-180..T-2, quindi non si scarica piu' l'intero palinsesto della lega.

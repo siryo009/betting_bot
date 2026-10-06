@@ -111,7 +111,82 @@ def oracle_cache_ttl_s(minutes_to_kickoff: Optional[float] = None) -> float:
 ORACLE_BUDGET_DAY = int(os.getenv("ORACLE_BUDGET_DAY", "2"))
 ORACLE_ENABLED = os.getenv("ORACLE_ENABLED", "1").strip().lower() \
     in ("1", "true", "yes", "on")
+# Contatore del budget oracolo del GIORNO. `n` = leghe pagate oggi (ogni lega =
+# 3 crediti). E' la voce di riferimento per il gate (`line_oracle`), per la
+# diagnosi (`_no_payload_reason`) e per la telemetria.
+# ⚠️ 06/10/2026 — PERSISTENZA. Era solo in-process: ogni RIAVVIO del processo
+# (deploy, restart della piattaforma) ripartiva da `{"day": None, "n": 0}` e
+# riapriva il tetto. Misurato il 05/10: `ORACLE_BUDGET_DAY=2` e 14 fetch a
+# linea nello stesso giorno (42 crediti su 6 di tetto) — il consumo che il
+# taglio del budget doveva impedire. Ora il contatore e' SEMINATO dal volume
+# alla prima chiamata del giorno (`oracle_budget_used`), quindi il tetto vale
+# sul GIORNO e non sul processo.
 _oracle_req_day = {"day": None, "n": 0}
+
+
+def oracle_budget_state_path() -> Path:
+    """Path dello stato del budget oracolo (env `ORACLE_BUDGET_STATE`).
+
+    Letto a RUNTIME, non all'import: i test e le diagnostiche lo spostano
+    senza toccare il volume di produzione (stessa lezione di
+    `credit_calls_log_path` e di `line_oracle.checkpoint_state_path`).
+    """
+    raw = (os.getenv("ORACLE_BUDGET_STATE") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path(DATA_DIR) / "decision" / "oracle_budget.json"
+
+
+def oracle_budget_used(day: Optional[str] = None) -> int:
+    """Leghe oracolo GIA' pagate in quel giorno (0 se lo stato non parla di oggi).
+
+    Fail-safe DICHIARATO: file assente, corrotto o di un altro giorno -> 0.
+    Non si inventa una spesa, ma si sceglie di non bloccare il sistema per un
+    file illeggibile: il tetto resta comunque applicato, per il resto del
+    processo, dal contatore in-process che questa funzione SEMINA.
+    """
+    target = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        data = json.loads(oracle_budget_state_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return 0
+    except Exception as exc:
+        logger.warning("oracolo a linea: stato del budget illeggibile (%s)", exc)
+        return 0
+    if not isinstance(data, dict) or str(data.get("day") or "") != target:
+        return 0
+    try:
+        return max(0, int(data.get("n") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def save_oracle_budget(day: str, n: int) -> bool:
+    """Persiste il consumo del giorno (scrittura atomica, mai eccezioni).
+
+    La telemetria del budget non deve MAI far fallire una fetch: un errore di
+    scrittura lascia il contatore in-process (che resta la fonte della
+    decisione) e torna `False`.
+    """
+    try:
+        target = oracle_budget_state_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(json.dumps({"day": str(day), "n": int(n)}),
+                       encoding="utf-8")
+        os.replace(tmp, target)
+        return True
+    except Exception as exc:
+        logger.debug("oracolo a linea: stato del budget non scritto (%s)", exc)
+        return False
+
+
+def reset_oracle_budget(day: Optional[str] = None) -> None:
+    """Azzera il contatore del giorno su MEMORIA e volume (test/diagnostica)."""
+    global _oracle_req_day
+    d = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    _oracle_req_day = {"day": d, "n": 0}
+    save_oracle_budget(d, 0)
 # HARD STOP (direttiva del proprietario, 21/09/2026): sotto questa soglia
 # NESSUNA chiamata HTTP verso the-odds-api, indipendentemente dalla
 # rotazione ridotta. Il piano free risponde 429 quando i crediti finiscono e
@@ -810,7 +885,15 @@ def fetch_line_odds(sport, frm, to, ttl_s: Optional[float] = None):
     # costo massimo misurabile a prescindere da quante leghe abbiano pick.
     global _oracle_req_day
     _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if _oracle_req_day.get("day") != _today:
+    if _oracle_req_day.get("day") is None:
+        # PRIMA chiamata del processo: si riparte dal consumo GIA' registrato
+        # sul volume per oggi. E' il fix del 06/10/2026: senza questo semina,
+        # un riavvio (deploy, restart della piattaforma) riapriva il tetto e
+        # il 05/10 il sistema ha pagato 14 leghe con `ORACLE_BUDGET_DAY=2`.
+        _oracle_req_day = {"day": _today, "n": oracle_budget_used(_today)}
+    elif _oracle_req_day.get("day") != _today:
+        # Cambio di giorno UTC: il tetto si riarma (il volume conserva il
+        # conteggio di ieri, che `oracle_budget_used` ignora per giorno).
         _oracle_req_day = {"day": _today, "n": 0}
     if _oracle_req_day["n"] >= ORACLE_BUDGET_DAY:
         logger.info("oracolo a linea: budget giornaliero %s esaurito (%s "
@@ -835,6 +918,7 @@ def fetch_line_odds(sport, frm, to, ttl_s: Optional[float] = None):
                                    ttl_s=ttl)
     if payload or remaining != 999:
         _oracle_req_day["n"] += 1
+        save_oracle_budget(_oracle_req_day["day"], _oracle_req_day["n"])
     return payload, remaining
 
 def fetch_odds(sport=None, commence_time_from=None, commence_time_to=None, **kwargs):

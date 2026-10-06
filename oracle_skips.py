@@ -80,7 +80,9 @@ def _window_bucket(in_window: Optional[bool]) -> str:
 
 def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
                 ev: Optional[float] = None,
-                in_window: Optional[bool] = None) -> Optional[dict]:
+                in_window: Optional[bool] = None,
+                action: Optional[str] = None,
+                refusal: Optional[str] = None) -> Optional[dict]:
     """Registra uno scarto del gate top-down (fail-safe, dedup giornaliero).
 
     `in_window` dice se il pick era nella FINESTRA ESECUTIVA
@@ -89,6 +91,14 @@ def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
     un ordine perso. Il dedup tiene separati i due bucket, cosi' lo stesso
     pick puo' comparire una volta fuori e una dentro la finestra (la
     transizione e' l'informazione utile).
+
+    `action`/`refusal` (06/10/2026) sono l'ESITO STRUTTURATO del fetch
+    on-demand tentato per quel pick (`fetched`, `refused`, `tier_not_core`,
+    `outside_window`, `not_recoverable`, `tier_unreadable`, `error`) e, per i
+    rifiuti, la causa dichiarata dal gate (`budget oracolo esaurito (...)`, i
+    checkpoint, la dedup...). Prima quell'informazione viveva solo nel TESTO
+    di `detail`: leggibile a occhio, non contabile ("quante fetch pagate e
+    quante rifiutate dal budget?" non aveva risposta numerica).
 
     Ritorna l'evento scritto, oppure None se era un duplicato del giorno o se
     la scrittura e' fallita (mai eccezioni).
@@ -101,7 +111,12 @@ def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
     esito = str((pick or {}).get("esito_key") or "?")
     reason = str(reason or "unknown")
     bucket = _window_bucket(in_window)
-    key = f"{day}|{mid}|{esito}|{reason}|{bucket}"
+    act = str(action or "")
+    # L'esito del fetch entra nella CHIAVE di dedup (come il bucket di
+    # finestra): lo stesso pick puo' comparire una volta rifiutato per tier e
+    # una volta, piu' tardi, con la fetch PAGATA — la transizione e'
+    # l'informazione utile, non un duplicato.
+    key = f"{day}|{mid}|{esito}|{reason}|{bucket}|{act}"
     if _SEEN.get(key):
         return None
     evt = {
@@ -116,6 +131,10 @@ def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
         "reason": reason,
         "in_window": in_window,
     }
+    if act:
+        evt["action"] = act
+    if refusal:
+        evt["refusal"] = str(refusal)
     if detail:
         evt["detail"] = detail
     if ev is not None:
@@ -176,6 +195,8 @@ def summary(days: float = 1.0) -> Dict[str, Any]:
     by_league: Dict[str, int] = defaultdict(int)
     in_reason: Dict[str, int] = defaultdict(int)
     in_market: Dict[str, int] = defaultdict(int)
+    by_action: Dict[str, int] = defaultdict(int)
+    by_refusal: Dict[str, int] = defaultdict(int)
     counts = {"in": 0, "out": 0, "?": 0}
     for e in events:
         reason = str(e.get("reason") or "unknown")
@@ -183,6 +204,12 @@ def summary(days: float = 1.0) -> Dict[str, Any]:
         by_reason[reason] += 1
         by_market[mkt] += 1
         by_league[str(e.get("league") or "?")] += 1
+        # Esito del fetch on-demand (06/10/2026). Se l'evento non ha il campo
+        # (righe scritte prima) NON si inventa un'azione: finisce in `assenti`.
+        act = str(e.get("action") or "assenti")
+        by_action[act] += 1
+        if e.get("refusal"):
+            by_refusal[str(e["refusal"])] += 1
         win = e.get("in_window")
         if win is True:
             counts["in"] += 1
@@ -199,6 +226,9 @@ def summary(days: float = 1.0) -> Dict[str, Any]:
             "by_reason": dict(by_reason), "by_market": dict(by_market),
             "by_reason_in_window": dict(in_reason),
             "by_market_in_window": dict(in_market),
+            "by_action": dict(sorted(by_action.items(), key=lambda kv: -kv[1])),
+            "by_refusal": dict(sorted(by_refusal.items(),
+                                      key=lambda kv: -kv[1])),
             "by_league": dict(sorted(by_league.items(),
                                      key=lambda kv: -kv[1]))}
 
@@ -227,6 +257,15 @@ def format_report(days: float = 1.0) -> str:
     mkt = ", ".join(f"{k} {v}" for k, v in sorted(s["by_market"].items(),
                                                  key=lambda kv: -kv[1]))
     lines.append(f"  per mercato: {mkt}")
+    # Fetch on-demand: quante ne sono state PAGATE e quante RIFIUTATE (e da
+    # chi). E' la riga che dice se il tetto crediti o il tiering stanno
+    # bloccando l'oracolo, senza dover leggere i log (retention ~5h).
+    act = ", ".join(f"{k} {v}" for k, v in s["by_action"].items())
+    if act:
+        lines.append(f"  fetch on-demand: {act}")
+    if s["by_refusal"]:
+        lines.append("  rifiuti dichiarati: " + ", ".join(
+            f"{k} {v}" for k, v in list(s["by_refusal"].items())[:3]))
     top = list(s["by_league"].items())[:5]
     if top:
         lines.append("  per lega: " + ", ".join(f"{k} {v}" for k, v in top))
