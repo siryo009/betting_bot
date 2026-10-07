@@ -200,6 +200,12 @@ export default defineRailway(() => {
       // mercati a cui applicarla (una sola definizione, in `value_filter`).
       EV_MIN_LIQUID: preserve(),
       EV_LIQUID_MARKETS: preserve(),
+      // Soglia EV del TIER di lega (08/10/2026, `value_filter.ev_min`):
+      // dimensione AGGIUNTIVA a quella per mercato, con precedenza "la piu'
+      // severa" (`max`) — il tier puo' solo stringere, mai allargare.
+      // `EV_MIN_CORE` = leghe Tier-1/Core, `EV_MIN_OTHER` = tutte le altre.
+      EV_MIN_CORE: preserve(),
+      EV_MIN_OTHER: preserve(),
       // Closing line a T-0 (04/10/2026, punto 5): la routine `closing_line.py`
       // scrive `clv_history.closing_odds` DENTRO la finestra T-PRE..T+POST
       // rispetto al kickoff (default 10' prima / 5' dopo). Sola lettura dalle

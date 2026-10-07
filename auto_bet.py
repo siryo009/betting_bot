@@ -714,13 +714,14 @@ def _top_down_eval(pick: dict, league: str | None = None, *,
                               "probabilita' fair"}
         ev = p_true * (quota - 1.0) - (1.0 - p_true)
         true_odd = 1.0 / p_true
-        # Soglia EV del MERCATO (direttiva 04/10, punto 4): OU/AH (liquidi)
-        # usano EV_MIN_LIQUID (1.0%), 1X2 la soglia unica. `ev_min_for_market`
-        # e' l'unica definizione della regola: se manca (import fallito) si
-        # ricade sulla soglia dichiarata dall'oracolo.
+        # Soglia EV EFFETTIVA (08/10): la piu' severa fra dimensione MERCATO
+        # (OU/AH liquidi = EV_MIN_LIQUID 1.0%, 1X2 = 2.5%) e dimensione TIER di
+        # LEGA (core 1.5%). `value_filter.ev_min` e' l'unica definizione della
+        # regola: se manca (import fallito) si ricade sulla soglia dichiarata
+        # dall'oracolo.
         try:
-            from value_filter import ev_min_for_market as _ev_min_for_market
-            ev_min = _ev_min_for_market(mercato)
+            from value_filter import ev_min as _ev_min
+            ev_min = _ev_min(league, mercato)
         except Exception:                                       # pragma: no cover
             ev_min = po.DEFAULT_EV_MIN
         # Probation: soglia EV piu' severa per le leghe non ancora validate

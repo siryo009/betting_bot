@@ -418,3 +418,86 @@ class TestOracoloAPagamento:
         for lg in ("Premier League", "Liga MX", "Serie A", "Inventata", ""):
             assert value_filter.is_paid_oracle_league(lg) is (
                 value_filter.league_tier(lg) in value_filter.oracle_paid_tiers()), lg
+
+
+class TestSogliaEvPerTier:
+    """Soglia EV a DUE dimensioni (08/10/2026): mercato + TIER di lega.
+
+    Direttiva del proprietario: aggiungere la dimensione del tier alla soglia
+    EV gia' differenziata per mercato, con precedenza **la piu' severa**.
+    Il tier puo' quindi solo stringere, mai allargare — e' la proprieta' che
+    questi test difendono (senza di essa un ritocco del tier diventerebbe un
+    allargamento silenzioso dei mercati liquidi).
+    """
+
+    def test_core_non_allarga_il_1x2(self):
+        import value_filter as vf
+        # 1X2: la soglia di mercato (2.5%) batte EV_MIN_CORE (1.5%) -> invariata
+        assert vf.ev_min("Premier League", "1X2") == vf.EV_MIN
+        assert vf.ev_min("Premier League", "") == vf.EV_MIN
+
+    def test_core_stringe_il_mercato_liquido(self):
+        import value_filter as vf
+        # Dichiarato: core + AH passa da EV_MIN_LIQUID (1.0%) a EV_MIN_CORE (1.5%)
+        assert vf.ev_min_for_market("AH") == vf.EV_MIN_LIQUID
+        assert vf.ev_min("Premier League", "AH") == vf.EV_MIN_CORE
+
+    def test_non_core_resta_protettiva(self):
+        import value_filter as vf
+        for lg in ("Serie A", "La Liga", "Inventata", "", "MLS"):
+            assert vf.ev_min_for_tier(lg) == vf.EV_MIN_OTHER, lg
+            assert vf.ev_min(lg, "AH") == vf.EV_MIN_OTHER, lg
+
+    def test_il_tier_non_abbassa_mai_una_soglia(self):
+        import value_filter as vf
+        leghe = (list(vf.STRATEGY_LEAGUES) + list(vf.PROBATION_LEAGUES)
+                 + ["Serie A", "", "Inventata"])
+        for lg in leghe:
+            for mk in ("", "1X2", "AH", "OU", "TOTALS", "ML", "TENNIS"):
+                assert vf.ev_min(lg, mk) >= vf.ev_min_for_market(mk) - 1e-12, (lg, mk)
+
+    def test_gate_core_su_mercato_liquido_usa_la_soglia_combinata(self):
+        import value_filter as vf
+        # +1.2%: sopra EV_MIN_LIQUID (1.0%), sotto EV_MIN_CORE (1.5%) -> respinto
+        ok, why = vf.is_sane(0.71, 1.55, 0.012, market_prob=0.65,
+                             league="Premier League", market="AH",
+                             favourites_only=False, market_edge_min=0.0)
+        assert not ok and "EV troppo basso" in why, why
+        # +1.7%: sopra la soglia combinata -> passa
+        ok2, why2 = vf.is_sane(0.72, 1.55, 0.017, market_prob=0.65,
+                               league="Premier League", market="AH",
+                               favourites_only=False, market_edge_min=0.0)
+        assert ok2, why2
+
+    def test_probation_su_mercato_liquido_e_piu_severa(self):
+        import value_filter as vf
+        # MLS = probation: EV_MIN_OTHER (2.5%) batte EV_MIN_LIQUID (1.0%)
+        ok, why = vf.is_sane(0.71, 1.55, 0.02, market_prob=0.65,
+                             league="MLS", market="OU",
+                             favourites_only=False, market_edge_min=0.0)
+        assert not ok and "EV troppo basso" in why, why
+
+    def test_fail_safe_su_lega_sconosciuta(self):
+        import value_filter as vf
+        # Una lega che non si sa riconoscere NON e' core: soglia protettiva.
+        assert vf.ev_min_for_tier("Lega Che Non Esiste") == vf.EV_MIN_OTHER
+        assert vf.ev_min_for_tier(None) == vf.EV_MIN_OTHER
+
+    def test_env_override(self, monkeypatch):
+        import importlib
+        import value_filter as vf
+        monkeypatch.setenv("EV_MIN_CORE", "0.02")
+        monkeypatch.setenv("EV_MIN_OTHER", "0.03")
+        try:
+            mod = importlib.reload(vf)
+            assert mod.ev_min_for_tier("Premier League") == 0.02
+            assert mod.ev_min_for_tier("Serie A") == 0.03
+        finally:
+            monkeypatch.undo()
+            importlib.reload(vf)
+
+    def test_iac_dichiara_le_env(self):
+        from pathlib import Path
+        src = Path(".railway/railway.ts").read_text(encoding="utf-8")
+        for env in ("EV_MIN_CORE", "EV_MIN_OTHER"):
+            assert f"{env}: preserve()" in src, env

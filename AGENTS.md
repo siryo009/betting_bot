@@ -9509,3 +9509,110 @@ giorno: -6,3 cr/giorno) -> profilo atteso **~7-9/giorno**, con margine sui 12,0
 sostenibili. Le due env nuove (`ORACLE_ENABLED`, oltre a
 `ORACLE_BUDGET_DAY`/`SETTLEMENT_HEAL_INTERVAL_HOURS`) erano gia' in `preserve()`:
 `railway config plan` = **already up to date** (0 to destroy).
+
+### Verifica "Tier-1 globale" + soglia EV a due dimensioni (08/10/2026)
+
+**Direttiva**: espandere la whitelist Tier-1 (NBA/MLB/NHL + tennis) per
+operativita' 24/7, aggiungere i mapping SX Bet -> oracolo, verificare la soglia
+di liquidita' sul tennis pre-match. Seconda direttiva: soglia EV dinamica per
+tier (core 1,5% / altri 2,5%) + safety check Kelly.
+
+**⚠️ QUATTRO PREMESSE SU CINQUE NON REGGEVANO SUI DATI — verificate PRIMA di
+scrivere codice** (endpoint gratuiti: `/v4/sports` = 0 crediti, SX
+`/markets/active` = lettura pubblica; crediti the-odds-api **287 invariati**):
+
+1. **`TIER_1_LEAGUES` NON ESISTE.** Il meccanismo reale e' `ORACLE_PAID_TIERS`
+   (env, oggi `core,probation`) + `league_tier()` + `is_paid_oracle_league()`.
+   Ma e' un sistema di tier **SOLO calcistico**: `league_tier("basketball_nba")`
+   = `blocked`, `league_tier("TENNIS")` = `blocked`. Sport USA e tennis non
+   hanno un tier.
+2. **Le chiavi tennis proposte NON ESISTONO.** Tennis attivi su `/v4/sports`:
+   **2, per torneo** (`tennis_atp_shanghai_masters`, `tennis_wta_china_open`).
+   `tennis_atp_masters`/`tennis_atp_grand_slam`/`tennis_wta_tour` = inesistenti
+   (il tennis e' gia' gestito da `tennis_lane.active_tennis_keys()`).
+3. **Sport USA: chiavi esistenti, corsia INESISTENTE.** `basketball_nba`,
+   `baseball_mlb`, `icehockey_nhl` sono `active` su the-odds-api, ma **nessuna
+   corsia produce pick**: `sx_signals`/`multi_market` = sportIds 5 (calcio),
+   `tennis_lane` = 6, `esports_lane` = 9, `market_shadow` = 1+8 (**solo**
+   telemetria `market_quotes`, non baseball 3 ne' hockey 2). Aggiungerli a una
+   whitelist non farebbe partire UN ordine: serve una corsia nuova.
+   **Decisione del proprietario: NON costruirla** — tennis + eSports coprono
+   gia' la notte europea.
+4. **Mapping SX proposto: SBAGLIATO 2 su 3** (misurato su `/markets/active`):
+
+   | sport | proposta | **reale** |
+   |---|---|---|
+   | NBA | sportId 2 / leagueId 1 | **sportId 1** / leagueId 1 |
+   | MLB | sportId 3 / leagueId 3 | sportId 3 / **leagueId 171** (1191=NPB, 1389=KBO) |
+   | NHL | sportId 4 / leagueId 2 | **sportId 2 / leagueId 3** |
+   | tennis | sportId 6 | ✅ 6, leagueId **per torneo** (1535 ATP Shanghai, 1534 WTA Beijing) |
+
+   `sportId 4` = **0 mercati**. Nessuno di questi mapping viene usato dal codice
+   (non esistendo la corsia): documentati per non ri-scoprirli.
+
+5. **LIQUIDITA' TENNIS: NON E' STRINGENTE.** Misura reale (38 eventi, 76 lati):
+   **0/76 sotto 20 USDC (0,0%)**, depth `p10=639 p50=1596 p90=3624 min=109`.
+   Anche a 60 USDC passano **76/76**. Inoltre `SX_PREFILTER_MIN_DEPTH_USDC`
+   (auto_bet) **non si applica al tennis** — gira solo su OU/AH; la soglia che
+   il tennis incontra e' `sx_signals.MIN_EXEC_DEPTH_USDC` (20) nella discovery,
+   e passa tutto. `liquidity_skips.jsonl` **non esiste** su questo volume:
+   zero scarti per liquidita' in questa era. **Nessuna soglia differenziata**.
+
+**✅ CONSEGNATO — SOGLIA EV A DUE DIMENSIONI (precedenza "la piu' severa").**
+Scelta del proprietario fra le opzioni proposte: il tier si AGGIUNGE alla
+dimensione per mercato con `max`, quindi puo' **solo stringere, mai allargare**.
+
+- `value_filter.py`: `EV_MIN_CORE` (env, default **0.015**), `EV_MIN_OTHER`
+  (env, default `EV_MIN` = 0.025), **`ev_min_for_tier(league)`** e
+  **`ev_min(league, market)`** = `max(ev_min_for_market(market),
+  ev_min_for_tier(league))` — **UNICA definizione** della regola combinata.
+  `is_sane` usa `ev_min(league, market)` (aveva gia' entrambi i parametri).
+- `agents/brain_agent.py`: `base_ev_min(market, league="")` e
+  `dynamic_ev_min(..., league="")` delegano a `ev_min` (nessuna soglia
+  ricopiata); `BrainAgent._one` passa `league=signal.league`.
+- `auto_bet._top_down_eval`: `ev_min(league, mercato)` al posto di
+  `ev_min_for_market(mercato)`; l'extra probation (`TOP_DOWN_PROBATION_EXTRA`
+  2%) resta e si SOMMA alla soglia combinata.
+- **IaC**: `EV_MIN_CORE`/`EV_MIN_OTHER` in `preserve()`;
+  `railway config plan` = **already up to date** (0 to destroy).
+
+**⚠️ EFFETTO MISURATO E DICHIARATO (non un allargamento).** Con `max`:
+| lega | mercato | prima | ora |
+|---|---|---|---|
+| core | AH/OU/Totals/ML | 1.0% | **1.5%** (piu' severo) |
+| core | 1X2 | 2.5% | 2.5% (invariato) |
+| probation / sconosciuta | qualunque | 1.0% (liquidi) / 2.5% | **2.5%** |
+
+Il tier **non abbassa mai** una soglia gia' piu' alta: la direttiva "core ->
+1,5%" non produce piu' volume (sui mercati liquidi lo riduce). Per un
+allargamento reale servirebbe la precedenza opposta (`min`) — scelta diversa,
+non un default silenzioso. **Impatto sugli ORDINI oggi: nullo** — le corsie che
+ordinano (tennis, eSports, 1X2) hanno soglia propria o mercato non liquido, e
+OU/AH non ordinano comunque (`ORACLE_ENABLED=0`, fuori perimetro dal 07/10).
+
+**✅ KELLY SAFETY CHECK (chiesto dalla seconda direttiva) — FATTO, nessuna
+azione necessaria.** Misurato con `decision.stake_engine.calculate_kelly_stake`
+(equity reale 28,89, k dinamico 0,177, cap 12%, ticket 1,00):
+```
+EV 1.5%: stake 3.14 (odds 1.30) | 2.08 (1.60) | 1.65 (1.80)   tutti >= ticket
+EV 2.5%: stake 3.21            | 2.13       | 1.69
+bankroll 10: stake 0.00 -> below_min_ticket (gia' fail-closed)
+```
+Con l'equity attuale un EV 1,5% produce stake **sempre sopra** il minimo SX
+(1,00 USDC). Il ticket morde solo sotto ~11-13 USDC di bankroll ed e' gia'
+gestito in modo fail-closed (`below_min_ticket`, mai un arrotondamento
+silenzioso) — coerente con "il ticket e' soglia del MOTORE".
+
+**Test**: `test_value_filter.py::TestSogliaEvPerTier` (8 nuovi: core non
+allarga il 1X2, core stringe il mercato liquido, non-core protettiva, **il tier
+non abbassa mai** su griglia di tutte le leghe x 7 mercati, gate combinato
++1.2% respinto/+1.7% ammesso, probation piu' severa sui liquidi, fail-safe su
+lega sconosciuta/None, env override, IaC dichiara le env).
+Regressioni verdi: value_filter + brain_agent (82), multi_market +
+decision_pipeline (parita' `is_sane`!) + decision_limits + top_down +
+market_calib + risk_guards (255), auto_bet x2 + capital_enclosure +
+exposure_gate + t60_breakers + line_oracle + ou_exclusion + esports_oracle +
+tennis_lane (466), bot + web_api + reports + market_diagnose + flow_measure +
+adaptive_weighting + smart_hedging + railway_drift_check + secret_hygiene +
+tier + favourites_only + league_gate (346). `verify_guardrails.py`: **A-H tutti
+bloccano** (exit 0). `compileall` OK, 0 marker di conflitto.

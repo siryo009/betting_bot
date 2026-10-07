@@ -91,16 +91,18 @@ def volatility_ref_pct_min() -> float:
     return _num_env(VOL_REF_ENV, DEFAULT_VOL_REF_PCT_MIN, minimum=1e-6)
 
 
-def base_ev_min(market: str = "") -> float:
-    """Soglia EV di base per il MERCATO (mai copiata qui).
+def base_ev_min(market: str = "", league: str = "") -> float:
+    """Soglia EV di base: la piu' severa fra MERCATO e TIER di lega.
 
     Direttiva 04/10/2026 (punto 4): i mercati LIQUIDI (Asian Handicap,
     Over/Under, Totals, BTTS, Moneyline) hanno una soglia piu' bassa
-    (`value_filter.ev_min_for_market`, EV > 1.0%); tutto il resto resta alla
-    soglia unica del progetto. Una sola definizione, in `value_filter`.
+    (EV > 1.0%). Direttiva 08/10/2026: si aggiunge la dimensione del TIER di
+    lega (core 1.5%, altrimenti la soglia protettiva) con precedenza "la piu'
+    severa". Entrambe le regole vivono in `value_filter.ev_min`: qui non si
+    ricopia nessuna soglia.
     """
-    from value_filter import ev_min_for_market
-    return float(ev_min_for_market(market))
+    from value_filter import ev_min
+    return float(ev_min(league, market))
 
 
 def shield_cap_pct() -> float:
@@ -114,7 +116,7 @@ def shield_cap_pct() -> float:
 
 def dynamic_ev_min(*, depth_usdc: Optional[float] = None,
                    velocity_pct_min: Optional[float] = None,
-                   market: str = "") -> dict[str, Any]:
+                   market: str = "", league: str = "") -> dict[str, Any]:
     """Soglia EV dinamica: parte dalla base e puo' solo SALIRE.
 
     Ritorna `{base_ev_min, ev_min, ev_multiplier, dynamic_reason}`. La
@@ -123,7 +125,7 @@ def dynamic_ev_min(*, depth_usdc: Optional[float] = None,
     la riferimento). Deterministico e senza metriche inventate: se un dato
     manca, quel componente non aggiunge nulla.
     """
-    base = base_ev_min(market)
+    base = base_ev_min(market, league)
     mult = 1.0
     reasons: list[str] = []
 
@@ -342,7 +344,8 @@ class BrainAgent:
         ev = _signal_ev(signal)
         dyn = dynamic_ev_min(depth_usdc=signal.depth_usdc,
                              velocity_pct_min=signal.velocity_pct_min,
-                             market=signal.market)
+                             market=signal.market,
+                             league=getattr(signal, "league", ""))
         if ev is not None and ev < dyn["ev_min"]:
             logger.debug("brain: %s EV %.4f < soglia dinamica %.4f (%s)",
                          signal.signal_id, ev, dyn["ev_min"],

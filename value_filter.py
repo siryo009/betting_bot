@@ -331,6 +331,51 @@ def is_core_league(league: str = "") -> bool:
 
 
 # ---------------------------------------------------------------------------
+# SOGLIA EV PER TIER DI LEGA (08/10/2026) — seconda dimensione
+# ---------------------------------------------------------------------------
+# Direttiva del proprietario: oltre alla dimensione per MERCATO
+# (`EV_MIN_LIQUID` sui mercati liquidi, `EV_MIN` sul resto) la soglia EV ha una
+# seconda dimensione, il TIER della lega. Le leghe Tier-1/Core — mercati
+# efficienti e profondi — accettano un vantaggio matematico inferiore
+# (`EV_MIN_CORE`), mentre tutto il resto mantiene la soglia protettiva
+# (`EV_MIN_OTHER`).
+#
+# ⚠️ PRECEDENZA "LA PIU' SEVERA" (`max`): il tier puo' solo STRINGERE, mai
+# allargare. Conseguenze dichiarate (non un effetto collaterale):
+#   • lega core + mercato liquido (AH/OU/Totals/BTTS/ML):
+#     max(1.0%, 1.5%) = **1.5%** — piu' severo dell'`EV_MIN_LIQUID` del 04/10;
+#   • lega core + 1X2: max(2.5%, 1.5%) = 2.5% — invariato;
+#   • lega non-core (probation o sconosciuta) + qualunque mercato: vince la
+#     soglia piu' alta, quindi >= 2.5%.
+# Il tier NON abbassa MAI una soglia gia' piu' alta: una configurazione piu'
+# prudente non viene allentata da un'altra dimensione. Per un allargamento
+# reale sui core servirebbe la precedenza opposta (`min`), che e' una scelta
+# diversa — non un default silenzioso.
+#: Env: `EV_MIN_CORE` (default 1.5%) e `EV_MIN_OTHER` (default `EV_MIN`).
+EV_MIN_CORE = float(os.getenv("EV_MIN_CORE", "0.015"))
+EV_MIN_OTHER = float(os.getenv("EV_MIN_OTHER", str(EV_MIN)))
+
+
+def ev_min_for_tier(league: str = "") -> float:
+    """Soglia EV del TIER di lega: core -> `EV_MIN_CORE`, altrimenti `EV_MIN_OTHER`."""
+    return EV_MIN_CORE if is_core_league(league) else EV_MIN_OTHER
+
+
+def ev_min(league: str = "", market: str | None = None) -> float:
+    """Soglia EV EFFETTIVA: la PIU' SEVERA fra dimensione mercato e tier.
+
+    UNICA definizione della regola combinata (direttiva 08/10/2026): la usano
+    `is_sane`, il Cervello (`base_ev_min`/`dynamic_ev_min`), il multi-mercato
+    AH/OU e l'oracolo top-down. Con `max` il tier non puo' allargare una soglia
+    gia' piu' alta (mercato liquido a 1%) ne' essere allargato da un tier
+    severo: la configurazione piu' prudente vince sempre. Fail-safe su una
+    lega sconosciuta (nome vuoto o non canonico -> non e' core -> la soglia
+    protettiva).
+    """
+    return max(ev_min_for_market(market), ev_min_for_tier(league))
+
+
+# ---------------------------------------------------------------------------
 # TIER DELL'ORACOLO A PAGAMENTO (07/10/2026) — direttiva del proprietario
 # ---------------------------------------------------------------------------
 # Il gate del 05/10 riservava il refetch a pagamento (`h2h,totals,spreads`, 3
@@ -469,12 +514,15 @@ def is_sane(prob: float, odds: float, ev: float,
     - fascia quote 1.30-1.80
     - odds_movement: se la quota scende > 5%, segnale +20% (sharp money)
 
-    `market` (opzionale) seleziona la soglia EV: i mercati liquidi (AH/OU/
-    Totals/BTTS/ML) usano `EV_MIN_LIQUID` (1.0%), il resto `EV_MIN` (2.5%) —
-    vedi `ev_min_for_market`. Chiamanti storici senza `market` restano
-    esattamente come prima.
+    La soglia EV effettiva e' la PIU' SEVERA fra la dimensione MERCATO (i
+    mercati liquidi AH/OU/Totals/BTTS/ML usano `EV_MIN_LIQUID` 1.0%, il resto
+    `EV_MIN` 2.5%) e la dimensione TIER di LEGA (core `EV_MIN_CORE` 1.5%,
+    altrimenti `EV_MIN_OTHER`) — vedi `ev_min`. Chiamanti storici senza
+    `market` ne' `league` restano esattamente come prima.
     """
-    ev_min_eff = ev_min_for_market(market)
+    # Soglia EFFETTIVA: la piu' severa fra mercato (04/10) e tier di lega
+    # (08/10). `ev_min` e' l'unica definizione della regola combinata.
+    ev_min_eff = ev_min(league, market)
     # Lega vietata?
     if league and not league_allowed(league):
         return False, (f"lega '{league}' esclusa per ROI negativo "
