@@ -172,12 +172,34 @@ def is_core_league(league: Any) -> bool:
         return False
 
 
+def is_paid_oracle_league(league: Any) -> bool:
+    """True se la lega puo' ricevere un fetch a PAGAMENTO (tier configurabile).
+
+    07/10/2026: il tier ammesso non e' piu' "solo Core" cablato ma si legge da
+    `value_filter.is_paid_oracle_league` (`ORACLE_PAID_TIERS`, default `core`).
+    La definizione resta UNICA: questo wrapper non copia l'insieme di leghe.
+
+    FAIL-CLOSED come sopra: import rotto -> False, cioe' NON si spende.
+    """
+    name = str(league or "").strip()
+    if not name:
+        return False
+    try:
+        from value_filter import is_paid_oracle_league as _vf_paid
+        return bool(_vf_paid(name))
+    except Exception as exc:                                     # pragma: no cover
+        logger.warning("line_oracle: tier a pagamento non leggibile (%s): "
+                       "nessun fetch a pagamento", exc)
+        return False
+
+
 def _league_plan(now: Optional[float] = None
                  ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Piano di fetch: `(leghe da pagare, leghe escluse per tier)`.
 
     Estratto da `leagues_needing_fetch` il 06/10/2026 perche' la stessa
-    classificazione serve a DUE lettori: chi paga (che vede solo le leghe Core)
+    classificazione serve a DUE lettori: chi paga (che vede solo i tier
+    ammessi, `ORACLE_PAID_TIERS`)
     e la telemetria (che deve poter DICHIARARE quante leghe sono state escluse
     per tier: un'esclusione non misurata e' indistinguibile da un'assenza di
     pick).
@@ -207,7 +229,8 @@ def _league_plan(now: Optional[float] = None
     for p in line_picks():
         if float(p.get("kickoff_ts") or 0) > deadline:
             continue
-        # LEAGUE TIERING (06/10/2026). Il filtro mancava QUI: lo scheduler
+        # LEAGUE TIERING (06/10/2026, tier configurabile dal 07/10). Il filtro
+        # mancava QUI: lo scheduler
         # (`bot.line_oracle_job` -> `ensure_oracle_payloads`) pagava 3 crediti
         # anche per le leghe in probation, mentre il percorso on-demand
         # (`auto_bet._ondemand_fetch`) e l'harvesting li filtravano gia'. Ecco
@@ -215,7 +238,7 @@ def _league_plan(now: Optional[float] = None
         # (Tier-2) fetchata ~ogni 30' per un totale di ~39 crediti in un giorno
         # con `ORACLE_BUDGET_DAY=2`. La lega resta nel ledger e nella
         # valutazione: cambia solo CHI paga.
-        if not is_core_league(p.get("league")):
+        if not is_paid_oracle_league(p.get("league")):
             b = blocked.setdefault(p["sport_key"],
                                    {"sport_key": p["sport_key"],
                                     "league": p.get("league"), "picks": 0})
@@ -271,10 +294,12 @@ def _league_plan(now: Optional[float] = None
 
 
 def leagues_needing_fetch(now: Optional[float] = None) -> List[Dict[str, Any]]:
-    """Sport key DISTINTI con pick a linea **Core** in gioco e cache stantia.
+    """Sport key DISTINTI con pick a linea AMMESSI al pagamento e cache stantia.
 
-    Le leghe in probation NON sono qui: si valutano solo sulla cache passiva
-    (direttiva League Tiering). Restano leggibili con `leagues_blocked_by_tier`.
+    I tier ammessi li decide `value_filter.is_paid_oracle_league`
+    (`ORACLE_PAID_TIERS`, default `core`): con il default le leghe in probation
+    NON sono qui e si valutano solo sulla cache passiva. Le leghe escluse
+    restano leggibili con `leagues_blocked_by_tier`.
     """
     return _league_plan(now)[0]
 
@@ -312,7 +337,7 @@ def ensure_oracle_payloads(max_leagues: Optional[int] = None
                            getattr(oa, "_oracle_req_day", {}).get("n", 0)}
     if tier_blocked:
         logger.info("oracolo a linea: %d leghe in gioco, %d escluse dal fetch "
-                    "a pagamento (non Tier-1/Core: valutazione solo sulla "
+                    "a pagamento (tier non ammesso: valutazione solo sulla "
                     "cache passiva) — %s", len(pending), len(tier_blocked),
                     ", ".join(f"{b['league']} ({b['picks']})"
                               for b in tier_blocked[:4]))

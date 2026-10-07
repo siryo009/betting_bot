@@ -357,13 +357,13 @@ def test_summary_aggrega_per_azione_e_rifiuto(tmp_path, monkeypatch):
     osk.record_skip(_pick(match_id="c"), "linea", action="refused",
                     refusal="checkpoint non aperto (140')")
     osk.record_skip(_pick(match_id="d"), "no_oracle/EXPIRED_CACHE",
-                    action="tier_not_core")
+                    action="tier_not_paid")
     s = osk.summary(days=1)
-    assert s["by_action"] == {"refused": 2, "fetched": 1, "tier_not_core": 1}
+    assert s["by_action"] == {"refused": 2, "fetched": 1, "tier_not_paid": 1}
     assert s["by_refusal"] == {"checkpoint non aperto (150')": 1,
                               "checkpoint non aperto (140')": 1}
     txt = osk.format_report(days=1)
-    assert "fetch on-demand:" in txt and "tier_not_core 1" in txt
+    assert "fetch on-demand:" in txt and "tier_not_paid 1" in txt
     assert "rifiuti dichiarati:" in txt
 
 
@@ -372,9 +372,9 @@ def test_la_transizione_di_azione_non_e_un_duplicato(tmp_path, monkeypatch):
     monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
     osk.reset_dedup()
     assert osk.record_skip(_pick(), "no_oracle/EXPIRED_CACHE",
-                           action="tier_not_core") is not None
+                           action="tier_not_paid") is not None
     assert osk.record_skip(_pick(), "no_oracle/EXPIRED_CACHE",
-                           action="tier_not_core") is None      # duplicato
+                           action="tier_not_paid") is None      # duplicato
     assert osk.record_skip(_pick(), "no_oracle/EXPIRED_CACHE",
                            action="fetched") is not None
     assert osk.summary(days=1)["events"] == 2
@@ -384,6 +384,6 @@ def test_note_top_down_skip_propaga_l_azione(tmp_path, monkeypatch):
     monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
     import auto_bet
     auto_bet._note_top_down_skip(_pick(), "no_oracle/EXPIRED_CACHE",
-                                 detail="d", action="tier_not_core")
+                                 detail="d", action="tier_not_paid")
     row = osk.iter_events(days=1)[0]
-    assert row["action"] == "tier_not_core"
+    assert row["action"] == "tier_not_paid"

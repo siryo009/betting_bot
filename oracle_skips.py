@@ -111,7 +111,7 @@ def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
     transizione e' l'informazione utile).
 
     `action`/`refusal` (06/10/2026) sono l'ESITO STRUTTURATO del fetch
-    on-demand tentato per quel pick (`fetched`, `refused`, `tier_not_core`,
+    on-demand tentato per quel pick (`fetched`, `refused`, `tier_not_paid`,
     `outside_window`, `not_recoverable`, `tier_unreadable`, `error`) e, per i
     rifiuti, la causa dichiarata dal gate (`budget oracolo esaurito (...)`, i
     checkpoint, la dedup...). Prima quell'informazione viveva solo nel TESTO

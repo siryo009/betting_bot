@@ -488,7 +488,7 @@ def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
     Import pigro e doppia cintura: la telemetria non deve MAI fermare un giro.
 
     `action`/`refusal` (06/10/2026) sono l'ESITO STRUTTURATO dell'eventuale
-    fetch on-demand (`fetched`/`refused`/`tier_not_core`/...). Prima esisteva
+    fetch on-demand (`fetched`/`refused`/`tier_not_paid`/...). Prima esisteva
     solo dentro il testo di `detail`: leggibile a occhio, non contabile.
     """
     try:
@@ -530,9 +530,10 @@ def _ondemand_fetch(pick: dict, info: dict, enabled: bool,
     l'unica leva e' SPENDERE MEGLIO. Qui si paga solo quando servirebbe davvero:
       - la diagnosi dichiara il caso RECUPERABILE (`recoverable`: dato scaduto
         per il TTL dinamico oppure partita mai scaricata);
-      - la LEGA e' **Tier-1/Core** (`value_filter.is_core_league`, 05/10/2026):
-        il refetch a pagamento non si fa per una lega in probation, che si
-        valuta solo sulla cache passiva;
+      - la LEGA e' ammessa al pagamento (`value_filter.is_paid_oracle_league`,
+        tier configurabile `ORACLE_PAID_TIERS`, default `core`): con il default
+        il refetch non si fa per una lega in probation, che si valuta solo
+        sulla cache passiva;
       - il pick e' nella FINESTRA ESECUTIVA (`pick_window == "within"`): fuori
         finestra il refetch sarebbe speso per una partita non ordinabile oggi
         (il gate gira su tutto il board, non solo sui pick in finestra);
@@ -564,23 +565,25 @@ def _ondemand_fetch(pick: dict, info: dict, enabled: bool,
         if pick_window(pick) != "within":
             out["action"] = "outside_window"
             return ""
-        # LEAGUE TIERING (05/10/2026): solo le leghe Core pagano il refetch.
-        # Fail-closed se il tier non e' leggibile: una spesa non autorizzata
-        # non deve passare per un errore di import.
+        # LEAGUE TIERING (05/10/2026, tier configurabile dal 07/10): pagano solo
+        # le leghe ammesse (`ORACLE_PAID_TIERS`, default `core`). Fail-closed se
+        # il tier non e' leggibile: una spesa non autorizzata non deve passare
+        # per un errore di import.
         try:
-            from value_filter import is_core_league
-            core = bool(is_core_league(str(pick.get("league") or "")))
+            from value_filter import is_paid_oracle_league
+            paid = bool(is_paid_oracle_league(str(pick.get("league") or "")))
         except Exception as exc:
             logger.debug("auto_bet: tier di lega non leggibile (%s): "
                          "nessun refetch a pagamento", exc)
             out["action"] = "tier_unreadable"
             return (" — fetch on-demand non eseguita: tier di lega non "
                     "leggibile (fail-closed)")
-        if not core:
-            out["action"] = "tier_not_core"
+        if not paid:
+            out["action"] = "tier_not_paid"
             return (f" — fetch on-demand non eseguita: lega "
-                    f"'{pick.get('league') or '?'}' non Tier-1/Core "
-                    f"(valutazione solo sulla cache passiva)")
+                    f"'{pick.get('league') or '?'}' non ammessa al refetch a "
+                    f"pagamento (ORACLE_PAID_TIERS; valutazione solo sulla "
+                    f"cache passiva)")
         import line_oracle
         res = line_oracle.fetch_for_pick(pick, code=_oracle_code(info))
     except Exception:
@@ -1258,7 +1261,7 @@ def _harvest_oracle_board(board: list[dict]) -> dict:
         import line_oracle
         if not line_oracle.ondemand_enabled():
             return out
-        from value_filter import is_core_league
+        from value_filter import is_paid_oracle_league
         from sx_signals import league_to_sport
     except Exception as exc:                                     # pragma: no cover
         logger.debug("auto_bet: harvesting non disponibile (%s)", exc)
@@ -1274,8 +1277,8 @@ def _harvest_oracle_board(board: list[dict]) -> dict:
                 continue
             if pick_window(pick) != "within":
                 continue                     # fuori finestra: non si ordina
-            if not is_core_league(str(pick.get("league") or "")):
-                continue                     # Tier-2/3: solo cache passiva
+            if not is_paid_oracle_league(str(pick.get("league") or "")):
+                continue                     # tier non ammesso: solo cache passiva
             if _sx_prefilter(pick) is not None:
                 continue                     # non ordinabile: nessuna spesa
             sport = league_to_sport(str(pick.get("league") or ""))

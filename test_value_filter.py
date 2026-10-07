@@ -380,3 +380,41 @@ class TestStrategiaPerLega:
         from value_filter import is_sane
         ok, reason = is_sane(0.57, 2.00, 0.14, market_prob=0.52, league="Premier League")
         assert not ok and "quota troppo alta" in reason
+
+
+class TestOracoloAPagamento:
+    """`ORACLE_PAID_TIERS` (07/10/2026): CHI puo' ricevere un refetch pagato.
+
+    Prima erano solo le leghe Core cablate; ora il tier ammesso e' una
+    configurazione, con default prudente (`core`).
+    """
+
+    def test_default_core(self, monkeypatch):
+        import value_filter
+        monkeypatch.delenv("ORACLE_PAID_TIERS", raising=False)
+        assert value_filter.oracle_paid_tiers() == frozenset({"core"})
+        assert value_filter.is_paid_oracle_league("Premier League") is True
+        assert value_filter.is_paid_oracle_league("Liga MX") is False
+
+    def test_probation_quando_dichiarata(self, monkeypatch):
+        import value_filter
+        monkeypatch.setenv("ORACLE_PAID_TIERS", "core,probation")
+        assert value_filter.is_paid_oracle_league("Liga MX") is True
+        assert value_filter.is_paid_oracle_league("MLS") is True
+        assert value_filter.is_paid_oracle_league("Premier League") is True
+        # Una lega VIETATA (ROI misurato negativo) non e' in nessun tier.
+        assert value_filter.is_paid_oracle_league("Serie A") is False
+        assert value_filter.is_paid_oracle_league("La Liga") is False
+
+    def test_valore_vuoto_o_ignoto_ricade_sul_default(self, monkeypatch):
+        import value_filter
+        for raw in ("", "   ", "core,", "pippo", "core,pippo", ","):
+            monkeypatch.setenv("ORACLE_PAID_TIERS", raw)
+            assert value_filter.oracle_paid_tiers() == frozenset({"core"}), raw
+
+    def test_coerente_col_tier_della_lega(self, monkeypatch):
+        import value_filter
+        monkeypatch.setenv("ORACLE_PAID_TIERS", "core,probation")
+        for lg in ("Premier League", "Liga MX", "Serie A", "Inventata", ""):
+            assert value_filter.is_paid_oracle_league(lg) is (
+                value_filter.league_tier(lg) in value_filter.oracle_paid_tiers()), lg

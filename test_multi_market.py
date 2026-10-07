@@ -528,17 +528,33 @@ class TestPreferenzaLineeOracle:
         assert mm._prefer_oracle_lines({"home": HOME, "away": AWAY}, "OU",
                                        [g25, g30]) == [g25, g30]
 
-    def test_nessun_gruppo_prezzabile_non_scarta(self, tmp_path):
-        """Oracolo NOTO senza linee utili: l'ordine di prima resta.
+    def test_nessun_gruppo_prezzabile_scarta(self, tmp_path):
+        """Oracolo NOTO senza linee utili: NESSUN gruppo (07/10/2026).
 
-        Conservativo di proposito: la telemetria del ledger non si perde, a
-        impedire l'ordine ci pensa `live_picks`.
+        Prima si tornava a `groups` e si registrava come GIOCABILE un candidato
+        che non poteva mai diventare un ordine (l'intersezione SX/Pinnacle era
+        vuota). Ora `_prefer_oracle_lines` torna `[]` e `_ledger_rows` degrada
+        il candidato piu' forte a `rejected`: la telemetria del perche' resta,
+        il pick non nasce "giocabile".
         """
         _write_oracle_cache(tmp_path, totals=(9.5,))
         g25 = [_cand("OU", 2.5, "over"), _cand("OU", 2.5, "under")]
         g30 = [_cand("OU", 3.0, "over"), _cand("OU", 3.0, "under")]
         assert mm._prefer_oracle_lines({"home": HOME, "away": AWAY}, "OU",
-                                       [g25, g30]) == [g25, g30]
+                                       [g25, g30]) == []
+
+    def test_ledger_degrada_la_linea_non_prezzabile(self, tmp_path):
+        """Oracolo noto e nessuna linea prezzabile -> riga `rejected`."""
+        _write_oracle_cache(tmp_path, totals=(9.5,))
+        fixture = {"id": FIXTURE, "home": HOME, "away": AWAY,
+                   "commence": "2030-01-01T20:00:00Z", "league": "Premier League"}
+        best = _cand("OU", 2.5, "over", ev=0.05)
+        other = _cand("OU", 3.0, "under", ev=0.04)
+        rows = mm._ledger_rows(fixture, [best, other])
+        assert len(rows) == 1
+        assert rows[0]["status"] == "rejected"
+        assert rows[0]["playable"] is False
+        assert rows[0]["line"] == 2.5          # il candidato piu' forte
 
     def test_ledger_registra_la_linea_prezzabile(self, tmp_path):
         """`_ledger_rows` sceglie il gruppo prezzabile invece del primo."""

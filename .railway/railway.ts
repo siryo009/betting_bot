@@ -304,6 +304,14 @@ export default defineRailway(() => {
       // preserve(), un `config apply` distruggerebbe gli override operativi.
       ORACLE_ENABLED: preserve(),
       ORACLE_BUDGET_DAY: preserve(),
+      // TIER ammessi al refetch a PAGAMENTO (07/10/2026, `ORACLE_PAID_TIERS`):
+      // CSV di `core`/`probation`, default `core` (comportamento storico).
+      // NON cambia la SPESA (budget e tetto per lega restano gli stessi),
+      // cambia l'ALLOCAZIONE delle unita' gia' pagate: con `core,probation`
+      // una lega in probation in finestra puo' ricevere un fetch. Da qui la
+      // necessita' di preserve(): un `config apply` non deve spegnere (o
+      // accendere) la spesa sulle probation in silenzio.
+      ORACLE_PAID_TIERS: preserve(),
       // Tetto di CONCENTRAZIONE per lega (06/10/2026). Il tetto giornaliero
       // conta CHIAMATE, non leghe: misurato in produzione due fetch sulla
       // stessa lega (UEFA Nations League) a 5 minuti di distanza hanno

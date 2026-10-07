@@ -421,7 +421,23 @@ class TestTieringNelPiano:
 
         def _boom(_name):
             raise RuntimeError("value_filter rotto")
-        monkeypatch.setattr(value_filter, "is_core_league", _boom)
+        monkeypatch.setattr(value_filter, "is_paid_oracle_league", _boom)
+        assert line_oracle.leagues_needing_fetch(time.time()) == []
+
+    def test_tier_a_pagamento_configurabile(self, monkeypatch, tmp_path):
+        """`ORACLE_PAID_TIERS` decide CHI paga: le probation restano escluse
+        col default `core` e vengono pagate quando il tier e' dichiarato."""
+        import line_oracle
+        monkeypatch.setattr("config.DATA_DIR", tmp_path)
+        monkeypatch.setattr(line_oracle, "line_picks",
+                            lambda: [self._pick("Argentina Primera")])
+        assert line_oracle.leagues_needing_fetch(time.time()) == []
+        monkeypatch.setenv("ORACLE_PAID_TIERS", "core,probation")
+        assert [x["sport_key"] for x in
+                line_oracle.leagues_needing_fetch(time.time())] == ["soccer_a"]
+        # Una lega VIETATA (ROI misurato negativo) non paga in nessun caso.
+        monkeypatch.setattr(line_oracle, "line_picks",
+                            lambda: [self._pick("Serie A")])
         assert line_oracle.leagues_needing_fetch(time.time()) == []
 
     def test_il_piano_dichiara_le_escluse(self, monkeypatch, tmp_path):
@@ -1660,17 +1676,35 @@ class TestLeagueTiering:
                                 or {"fetched": True, "reason": "ok"}))
         rec = {"reason": "no_oracle/EXPIRED_CACHE", "recoverable": True}
         out = auto_bet._ondemand_fetch(self._pick("Liga MX"), rec, True)
-        assert "non Tier-1/Core" in out and "cache passiva" in out
+        assert "non ammessa al refetch a pagamento" in out
+        assert "ORACLE_PAID_TIERS" in out and "cache passiva" in out
         assert paid == []
+
+    def test_lega_probation_paga_se_il_tier_lo_ammette(self, monkeypatch):
+        """`ORACLE_PAID_TIERS=core,probation` sblocca la spesa sulle probation."""
+        import auto_bet, line_oracle
+        monkeypatch.setenv("ORACLE_PAID_TIERS", "core,probation")
+        paid = []
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        monkeypatch.setattr(line_oracle, "fetch_for_pick",
+                            lambda p, now=None, code=None: (
+                                paid.append(p["league"])
+                                or {"fetched": True, "reason": "ok"}))
+        rec = {"reason": "no_oracle/EXPIRED_CACHE", "recoverable": True}
+        out = auto_bet._ondemand_fetch(self._pick("Liga MX"), rec, True)
+        assert "FETCH ON-DEMAND" in out and paid == ["Liga MX"]
 
     def test_lega_vietata_non_paga(self, monkeypatch):
         import auto_bet, line_oracle
+        paid = []
         monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
         monkeypatch.setattr(line_oracle, "fetch_for_pick",
-                            lambda p, now=None, code=None: {"fetched": True})
+                            lambda p, now=None, code=None: (
+                                paid.append(p["league"]) or {"fetched": True}))
         rec = {"reason": "no_oracle/EXPIRED_CACHE", "recoverable": True}
         out = auto_bet._ondemand_fetch(self._pick("Serie A"), rec, True)
-        assert "non Tier-1/Core" in out
+        assert "non ammessa al refetch a pagamento" in out
+        assert paid == []
 
     def test_tier_non_leggibile_non_paga(self, monkeypatch):
         """Fail-closed: una spesa non autorizzata non passa per un import rotto."""
@@ -1715,7 +1749,7 @@ class TestEsitoStrutturatoDelFetch:
         act = {}
         auto_bet._ondemand_fetch(self._pick("Liga MX"),
                                  {"recoverable": True}, True, out=act)
-        assert act == {"action": "tier_not_core"}
+        assert act == {"action": "tier_not_paid"}
 
     def test_fuori_finestra(self, monkeypatch):
         import auto_bet
@@ -1769,7 +1803,7 @@ class TestEsitoStrutturatoDelFetch:
         pick = dict(self._pick("Liga MX"), commence="x")
         v = auto_bet._top_down_eval(pick, fetch_missing=True)
         assert v.get("ok") is False
-        assert v.get("action") == "tier_not_core"
+        assert v.get("action") == "tier_not_paid"
 
     def test_senza_out_il_ritorno_e_la_stringa(self, monkeypatch):
         """Retrocompatibilita': la firma a 3 argomenti resta valida."""
@@ -1777,7 +1811,8 @@ class TestEsitoStrutturatoDelFetch:
         monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
         out = auto_bet._ondemand_fetch(self._pick("Liga MX"),
                                        {"recoverable": True}, True)
-        assert isinstance(out, str) and "non Tier-1/Core" in out
+        assert isinstance(out, str)
+        assert "non ammessa al refetch a pagamento" in out
 
 
 # ---------------------------------------------------------------------------

@@ -1148,20 +1148,26 @@ def _prefer_oracle_lines(fixture: Dict[str, Any], market_type: str,
     gate top-down risponde `linea`). Preferire le linee prezzabili evita di
     registrare come giocabile un candidato che non lo e'.
 
-    CONSERVATIVO per costruzione: se l'oracolo e' IGNOTO per la partita (nessuna
-    cache fresca) l'ordine resta quello di prima (`_group_rank`: linea main,
-    poi liquidita'); se l'oracolo e' NOTO ma NESSUN gruppo e' prezzabile si
-    torna comunque all'ordine di prima, senza scartare nulla — la telemetria
-    del ledger resta completa e a impedire l'ordine ci pensa `live_picks`
-    (fail-closed).
+    DUE esiti, e sono DIVERSI (07/10/2026):
+    - oracolo IGNOTO per la partita (nessuna cache fresca) -> si torna `groups`
+      invariati: non si conclude nulla, il gate a valle resta fail-closed;
+    - oracolo NOTO e NESSUNA linea prezzabile -> si torna `[]`. Prima si
+      tornava a `groups`, cioe' si registrava come GIOCABILE un candidato che
+      non poteva MAI diventare un ordine: `live_picks` lo scarta con
+      `_line_priceable`, ma intanto gonfiava i conteggi "giocabili", le
+      statistiche e il rumore del gate top-down. Misurato il 06-07/10: gli
+      scarti in finestra della notte (MLS) erano TUTTI di questa classe — SX
+      quota una griglia a passi di 0,5 mentre Pinnacle pubblicava la sola
+      linea `3.25`, quindi l'intersezione era vuota. Ora `_ledger_rows` degrada
+      il candidato piu' forte a `rejected`: la telemetria del perche' resta,
+      il pick non nasce piu' "giocabile".
     """
     known = _oracle_lines_for(fixture, market_type)
     if not known:
         return groups
-    preferred = [g for g in groups
-                 if any(abs(float(c.get("line") or 0.0) - ln) < 1e-6
-                        for c in g for ln in known)]
-    return preferred or groups
+    return [g for g in groups
+            if any(abs(float(c.get("line") or 0.0) - ln) < 1e-6
+                   for c in g for ln in known)]
 
 
 def _ledger_rows(fixture: Dict[str, Any],
@@ -1185,12 +1191,44 @@ def _ledger_rows(fixture: Dict[str, Any],
             continue
         playable = [g for g in groups if any(c.get("playable") for c in g)]
         if playable:
-            out.extend(_prefer_oracle_lines(fixture, market_type,
-                                            playable)[0])
+            pref = _prefer_oracle_lines(fixture, market_type, playable)
+            if pref:
+                out.extend(pref[0])
+                continue
+            # ORACOLO NOTO, nessuna linea prezzabile: nessun pick di questo
+            # mercato potra' diventare un ordine. Si registra comunque il
+            # candidato piu' forte, DEGRADATO a non giocabile (07/10/2026).
+            best = max(playable, key=lambda g: max(float(c["ev"]) for c in g))
+            out.append(_demote_unpriceable(fixture, market_type,
+                                           max(best, key=lambda c: float(c["ev"]))))
         else:
             best = max(groups, key=lambda g: max(float(c["ev"]) for c in g))
             out.append(max(best, key=lambda c: float(c["ev"])))
     return out
+
+
+def _demote_unpriceable(fixture: Dict[str, Any], market_type: str,
+                        cand: Dict[str, Any]) -> Dict[str, Any]:
+    """Rende NON giocabile un candidato la cui linea l'oracolo non prezza.
+
+    Il ledger `predictions` non ha una colonna per la causa, quindi il motivo
+    viene DICHIARATO nel log (una riga per fixture/mercato) e il verdetto
+    diventa `rejected`: la riga resta (telemetria del perche', diagnosi per
+    mercato) ma non entra in nessun conteggio "giocabile", non alimenta le
+    statistiche dei giocabili e non arriva mai alla corsia d'ordine.
+    """
+    try:
+        logger.info("multi_market: %s %s linea %s del mercato %s non e' "
+                    "prezzata dall'oracolo Pinnacle (linee note: %s) — "
+                    "registrato come NON giocabile", fixture.get("id"),
+                    cand.get("esito_key"), cand.get("line"), market_type,
+                    sorted(_oracle_lines_for(fixture, market_type) or []))
+    except Exception:
+        pass
+    demoted = dict(cand)
+    demoted["status"] = "rejected"
+    demoted["playable"] = False
+    return demoted
 
 
 def _persist(fixture: Dict[str, Any], cands: Sequence[Dict[str, Any]]) -> int:

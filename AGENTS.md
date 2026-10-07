@@ -9294,3 +9294,74 @@ blocca, telemetria rotta che non ferma il refresh, tripwire sul sorgente). File:
 **77 verdi**; lotto `tennis_lane`+`bot`+`credit_diagnose`+`railway_drift_check`
 = **189 passed**. `DEPLOY.md` §1quater aggiornato (il tennis ora compare nel
 profilo di consumo e fra le voci attribuibili).
+
+### Follow-up oracolo: pick non ordinabili, misura, tier a pagamento configurabile (07/10/2026)
+
+Tre direttive applicate in sequenza dopo il fix "rifiuti pre-HTTP + tetto per
+lega + telemetria budget" (`82ef2ae`, gia' deployato).
+
+**1) I PICK NON NASCONO PIU' NON ORDINABILI (`multi_market.py`).**
+`_prefer_oracle_lines` aveva due esiti ma ne confondeva uno: oracolo NOTO e
+nessuna linea prezzabile tornava a `groups`, cioe' registrava come **giocabile**
+un candidato che non poteva MAI diventare un ordine (`live_picks` lo scartava
+dopo con `_line_priceable`, ma intanto gonfiava i conteggi "giocabili", le
+statistiche e i rumori del gate top-down). Ora:
+- **oracolo IGNOTO** (nessuna cache fresca) -> `groups` invariati: non si
+  conclude nulla, il gate a valle resta fail-closed (invariato);
+- **oracolo NOTO e NESSUNA linea prezzabile** -> `[]` e `_ledger_rows` **degrada**
+  il candidato piu' forte con la nuova `_demote_unpriceable` (`status="rejected"`,
+  `playable=False`, log INFO con fixture/esito/linea/mercato/linee note). La
+  telemetria del PERCHE' resta (il ledger non ha una colonna per la causa),
+  il pick non nasce piu' "giocabile".
+
+**2) `line_intersection.py` (NUOVO) — la misura.** Sola LETTURA (`mode=ro`),
+offline, zero crediti: quantifica l'intersezione fra la griglia di SX e le
+linee prezzate da Pinnacle, per `(fixture, mercato)` OU/AH. Quattro esiti:
+`unknown` (oracolo mai pagato per la lega), `oracle_empty` (cache presente ma
+Pinnacle non prezza alcuna linea), `no_intersection` (**il caso MLS del
+06-07/10**: SX a passi di 0,5 vs Pinnacle `3.25`), `priceable`. Il KPI e'
+`picks_playable_unpriceable` (segnali marcati giocabili con linea che l'oracolo
+non prezza) e `line_coverage_pct`. Delega a `pinnacle_oracle.oracle_lines`
+(nessuna regola copiata) e a `multi_market.order_target` per la linea del pick.
+CLI `--days/--json/--db`, exit 1 se il DB non e' leggibile.
+
+**3) TIER A PAGAMENTO CONFIGURABILE (`value_filter.py` + `line_oracle.py` +
+`auto_bet.py`).** `ORACLE_PAID_TIERS` (CSV `core`/`probation`, default `core`)
+con `oracle_paid_tiers()` (parsing prudente: assente/vuoto/sconosciuto ->
+default, nomi ignoti scartati con warning) e `is_paid_oracle_league()`
+(**UNICA definizione**, `league_tier(league) in oracle_paid_tiers()`).
+`line_oracle._league_plan`, `line_oracle.is_paid_oracle_league` (wrapper
+fail-closed) e `auto_bet._ondemand_fetch` (nuovo motivo `tier_not_paid`)
+leggono da li': i due percorsi che SPENDONO non possono divergere su CHI paga.
+⚠️ **Cambiare `ORACLE_PAID_TIERS` NON aumenta la spesa**: budget
+(`ORACLE_BUDGET_DAY`) e tetto per lega (`ORACLE_MAX_CALLS_PER_LEAGUE`) restano
+gli stessi e `_league_plan` ordina per kickoff crescente — cambia solo
+l'ALLOCAZIONE delle unita' gia' pagate.
+**BUG reale trovato dai test**: `value_filter` non aveva un `logger` (il
+warning sui tier ignoti sollevava `NameError` nel percorso della guardia di
+spesa). Aggiunti `import logging` + `logger = logging.getLogger(__name__)`.
+
+**IaC**: `ORACLE_PAID_TIERS: preserve()` in `.railway/railway.ts` (blocco
+oracolo). `railway config plan` = **already up to date** (0 to destroy).
+
+**Test**: `test_line_intersection.py` **NUOVO (21 verdi, OFFLINE**: la
+connessione RIFIUTA una `UPDATE`, sorgente senza `INSERT/UPDATE/DELETE` ne'
+rete/ordini) + `TestOracoloAPagamento` in `test_value_filter.py` (5) + casi
+nuovi in `test_line_oracle.py` (tier configurabile nel piano e nel fetch
+on-demand) + `test_multi_market.py` (nuova semantica `[]` e degradazione a
+`rejected`). Regressioni verdi: 466 (oracolo/odds/top_down/ou_exclusion) +
+253 (auto_bet×3, t60, capital_enclosure, order_watch, aggressive_kelly,
+risk_guards, favourites_only) + 440 (bot, railway_drift, secret_hygiene,
+steam_move, pinnacle_api, tennis_lane, multi_market, market_shadow).
+`compileall` OK, 0 marker di conflitto.
+
+**⚠️ COSA NON RISOLVE, misurato il 07/10 (00:14 UTC).** Nel palinsesto
+notturno i soli pick in finestra T-180..T-2 erano **MLS Chicago
+Fire-Vancouver** (`sx-L20297363`), 2 OU `strong_value` — e quella partita ha
+**intersezione linee VUOTA** (Pinnacle pubblica `totals 3.25` e `spreads +0.25`,
+SX quota `2.0/2.5/3.0/3.5/4.0/4.5/5.0` e AH a passi di 0,5): **0 ordini
+ordinabili a qualunque budget**. Nessuna modifica di codice lo cambia. Il primo
+pick potenzialmente ordinabile e' il **Brasileirao del 07/10** (22:30Z
+`sx-L20175865` Home +0.5, 23:30Z `sx-L20175875` Under 3.5), lega **probation**:
+per coprirlo serve `ORACLE_PAID_TIERS=core,probation` (a costo invariato) e
+un'intersezione di linee non vuota.

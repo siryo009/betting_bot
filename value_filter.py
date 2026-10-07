@@ -1,5 +1,6 @@
 """Value bet filter e Kelly Criterion Pro"""
 
+import logging
 import os
 from typing import List, Dict, Any
 
@@ -12,6 +13,8 @@ from market_calib import (
     MARKET_EDGE_STRONG,
     LEAGUE_EFFICIENCY,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # === STRATEGIA BASE ===
@@ -325,6 +328,62 @@ def is_core_league(league: str = "") -> bool:
     quindi non si puo' negare una lega Core per come la scrive la fonte.
     """
     return league_tier(league) == "core"
+
+
+# ---------------------------------------------------------------------------
+# TIER DELL'ORACOLO A PAGAMENTO (07/10/2026) — direttiva del proprietario
+# ---------------------------------------------------------------------------
+# Il gate del 05/10 riservava il refetch a pagamento (`h2h,totals,spreads`, 3
+# crediti) alle sole leghe Core. La misura del 06/10/07 mostra che questo
+# escludeva TUTTI i candidati a linea realmente in finestra: MLS e Brasileirao
+# (probation) erano gli unici pick OU/AH della notte, e restavano non
+# prezzabili per scelta di tier.
+#
+# ⚠️ CAMBIARE QUESTO VALORE **NON** AUMENTA LA SPESA: il budget giornaliero
+# (`odds_api.ORACLE_BUDGET_DAY`) e il tetto per lega
+# (`ORACLE_MAX_CALLS_PER_LEAGUE`) restano identici. Cambia solo l'ALLOCAZIONE
+# delle unita' gia' pagate — che vanno alla partita col kickoff piu' vicino
+# (`line_oracle._league_plan` ordina per kickoff crescente), non al tier.
+# Default `core` (comportamento invariato): includere le probation e' una
+# decisione, non un default silenzioso.
+ORACLE_PAID_TIERS_DEFAULT = "core"
+_VALID_TIERS = ("core", "probation")
+
+
+def oracle_paid_tiers() -> frozenset:
+    """Tier ammessi al refetch a PAGAMENTO (`ORACLE_PAID_TIERS`, CSV).
+
+    Fail-safe in DIREZIONE PRUDENTE: un valore assente, vuoto o con nomi
+    sconosciuti ricade sul default `core`; i nomi validi non riconosciuti
+    vengono scartati con un warning (meta' di un valore sbagliato non deve
+    accendere una spesa diversa da quella dichiarata).
+    """
+    raw = os.getenv("ORACLE_PAID_TIERS")
+    if raw is None or not str(raw).strip():
+        return frozenset({ORACLE_PAID_TIERS_DEFAULT})
+    out = set()
+    for bit in str(raw).split(","):
+        name = bit.strip().lower()
+        if not name:
+            continue
+        if name in _VALID_TIERS:
+            out.add(name)
+        else:
+            logger.warning("oracolo a pagamento: tier %r sconosciuto in "
+                           "ORACLE_PAID_TIERS=%r, ignorato (validi: %s)",
+                           name, raw, ", ".join(_VALID_TIERS))
+    return frozenset(out) if out else frozenset({ORACLE_PAID_TIERS_DEFAULT})
+
+
+def is_paid_oracle_league(league: str = "") -> bool:
+    """True se quella lega puo' ricevere un refetch a PAGAMENTO dell'oracolo.
+
+    UNICA definizione: la usano il fetch on-demand di `auto_bet` e lo
+    scheduler `line_oracle._league_plan`, cosi' i due percorsi che spendono
+    non possono divergere su CHI paga. Una lega non giocabile (blocked) non e'
+    in nessun tier ammesso -> False.
+    """
+    return league_tier(league) in oracle_paid_tiers()
 
 
 def compute_ev(prob: float, odds: float) -> float:
