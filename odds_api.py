@@ -1,7 +1,7 @@
 import json, os, time, logging, requests
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 from config import DATA_DIR, load_dotenv
 
 load_dotenv()
@@ -109,11 +109,22 @@ def oracle_cache_ttl_s(minutes_to_kickoff: Optional[float] = None) -> float:
 # giocabili chiuse/giorno su ~2-4 leghe distinte). Env per alzarlo (ogni
 # aumento va verificato contro test_budget_mensile_piano_free).
 ORACLE_BUDGET_DAY = int(os.getenv("ORACLE_BUDGET_DAY", "2"))
+# TETTO PER LEGA (06/10/2026). Il tetto giornaliero conta CHIAMATE, non leghe:
+# misurato in produzione il 06/10 due fetch su `soccer_uefa_nations_league` a
+# 5 minuti di distanza hanno consumato ENTRAMBE le unita' del budget, lasciando
+# senza oracolo le altre leghe Core con pick in finestra (AFCON: due pick
+# pronti e mai prezzati). Con questo tetto una sola lega non puo' monopolizzare
+# il budget del giorno: `ORACLE_BUDGET_DAY` resta il tetto di CREDITI (chiamate),
+# questo e' il tetto di CONCENTRAZIONE. Default **1**: con budget 2 le due
+# unita' vanno a due leghe distinte. Alzarlo (2/3) solo insieme al budget, e
+# ricordando che ogni unita' in piu' e' 3 crediti (`h2h,totals,spreads`).
+ORACLE_MAX_CALLS_PER_LEAGUE = int(os.getenv("ORACLE_MAX_CALLS_PER_LEAGUE", "1"))
 ORACLE_ENABLED = os.getenv("ORACLE_ENABLED", "1").strip().lower() \
     in ("1", "true", "yes", "on")
-# Contatore del budget oracolo del GIORNO. `n` = leghe pagate oggi (ogni lega =
-# 3 crediti). E' la voce di riferimento per il gate (`line_oracle`), per la
-# diagnosi (`_no_payload_reason`) e per la telemetria.
+# Contatore del budget oracolo del GIORNO. `n` = CHIAMATE pagate oggi (ogni
+# chiamata = 3 crediti) e `by_league` = quante ne ha pagate ogni lega. E' la
+# voce di riferimento per il gate (`line_oracle`), per la diagnosi
+# (`_no_payload_reason`) e per la telemetria.
 # ⚠️ 06/10/2026 — PERSISTENZA. Era solo in-process: ogni RIAVVIO del processo
 # (deploy, restart della piattaforma) ripartiva da `{"day": None, "n": 0}` e
 # riapriva il tetto. Misurato il 05/10: `ORACLE_BUDGET_DAY=2` e 14 fetch a
@@ -121,7 +132,15 @@ ORACLE_ENABLED = os.getenv("ORACLE_ENABLED", "1").strip().lower() \
 # taglio del budget doveva impedire. Ora il contatore e' SEMINATO dal volume
 # alla prima chiamata del giorno (`oracle_budget_used`), quindi il tetto vale
 # sul GIORNO e non sul processo.
-_oracle_req_day = {"day": None, "n": 0}
+_oracle_req_day = {"day": None, "n": 0, "by_league": {}}
+
+
+def oracle_max_calls_per_league() -> int:
+    """Tetto di chiamate per SINGOLA lega al giorno (0 = nessun tetto)."""
+    try:
+        return max(0, int(ORACLE_MAX_CALLS_PER_LEAGUE))
+    except (TypeError, ValueError):                             # pragma: no cover
+        return 1
 
 
 def oracle_budget_state_path() -> Path:
@@ -137,10 +156,10 @@ def oracle_budget_state_path() -> Path:
     return Path(DATA_DIR) / "decision" / "oracle_budget.json"
 
 
-def oracle_budget_used(day: Optional[str] = None) -> int:
-    """Leghe oracolo GIA' pagate in quel giorno (0 se lo stato non parla di oggi).
+def oracle_budget_state(day: Optional[str] = None) -> Dict[str, Any]:
+    """Stato PERSISTITO del giorno: `{n, by_league}` (zeri se non e' di oggi).
 
-    Fail-safe DICHIARATO: file assente, corrotto o di un altro giorno -> 0.
+    Fail-safe DICHIARATO: file assente, corrotto o di un altro giorno -> zeri.
     Non si inventa una spesa, ma si sceglie di non bloccare il sistema per un
     file illeggibile: il tetto resta comunque applicato, per il resto del
     processo, dal contatore in-process che questa funzione SEMINA.
@@ -149,19 +168,34 @@ def oracle_budget_used(day: Optional[str] = None) -> int:
     try:
         data = json.loads(oracle_budget_state_path().read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return 0
+        return {"n": 0, "by_league": {}}
     except Exception as exc:
         logger.warning("oracolo a linea: stato del budget illeggibile (%s)", exc)
-        return 0
+        return {"n": 0, "by_league": {}}
     if not isinstance(data, dict) or str(data.get("day") or "") != target:
-        return 0
+        return {"n": 0, "by_league": {}}
     try:
-        return max(0, int(data.get("n") or 0))
+        n = max(0, int(data.get("n") or 0))
     except (TypeError, ValueError):
-        return 0
+        n = 0
+    by_league: Dict[str, int] = {}
+    raw_bl = data.get("by_league")
+    if isinstance(raw_bl, dict):
+        for k, v in raw_bl.items():
+            try:
+                by_league[str(k)] = max(0, int(v))
+            except (TypeError, ValueError):
+                continue
+    return {"n": n, "by_league": by_league}
 
 
-def save_oracle_budget(day: str, n: int) -> bool:
+def oracle_budget_used(day: Optional[str] = None) -> int:
+    """Chiamate oracolo GIA' pagate in quel giorno (0 se lo stato non parla di oggi)."""
+    return int(oracle_budget_state(day).get("n") or 0)
+
+
+def save_oracle_budget(day: str, n: int,
+                       by_league: Optional[Dict[str, int]] = None) -> bool:
     """Persiste il consumo del giorno (scrittura atomica, mai eccezioni).
 
     La telemetria del budget non deve MAI far fallire una fetch: un errore di
@@ -172,8 +206,10 @@ def save_oracle_budget(day: str, n: int) -> bool:
         target = oracle_budget_state_path()
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
-        tmp.write_text(json.dumps({"day": str(day), "n": int(n)}),
-                       encoding="utf-8")
+        payload: Dict[str, Any] = {"day": str(day), "n": int(n)}
+        if by_league:
+            payload["by_league"] = {str(k): int(v) for k, v in by_league.items()}
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, target)
         return True
     except Exception as exc:
@@ -185,8 +221,117 @@ def reset_oracle_budget(day: Optional[str] = None) -> None:
     """Azzera il contatore del giorno su MEMORIA e volume (test/diagnostica)."""
     global _oracle_req_day
     d = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    _oracle_req_day = {"day": d, "n": 0}
-    save_oracle_budget(d, 0)
+    _oracle_req_day = {"day": d, "n": 0, "by_league": {}}
+    save_oracle_budget(d, 0, {})
+
+
+def _oracle_budget_ensure_day() -> Dict[str, Any]:
+    """Assicura che il contatore in-process sia quello del GIORNO corrente.
+
+    Idempotente: alla prima chiamata semina dal volume (un riavvio non riapre
+    il tetto), al cambio di giorno UTC riparte da zero.
+    """
+    global _oracle_req_day
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _oracle_req_day.get("day") is None:
+        state = oracle_budget_state(today)
+        _oracle_req_day = {"day": today, "n": int(state.get("n") or 0),
+                           "by_league": dict(state.get("by_league") or {})}
+    elif _oracle_req_day.get("day") != today:
+        _oracle_req_day = {"day": today, "n": 0, "by_league": {}}
+    if not isinstance(_oracle_req_day.get("by_league"), dict):
+        _oracle_req_day["by_league"] = {}
+    return _oracle_req_day
+
+
+def oracle_league_calls(sport: Optional[str]) -> int:
+    """Chiamate pagate OGGI per quella lega (0 se nessuna)."""
+    try:
+        _oracle_budget_ensure_day()
+        return int((_oracle_req_day.get("by_league") or {}).get(str(sport)) or 0)
+    except Exception:                                            # pragma: no cover
+        return 0
+
+
+def oracle_refusal(sport: Optional[str] = None) -> Optional[str]:
+    """Causa per cui l'oracolo a linea NON farebbe ALCUNA HTTP (None = libero).
+
+    UNICA definizione dei rifiuti "a monte della richiesta": budget del giorno,
+    tetto per lega, hard-stop crediti e `ORACLE_ENABLED`. Chi spende non deve
+    duplicare queste condizioni: `fetch_line_odds` le applica e
+    `line_oracle.fetch_for_pick` le INTERROGA PRIMA di consumare un checkpoint
+    (06/10/2026: un rifiuto che non ha fatto HTTP non deve bruciare un
+    tentativo — misurato su AFCON, due checkpoint T-70 spesi senza una singola
+    richiesta).
+
+    Le condizioni sono elencate nell'ORDINE in cui vanno lette per la diagnosi:
+    la prima che scatta e' la causa dichiarata.
+
+    DUE ESCLUSIONI DICHIARATE. (1) La CHIAVE the-odds-api assente e (2) il
+    filtro proattivo `should_query_sport` NON sono qui: restano difese della
+    chiamata dentro `_get_odds`. Sono condizioni d'AMBIENTE (una chiave manca
+    o i crediti sono quasi finiti = il sistema e' in conservazione, non "il
+    budget di oggi e' stato speso") e farle dipendere dal contenuto delle
+    cache renderebbe questo controllo non deterministico — esattamente cio'
+    che un gate di spesa non deve essere. Conseguenza nota e accettata: in
+    quei due casi un checkpoint puo' essere consumato senza HTTP.
+    """
+    try:
+        if not ORACLE_ENABLED:
+            return "ORACLE_ENABLED=0"
+    except Exception:                                            # pragma: no cover
+        return None
+    try:
+        if credits_hard_stopped():
+            return "hard-stop crediti"
+    except Exception:                                            # pragma: no cover
+        pass
+    try:
+        state = _oracle_budget_ensure_day()
+        used = int(state.get("n") or 0)
+        cap = max(0, int(ORACLE_BUDGET_DAY))
+        if used >= cap:
+            logger.info("oracolo a linea: budget giornaliero %s esaurito "
+                        "(%s chiamate), rinvio a domani", cap, used)
+            return f"budget oracolo esaurito ({used}/{cap} oggi)"
+        if sport:
+            k = int((state.get("by_league") or {}).get(str(sport)) or 0)
+            per_cap = oracle_max_calls_per_league()
+            if per_cap > 0 and k >= per_cap:
+                return f"tetto per lega raggiunto ({k}/{per_cap} oggi)"
+    except Exception:                                            # pragma: no cover
+        pass
+    return None
+
+
+def oracle_budget_status() -> Dict[str, Any]:
+    """Istantanea del budget oracolo per la telemetria (`credit_diagnose`).
+
+    Dichiara usato/tetto, leghe distinte, per-lega, tetto di concentrazione e i
+    crediti STIMATI consumati oggi (`h2h,totals,spreads` = 3). Senza questa
+    riga l'esaurimento del budget resta invisibile: nel report dei crediti
+    l'oracolo appariva solo come generica sorgente `oracle` nella telemetria
+    delle chiamate, mai come tetto saturato (06/10/2026).
+    """
+    out: Dict[str, Any] = {"day": None, "used": 0, "cap": 0, "left": 0,
+                          "leagues": 0, "by_league": {},
+                          "max_calls_per_league": oracle_max_calls_per_league(),
+                          "credits_per_call": 1 + int(ORACLE_EXTRA_CREDITS),
+                          "credits_used_today": 0, "exhausted": False}
+    try:
+        state = _oracle_budget_ensure_day()
+        bl = dict(state.get("by_league") or {})
+        used = int(state.get("n") or 0)
+        cap = max(0, int(ORACLE_BUDGET_DAY))
+        per_call = 1 + int(ORACLE_EXTRA_CREDITS)
+        out.update({"day": state.get("day"), "used": used, "cap": cap,
+                    "left": max(0, cap - used), "leagues": len(bl),
+                    "by_league": bl,
+                    "credits_used_today": round(used * per_call, 1),
+                    "exhausted": used >= cap})
+    except Exception as exc:                                     # pragma: no cover
+        out["error"] = str(exc)
+    return out
 # HARD STOP (direttiva del proprietario, 21/09/2026): sotto questa soglia
 # NESSUNA chiamata HTTP verso the-odds-api, indipendentemente dalla
 # rotazione ridotta. Il piano free risponde 429 quando i crediti finiscono e
@@ -883,24 +1028,11 @@ def fetch_line_odds(sport, frm, to, ttl_s: Optional[float] = None):
     # Budget giornaliero dedicato: l'oracolo a linea NON puo' sfinire la
     # stessa risorsa (crediti) della ricerca — un tetto proprio rende il
     # costo massimo misurabile a prescindere da quante leghe abbiano pick.
-    global _oracle_req_day
-    _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if _oracle_req_day.get("day") is None:
-        # PRIMA chiamata del processo: si riparte dal consumo GIA' registrato
-        # sul volume per oggi. E' il fix del 06/10/2026: senza questo semina,
-        # un riavvio (deploy, restart della piattaforma) riapriva il tetto e
-        # il 05/10 il sistema ha pagato 14 leghe con `ORACLE_BUDGET_DAY=2`.
-        _oracle_req_day = {"day": _today, "n": oracle_budget_used(_today)}
-    elif _oracle_req_day.get("day") != _today:
-        # Cambio di giorno UTC: il tetto si riarma (il volume conserva il
-        # conteggio di ieri, che `oracle_budget_used` ignora per giorno).
-        _oracle_req_day = {"day": _today, "n": 0}
-    if _oracle_req_day["n"] >= ORACLE_BUDGET_DAY:
-        logger.info("oracolo a linea: budget giornaliero %s esaurito (%s "
-                    "leghe), rinvio a domani", ORACLE_BUDGET_DAY,
-                    _oracle_req_day["n"])
-        return [], 999
-    if not ORACLE_ENABLED:
+    # Tutti i rifiuti "a monte della richiesta" vivono in `oracle_refusal`
+    # (unica definizione, interrogabile anche da `line_oracle.fetch_for_pick`
+    # PRIMA di consumare un checkpoint).
+    refusal = oracle_refusal(sport)
+    if refusal:
         return [], 999
     # Pre-check cache: un HIT di cache NON consuma budget (zero spesa = zero
     # costo; il contatore conta SOLE le chiamate realmente fatte). La regola
@@ -917,8 +1049,13 @@ def fetch_line_odds(sport, frm, to, ttl_s: Optional[float] = None):
                                    cache_prefix=ORACLE_CACHE_PREFIX,
                                    ttl_s=ttl)
     if payload or remaining != 999:
-        _oracle_req_day["n"] += 1
-        save_oracle_budget(_oracle_req_day["day"], _oracle_req_day["n"])
+        # Consumo su ENTRAMBI i contatori: il totale (crediti) e quello della
+        # lega (concentrazione). La scrittura e' atomica e fail-safe.
+        state = _oracle_budget_ensure_day()
+        state["n"] = int(state.get("n") or 0) + 1
+        bl = state.setdefault("by_league", {})
+        bl[str(sport)] = int(bl.get(str(sport)) or 0) + 1
+        save_oracle_budget(state["day"], state["n"], bl)
     return payload, remaining
 
 def fetch_odds(sport=None, commence_time_from=None, commence_time_to=None, **kwargs):

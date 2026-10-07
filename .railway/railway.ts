@@ -304,6 +304,14 @@ export default defineRailway(() => {
       // preserve(), un `config apply` distruggerebbe gli override operativi.
       ORACLE_ENABLED: preserve(),
       ORACLE_BUDGET_DAY: preserve(),
+      // Tetto di CONCENTRAZIONE per lega (06/10/2026). Il tetto giornaliero
+      // conta CHIAMATE, non leghe: misurato in produzione due fetch sulla
+      // stessa lega (UEFA Nations League) a 5 minuti di distanza hanno
+      // consumato ENTRAMBE le unita' di `ORACLE_BUDGET_DAY=2`, lasciando senza
+      // oracolo le altre leghe Core con pick in finestra (AFCON: due pick
+      // pronti e mai prezzati). Default 1: con budget 2 le unita' vanno a due
+      // leghe distinte. Alzarlo solo insieme al budget (3 crediti per unita').
+      ORACLE_MAX_CALLS_PER_LEAGUE: preserve(),
       // Stato del budget GIORNALIERO dell'oracolo (06/10/2026). Il contatore
       // era solo in-process: ogni riavvio (deploy, restart della piattaforma)
       // riapriva il tetto e il 05/10 sono state pagate 14 leghe con

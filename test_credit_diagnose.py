@@ -242,3 +242,76 @@ def test_attribuzione_usa_il_costo_reale(log_path):
     b = cd.breakdown(days=1)
     assert b["total_credits"] == 5.0
     assert b["by_source"]["settlement"]["credits"] == 4.0
+
+
+# ------------------------------------------ budget dell'oracolo a linea (06/10)
+
+class TestBudgetOracoloNelReport:
+    """L'esaurimento del budget oracolo non deve essere invisibile.
+
+    Il 06/10 la diagnosi diceva "oracle 2 chiamate" mentre in produzione le due
+    unita' erano finite sulla STESSA lega e le altre leghe Core erano rimaste
+    senza prezzo: un numero senza il tetto (e senza le leghe distinte) non
+    racconta quella storia.
+    """
+
+    def _stato(self, monkeypatch, tmp_path, used: int, by_league: dict):
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(tmp_path / "ob.json"))
+        monkeypatch.setattr(oa, "ORACLE_BUDGET_DAY", 2)
+        monkeypatch.setattr(oa, "ORACLE_MAX_CALLS_PER_LEAGUE", 1)
+        monkeypatch.setattr(oa, "_oracle_req_day",
+                            {"day": today, "n": used,
+                             "by_league": dict(by_league)})
+
+    def test_sezione_dedicata_con_usato_tetto_e_leghe(self, monkeypatch,
+                                                     tmp_path):
+        self._stato(monkeypatch, tmp_path, 1, {"soccer_epl": 1})
+        orc = cd.oracle_budget(days=1)
+        b = orc["budget"]
+        assert b["used"] == 1 and b["cap"] == 2 and b["left"] == 1
+        assert b["leagues"] == 1 and b["by_league"] == {"soccer_epl": 1}
+        assert b["max_calls_per_league"] == 1
+        assert b["credits_used_today"] == 3.0 and b["exhausted"] is False
+
+    def test_tetto_esaurito_dichiarato(self, monkeypatch, tmp_path):
+        self._stato(monkeypatch, tmp_path, 2,
+                    {"soccer_uefa_nations_league": 2})
+        b = cd.oracle_budget(days=1)["budget"]
+        assert b["exhausted"] is True and b["left"] == 0
+        assert b["leagues"] == 1          # una sola lega si e' presa tutto
+
+    def test_rifiuti_per_causa_dagli_skips(self, monkeypatch, tmp_path):
+        self._stato(monkeypatch, tmp_path, 2, {"soccer_x": 2})
+        import oracle_skips as osk
+        osk.record_skip({"match_id": "m1", "esito_key": "Over 2",
+                         "mercato": "OU", "league": "Africa Cup of Nations"},
+                        "no_oracle", action="refused",
+                        refusal="budget oracolo esaurito (2/2 oggi)")
+        osk.record_skip({"match_id": "m2", "esito_key": "Over 1.5",
+                         "mercato": "OU", "league": "Africa Cup of Nations"},
+                        "no_oracle", action="refused",
+                        refusal="tetto per lega raggiunto (1/1 oggi)")
+        orc = cd.oracle_budget(days=1)
+        assert orc["refusals_by_class"] == {"budget oracolo esaurito": 1,
+                                            "tetto per lega raggiunto": 1}
+
+    def test_report_stampa_la_riga_oracolo(self, monkeypatch, tmp_path):
+        self._stato(monkeypatch, tmp_path, 2, {"soccer_epl": 2})
+        txt = cd.format_report(cd.diagnose(days=1))
+        assert "oracolo a linea" in txt and "TETTO ESAURITO" in txt
+        assert "per lega" in txt and "epl" in txt
+
+    def test_diagnose_include_oracolo(self, monkeypatch, tmp_path):
+        self._stato(monkeypatch, tmp_path, 0, {})
+        d = cd.diagnose(days=1)
+        assert "oracle" in d and "budget" in d["oracle"]
+        assert d["oracle"]["refusals_by_class"] == {}
+
+    def test_report_degrada_se_lo_stato_e_illeggibile(self, monkeypatch):
+        """Un errore di lettura diventa una riga d'errore, mai un traceback."""
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", "/dev/null/non-una-cartella")
+        orc = cd.oracle_budget(days=1)
+        assert "budget" in orc          # nessuna eccezione propagata
+        assert "oracolo a linea" in cd.format_report(cd.diagnose(days=1))

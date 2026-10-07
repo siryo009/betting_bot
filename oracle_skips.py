@@ -17,9 +17,12 @@ Motivi (machine-readable, mai prosa):
     con la loro chiave.
 
 DEDUP. Il giro gira ogni 60s e lo stesso pick verrebbe registrato centinaia di
-volte: si scrive UNA riga per (giorno, match_id, esito, motivo). La memo e'
-in-process (nessun I/O per giro); dopo un riavvio un pick ancora aperto puo'
-essere registrato di nuovo — e' un'ottimizzazione di volume, non correttezza.
+volte: si scrive UNA riga per (giorno, match_id, esito, motivo, finestra,
+esito del fetch, CAUSA del rifiuto). La memo e' in-process (nessun I/O per
+giro); dopo un riavvio un pick ancora aperto puo' essere registrato di nuovo —
+e' un'ottimizzazione di volume, non correttezza. La causa del rifiuto entra
+nella chiave per CLASSE (la parte stabile, senza i secondi) cosi' due rifiuti
+diversi dello stesso pick restano distinguibili senza riempire il log.
 
 Diagnostica pura: sola scrittura del proprio log, nessun ordine, nessuna
 decisione. Fail-safe totale (mai eccezioni verso il giro puntate).
@@ -78,6 +81,21 @@ def _window_bucket(in_window: Optional[bool]) -> str:
     return "in" if in_window else "out"
 
 
+def _refusal_class(refusal: Optional[str]) -> str:
+    """Classe STABILE del rifiuto, per la chiave di dedup.
+
+    Il TESTO di un rifiuto contiene valori che cambiano di secondo in secondo
+    (`dedup (73s < 120s)`, `budget oracolo esaurito (2/2 oggi)`): mettendo la
+    stringa intera nella chiave si scriverebbe una riga per ciclo di 60s —
+    esattamente il flood che il dedup esiste per evitare. Si tiene la CAUSA,
+    cioe' la parte prima della parentesi: stabile per costruzione.
+    """
+    txt = str(refusal or "").strip()
+    if not txt:
+        return ""
+    return txt.split("(", 1)[0].strip()
+
+
 def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
                 ev: Optional[float] = None,
                 in_window: Optional[bool] = None,
@@ -116,7 +134,14 @@ def record_skip(pick: dict, reason: str, *, detail: Optional[str] = None,
     # finestra): lo stesso pick puo' comparire una volta rifiutato per tier e
     # una volta, piu' tardi, con la fetch PAGATA — la transizione e'
     # l'informazione utile, non un duplicato.
-    key = f"{day}|{mid}|{esito}|{reason}|{bucket}|{act}"
+    #
+    # ⚠️ 06/10/2026 — la CAUSA del rifiuto e' nella chiave (classe stabile,
+    # non il testo che contiene i secondi). Senza, due rifiuti DIVERSI dello
+    # stesso pick collassavano in una riga e la telemetria mentiva: i due
+    # rifiuti per budget di AFCON non sono mai comparsi nel log e i conteggi
+    # mostravano il motivo vecchio ("kickoff oltre la finestra di fetch").
+    ref = _refusal_class(refusal)
+    key = f"{day}|{mid}|{esito}|{reason}|{bucket}|{act}|{ref}"
     if _SEEN.get(key):
         return None
     evt = {
@@ -197,6 +222,7 @@ def summary(days: float = 1.0) -> Dict[str, Any]:
     in_market: Dict[str, int] = defaultdict(int)
     by_action: Dict[str, int] = defaultdict(int)
     by_refusal: Dict[str, int] = defaultdict(int)
+    by_refusal_class: Dict[str, int] = defaultdict(int)
     counts = {"in": 0, "out": 0, "?": 0}
     for e in events:
         reason = str(e.get("reason") or "unknown")
@@ -210,6 +236,7 @@ def summary(days: float = 1.0) -> Dict[str, Any]:
         by_action[act] += 1
         if e.get("refusal"):
             by_refusal[str(e["refusal"])] += 1
+            by_refusal_class[_refusal_class(str(e["refusal"]))] += 1
         win = e.get("in_window")
         if win is True:
             counts["in"] += 1
@@ -229,6 +256,8 @@ def summary(days: float = 1.0) -> Dict[str, Any]:
             "by_action": dict(sorted(by_action.items(), key=lambda kv: -kv[1])),
             "by_refusal": dict(sorted(by_refusal.items(),
                                       key=lambda kv: -kv[1])),
+            "by_refusal_class": dict(sorted(by_refusal_class.items(),
+                                            key=lambda kv: -kv[1])),
             "by_league": dict(sorted(by_league.items(),
                                      key=lambda kv: -kv[1]))}
 
@@ -266,6 +295,9 @@ def format_report(days: float = 1.0) -> str:
     if s["by_refusal"]:
         lines.append("  rifiuti dichiarati: " + ", ".join(
             f"{k} {v}" for k, v in list(s["by_refusal"].items())[:3]))
+    if s.get("by_refusal_class"):
+        lines.append("  cause dei rifiuti: " + ", ".join(
+            f"{k} {v}" for k, v in list(s["by_refusal_class"].items())[:4]))
     top = list(s["by_league"].items())[:5]
     if top:
         lines.append("  per lega: " + ", ".join(f"{k} {v}" for k, v in top))

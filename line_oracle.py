@@ -550,6 +550,29 @@ def reset_checkpoints() -> None:
     _CHECKPOINT_MEMO["path"] = None
 
 
+def _pre_http_refusal(sport: Optional[str] = None) -> Optional[str]:
+    """Causa per cui la fetch NON farebbe HTTP (None = libero di procedere).
+
+    Delega a `odds_api.oracle_refusal` (UNICA definizione: budget del giorno,
+    tetto per lega, hard-stop, `ORACLE_ENABLED`, chiave, filtro proattivo).
+    Serve a NON consumare un checkpoint quando non e' partita nessuna
+    richiesta: il 06/10 le due unita' di budget si sono esaurite sulla stessa
+    lega e i checkpoint T-70 di AFCON sono stati marcati "onorati" senza una
+    singola HTTP — al giro successivo il pick era saltato per "checkpoint gia'
+    onorato", cioe' il freno anti-spreco si era mangiato l'unico tentativo
+    utile.
+
+    Fail-OPEN DICHIARATO: se `odds_api` non risponde non si blocca nulla (il
+    controllo resta comunque applicato da `fetch_line_odds`, l'unico punto
+    HTTP del progetto).
+    """
+    try:
+        import odds_api as oa
+        return oa.oracle_refusal(sport)
+    except Exception:                                            # pragma: no cover
+        return None
+
+
 def fetch_for_pick(pick: Dict[str, Any],
                    now: Optional[float] = None,
                    code: Optional[str] = None) -> Dict[str, Any]:
@@ -557,8 +580,12 @@ def fetch_for_pick(pick: Dict[str, Any],
 
     Ritorna SEMPRE un dict con `fetched` (bool) e `reason` machine-readable:
     `fetch on-demand eseguita` | `dedup (...)` | `lega non mappata` |
-    `budget oracolo esaurito` | `hard-stop crediti` | `errore fetch (...)` |
+    `budget oracolo esaurito` | `tetto per lega raggiunto` |
+    `hard-stop crediti` | `errore fetch (...)` |
     `nessun payload (nessuna partita in finestra)` | `checkpoint ...`.
+
+    `refused_before_http: True` (06/10/2026) segnala i rifiuti che NON hanno
+    fatto alcuna richiesta: sono quelli che non consumano un checkpoint.
 
     Tetti (nessuno aggirabile da qui): budget giornaliero, hard-stop crediti,
     `ORACLE_ENABLED` e `should_query_sport` vivono in `odds_api.fetch_line_odds`
@@ -611,6 +638,17 @@ def fetch_for_pick(pick: Dict[str, Any],
         return {"fetched": False, "sport_key": sport,
                 "reason": (f"kickoff oltre la finestra di fetch "
                            f"({mtk:.0f}' > {window_min:.0f}')")}
+    # RIFIUTO A MONTE DELLA RICHIESTA (06/10/2026): budget esaurito, tetto per
+    # lega, hard-stop, ORACLE_ENABLED, chiave assente. In TUTTI questi casi
+    # `fetch_line_odds` ritorna senza fare HTTP, quindi non c'e' nessun
+    # tentativo da addebitare: si esce PRIMA di toccare la memo di dedup e i
+    # checkpoint. Fail-closed sul consumo (nessuna richiesta = nessun
+    # tentativo speso), fail-open sulla decisione (il gate resta fail-closed
+    # sul pick: senza oracolo non si ordina).
+    refusal = _pre_http_refusal(sport)
+    if refusal:
+        return {"fetched": False, "sport_key": sport, "reason": refusal,
+                "refused_before_http": True}
     # CHECKPOINT di refetch per MISSING_MARKET (05/10/2026, direttiva del
     # proprietario). Un mercato che Pinnacle non pubblica non manca perche' il
     # dato e' scaduto: manca perche' lo si e' chiesto troppo presto. Senza
@@ -662,10 +700,10 @@ def fetch_for_pick(pick: Dict[str, Any],
         # (un errore di rete e' transitorio, un tentativo speso no).
         return {"fetched": False, "reason": f"errore fetch ({exc})",
                 "sport_key": sport}
-    # Il tentativo e' avvenuto: il checkpoint si consuma ANCHE se il payload e'
-    # tornato vuoto (budget finito o nessuna partita nella finestra). La regola
-    # e' "due tentativi", non "due riusciti": un payload vuoto non e' una
-    # ragione per riprovare fra 60 secondi.
+    # Il tentativo e' avvenuto (la HTTP e' stata fatta): il checkpoint si
+    # consuma ANCHE se il payload e' tornato vuoto. La regola e' "due
+    # tentativi", non "due riusciti". I rifiuti che NON fanno HTTP sono gia'
+    # usciti SOPRA, quindi non possono bruciare un checkpoint (06/10/2026).
     if label:
         mark_checkpoint(pick.get("match_id") or pick.get("id"), label)
     if payload:
@@ -680,32 +718,13 @@ def fetch_for_pick(pick: Dict[str, Any],
 def _no_payload_reason() -> str:
     """PERCHE' la fetch non ha prodotto payload (causa DICHIARATA, non 'vuoto').
 
-    Ordine di lettura: hard-stop crediti -> budget oracolo del giorno ->
-    cache non ri-scritta / nessuna partita nella finestra. Non inventa una
-    causa che non puo' verificare: se nessuna sonda risponde, resta il
-    generico (onesto).
+    Le cause "a monte della richiesta" arrivano da `odds_api.oracle_refusal`
+    (stessa fonte del controllo pre-HTTP: una sola definizione). Se nessuna
+    sonda risponde, resta il generico — onesto, non inventato.
     """
-    try:
-        import odds_api as oa
-        try:
-            if oa.credits_hard_stopped():                        # pragma: no cover
-                return "hard-stop crediti"
-        except Exception:
-            pass
-        try:
-            used = int(getattr(oa, "_oracle_req_day", {}).get("n") or 0)
-            cap = int(getattr(oa, "ORACLE_BUDGET_DAY", 0) or 0)
-            if cap > 0 and used >= cap:
-                return f"budget oracolo esaurito ({used}/{cap} oggi)"
-        except Exception:
-            pass
-        try:
-            if not bool(oa.ORACLE_ENABLED):
-                return "ORACLE_ENABLED=0"
-        except Exception:
-            pass
-    except Exception:                                            # pragma: no cover
-        pass
+    refusal = _pre_http_refusal()
+    if refusal:
+        return refusal
     return "nessun payload (nessuna partita in finestra o cache non riscritta)"
 
 

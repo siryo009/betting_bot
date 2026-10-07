@@ -45,6 +45,70 @@ def test_dedup_per_giorno_pick_e_motivo(tmp_path, monkeypatch):
     assert osk.record_skip(_pick(), "no_oracle") is not None  # motivo diverso
 
 
+# ----------------------------------------- causa del rifiuto (06/10/2026)
+
+def test_rifiuti_diversi_restano_distinti(tmp_path, monkeypatch):
+    """La CAUSA del rifiuto entra nella chiave di dedup.
+
+    Prima due rifiuti DIVERSI dello stesso pick collassavano in una riga: i due
+    rifiuti per budget di AFCON non sono mai comparsi nel log e i conteggi
+    mostravano il motivo vecchio ("kickoff oltre la finestra di fetch").
+    """
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.record_skip(_pick(), "no_oracle", action="refused",
+                    refusal="budget oracolo esaurito (2/2 oggi)")
+    assert osk.record_skip(_pick(), "no_oracle", action="refused",
+                           refusal="checkpoint T-70 gia' onorato") is not None
+    s = osk.summary(days=1)
+    assert s["events"] == 2
+    assert s["by_refusal_class"] == {"budget oracolo esaurito": 1,
+                                     "checkpoint T-70 gia' onorato": 1}
+
+
+def test_stessa_causa_non_duplica(tmp_path, monkeypatch):
+    """Il TESTO cambia di secondo in secondo: la chiave usa la CAUSA.
+
+    `dedup (73s < 120s)` -> `dedup (133s < 120s)` sono lo STESSO evento; se
+    finisse nella chiave si scriverebbe una riga per ciclo di 60s (il flood
+    che il dedup esiste per evitare).
+    """
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.record_skip(_pick(), "no_oracle", action="refused",
+                    refusal="dedup (0s < 120s)")
+    assert osk.record_skip(_pick(), "no_oracle", action="refused",
+                           refusal="dedup (73s < 120s)") is None
+    assert osk.summary(days=1)["events"] == 1
+
+
+def test_refusal_class_stabile():
+    assert osk._refusal_class("dedup (73s < 120s)") == "dedup"
+    assert osk._refusal_class(
+        "budget oracolo esaurito (2/2 oggi)") == "budget oracolo esaurito"
+    assert osk._refusal_class("tetto per lega raggiunto (1/1 oggi)") == \
+        "tetto per lega raggiunto"
+    assert osk._refusal_class("hard-stop crediti") == "hard-stop crediti"
+    assert osk._refusal_class(None) == ""
+    assert osk._refusal_class("  ") == ""
+
+
+def test_evento_porta_la_causa(tmp_path, monkeypatch):
+    p = tmp_path / "s.jsonl"
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(p))
+    evt = osk.record_skip(_pick(), "no_oracle", action="refused",
+                          refusal="budget oracolo esaurito (2/2 oggi)")
+    assert evt["refusal"] == "budget oracolo esaurito (2/2 oggi)"
+    assert json.loads(p.read_text().splitlines()[0])["refusal"].startswith(
+        "budget oracolo")
+
+
+def test_report_mostra_le_cause(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
+    osk.record_skip(_pick(), "no_oracle", action="refused",
+                    refusal="budget oracolo esaurito (2/2 oggi)")
+    txt = osk.format_report(days=1)
+    assert "cause dei rifiuti" in txt and "budget oracolo esaurito" in txt
+
+
 def test_reset_dedup_riabilita(tmp_path, monkeypatch):
     monkeypatch.setenv("ORACLE_SKIP_LOG", str(tmp_path / "s.jsonl"))
     osk.record_skip(_pick(), "linea")

@@ -243,7 +243,7 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     monkeypatch.setenv("ORACLE_BUDGET_STATE",
                        str(tmp_path / "oracle_budget.json"))
     import odds_api as _oa
-    _oa._oracle_req_day = {"day": None, "n": 0}
+    _oa._oracle_req_day = {"day": None, "n": 0, "by_league": {}}
     import oracle_skips as _oracle_skips
     _oracle_skips.reset_dedup()
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di

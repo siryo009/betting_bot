@@ -163,6 +163,39 @@ def breakdown(*, days: float = 7.0, path: Optional[Path] = None) -> Dict[str, An
             "by_market": dict(by_market)}
 
 
+def oracle_budget(*, days: float = 7.0) -> Dict[str, Any]:
+    """Stato del budget dell'oracolo a linea: tetto, leghe, RIFIUTI per causa.
+
+    PERCHE' E' QUI (06/10/2026). L'esaurimento del budget dell'oracolo era
+    invisibile: nel report dei crediti compariva solo la generica sorgente
+    `oracle` (dalla telemetria delle chiamate), mai il TETTO saturato. Il
+    06/10 la diagnosi diceva "oracle 2 chiamate" mentre in produzione le due
+    unita' erano finite sulla stessa lega e le altre leghe Core erano rimaste
+    senza prezzo: un numero senza il tetto non racconta quella storia.
+
+    Dichiara: usato/tetto, leghe distinte pagate, tetto per lega, crediti
+    stimati del giorno e i RIFIUTI per causa classe (da `oracle_skips`, che li
+    registra dal 06/10 con la causa nella chiave di dedup). Fail-safe: ogni
+    sonda che non risponde diventa un campo d'errore, mai un'eccezione.
+    """
+    out: Dict[str, Any] = {}
+    try:
+        import odds_api as oa
+        out["budget"] = oa.oracle_budget_status()
+    except Exception as e:                                       # pragma: no cover
+        out["budget"] = {"error": str(e)}
+    try:
+        import oracle_skips
+        s = oracle_skips.summary(days=days)
+        out["refusals_by_class"] = dict(s.get("by_refusal_class") or {})
+        out["refusals"] = dict(s.get("by_refusal") or {})
+        out["skips_in_window"] = int(s.get("orders_blocked") or 0)
+    except Exception as e:                                       # pragma: no cover
+        out["refusals_by_class"] = {}
+        out["refusals_error"] = str(e)
+    return out
+
+
 def diagnose(*, days: float = 7.0, path: Optional[Path] = None) -> Dict[str, Any]:
     """Diagnosi completa: budget + attribuzione per sorgente + inventario.
 
@@ -177,6 +210,7 @@ def diagnose(*, days: float = 7.0, path: Optional[Path] = None) -> Dict[str, Any
         out["budget"] = {"error": str(e)}
     out["calls"] = breakdown(days=days, path=path)
     out["inventory"] = inventory()
+    out["oracle"] = oracle_budget(days=days)
     # Costo GIORNALIERO attribuito (crediti/giorno) per sorgente: la metrica
     # azionabile per decidere quale tagliare.
     per_day: Dict[str, float] = {}
@@ -217,6 +251,28 @@ def format_report(d: Dict[str, Any]) -> str:
                          f"{per_day.get(src, 0.0):>5.1f} cr/giorno"
                          + (f" | errori {row['errors']}" if row.get("errors")
                             else ""))
+    # Tetto dell'oracolo a linea: la riga che dice se il gate resta senza
+    # prezzo per BUDGET (e non per assenza di pick).
+    orc = d.get("oracle") or {}
+    ob = orc.get("budget") or {}
+    if ob.get("error"):
+        lines.append(f"  ⚠️ budget oracolo non leggibile: {ob['error']}")
+    else:
+        lines.append(f"  🎯 oracolo a linea: {ob.get('used')}/{ob.get('cap')} "
+                     f"chiamate usate oggi ({ob.get('left')} residue) | "
+                     f"{ob.get('leagues')} leghe distinte | tetto per lega "
+                     f"{ob.get('max_calls_per_league')} | "
+                     f"~{ob.get('credits_used_today')} crediti"
+                     + ("  ⚠️ TETTO ESAURITO" if ob.get("exhausted") else ""))
+        bl = ob.get("by_league") or {}
+        if bl:
+            lines.append("    per lega: " + ", ".join(
+                f"{k.replace('soccer_', '')} {v}" for k, v in bl.items()))
+        ref = orc.get("refusals_by_class") or {}
+        if ref:
+            lines.append("    rifiuti del fetch (finestra "
+                         f"{d.get('days')} gg): " + ", ".join(
+                             f"{k} {v}" for k, v in list(ref.items())[:4]))
     inv = d.get("inventory") or {}
     lines.append("  🗃️ cache per categoria:")
     for cat in SOURCES + ("other",):

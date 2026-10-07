@@ -188,7 +188,11 @@ class TestBudgetPersistente:
                             lambda *a, **k: called.append(1))
         payload, remaining = odds_api.fetch_line_odds("soccer_x", "f", "t")
         assert (payload, remaining) == ([], 999) and called == []
-        assert odds_api._oracle_req_day == {"day": _today(), "n": 2}
+        # Il contatore seminato e' quello del volume (2 chiamate del giorno),
+        # con il dettaglio per lega che il tetto di concentrazione usa.
+        assert odds_api._oracle_req_day["day"] == _today()
+        assert odds_api._oracle_req_day["n"] == 2
+        assert isinstance(odds_api._oracle_req_day.get("by_league"), dict)
 
     def test_il_giorno_nuovo_riarma(self, monkeypatch, tmp_path):
         monkeypatch.setenv("ORACLE_BUDGET_STATE", str(tmp_path / "b.json"))
@@ -253,6 +257,109 @@ class TestBudgetPersistente:
         odds_api.reset_oracle_budget()
         assert odds_api._oracle_req_day["n"] == 0
         assert odds_api.oracle_budget_used() == 0
+
+
+class TestBudgetPerLega:
+    """Il budget NON si esaurisce sulla stessa lega (06/10/2026).
+
+    Misurato in produzione: due fetch su `soccer_uefa_nations_league` a 5
+    minuti di distanza hanno consumato ENTRAMBE le unita' di `ORACLE_BUDGET_DAY=2`,
+    lasciando senza oracolo le altre leghe Core con pick in finestra (AFCON:
+    due pick pronti e mai prezzati). Il tetto giornaliero resta il tetto di
+    CREDITI; `ORACLE_MAX_CALLS_PER_LEAGUE` e' il tetto di CONCENTRAZIONE.
+    """
+
+    def _response(self):
+        class _R:
+            status_code = 200
+            headers = {"x-requests-remaining": "300"}
+            text = "[]"
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return [{"id": "m1"}]
+        return _R()
+
+    def test_una_lega_non_puo_spendere_tutto_il_budget(self, monkeypatch,
+                                                       tmp_path):
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(tmp_path / "b.json"))
+        monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(odds_api, "ORACLE_BUDGET_DAY", 2)
+        monkeypatch.setattr(odds_api, "ORACLE_MAX_CALLS_PER_LEAGUE", 1)
+        monkeypatch.setattr(odds_api, "should_query_sport", lambda s: True)
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: False)
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        calls = []
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: (calls.append(1),
+                                             self._response())[1])
+        odds_api.reset_oracle_budget()
+        # Prima fetch della lega: paga.
+        p1, _ = odds_api.fetch_line_odds("soccer_uefa_nations_league", "f", "t")
+        assert p1 == [{"id": "m1"}] and len(calls) == 1
+        # Seconda fetch della STESSA lega (cache forzata scaduta): rifiutata
+        # dal tetto per lega, senza HTTP e senza consumare l'unita' residua.
+        p2, r2 = odds_api.fetch_line_odds("soccer_uefa_nations_league", "f",
+                                          "t", ttl_s=0)
+        assert (p2, r2) == ([], 999) and len(calls) == 1
+        assert odds_api._oracle_req_day["n"] == 1
+        # La lega AFCON usa l'unita' RESIDUA: e' il senso del fix.
+        p3, _ = odds_api.fetch_line_odds("soccer_africa_cup_of_nations", "f", "t")
+        assert p3 == [{"id": "m1"}] and len(calls) == 2
+        st = odds_api.oracle_budget_status()
+        assert st["used"] == 2 and st["cap"] == 2 and st["leagues"] == 2
+        assert st["exhausted"] is True and st["left"] == 0
+        assert st["credits_used_today"] == 6.0
+
+    def test_il_dettaglio_per_lega_e_persistito(self, monkeypatch, tmp_path):
+        target = tmp_path / "b.json"
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(target))
+        monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(odds_api, "should_query_sport", lambda s: True)
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: False)
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: self._response())
+        odds_api.reset_oracle_budget()
+        odds_api.fetch_line_odds("soccer_epl", "f", "t")
+        saved = json.loads(target.read_text())
+        assert saved["n"] == 1 and saved["by_league"] == {"soccer_epl": 1}
+        assert odds_api.oracle_league_calls("soccer_epl") == 1
+
+    def test_il_tetto_per_lega_sopravvive_al_riavvio(self, monkeypatch,
+                                                    tmp_path):
+        """Un redeploy non riapre il monopolio di una lega."""
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", str(tmp_path / "b.json"))
+        monkeypatch.setattr(odds_api, "ORACLE_MAX_CALLS_PER_LEAGUE", 1)
+        monkeypatch.setattr(odds_api, "ORACLE_BUDGET_DAY", 5)
+        assert odds_api.save_oracle_budget(_today(), 1, {"soccer_epl": 1})
+        odds_api._oracle_req_day = {"day": None, "n": 0, "by_league": {}}
+        assert odds_api.oracle_refusal("soccer_epl") == \
+            "tetto per lega raggiunto (1/1 oggi)"
+        assert odds_api.oracle_refusal("soccer_serie_b") is None
+
+    def test_tetto_per_lega_zero_significa_nessun_tetto(self, monkeypatch):
+        monkeypatch.setattr(odds_api, "ORACLE_MAX_CALLS_PER_LEAGUE", 0)
+        monkeypatch.setattr(odds_api, "ORACLE_BUDGET_DAY", 5)
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", "/dev/null/non-scrivibile")
+        odds_api._oracle_req_day = {"day": None, "n": 0, "by_league": {}}
+        assert odds_api.oracle_max_calls_per_league() == 0
+        assert odds_api.oracle_refusal("soccer_epl") is None
+
+    def test_oracle_refusal_non_dipende_dalla_chiave(self, monkeypatch):
+        """La chiave assente e' un errore d'AMBIENTE, non un budget speso.
+
+        Resta una difesa della chiamata (`_get_odds`): includerla qui
+        renderebbe il gate di spesa non deterministico (dipende da cosa c'e'
+        in `.env`), quindi e' ESCLUSA di proposito.
+        """
+        monkeypatch.setattr(odds_api, "ORACLE_BUDGET_DAY", 5)
+        monkeypatch.setattr(odds_api, "ORACLE_MAX_CALLS_PER_LEAGUE", 1)
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: False)
+        monkeypatch.setenv("ORACLE_BUDGET_STATE", "/dev/null/non-scrivibile")
+        monkeypatch.delenv("ODDS_API_KEY", raising=False)
+        odds_api._oracle_req_day = {"day": None, "n": 0, "by_league": {}}
+        assert odds_api.oracle_refusal("soccer_epl") is None
 
 
 class TestTieringNelPiano:
@@ -1101,15 +1208,28 @@ class TestFetchOnDemand:
         assert line_oracle.ondemand_dedup_s() == 30.0
 
     def test_budget_esaurito_dichiarato(self, monkeypatch):
-        """Nessun payload: la causa e' DICHIARATA (budget), non un 'vuoto'."""
+        """Budget speso: la causa e' DICHIARATA e NON si paga NULLA.
+
+        ⚠️ Il giorno e' quello VERO. Con `2099-01-01` il controllo di
+        cambio-giorno riarmava il tetto e il test misurava la ragione
+        generica: dal 06/10/2026 il rifiuto per budget e' un PRE-CHECK (nessuna
+        HTTP), quindi va verificato sul contatore del giorno reale.
+        """
         import line_oracle, odds_api as oa
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        calls = []
         monkeypatch.setattr(oa, "fetch_line_odds",
-                            lambda s, f, t, ttl_s=None, **k: ([], 250))
+                            lambda s, f, t, ttl_s=None, **k: (
+                                calls.append(s), ([], 250))[1])
         monkeypatch.setattr(oa, "_oracle_req_day",
-                            {"day": "2099-01-01", "n": oa.ORACLE_BUDGET_DAY})
+                            {"day": today, "n": oa.ORACLE_BUDGET_DAY,
+                             "by_league": {"soccer_epl": 1}})
         res = line_oracle.fetch_for_pick(self._pick(), now=self.NOW)
         assert res["fetched"] is False
         assert "budget oracolo esaurito" in res["reason"]
+        assert res["refused_before_http"] is True
+        assert calls == []           # nessuna richiesta: nessun credito speso
 
     def test_errore_di_rete_non_propaga(self, monkeypatch):
         import line_oracle, odds_api as oa
@@ -1356,6 +1476,99 @@ class TestCheckpointRefetch:
                                         code="MISSING_MARKET")
         assert r2["fetched"] is True and r2["checkpoint"] == "T-120"
 
+    # -----------------------------------------------------------------
+    # 06/10/2026 — RIFIUTO PRIMA DI QUALUNQUE HTTP = NESSUN TENTATIVO SPESO
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _budget_state(used: int, by_league: dict) -> dict:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return {"day": today, "n": used, "by_league": dict(by_league)}
+
+    def test_budget_esaurito_non_consuma_il_checkpoint(self, monkeypatch):
+        """Il freno anti-spreco NON deve mangiarsi l'unico tentativo utile.
+
+        Misurato in produzione il 06/10/2026: le due unita' di budget erano
+        finite sulla stessa lega (UEFA Nations League) e il checkpoint T-70 di
+        AFCON e' stato marcato "onorato" senza una singola richiesta — al giro
+        successivo il pick era saltato per "checkpoint gia' onorato".
+        """
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: (calls.append(1),
+                                             ([{"id": "m"}], 300))[1])
+        monkeypatch.setattr(oa, "_oracle_req_day",
+                            self._budget_state(oa.ORACLE_BUDGET_DAY,
+                                               {"soccer_epl": oa.ORACLE_BUDGET_DAY}))
+        res = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                         code="MISSING_MARKET")
+        assert res["fetched"] is False
+        assert res["refused_before_http"] is True
+        assert "budget oracolo esaurito" in res["reason"]
+        assert calls == []
+        assert line_oracle.checkpoint_honoured("m1") is None      # INTATTO
+        # Budget liberato (nuovo giorno o altra lega): il tentativo e' ancora
+        # disponibile — e' esattamente il punto del fix.
+        monkeypatch.setattr(oa, "_oracle_req_day", self._budget_state(0, {}))
+        line_oracle.reset_ondemand_dedup()
+        ok = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                        code="MISSING_MARKET")
+        assert ok["fetched"] is True and ok["checkpoint"] == "T-120"
+
+    def test_hard_stop_non_consuma_il_checkpoint(self, monkeypatch):
+        """Hard-stop crediti = nessuna HTTP = nessun tentativo addebitato."""
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: (calls.append(1), ([], 0))[1])
+        monkeypatch.setattr(oa, "credits_hard_stopped", lambda: True)
+        monkeypatch.setattr(oa, "_oracle_req_day", self._budget_state(0, {}))
+        res = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                         code="MISSING_MARKET")
+        assert res["refused_before_http"] is True
+        assert "hard-stop" in res["reason"] and calls == []
+        assert line_oracle.checkpoint_honoured("m1") is None
+
+    def test_tetto_per_lega_non_consuma_il_checkpoint(self, monkeypatch):
+        """Tetto di concentrazione: un'altra lega resta prezzabile."""
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: (calls.append(1), ([], 300))[1])
+        monkeypatch.setattr(oa, "ORACLE_MAX_CALLS_PER_LEAGUE", 1)
+        monkeypatch.setattr(oa, "_oracle_req_day",
+                            self._budget_state(1, {"soccer_epl": 1}))
+        res = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                         code="MISSING_MARKET")
+        assert res["refused_before_http"] is True
+        assert "tetto per lega raggiunto" in res["reason"]
+        assert calls == []
+        assert line_oracle.checkpoint_honoured("m1") is None
+        # Sulle ALTRE leghe il budget residuo resta spendibile (la lega
+        # esaurita non deve poter bloccare il resto del sistema).
+        assert oa.oracle_refusal("soccer_africa_cup_of_nations") is None
+
+    def test_interruttore_spento_non_consuma_il_checkpoint(self, monkeypatch):
+        import line_oracle, odds_api as oa
+        calls = []
+        monkeypatch.setattr(oa, "fetch_line_odds",
+                            lambda *a, **k: (calls.append(1), ([], 999))[1])
+        monkeypatch.setattr(oa, "ORACLE_ENABLED", False)
+        monkeypatch.setattr(oa, "_oracle_req_day", self._budget_state(0, {}))
+        res = line_oracle.fetch_for_pick(self._pick(100), now=self.NOW,
+                                         code="MISSING_MARKET")
+        assert res["refused_before_http"] is True
+        assert "ORACLE_ENABLED" in res["reason"] and calls == []
+        assert line_oracle.checkpoint_honoured("m1") is None
+
+    def test_il_rifiuto_pre_http_non_aggiorna_la_dedup(self, monkeypatch):
+        """Niente speso = niente da deduplicare: il memo non si muove."""
+        import line_oracle, odds_api as oa
+        monkeypatch.setattr(oa, "ORACLE_ENABLED", False)
+        monkeypatch.setattr(oa, "_oracle_req_day", self._budget_state(0, {}))
+        line_oracle.fetch_for_pick(self._pick(100), now=self.NOW)
+        assert line_oracle._last_ondemand == {}
+
     def test_le_cause_diverse_da_missing_market_restano_libere(self, monkeypatch):
         """`EXPIRED_CACHE` = il dato esiste e va solo rinfrescato: nessun freno."""
         import line_oracle, odds_api as oa
@@ -1601,6 +1814,7 @@ class TestTripwire:
     def test_iac_dichiara_le_env_oracolo(self):
         src = Path(".railway/railway.ts").read_text()
         for env in ("ORACLE_ENABLED", "ORACLE_BUDGET_DAY",
+                    "ORACLE_MAX_CALLS_PER_LEAGUE",
                     "ORACLE_BUDGET_STATE",
                     "ORACLE_FETCH_WINDOW_MIN", "ORACLE_LEAGUES_PER_PASS",
                     "ORACLE_ONDEMAND_DEDUP_S", "ORACLE_ONDEMAND_ENABLED",
