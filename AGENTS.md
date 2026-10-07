@@ -9211,11 +9211,15 @@ contro un tetto dichiarato di **6 cr/g** (`ORACLE_BUDGET_DAY=2` × 3 crediti).
   tetto e le leghe fuori dal perimetro Tier-1/Core.
 - `auto_bet.py`: **esito strutturato del fetch on-demand** —
   `_ondemand_fetch(pick, info, enabled, out=...)` riempie `out` con `action`
-  ∈ {`not_recoverable`, `outside_window`, `tier_unreadable`, `tier_not_core`,
+  ∈ {`not_recoverable`, `outside_window`, `tier_unreadable`, `tier_not_paid`
+  (era `tier_not_core`: rinominato il 07/10/2026 con `ORACLE_PAID_TIERS`),
   `error`, `fetched`, `refused`} (+`refusal`); `_top_down_eval` lo propaga nel
   verdetto (`action`/`refusal`) e `_note_top_down_skip` lo registra.
+  ⚠️ Le righe di `oracle_skips.jsonl` scritte PRIMA di quel deploy portano
+  ancora `tier_not_core` (il valore è registrato al momento della scrittura):
+  in `by_action` convivono le due voci, ed è storico, non un difetto.
 - `oracle_skips.py`: `record_skip(..., action, refusal)` — **`action` entra
-  nella chiave di dedup** (la transizione `tier_not_core` → `fetched` è una
+  nella chiave di dedup** (la transizione `tier_not_paid` → `fetched` è una
   riga nuova, non un duplicato); `summary` aggiunge `by_action`/`by_refusal`
   (righe senza campo → `"assenti"`, mai un'azione inventata); `format_report`
   stampa "fetch on-demand: …" e "rifiuti dichiarati: …". Così "pagato",
