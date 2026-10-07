@@ -9369,3 +9369,103 @@ pick potenzialmente ordinabile e' il **Brasileirao del 07/10** (22:30Z
 `sx-L20175865` Home +0.5, 23:30Z `sx-L20175875` Under 3.5), lega **probation**:
 per coprirlo serve `ORACLE_PAID_TIERS=core,probation` (a costo invariato) e
 un'intersezione di linee non vuota.
+
+### Audit fascia quota tennis + freno al burn crediti (07/10/2026)
+
+#### 1) Tennis: perche' le 7 puntate perse "superavano" la fascia (1.30-2.50)
+
+**La causa e' TEMPORALE, non logica**: la banda e' entrata il **02/10**
+(`591643c`, deploy `73463d6c`). Prima la corsia applicava il **solo**
+`EV_MIN >= 2.5%`: nessuna banda esisteva, quindi 5 delle 7 perse sono
+semplicemente **anteriori al filtro**.
+
+| bet | quota | quando | in banda 1.30-2.50 | P/L |
+|---|---|---|---|---|
+| #1 | **5.5944** | 01/10 02:15 | no | -1.50 |
+| #3 | **4.2781** | 01/10 02:59 | no | -1.50 |
+| #5 | **17.0213** | 01/10 06:23 | no | -1.50 |
+| #6 | **4.9689** | 02/10 07:21 | no | -1.50 |
+| #7 | **4.3243** | 02/10 11:50 | no | -1.50 |
+| #4 | 2.4242 | 01/10 05:57 | **si** | -1.50 |
+| #8 | 2.3952 | 05/10 03:52 | **si** | -1.02 |
+
+**⚠️ Risposta onesta alla domanda "il filtro le blocca tutte?": NO, ne blocca
+5 su 7.** Le altre due sono **dentro** la banda per disegno (entrambe <= 2.50):
+non sono un buco del filtro, sono sconfitte regolari. Bloccarle richiederebbe
+una banda piu' stretta (es. max 2.00) — una **scelta di strategia**, non un bug.
+
+Verifiche eseguite sul container (07/10):
+- `in_odds_band` -> `1.29 F | 1.30 T | 2.40 T | 2.50 T | 2.51 F | 5.59 F |
+  17.02 F | None F | "abc" F` — **fail-closed** su None/stringhe (tripwire).
+- corsia viva: `tennis_lane.picks()` = 4, `auto_bet._tennis_picks()` = 4,
+  **0 fuori banda** (1.66 / 1.578 / 2.078 / 1.487).
+- prezzo MASSIMO per giorno (misura del fix): 01/10 **17.02** -> 02/10 4.97 ->
+  05/10 2.3952 -> 06/10 2.4316 -> 07/10 1.5717. Dal 05/10 (primo ordine
+  post-deploy) **nessun** ordine fuori banda.
+- **effetto della banda**: se fosse stata attiva dal 01/10, il P/L delle 11
+  chiuse passerebbe da **-5.82 a +1.68 USDC** (si sarebbero saltate le 5
+  perdite longshot, non le 2 in banda).
+- le 3 righe di **TELEMETRIA** aperte fuori banda (34.78, 3.4188, 2.6846) sono
+  del **02/10 02:30/08:30**, cioe' **pre-fix**, e non sono ordini.
+
+**Causa radice del perche' prima filtrava solo l'EV**: un EV alto su un
+longshot a 17.02 e' **rumore del book**, non edge — la stessa lezione del
+`MAX_ODDS` dei surebet. Nota: lo schema **`bets` non ha la colonna `quota`**, il
+prezzo sta in **`price`** (un audit che legge `quota` ottiene `None` su tutte le
+righe e conclude erroneamente "tutte fuori banda": verificato mentre si
+scriveva questo audit).
+
+#### 2) Frenato il burn crediti: oracolo a linea 2 -> 1 chiamata/giorno
+
+**Misure al 07/10** (container, sola lettura): **287 crediti residui**, 24
+giorni al reset dell'**01/11** -> **12,0/giorno sostenibili**. Tasso **24h =
+20,2/giorno** (10 campioni su 20,2h); **48h = 39,1** ma **INQUINATO** dal burst
+del 05/10 (Argentina Primera riscaricata ~10 volte: 19:13, 19:26, 19:29, 20:50,
+20:56, 21:53, 22:33, 23:03, 00:03 — 3 crediti l'una), gia' **chiuso** dai fix
+del 06/10 (budget persistito sul volume + `ORACLE_MAX_CALLS_PER_LEAGUE=1`).
+Media 7 giorni per sorgente: **oracle 8,4** + rotation 2,0 + settlement 0,1.
+
+**DIFFETTO STRUTTURALE TROVATO (misurato, non ipotizzato) — l'oracolo a linea
+vale 2-30 minuti al giorno.** Il TTL della cache oracolo e' **DINAMICO**
+(`pinnacle_oracle.cache_ttl_minutes`): **30'** oltre T-180, **5'** tra T-60 e
+T-180, **2'** sotto T-60; e `_oracle_fixture_status` considera `expired` un
+dato piu' vecchio del TTL dinamico. Insieme a `ORACLE_MAX_CALLS_PER_LEAGUE=1`,
+ogni chiamata pagata (**3 crediti**) compra **2-30 minuti di validita' per lega
+al giorno**, dentro una finestra eseguibile di **178 minuti** (T-180..T-2).
+Misura diretta sul container: le 5 cache `toao_*` hanno 1,8h-100h e contengono
+**1 evento** (MLS: solo la partita a 20' dal kickoff) o partite gia' giocate
+(Nations League: 9 eventi TUTTI alle 18:45Z del 06/10) -> **386 fixture OU/AH
+tutte `unknown`**, 0 linee prezzabili, **283 pick aperti di cui 46 giocabili ma
+0 con linea verificabile**.
+
+**PERCHE' QUESTO GIUSTIFICA IL TAGLIO**: l'oracolo a linea compra **1 colpo per
+lega al giorno** e rende **~0 ordini** (griglia SX a passi di 0,5 vs linea
+main/quarter di Pinnacle = intersezione vuota, caso MLS documentato sopra).
+Il taglio e' quindi quasi a costo zero sugli ordini.
+
+**APPLICATO (env Railway, nessuna modifica di codice)**:
+- `ORACLE_BUDGET_DAY` **2 -> 1** (3 crediti/giorno invece di 6);
+- `SETTLEMENT_HEAL_INTERVAL_HOURS` **48 -> 72** (tocca SOLO la verifica
+  periodica delle leghe senza puntate aperte: impatto sugli ordini nullo).
+
+**SCARTATO di proposito** (decisione esplicita, con il motivo):
+- `TENNIS_ORACLE_TTL_MIN` 720 -> 1440: il tennis e' l'**UNICA corsia che sta
+  ordinando** (12 bet, 1 aperta, 4 pick vivi). A 24h il TTL coinciderebbe col
+  tetto assoluto `PINNACLE_CACHE_MAX_AGE_H=24` -> la cache sarebbe **scaduta
+  proprio nel momento d'uso** e la corsia si spegnerebbe da sola. Non si tocca
+  la corsia che produce i pochi ordini che abbiamo.
+- rotazione `SPORTS_INTERVAL_DAYS` 7gg -> 10gg: taglierebbe i candidati di
+  **tutte** le corsie (e' il feed delle analisi), non solo di una.
+
+**Profilo atteso dopo il taglio**: oracle a linea 3 + tennis ~4-6 + rotation
+~2-5 + settlement ~0,1-1 = **~10-12/giorno**, dentro i 12,0 sostenibili (prima
+il profilo strutturale era 12-18/giorno).
+
+**⚠️ Il prossimo passo sul tema NON e' un altro taglio, e' capire se l'oracolo a
+linea vale i 3 crediti**: il TTL dinamico (2-30') e il tetto 1/lega/giorno sono
+in **contraddizione** con una finestra eseguibile di 178 minuti — e' il motivo
+per cui OU/AH non hanno mai ordinato. Le opzioni (allineare il TTL alla
+finestra, oppure rinunciare all'oracolo a linea e dichiarare OU/AH fuori
+perimetro) sono una **scelta del proprietario**: nessuna delle due e' un
+semplice ritocco di soglia. Verificato con `railway config plan` = **already up
+to date** (0 to destroy: entrambe le env erano gia' in `preserve()`).
