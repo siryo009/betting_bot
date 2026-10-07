@@ -9461,11 +9461,51 @@ Il taglio e' quindi quasi a costo zero sugli ordini.
 ~2-5 + settlement ~0,1-1 = **~10-12/giorno**, dentro i 12,0 sostenibili (prima
 il profilo strutturale era 12-18/giorno).
 
-**⚠️ Il prossimo passo sul tema NON e' un altro taglio, e' capire se l'oracolo a
-linea vale i 3 crediti**: il TTL dinamico (2-30') e il tetto 1/lega/giorno sono
-in **contraddizione** con una finestra eseguibile di 178 minuti — e' il motivo
-per cui OU/AH non hanno mai ordinato. Le opzioni (allineare il TTL alla
-finestra, oppure rinunciare all'oracolo a linea e dichiarare OU/AH fuori
-perimetro) sono una **scelta del proprietario**: nessuna delle due e' un
-semplice ritocco di soglia. Verificato con `railway config plan` = **already up
-to date** (0 to destroy: entrambe le env erano gia' in `preserve()`).
+#### 3) DECISIONE: OU/AH fuori perimetro per gli ORDINI (oracolo a linea spento)
+
+Il TTL dinamico (2-30') e il tetto `ORACLE_MAX_CALLS_PER_LEAGUE=1` sono in
+**contraddizione** con una finestra eseguibile di 178 minuti (T-180..T-2): e'
+il motivo per cui OU/AH non hanno mai ordinato. Verificate le due uscite, la
+scelta e' caduta sulla **seconda**, e il motivo e' un conto, non una prudenza.
+
+**1) ALLINEARE IL TTL ALLA FINESTRA e' il rimedio PEGGIORE — rifiutato.**
+Si poteva fare a costo zero di codice (`PINNACLE_TTL_LONG/MID/SHORT_MIN=180`:
+sono env) e avrebbe reso la cache valida per tutta la finestra. Ma
+`_oracle_fixture_status` dichiara proprio il contrario: *"un dato di tre ore
+nella finestra T-180 non e' il mercato, e usarlo produce falsi disallineamenti
+di linea"*. Il TTL non limita l'ORDINE (fetch, `_top_down_eval` e ordine stanno
+nello **stesso ciclo** di 60s: bastano 2 minuti di validita'); limita il
+**RIUSO** della cache. Allungarlo a 180' comprerebbe funzionalita' al prezzo di
+un p_true di tre ore — cioe' un generatore di falsi edge.
+
+**2) IL CONTO CHE CHIUDE LA QUESTIONE.** Per tenere un oracolo fresco lungo i
+178 minuti della finestra servono ~6 fetch per lega (uno ogni ~30'), cioe'
+**18 crediti/lega/giorno** contro **12/giorno sostenibili TOTALI** (287 residui
+/ 24 giorni): **economicamente impossibile sul piano free**, a qualunque
+`ORACLE_BUDGET_DAY`. E il rendimento misurato e' ~0 anche pagando: con
+budget 2 (6 cr/giorno, periodo 04-07/10) le due lane OU/AH non hanno prodotto
+**nessun** ordine, perche' la griglia SX (passi di 0,5) raramente interseca la
+linea main/quarter di Pinnacle. Il taglio a `ORACLE_BUDGET_DAY=1` aveva gia'
+ridotto la copertura a **un solo colpo al giorno** per tutte le leghe insieme.
+
+**3) APPLICATO: `ORACLE_ENABLED=0`** (env, gia' in `preserve()`). Da questo
+momento nessun credito va all'oracolo a linea. `ENABLE_LIVE_AH` e
+`ENABLE_LIVE_OU` **NON sono stati toccati**: le corsie restano autorizzate, ma
+senza oracolo il gate top-down e' **fail-closed** (motivo `linea`/`no_oracle`),
+quindi il comportamento osservabile e' identico a quello misurato (zero ordini)
+**senza pagarlo**. Reversibile con una env: `ORACLE_ENABLED=1` +
+`ORACLE_BUDGET_DAY>=6` (2 colpi/lega/giorno) — e la griglia va verificata con
+`line_intersection.py`, che e' la misura che sostiene questa decisione.
+
+**4) OU/AH NON SPARISCONO: restano in TELEMETRIA.** `multi_market` continua a
+ingerire (`market_quotes`), analizzare e registrare (`predictions`) OU/AH: i 46
+pick giocabili aperti restano nel ledger per la misura, e il giorno in cui
+l'intersezione di linee diventasse ricorrente la decisione si riapre con dati
+in mano. Il percorso di ORDINE per OU/AH resta scritto e testato
+(`order_target`, `resolve_market_for`): si spegne la SPESA, non il codice.
+
+**Effetto sul budget**: oracle a linea **-3 cr/giorno** (totale taglio del
+giorno: -6,3 cr/giorno) -> profilo atteso **~7-9/giorno**, con margine sui 12,0
+sostenibili. Le due env nuove (`ORACLE_ENABLED`, oltre a
+`ORACLE_BUDGET_DAY`/`SETTLEMENT_HEAL_INTERVAL_HOURS`) erano gia' in `preserve()`:
+`railway config plan` = **already up to date** (0 to destroy).
