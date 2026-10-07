@@ -319,6 +319,31 @@ class TestRiskEngine:
                                                verdict, ok, why))
         assert mismatches == [], f"divergenza dai gate di produzione: {mismatches[:3]}"
 
+    def test_ev_min_effettivo_per_lega_e_mercato(self, limits):
+        """Direttiva 08/10/2026: la soglia EV della CATENA e' quella effettiva
+        di lega+mercato (`value_filter.ev_min`), non il 2.5% piatto — cosi'
+        catena e produzione non divergono su una soglia."""
+        assert limits.league_ev_min("Premier League", "1X2") == vf.EV_MIN_CORE
+        assert limits.league_ev_min("Premier League", "AH") == vf.EV_MIN_LIQUID
+        assert limits.league_ev_min("MLS", "1X2") == vf.EV_MIN
+        assert limits.league_ev_min("MLS", "OU") == vf.EV_MIN_LIQUID
+        assert limits.league_ev_min("", "") == vf.EV_MIN
+
+    def test_gate_ev_core_a_1_5_percento(self, limits):
+        """Un segnale CORE con EV +1.7% passa (con la soglia piatta 2.5% era
+        respinto); lo stesso EV su una lega non core resta respinto."""
+        price = 1.60
+        blended = 1.017 / price                       # EV +1.7%
+        core = risk_engine.evaluate(
+            make_signal(price=price, blended_prob=blended, league="Premier League"),
+            kills=live_kills(), limits=limits)
+        assert core.verdict == "approve", (core.reason, core.detail)
+        non_core = risk_engine.evaluate(
+            make_signal(price=price, blended_prob=blended, league="MLS"),
+            kills=live_kills(), limits=limits)
+        assert non_core.verdict == "reject"
+        assert non_core.reason is ReasonCode.EV_TOO_LOW
+
     def test_tighten_puo_solo_stringere(self, limits):
         assert risk_engine.tighten(limits, "value", 0.005) == {"max_stake_pct": 0.005}
         assert risk_engine.tighten(limits, "value", 0.30) == {}      # piu' largo: ignorato

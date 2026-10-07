@@ -401,3 +401,59 @@ class TestInterruttore:
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
         monkeypatch.setattr(auto_bet, "STAKE_MODE", "adaptive")
         assert auto_bet.aggressive_live_active() is False
+
+
+# ---------------------------------------------------------------------------
+# 7. NORMALIZZAZIONE EV DEL K (direttiva 08/10/2026, revisione)
+# ---------------------------------------------------------------------------
+
+class TestNormalizzazioneEvDelK:
+    """La componente EV si normalizza sulla soglia REALE di lega+MERCATO.
+
+    Prima usava il 2.5% generico (`ev_min_for_market("")`): un'operazione core
+    con EV 2% finiva a componente 0, quindi al MINIMO della banda di Kelly.
+    Ora il riferimento e' `value_filter.ev_min(league, market)`.
+    """
+
+    def test_core_non_piu_schiacciato_al_minimo(self):
+        ev = 0.02                  # sotto EV_MIN (2.5%), sopra EV_MIN_CORE (1.5%)
+        senza = se.dynamic_kelly_fraction(ev=ev)
+        con = se.dynamic_kelly_fraction(ev=ev, league="Premier League",
+                                        market="1X2")
+        assert senza["components"]["ev"] == 0.0      # riferimento 2.5%
+        assert con["components"]["ev"] > 0.0         # riferimento reale 1.5%
+        assert con["kelly_fraction"] > senza["kelly_fraction"]
+        assert con["kelly_fraction"] <= 0.25        # la banda non si allarga
+
+    def test_il_riferimento_e_la_soglia_reale(self):
+        """Componente EV = (EV - soglia effettiva) / (4% - soglia effettiva)."""
+        for lg, mk in (("Premier League", "1X2"), ("Premier League", "AH"),
+                       ("MLS", "OU"), ("", "")):
+            soglia = vf.ev_min(lg, mk)
+            basso = se.dynamic_kelly_fraction(ev=soglia, league=lg, market=mk)
+            alto = se.dynamic_kelly_fraction(ev=0.04, league=lg, market=mk)
+            assert basso["components"]["ev"] == 0.0, (lg, mk)
+            assert alto["components"]["ev"] == 1.0, (lg, mk)
+
+    def test_calculate_kelly_stake_propaga_il_mercato(self):
+        """Sui mercati liquidi la soglia scende a 1.0% anche fuori dal core:
+        senza `market` il 2% finirebbe al minimo di banda (2.5%), con `market`
+        no — e' la propagazione che il chiamante deve fare."""
+        senza = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=0.02, league="MLS")
+        con = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=0.02,
+                                      league="MLS", market="OU")
+        assert senza["kelly_fraction"] == 0.15       # soglia 2.5% -> minimo
+        assert con["kelly_fraction"] > senza["kelly_fraction"]
+        assert con["stake"] >= senza["stake"]
+
+    def test_auto_bet_passa_il_mercato_del_pick(self, monkeypatch):
+        """Il pick porta `mercato`: la corsia LIVE lo passa al motore (senza,
+        la normalizzazione tornerebbe al 2.5% generico)."""
+        monkeypatch.setenv("KELLY_AGGRESSIVE_ENABLED", "1")
+        monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 100.0)
+        base = {"match_id": "m1", "esito_key": "1", "p_true": 0.60,
+                "quota": 1.66, "price": 1.66, "league": "MLS", "ev": 0.02}
+        senza = auto_bet.kelly_size_for_pick({**base}, price=1.66, bankroll=100.0)
+        con = auto_bet.kelly_size_for_pick({**base, "mercato": "OU"},
+                                          price=1.66, bankroll=100.0)
+        assert con["kelly_fraction"] > senza["kelly_fraction"]

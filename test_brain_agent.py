@@ -4,8 +4,9 @@ Due ragionamenti che nessun altro agente fa:
 
 1. **EV dinamico** — la soglia minima di EV sale quando il trade e' fragile:
    libro sottile (rischio slippage) o sharp che si muove veloce (il prezzo puo'
-   non esistere piu' all'arrivo). Parte SEMPRE da `value_filter.EV_MIN` e puo'
-   solo SALIRE: il Cervello non allarga cio' che la pipeline ha stretto.
+   non esistere piu' all'arrivo). Parte SEMPRE dalla soglia EFFETTIVA di
+   lega+mercato (`value_filter.ev_min`: core 1.5% sul 1X2, mercati liquidi
+   1.0%) e puo' solo SALIRE coi fattori di fragilita'.
 2. **Portfolio Shield** — misura la concentrazione del blocco correlato (lega)
    sugli ordini REALI aperti e restituisce `allow`/`scale`/`block`. Il cap e'
    quello di `auto_bet` (30%), il ticket quello del motore Kelly: nessuna
@@ -168,16 +169,23 @@ class TestProcess:
         assert out.validated == 1 and out.rejected == 0
         trade = out.trades[0]
         assert trade.shield_action == "allow"
-        assert trade.dynamic_ev_min == vf.EV_MIN
+        # Soglia EFFETTIVA (direttiva 08/10/2026): core + 1X2 = EV_MIN_CORE.
+        # Derivata dalla funzione di produzione: un ritocco delle soglie non
+        # lascia questo test a misurare un numero vecchio.
+        assert trade.dynamic_ev_min == vf.ev_min(trade.league, trade.market)
+        assert trade.base_ev_min == vf.EV_MIN_CORE
         assert trade.signal_id == "sx-1|1X2|1"
 
     def test_ev_sotto_la_soglia_dinamica_rifiutato(self):
-        # depth 5 alza la soglia a 3.125%: EV 3.0% non passa piu'
-        out = self._agent().process([_oracle(ev=0.030, depth=5.0)])
+        # depth 5 alza la soglia del 25%: con la base core (1.5%) la soglia
+        # dinamica e' 1.875% -> EV 1.8% non passa piu'
+        base = vf.ev_min("Premier League", "1X2")
+        out = self._agent().process([_oracle(ev=base * 1.25 - 0.00075, depth=5.0)])
         assert out.trades == [] and out.rejected == 1
 
     def test_ev_pari_alla_soglia_dinamica_passa(self):
-        out = self._agent().process([_oracle(ev=0.03125, depth=5.0)])
+        base = vf.ev_min("Premier League", "1X2")
+        out = self._agent().process([_oracle(ev=base * 1.25, depth=5.0)])
         assert out.validated == 1
 
     def test_ev_derivato_da_prob_e_quota(self):

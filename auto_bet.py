@@ -1937,15 +1937,18 @@ def kelly_size_for_pick(pick: dict, *, price: float, bankroll: float,
     prob = true_probability(pick, price)
     if prob is None:
         return {"stake": 0.0, "reason": "no_true_prob"}
-    # k DINAMICO (04/10/2026): EV/edge/lega del pick scalano il frazionamento
-    # dentro la banda 0.15-0.25. Sono dati che il pick porta gia' (il Cervello
-    # li usa per il gate EV) — nessun ricalcolo, un solo motore.
+    # k DINAMICO (04/10/2026): EV/edge/lega/mercato del pick scalano il
+    # frazionamento dentro la banda 0.15-0.25. Sono dati che il pick porta gia'
+    # (il Cervello li usa per il gate EV) — nessun ricalcolo, un solo motore.
+    # Il MERCATO serve alla normalizzazione dell'EV (direttiva 08/10/2026): la
+    # soglia di riferimento e' `ev_min(lega, mercato)`, non il 2.5% generico.
     _ev = pick.get("top_down_ev")
     if _ev is None:
         _ev = pick.get("ev")
     res = dict(calculate_kelly_stake(
         prob, price, bankroll,
-        ev=_ev, edge=pick.get("market_edge"), league=pick.get("league")))
+        ev=_ev, edge=pick.get("market_edge"), league=pick.get("league"),
+        market=pick.get("mercato") or pick.get("market")))
     res["true_prob"] = round(prob, 6)
     if not res.get("executable"):
         return res

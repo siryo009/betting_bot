@@ -8826,14 +8826,16 @@ lungo tutta la catena, senza ricalcolare nulla.
   `DEFAULT_KELLY_AGGRESSIVE_MIN_FRACTION = 0.15`; `DEFAULT_KELLY_MIN_TICKET = 1.00`.
 - `aggressive_config()` ritorna `{kelly_fraction (max), kelly_min_fraction,
   max_stake_pct, min_ticket}` con banda resa coerente (`k_min = min(k_min, frac)`).
-- Nuova **`dynamic_kelly_fraction(*, ev=None, edge=None, league=None) -> dict`**:
-  forza = media pesata (ev 0.45, edge 0.35, league 0.20) di componenti
-  normalizzati su `value_filter.ev_min_for_market("")` /
+- Nuova **`dynamic_kelly_fraction(*, ev=None, edge=None, league=None,
+  market=None) -> dict`**: forza = media pesata (ev 0.45, edge 0.35, league
+  0.20) di componenti normalizzati su **`value_filter.ev_min(league, market)`**
+  (la soglia REALE dell'operazione — revisione 08/10/2026: con
+  `ev_min_for_market("")` un core a EV 2% finiva al minimo di banda) /
   `market_calib.MARKET_EDGE_*` / `get_league_strategy()["kelly_mult"]`
   (range 0.4-1.3); senza dati → **0.5 = centro banda**; risultato sempre in
   `[k_min, k_max]`. Ritorna `kelly_fraction, kelly_min_fraction, kelly_max_fraction,
   strength, components, reason`.
-- `calculate_kelly_stake(..., ev=None, edge=None, league=None)`: usa
+- `calculate_kelly_stake(..., ev=None, edge=None, league=None, market=None)`: usa
   `dynamic_kelly_fraction` se `kelly_fraction` non e' esplicito; aggiunge a
   output `kelly_dynamic`, `kelly_strength`, `kelly_reason`.
 - **`auto_bet.kelly_size_for_pick`** passa `ev=pick.get("top_down_ev") or
@@ -9558,15 +9560,21 @@ scrivere codice** (endpoint gratuiti: `/v4/sports` = 0 crediti, SX
    e passa tutto. `liquidity_skips.jsonl` **non esiste** su questo volume:
    zero scarti per liquidita' in questa era. **Nessuna soglia differenziata**.
 
-**✅ CONSEGNATO — SOGLIA EV A DUE DIMENSIONI (precedenza "la piu' severa").**
-Scelta del proprietario fra le opzioni proposte: il tier si AGGIUNGE alla
-dimensione per mercato con `max`, quindi puo' **solo stringere, mai allargare**.
+**✅ CONSEGNATO — SOGLIA EV A DUE DIMENSIONI (precedenza "la piu' PERMISSIVA",
+`min`).** Direttiva del proprietario in due battute lo stesso giorno: prima il
+tier con `max` (puo' solo stringere), poi la **revisione con `min`** perche'
+l'obiettivo dichiarato e' il VOLUME sui campionati validati. Lo stato FINALE —
+quello in produzione — e' `min`.
 
 - `value_filter.py`: `EV_MIN_CORE` (env, default **0.015**), `EV_MIN_OTHER`
   (env, default `EV_MIN` = 0.025), **`ev_min_for_tier(league)`** e
-  **`ev_min(league, market)`** = `max(ev_min_for_market(market),
+  **`ev_min(league, market)`** = `min(ev_min_for_market(market),
   ev_min_for_tier(league))` — **UNICA definizione** della regola combinata.
   `is_sane` usa `ev_min(league, market)` (aveva gia' entrambi i parametri).
+- `decision/limits.py`: **`RiskLimits.league_ev_min(league, market)`** delega
+  alla stessa funzione e `decision/risk_engine.py` la usa nel gate EV: senza,
+  la CATENA restava al 2,5% piatto e il test di parita' con `is_sane` (griglia
+  di 54 casi) avrebbe segnalato la divergenza.
 - `agents/brain_agent.py`: `base_ev_min(market, league="")` e
   `dynamic_ev_min(..., league="")` delegano a `ev_min` (nessuna soglia
   ricopiata); `BrainAgent._one` passa `league=signal.league`.
@@ -9576,43 +9584,64 @@ dimensione per mercato con `max`, quindi puo' **solo stringere, mai allargare**.
 - **IaC**: `EV_MIN_CORE`/`EV_MIN_OTHER` in `preserve()`;
   `railway config plan` = **already up to date** (0 to destroy).
 
-**⚠️ EFFETTO MISURATO E DICHIARATO (non un allargamento).** Con `max`:
-| lega | mercato | prima | ora |
+**⚠️ EFFETTO DICHIARATO DELLA REVISIONE (allarga — e' la scelta del
+proprietario, non un effetto collaterale).**
+| lega | mercato | con `max` (prima stesura) | **con `min` (in produzione)** |
 |---|---|---|---|
-| core | AH/OU/Totals/ML | 1.0% | **1.5%** (piu' severo) |
-| core | 1X2 | 2.5% | 2.5% (invariato) |
-| probation / sconosciuta | qualunque | 1.0% (liquidi) / 2.5% | **2.5%** |
+| core | 1X2 | 2.5% | **1.5%** |
+| core | AH/OU/Totals/BTTS/ML | 1.5% | **1.0%** |
+| probation / sconosciuta | AH/OU/Totals/BTTS/ML | 2.5% | **1.0%** |
+| probation / sconosciuta | 1X2 | 2.5% | 2.5% (invariato) |
 
-Il tier **non abbassa mai** una soglia gia' piu' alta: la direttiva "core ->
-1,5%" non produce piu' volume (sui mercati liquidi lo riduce). Per un
-allargamento reale servirebbe la precedenza opposta (`min`) — scelta diversa,
-non un default silenzioso. **Impatto sugli ORDINI oggi: nullo** — le corsie che
-ordinano (tennis, eSports, 1X2) hanno soglia propria o mercato non liquido, e
-OU/AH non ordinano comunque (`ORACLE_ENABLED=0`, fuori perimetro dal 07/10).
+La dimensione TIER **non stringe piu' nulla**: puo' solo ABBASSARE la soglia
+delle leghe core. `EV_MIN_OTHER` (2,5%) resta il default del tier ma morde solo
+se una soglia di MERCATO fosse piu' alta di 2,5%. Freno d'emergenza senza
+toccare il codice: **`EV_MIN_LIQUID=0.025`** (env gia' in `preserve()`) riporta
+a 2,5% tutti i mercati liquidi, leghe core incluse.
 
-**✅ KELLY SAFETY CHECK (chiesto dalla seconda direttiva) — FATTO, nessuna
-azione necessaria.** Misurato con `decision.stake_engine.calculate_kelly_stake`
-(equity reale 28,89, k dinamico 0,177, cap 12%, ticket 1,00):
+**✅ KELLY: NORMALIZZAZIONE EV CORRETTA + SAFETY CHECK (seconda direttiva).**
+1. `decision/stake_engine.dynamic_kelly_fraction` accetta ora **`market`**
+   (oltre a `ev`/`edge`/`league`) e normalizza la componente EV sulla soglia
+   **REALE** `value_filter.ev_min(league, market)`: prima usava
+   `ev_min_for_market("")` (2,5% fisso), quindi un'operazione core a EV 2%
+   finiva con componente 0 = **k al minimo di banda** (misurato in produzione:
+   `ev 0.00; edge 0.00; lega 0.89`). `calculate_kelly_stake` propaga il nuovo
+   parametro; lo passano `auto_bet.kelly_size_for_pick` (`pick["mercato"]`),
+   `agents/finance_agent` (`trade.market`) e `web_api` (schedina).
+2. Safety check del ticket (equity reale 28,8936, cap 12% = 3,47, ticket 1,00)
+misurato con il motore vero:
 ```
-EV 1.5%: stake 3.14 (odds 1.30) | 2.08 (1.60) | 1.65 (1.80)   tutti >= ticket
-EV 2.5%: stake 3.21            | 2.13       | 1.69
-bankroll 10: stake 0.00 -> below_min_ticket (gia' fail-closed)
+EV 1.5% core 1X2: stake 2.97 (odds 1.30) | 1.97 (1.60) | 1.56 (1.80)  tutti >= ticket
+EV 2.0% core 1X2: stake 3.16            | 2.10       | 1.66
+EV 2.5% core 1X2: stake 3.36            | 2.23       | 1.77
+k: 0.168 (EV 1.5%) -> 0.186 (EV 2.5%)  [la componente EV CRESCE: prima era 0 sotto 2.5%]
+bankroll 10 + EV 1.5%: stake 1.03 -> eseguibile
 ```
 Con l'equity attuale un EV 1,5% produce stake **sempre sopra** il minimo SX
-(1,00 USDC). Il ticket morde solo sotto ~11-13 USDC di bankroll ed e' gia'
-gestito in modo fail-closed (`below_min_ticket`, mai un arrotondamento
-silenzioso) — coerente con "il ticket e' soglia del MOTORE".
+(1,00 USDC). Il ticket morde solo sotto ~11-13 USDC di bankroll ed e' gestito
+**fail-closed** (`below_min_ticket`, mai un arrotondamento silenzioso) —
+coerente con "il ticket e' soglia del MOTORE".
 
-**Test**: `test_value_filter.py::TestSogliaEvPerTier` (8 nuovi: core non
-allarga il 1X2, core stringe il mercato liquido, non-core protettiva, **il tier
-non abbassa mai** su griglia di tutte le leghe x 7 mercati, gate combinato
-+1.2% respinto/+1.7% ammesso, probation piu' severa sui liquidi, fail-safe su
-lega sconosciuta/None, env override, IaC dichiara le env).
-Regressioni verdi: value_filter + brain_agent (82), multi_market +
-decision_pipeline (parita' `is_sane`!) + decision_limits + top_down +
-market_calib + risk_guards (255), auto_bet x2 + capital_enclosure +
-exposure_gate + t60_breakers + line_oracle + ou_exclusion + esports_oracle +
-tennis_lane (466), bot + web_api + reports + market_diagnose + flow_measure +
-adaptive_weighting + smart_hedging + railway_drift_check + secret_hygiene +
-tier + favourites_only + league_gate (346). `verify_guardrails.py`: **A-H tutti
-bloccano** (exit 0). `compileall` OK, 0 marker di conflitto.
+**Test**: `test_value_filter.py::TestSogliaEvPerTier` riscritto sulla regola
+`min` (core ABBASSA il 1X2, core sui liquidi usa la soglia di mercato, non-core
+usa la soglia di mercato, **il tier non alza mai** su griglia di tutte le leghe
+x 7 mercati, gate +1.7% core ammesso / +1.2% respinto, liquidi non core +2%
+ORA ammessi — la conseguenza dichiarata —, fail-safe su lega sconosciuta/None,
+env override, IaC). `test_aggressive_kelly.py::TestNormalizzazioneEvDelK`
+(4 nuovi: core non piu' schiacciato al minimo, riferimento = soglia reale su
+griglia lega/mercato, propagazione di `market` via `calculate_kelly_stake`,
+`auto_bet.kelly_size_for_pick` che passa `mercato`). `test_decision_pipeline`:
+nuovi `test_ev_min_effettivo_per_lega_e_mercato` e
+`test_gate_ev_core_a_1_5_percento` (core+1.7% = approve, stesso EV su MLS =
+reject `EV_TOO_LOW`) + la parita' con `is_sane` resta verde. Aggiornati di
+proposito: `test_brain_agent` (soglia derivata da `vf.ev_min`, depth 5 ->
+1,875%), `test_top_down` (core 1,5% invece di 2,5%).
+Regressioni verdi (exit 0) nei lotti: value_filter/brain_agent/
+aggressive_kelly/decision_pipeline/decision_limits/agent_kelly/
+adapters/top_down; auto_bet x2/capital_enclosure/exposure_gate/t60_breakers/
+risk_guards/favourites_only/league_gate; multi_market/line_oracle/tennis_lane/
+esports_lane/market_calib/ou_exclusion/decision_compare/decision_shadow;
+web_api/market_diagnose/flow_measure/significance; bot/reports/
+league_dynamic/decision_feed/agent_hierarchy/adaptive_weighting.
+`verify_guardrails.py`: **A-H tutti bloccano** (exit 0). `compileall` OK,
+0 marker di conflitto.

@@ -97,9 +97,10 @@ def base_ev_min(market: str = "", league: str = "") -> float:
     Direttiva 04/10/2026 (punto 4): i mercati LIQUIDI (Asian Handicap,
     Over/Under, Totals, BTTS, Moneyline) hanno una soglia piu' bassa
     (EV > 1.0%). Direttiva 08/10/2026: si aggiunge la dimensione del TIER di
-    lega (core 1.5%, altrimenti la soglia protettiva) con precedenza "la piu'
-    severa". Entrambe le regole vivono in `value_filter.ev_min`: qui non si
-    ricopia nessuna soglia.
+    lega (core 1.5%), con precedenza "la piu' PERMISSIVA" (revisione del
+    proprietario): vince la soglia piu' bassa, quindi la lega core gioca il
+    1X2 a 1.5% mentre sui mercati liquidi resta l'1.0%. Entrambe le regole
+    vivono in `value_filter.ev_min`: qui non si ricopia nessuna soglia.
     """
     from value_filter import ev_min
     return float(ev_min(league, market))

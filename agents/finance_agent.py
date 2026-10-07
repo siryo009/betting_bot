@@ -182,7 +182,7 @@ class FinanceAgent:
         res = calculate_kelly_stake(as_float(trade.true_prob),
                                     as_float(trade.price), bk,
                                     ev=trade.ev, edge=getattr(trade, "edge", None),
-                                    league=trade.league)
+                                    league=trade.league, market=trade.market)
         trade.kelly_fraction = as_float(res.get("kelly_fraction") or 0.0)
         trade.kelly_full = as_float(res.get("kelly_full") or 0.0)
         trade.raw_stake = as_float(res.get("raw_stake") or 0.0)

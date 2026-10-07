@@ -236,7 +236,9 @@ def _schedina_json(params=None):
             from decision.stake_engine import dynamic_kelly_fraction
             _dyn = dynamic_kelly_fraction(ev=p.get("ev"),
                                           edge=p.get("market_edge"),
-                                          league=p.get("league"))
+                                          league=p.get("league"),
+                                          market=p.get("mercato")
+                                          or p.get("market"))
             pick_data["kelly_dynamic"] = _dyn["kelly_fraction"]
             pick_data["kelly_strength"] = _dyn["strength"]
             pick_data["kelly_reason"] = _dyn["reason"]

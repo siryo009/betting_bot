@@ -22,6 +22,7 @@ import pytest
 import auto_bet
 import pinnacle_oracle as po
 import tracker
+import value_filter as vf
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +541,8 @@ class TestWiringCorsiaLive:
 class TestProbationExtra:
     def test_probation_alza_la_soglia_ev(self, monkeypatch, temp_db):
         """Liga MX (probation): EV +3% con extra 2pp NON basta (servirebbe
-        >= 4.5% con soglia base 2.5%); la stessa EV su una lega core passa."""
+        >= 4.5% col tier protettivo 2.5%); la stessa EV su una lega core passa
+        perche' il tier core porta la soglia a 1.5% (direttiva 08/10/2026)."""
         pick = {"match_id": "p1", "home": "A", "away": "B",
                 "esito_key": "1", "quota": 2.00}
         # p_true 0.515, quota 2.00 -> EV = 0.515 - 0.485 = +3% (strettamente
@@ -552,7 +554,7 @@ class TestProbationExtra:
         assert v["ev_min"] == pytest.approx(0.045)
         v_core = auto_bet._top_down_eval(pick, league="Premier League")
         assert v_core["ok"] and v_core["trigger"] is True
-        assert v_core["ev_min"] == pytest.approx(0.025)
+        assert v_core["ev_min"] == pytest.approx(vf.EV_MIN_CORE)
 
     def test_senza_leaga_nessun_extra(self, monkeypatch):
         pick = {"match_id": "p1", "home": "A", "away": "B",

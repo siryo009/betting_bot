@@ -105,13 +105,18 @@ def evaluate(signal: Signal, *, kills: KillSwitchStatus, limits: RiskLimits,
                            f"{limits.min_favourite_prob*100:.0f}%", checked=checked)
 
     # 6. EV (sotto = no edge, sopra la fascia = anomalia/quota sporca).
+    #    La soglia e' quella EFFETTIVA di lega+mercato (direttiva 08/10/2026):
+    #    lega core a 1.5% sul 1X2, mercati liquidi alla soglia di mercato
+    #    (1.0%). Stessa definizione di `is_sane` (`value_filter.ev_min`), mai
+    #    una copia: la parita' fra catena e produzione e' un test.
     checked.append("ev")
     ev = float(signal.ev or 0.0)
-    if ev < limits.ev_min:
+    ev_min_eff = limits.league_ev_min(signal.league, signal.market)
+    if ev < ev_min_eff:
         # `:g` e non `:.0f`: con soglia 2.5% il `:.0f` mostrerebbe "2%"
         # (round-half-even) e il motivo del rifiuto mentirebbe.
         return risk_reject(ReasonCode.EV_TOO_LOW,
-                           f"EV {ev*100:.1f}% < {limits.ev_min*100:g}%", checked=checked)
+                           f"EV {ev*100:.1f}% < {ev_min_eff*100:g}%", checked=checked)
     if ev > limits.ev_max:
         return risk_reject(ReasonCode.EV_ANOMALOUS,
                            f"EV {ev*100:.1f}% > {limits.ev_max*100:.0f}% (anomalia)",

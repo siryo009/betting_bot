@@ -158,6 +158,20 @@ class RiskLimits(BaseModel):
         import value_filter as vf
         return float(vf.get_league_strategy(league).get("min_edge", self.edge_min))
 
+    def league_ev_min(self, league: str = "", market: str = "") -> float:
+        """Soglia EV EFFETTIVA per lega+mercato (direttiva 08/10/2026).
+
+        Delega a `value_filter.ev_min`: il Risk Engine della catena non puo'
+        divergere dal gate di produzione (`is_sane`) su una soglia. Con `min`
+        la lega core gioca il 1X2 a 1.5% e i mercati liquidi restano alla
+        soglia di mercato (1.0%): nessuna copia di questi numeri qui.
+        """
+        import value_filter as vf
+        try:
+            return float(vf.ev_min(league or "", market or ""))
+        except Exception:
+            return float(self.ev_min)
+
     def league_max_stake_pct(self, league: str) -> float:
         """Cap di lega (`value_filter.STRATEGY_LEAGUES[...]["max_stake"]`)."""
         import value_filter as vf

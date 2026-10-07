@@ -119,14 +119,19 @@ def _clamp01(value: float) -> float:
 
 def dynamic_kelly_fraction(*, ev: Optional[float] = None,
                            edge: Optional[float] = None,
-                           league: Optional[str] = None) -> dict[str, Any]:
+                           league: Optional[str] = None,
+                           market: Optional[str] = None) -> dict[str, Any]:
     """k effettivo nella banda [k_min, k_max] da edge + confidenza lega.
 
     Direttiva 04/10/2026 (punto 2): il frazionamento scende da 0.65 fisso a
     **0.15-0.25 dinamico**. Il valore sale verso il massimo quando:
 
-    - l'**EV** del trade e' forte (normalizzato fra la soglia minima di
-      progetto e `EV_STRONG_REF`, 4%): un margine grande regge piu' Kelly;
+    - l'**EV** del trade e' forte (normalizzato fra la soglia minima EFFETTIVA
+      dell'operazione — `value_filter.ev_min(league, market)`, quindi 1.5% su
+      un 1X2 core e 1.0% su un mercato liquido — e `EV_STRONG_REF`, 4%): un
+      margine grande regge piu' Kelly. Direttiva 08/10/2026 (revisione): la
+      soglia di riferimento e' quella REALE della lega/mercato, non il 2.5%
+      generico — un'operazione core a EV 2% non finisce piu' schiacciata a 0;
     - l'**edge** sul mercato e' ampio (normalizzato fra `MARKET_EDGE_MIN` e
       `MARKET_EDGE_STRONG`);
     - la **lega** e' affidabile (`value_filter.get_league_strategy`):
@@ -145,7 +150,10 @@ def dynamic_kelly_fraction(*, ev: Optional[float] = None,
     try:
         if ev is not None:
             import value_filter as _vf
-            ev_lo = float(_vf.ev_min_for_market(""))
+            # Soglia di riferimento REALE per questa lega/mercato (direttiva
+            # 08/10/2026): usare il 2.5% generico schiacciava a zero il
+            # componente EV di ogni operazione core a EV 1.5-2.5%.
+            ev_lo = float(_vf.ev_min(league or "", market))
             ev_hi = _KELLY_EV_REF_FALLBACK
             try:
                 from market_calib import MARKET_EDGE_STRONG as _strong
@@ -205,15 +213,18 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
                          min_ticket: Optional[float] = None,
                          ev: Optional[float] = None,
                          edge: Optional[float] = None,
-                         league: Optional[str] = None) -> dict[str, Any]:
+                         league: Optional[str] = None,
+                         market: Optional[str] = None) -> dict[str, Any]:
     """Stake aggressivo: Kelly frazionato + cap dinamico + ticket minimo.
 
     `f = (b*p - q)/b` con `b` = quota decimale: la formula vive in
     `value_filter.kelly_fraction` (mai ricopiata). Sull'importo:
 
     1. `stake_raw = bankroll x kelly_pieno x k` con **k dinamico** nella banda
-       0.15-0.25 scalata da EV/edge/lega (`dynamic_kelly_fraction`); passare
-       `kelly_fraction` esplicito la vince (test e override);
+       0.15-0.25 scalata da EV/edge/lega/mercato (`dynamic_kelly_fraction`:
+       l'EV si normalizza sulla soglia REALE di lega+mercato, direttiva
+       08/10/2026); passare `kelly_fraction` esplicito la vince (test e
+       override);
     2. cap dinamico: `bankroll x max_stake_pct` (12%) — TRONCA, mai alza;
     3. ticket minimo (1.00 USDC): sotto soglia lo stake e' **0.0**
        (operazione scartata) — mai un ordine piu' piccolo del ticket.
@@ -225,7 +236,8 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
     cfg = aggressive_config()
     dyn = None
     if kelly_fraction is None:
-        dyn = dynamic_kelly_fraction(ev=ev, edge=edge, league=league)
+        dyn = dynamic_kelly_fraction(ev=ev, edge=edge, league=league,
+                                    market=market)
         frac = float(dyn["kelly_fraction"])
     else:
         frac = float(kelly_fraction)
