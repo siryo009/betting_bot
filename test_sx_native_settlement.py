@@ -212,6 +212,144 @@ class TestFindPath:
         assert res["settled"] == 0 and res["source"] is None
 
 
+def _tennis_market(market_hash, outcome=1, home="Adrian Mannarino",
+                   away="Nikoloz Basilashvili", league="ATP - Shanghai",
+                   sh=None, sa=None, mtype=52, with_outcome=True):
+    """Mercato TENNIS (type 52, 2 esiti) come lo ritorna markets/find.
+
+    Sul tennis i campi `teamOneScore`/`teamTwoScore` sono GAME e possono
+    mancare del tutto sui mercati ritirati: `sh`/`sa` restano None per
+    riprodurre il caso reale (bet #14).
+    """
+    m = {"marketHash": market_hash, "type": mtype, "status": "INACTIVE",
+         "teamOneName": home, "teamTwoName": away,
+         "outcomeOneName": home, "outcomeTwoName": away,
+         "outcomeVoidName": "NO_CONTEST", "leagueLabel": league,
+         "sportXeventId": "L20430101", "sportId": 6,
+         "gameTime": NOW_S - 8 * 3600}
+    if with_outcome:
+        m["outcome"] = outcome
+    if sh is not None:
+        m["teamOneScore"] = sh
+    if sa is not None:
+        m["teamTwoScore"] = sa
+    return m
+
+
+class TestMercatoDueEsiti:
+    """Type 52 (tennis / eSports / "12 senza pareggio"): il verdetto e' il
+    campo `outcome` SALDATO DALL'EXCHANGE, non i punteggi (03/10/2026).
+
+    Prima di questo percorso il tennis si saldava (male) dai game e i
+    mercati ritirati senza punteggi restavano aperti fino alla scadenza
+    push — con P/L 0 al posto del verdetto vero.
+    """
+
+    def test_bet_14_senza_punteggi_usa_l_outcome(self, temp_db):
+        """REGRESSION bet #14 (Mannarino-Basilashvili): il tennis NON porta
+        punteggi sui mercati ritirati. `outcome` 1 = ha vinto Mannarino ->
+        la nostra selezione 2 ha PERSO -1.31 (prima: riga aperta fino alla
+        scadenza push, con +1.31 di P/L INVENTATO)."""
+        mid = "sx-tennis-0x0691"
+        tracker.save_match(mid, "ATP - Shanghai", "Adrian Mannarino",
+                           "Nikoloz Basilashvili", "2026-10-07T05:30:00Z")
+        tracker.save_bet(mid, "TENNIS", "2", "0x0691", 2, 2.0408, 1.31,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[_tennis_market("0x0691", outcome=1)])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["results"] == 1 and res["settled"] == 1
+        assert _bet_outcome(mid) == ("lost", -1.31)
+
+    def test_selezione_1_vincente_con_outcome_1(self, temp_db):
+        mid = "sx-tennis-0x0001"
+        tracker.save_bet(mid, "TENNIS", "1", "0x0001", 1, 2.0, 1.0,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[_tennis_market("0x0001", outcome=1)])
+        sx_signals.settle_sx_bets(provider=prov)
+        assert _bet_outcome(mid) == ("won", 1.0)
+
+    def test_punteggi_pareggiati_non_decidono_il_verdetto(self, temp_db):
+        """REGRESSION bet #19 (Giron-Baez): game 13-13 — i game possono
+        pareggiare con un vincitore — ma `outcome` 2 dice che ha vinto la
+        selezione 2. I punteggi l'avevano registrata PERSA (-1.34) invece
+        che VINTA (+1.15)."""
+        mid = "sx-tennis-0x4be2"
+        tracker.save_match(mid, "ATP - Shanghai", "Marcos Giron",
+                           "Sebastian Baez", "2026-10-08T07:00:00Z")
+        tracker.save_bet(mid, "TENNIS", "2", "0x4be2", 2, 1.8561, 1.34,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[
+            _tennis_market("0x4be2", outcome=2, home="Marcos Giron",
+                           away="Sebastian Baez", sh=13, sa=13)])
+        sx_signals.settle_sx_bets(provider=prov)
+        assert _bet_outcome(mid) == ("won", 1.15)
+
+    def test_outcome_void_non_chiude(self, temp_db):
+        """outcome 0 (NO_CONTEST), senza punteggi: fail-closed, nessuna
+        chiusura qui. Ci pensa la scadenza (`expire_stale_sx_rows` -> push,
+        che per un void e' il P/L corretto: nessun verdetto inventato)."""
+        mid = "sx-tennis-0x0002"
+        tracker.save_bet(mid, "TENNIS", "1", "0x0002", 1, 2.0, 1.0,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[_tennis_market("0x0002", outcome=0)])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["results"] == 0 and res["settled"] == 0
+        assert _bet_outcome(mid) == (None, None)
+
+    def test_outcome_assente_non_chiude(self, temp_db):
+        """Mercato NON saldato (nessun `outcome`): fail-closed anche coi
+        punteggi presenti (il percorso find del tennis non li usa piu',
+        ma la riga non deve chiudersi per un verdetto che non esiste)."""
+        mid = "sx-tennis-0x0003"
+        tracker.save_bet(mid, "TENNIS", "1", "0x0003", 1, 2.0, 1.0,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[
+            _tennis_market("0x0003", with_outcome=False)])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["results"] == 0 and res["settled"] == 0
+        assert _bet_outcome(mid) == (None, None)
+
+    def test_type1_calcio_ignora_l_outcome_della_gamba(self, temp_db):
+        """Sul 1X2 calcio (type 1) la regola NON cambia: il verdetto si
+        deriva dai punteggi, MAI dal campo `outcome` della gamba (qui
+        `outcome` 2 e punteggi 3-0: comanda il 3-0 -> la selezione 2 perde).
+        """
+        mid = "sx-LEV9"
+        tracker.save_bet(mid, "1X2", "2", "0xL9", 2, 3.0, 1.0,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[
+            _find_market("0xL9", outcome=2, sh=3, sa=0)])
+        sx_signals.settle_sx_bets(provider=prov)
+        assert _bet_outcome(mid)[0] == "lost"
+
+    def test_previsione_tennis_chiusa_col_verdetto_dell_exchange(
+            self, temp_db, monkeypatch):
+        """Anche la PREVISIONE dello stesso match (telemetria) si chiude col
+        verdetto dell'exchange: il risultato salvato dal percorso find ha la
+        chiave sx-<id>, quindi `settle_predictions` la aggancia per match_id.
+
+        NOTA: il percorso find parte dal `market_id` delle BET — un match con
+        la SOLA previsione (nessuna puntata) non storea market_id nel ledger e
+        non e' coperto qui. E' telemetria, non denaro: nella corsia tennis la
+        previsione e la puntata nascono insieme.
+        """
+        monkeypatch.setattr(
+            "odds_api.fetch_scores",
+            lambda sport=None, days_from=3: (_ for _ in ()).throw(
+                AssertionError("no crediti")))
+        mid = "sx-tennis-0x0004"
+        tracker.save_match(mid, "ATP - Shanghai", "Adrian Mannarino",
+                           "Nikoloz Basilashvili", "2026-10-07T05:30:00Z")
+        tracker.save_bet(mid, "TENNIS", "1", "0x0004", 1, 1.9, 1.0,
+                         mode="live")
+        tracker.save_prediction(mid, "TENNIS", "2", 2.0408, 0.49, 0.03)
+        prov = FakeSxSettle(find_data=[_tennis_market("0x0004", outcome=1)])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["predictions"] == 1 and res["settled"] == 1
+        assert _bet_outcome(mid)[0] == "won"
+        assert _pred_outcome(mid)[0] == "lost"
+
+
 class TestActivePath:
     """Percorso (2): match con riga nel ledger -> punteggi live su active."""
 

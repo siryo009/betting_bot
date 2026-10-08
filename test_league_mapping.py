@@ -268,9 +268,19 @@ class TestSettlementNomiTolleranti:
         """Le previsioni SX senza una bet restavano aperte per SEMPRE (il
         settlement guardava solo la tabella `bets`): inquinavano la
         telemetria di calibrazione. Ora il risultato viene salvato anche per
-        i match con sole previsioni."""
+        i match con sole previsioni.
+
+        ⚠️ COPERTURA ESTESA DICHIARATA: dal 04/10/2026 la politica di
+        default e' `SETTLEMENT_BETS_ONLY=1` ("il referto segue il DENARO":
+        le fonti PAGATE interrogano solo le leghe con una puntata). Qui si
+        esercita il percorso esteso — quello che questo tripwire difende —
+        accendendo esplicitamente l'escape hatch, come fa `TestResiduoSettlement`
+        in `test_settlement_watchdog`: senza, il test misurerebbe la policy
+        del giorno invece del comportamento che vuole proteggere.
+        """
         monkeypatch.setenv("ODDS_API_KEY", "test")
         monkeypatch.setenv("API_FOOTBALL_KEY", "")
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "0")
         tracker.save_match("sx-LNP", "Serie A", "Alpha", "Beta",
                            "2026-09-10T00:00:00Z")
         tracker.save_prediction("sx-LNP", "1X2", "1", 1.8, 0.6, 0.05,

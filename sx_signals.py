@@ -102,6 +102,13 @@ SX_FIND_BATCH = 30
 # due ore di ritardo sono accettabili; le coperte arrivano prima.
 SX_LIVE_MIN_AGE_MS = 120 * 60 * 1000
 
+# Mercato SX a DUE ESITI ("X vs Not X"): type 52 = moneyline 2 vie
+# (tennis sportId 6, eSports sportId 9, "12 senza pareggio" calcio).
+# Su questi mercati il campo `outcome` dell'exchange (1 = vince
+# outcomeOne, 2 = vince outcomeTwo, 0 = void/NO_CONTEST) E' il verdetto
+# definitivo e NON va ricavato dai punteggi (vedi `_results_from_sx`).
+SX_MONEYLINE_TYPE = 52
+
 _LEAGUE_MAP_CACHE: Dict[str, Optional[str]] = {}
 
 # ---------------------------------------------------------------------------
@@ -1008,6 +1015,18 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
        vengono dalla risposta SX stessa (niente riga `matches` richiesta):
        cosi' si saldano anche le bet ORFANE senza riga nel ledger.
 
+       MERCATI A DUE ESITI (type 52 = tennis / eSports / "12 senza
+       pareggio", 03/10/2026): il verdetto si prende dal campo `outcome`,
+       non dai punteggi. Sul tennis i `teamOneScore`/`teamTwoScore` sono
+       GAME (possono pareggiare con un vincitore: 13-13 su Giron-Baez,
+       dove il verdetto vero era `outcome` 2) e sui mercati ritirati non
+       arrivano affatto (Mannarino-Basilashvili): in entrambi i casi la
+       bet restava aperta o veniva chiusa col verdetto sbagliato. Su un
+       mercato a 2 esiti `outcome` e' la risoluzione dell'exchange, quindi
+       e' la fonte corretta (sul 1X2 calcio, type 1, resta la regola
+       opposta: il verdetto si deriva dai punteggi, mai dalla gamba).
+       `outcome` 0 (void) o assente -> fail-closed, nessuna chiusura.
+
     2. MATCH aperti (bet o sole previsioni) con riga nel ledger:
        `/markets/active` (type 1, sportId 5, paginato come `_discover`)
        espone ancora gli eventi IN CORSO (fino a ~+1h dal kickoff) con
@@ -1074,9 +1093,40 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
             ko = _kickoff_utc_ms(m.get("gameTime"))
             if ko is None or ko > now_ms - SX_LIVE_MIN_AGE_MS:
                 continue   # non conclusa: il punteggio puo' ancora cambiare
-            sh, sa = m.get("teamOneScore"), m.get("teamTwoScore")
             home = m.get("teamOneName") or ""
             away = m.get("teamTwoName") or ""
+            try:
+                mtype = int(m.get("type"))
+            except (TypeError, ValueError):
+                mtype = 0
+            try:
+                outcome = int(m.get("outcome"))
+            except (TypeError, ValueError):
+                outcome = None
+            # MERCATO A DUE ESITI (type 52: tennis, eSports, "12 senza
+            # pareggio"): qui il campo `outcome` SALDATO DALL'EXCHANGE e' il
+            # verdetto, non un dato da derivare dai punteggi. Non e'
+            # un'alternativa, e' l'unica fonte corretta:
+            #  - il tennis NON porta punteggi sui mercati ritirati (bet #14
+            #    Mannarino-Basilashvili: outcome 1, zero score) e resterebbe
+            #    aperta fino alla scadenza push, con P/L 0 inventato al posto
+            #    della perdita reale;
+            #  - quando li porta sono GAME, e i game possono pareggiare con un
+            #    vincitore (bet #19 Giron-Baez: 13-13 ma outcome 2 — la bet era
+            #    VINTA, registrata persa dai punteggi).
+            # La semantica resta RELATIVA ALLA GAMBA (1 = vince outcomeOne),
+            # che su un mercato a 2 esiti e' esattamente cio' che serve; sul
+            # 1X2 calcio (type 1) la regola "mai dal campo outcome" resta
+            # intatta. I punteggi canonici (1,0)/(0,1) servono solo a far
+            # derivare il verdetto a settle_bets/_prediction_outcome.
+            # outcome 0 (void) o assente -> fail-closed: nessuna chiusura qui
+            # (la scadenza la chiude come push, che per un void e' corretto).
+            if (mtype == SX_MONEYLINE_TYPE and outcome in (1, 2)
+                    and home and away):
+                sh, sa = (1, 0) if outcome == 1 else (0, 1)
+                _save(mid, m.get("leagueLabel") or "", home, away, sh, sa)
+                continue
+            sh, sa = m.get("teamOneScore"), m.get("teamTwoScore")
             if home and away and isinstance(sh, int) and isinstance(sa, int):
                 _save(mid, m.get("leagueLabel") or "", home, away, sh, sa)
 
