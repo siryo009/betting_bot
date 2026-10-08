@@ -9694,14 +9694,30 @@ provider veniva ritentato a ogni ciclo, per sempre.
 `test_dockerfile_fornisce_la_libreria_tls`; 57 verdi. Regressioni verdi:
 `test_railway_drift_check`, `test_agent_hierarchy`, `test_advisor_agent`,
 `test_exposure_gate`, `test_secret_hygiene`, `test_chief_shadow_wiring` (106).
-Sul container: la riga del Dockerfile e' stata riprodotta a mano e con il `.so`
-presente **l'errore TLS sparisce** (soccerdata arriva all'HTTP).
+
+**ESITO IN PRODUZIONE (commit `b562ffb`, deploy `b42178c8` SUCCESS, health 200).**
+Misurato sul container, NON dedotto:
+- il `.so` e' al suo posto (`/usr/local/lib/python3.12/site-packages/tls_requests/
+  bin/tls-client-linux-ubuntu-amd64-1.13.1.so`) e `TLSLibrary.load()` lo CARICA:
+  in produzione l'unica riga TLS e' `INFO Successfully loaded TLS library: ...`,
+  **0 `ERROR` / 0 `Failed to download`**;
+- dettaglio che rende il fix solido: `IS_UBUNTU=False` e `find()` (pattern
+  `linux-amd64.*so`) restituirebbe **None** — ma `load()` usa `find_all()` (glob
+  di TUTTI i `.so` in `BIN_DIR` + versione nel nome = target), quindi il file
+  della variante ubuntu funziona lo stesso e il download a runtime e' saltato;
+- **cache negativa attiva**: 9 voci negative sul volume al primo ciclo
+  (5 `elo` + 4 `fbref`); confronto a 3 minuti di distanza con **8 cicli**
+  `auto_bet`: `Traceback` 20 -> 20, righe `clubelo` 40 -> 40 (**delta 0**).
+  Prima del fix: 49 ERROR + 344 righe `TLSLibrary` in ~13 minuti.
 
 ⚠️ **Limite ESTERNO trovato nella stessa verifica**: `api.clubelo.com` risponde
-**502 su tutte le date** (oggi e precedenti) dal container. Anche col TLS
-riparato, il provider ELO non produce dati: e' un guasto del servizio esterno,
-non del nostro codice. La cache negativa lo rende comunque silenzioso ed
-economico (max 1 tentativo/ora per squadra invece di uno ogni 60s).
+**502 su tutte le date** (oggi e precedenti) dal container: la richiesta ora
+ARRIVA all'HTTP (prova che il TLS e' sano), ma il provider ELO resta senza dati
+finche' il servizio esterno non torna. Costo residuo: un burst al boot e al piu'
+1 tentativo/ora per squadra (fail TTL) invece di uno ogni 60s. Il traceback del
+502 e' stampato da `soccerdata` (non da `live_intel`, che lo cattura e lo espone
+in `INTEL_ERRORS`/`providers[].detail`): silenziarlo richiede un livello di log
+dedicato, NON e' stato fatto (fuori dal perimetro della direttiva).
 
 **Regola permanente**: quando un provider fallisce a ripetizione, il primo
 sospetto non e' il provider ma il **nome dell'asset/URL che la libreria genera**
