@@ -42,6 +42,7 @@ CLI:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -713,6 +714,82 @@ def _sx_open_matches() -> Dict[str, dict]:
                    "kickoff": r[4]} for r in rows}
 
 
+def _prediction_market_hashes() -> Dict[str, List[dict]]:
+    """`market_hash` SX delle PREVISIONI aperte, letto da `market_quotes`.
+
+    PERCHE' ESISTE (08/10/2026). Il referto nativo leggeva gli hash SOLO dalle
+    bet (`bets.market_id`), quindi una partita SENZA puntata non era saldabile
+    gratis: la riga restava aperta fino alla scadenza a 5 giorni e veniva
+    chiusa come **PUSH** — un verdetto inventato — anche quando SX aveva il
+    risultato vero disponibile.
+
+    Misura sul container (08/10/2026) che l'ha motivata: 96 previsioni aperte
+    con kickoff nel passato (Brasileirao 36, Nations League 19, ...), quasi
+    tutte di leghe che `SETTLEMENT_BETS_ONLY` esclude dal referto PAGATO; il
+    `market_hash` e' nell'`extra_json` di `market_quotes` (200/200 righe
+    campionate) e `markets/find` risponde 200 con lo score dell'evento anche
+    22h dopo il kickoff (Botafogo RJ-CR Vasco da Gama: 1-2).
+
+    Un hash per FIXTURE basta: qualunque mercato dello stesso evento porta il
+    punteggio dell'evento, ed e' il punteggio (non la gamba) a decidere il
+    verdetto di una previsione (1X2/OU/AH) — la stessa semantica del percorso
+    delle bet. I bersagli sono una LISTA perche' bet e previsioni dello stesso
+    evento possono avere `match_id` diversi e nessuno dei due va perso.
+
+    Solo lettura, nessuna rete: un errore torna `{}` (il percorso nativo resta
+    quello di prima, fail-closed sulle fonti esterne).
+    """
+    out: Dict[str, List[dict]] = {}
+    seen_fixtures: set = set()
+    try:
+        from tracker import _get_conn
+        conn = _get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT q.fixture_id, q.extra_json, m.home_team, m.away_team, "
+                "       m.league "
+                "FROM market_quotes q "
+                "JOIN (SELECT DISTINCT match_id FROM predictions "
+                "      WHERE esito_finale IS NULL AND match_id LIKE 'sx-%') p "
+                "  ON p.match_id = q.fixture_id "
+                "LEFT JOIN matches m ON m.id = q.fixture_id").fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("sx_signals: hash delle previsioni non leggibili (%s)", exc)
+        return out
+    for fixture_id, extra_json, home, away, league in rows:
+        mid = str(fixture_id or "")
+        if not mid or mid in seen_fixtures:
+            continue           # un hash per partita: basta, e costa meno
+        try:
+            extra = json.loads(extra_json or "{}")
+        except Exception:
+            continue
+        if not isinstance(extra, dict):
+            continue
+        market_hash = extra.get("market_hash") or extra.get("marketHash")
+        if not market_hash:
+            continue
+        # La chiave e' il `market_hash` (NON il fixture id): e' quello che
+        # `markets/find` riceve. Un mercato dello stesso evento ne ha uno
+        # diverso per ogni linea, ma il punteggio che ne torna e' quello
+        # dell'EVENTO, quindi il primo che capita va bene.
+        seen_fixtures.add(mid)
+        # `moneyline_ok=False`: una PREVISIONE non prende i punteggi
+        # SINTETICI (1,0)/(0,1) dei mercati a 2 esiti — il suo esito e' una
+        # stringa di ledger ('Under 3.5', nome giocatore) e un punteggio
+        # sintetico su un mercato che non e' un 1X2 sarebbe un verdetto
+        # costruito. Si accetta solo il punteggio REALE dell'evento.
+        out[str(market_hash)] = [{"mid": mid, "moneyline_ok": False,
+                                  "home": home or "", "away": away or "",
+                                  "league": league or ""}]
+    if out:
+        logger.debug("sx_signals: %d partite con sole previsioni hanno un "
+                     "market_hash (referto SX-native gratuito)", len(out))
+    return out
+
+
 def _same_event(event: dict, home: str, away: str) -> bool:
     """True se l'evento the-odds-api E' la partita (home, away).
 
@@ -1005,7 +1082,9 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
     Due percorsi, entrambi GRATUITI (letture pubbliche, zero crediti
     the-odds-api) e senza matching per nome:
 
-    1. BET con market_id salvato sul ledger: `markets/find` sui mercati
+    1. BET con market_id salvato sul ledger + PREVISIONI senza puntata (dal
+       08/10/2026: il loro `market_hash` vive in `market_quotes.extra_json`,
+       vedi `_prediction_market_hashes`): `markets/find` sui mercati
        aperti (batch da SX_FIND_BATCH). Ogni mercato binario porta SEMPRE
        i punteggi dell'evento (teamOneScore/teamTwoScore) e, se saldato,
        anche `outcome` (1 = vince outcomeOne, 2 = vince outcomeTwo,
@@ -1052,10 +1131,25 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
     finally:
         conn.close()
     saved = 0
-    by_hash = {}
+    # market_hash -> LISTA dei bersagli da saldare. Una lista e non una tupla
+    # singola perche' lo stesso mercato puo' servire piu' righe dello stesso
+    # evento: le bet lo facevano gia', e dal 08/10/2026 anche le sole
+    # PREVISIONI portano il proprio hash (letto da `market_quotes`, non dal
+    # ledger delle puntate).
+    by_hash: Dict[str, List[dict]] = {}
     for mid, mkt_id, sel, esito in rows:
-        if mkt_id not in by_hash:
-            by_hash[mkt_id] = (mid, sel, esito)
+        entries = by_hash.setdefault(mkt_id, [])
+        if not any(e["mid"] == mid for e in entries):
+            entries.append({"mid": mid, "sel": sel, "esito": esito,
+                            "home": "", "away": "", "league": "",
+                            "moneyline_ok": True})
+    # Previsioni SENZA puntata: stesso percorso gratuito. Era il buco che
+    # lasciava le righe aperte fino alla scadenza push a 5 giorni.
+    for _mh, _targets in _prediction_market_hashes().items():
+        entries = by_hash.setdefault(_mh, [])
+        for _t in _targets:
+            if not any(e["mid"] == _t["mid"] for e in entries):
+                entries.append(_t)
 
     def _save(mid, league_label, home, away, sh, sa):
         nonlocal saved
@@ -1063,7 +1157,7 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
                     datetime.now(timezone.utc).isoformat())
         saved += 1
 
-    # --- 1. mercati delle bet aperte (find, a batch) ---
+    # --- 1. mercati delle bet aperte E delle sole previsioni (find, a batch) ---
     # GUARDIA DI CONCLUSIONE (17/09): lo stesso principio del percorso 2 —
     # un evento che non ha ancora finito di giocare NON ha un punteggio
     # finale. Se SX popolasse i punteggi live anche qui, salvarli chiuderebbe
@@ -1086,10 +1180,9 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
             if not isinstance(m, dict):
                 continue
             mh = m.get("marketHash")
-            hit = by_hash.get(mh)
-            if not hit:
+            targets = by_hash.get(mh)
+            if not targets:
                 continue
-            mid, _sel, _esito = hit
             ko = _kickoff_utc_ms(m.get("gameTime"))
             if ko is None or ko > now_ms - SX_LIVE_MIN_AGE_MS:
                 continue   # non conclusa: il punteggio puo' ancora cambiare
@@ -1121,14 +1214,30 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
             # derivare il verdetto a settle_bets/_prediction_outcome.
             # outcome 0 (void) o assente -> fail-closed: nessuna chiusura qui
             # (la scadenza la chiude come push, che per un void e' corretto).
-            if (mtype == SX_MONEYLINE_TYPE and outcome in (1, 2)
-                    and home and away):
-                sh, sa = (1, 0) if outcome == 1 else (0, 1)
-                _save(mid, m.get("leagueLabel") or "", home, away, sh, sa)
-                continue
-            sh, sa = m.get("teamOneScore"), m.get("teamTwoScore")
-            if home and away and isinstance(sh, int) and isinstance(sa, int):
-                _save(mid, m.get("leagueLabel") or "", home, away, sh, sa)
+            ev_id = m.get("sportXeventId")
+            for t in targets:
+                mid = t["mid"]
+                # GUARDIA DI EVENTO (08/10/2026): i bersagli che NON vengono
+                # dal ledger delle puntate sono stati scelti per HASH, quindi
+                # si verifica che il mercato appartenga davvero a QUELLA
+                # partita prima di salvargli il punteggio (`sx-<eventId>` e'
+                # la chiave del ledger). Senza la verifica un hash sbagliato
+                # salderebbe la previsione col risultato di un altro evento.
+                if not t.get("moneyline_ok") and ev_id and \
+                        f"sx-{ev_id}" != str(mid):
+                    continue
+                t_home = t.get("home") or ""
+                t_away = t.get("away") or ""
+                label = m.get("leagueLabel") or t.get("league") or ""
+                if (t.get("moneyline_ok") and mtype == SX_MONEYLINE_TYPE
+                        and outcome in (1, 2) and home and away):
+                    sh, sa = (1, 0) if outcome == 1 else (0, 1)
+                    _save(mid, label, home, away, sh, sa)
+                    continue
+                sh, sa = m.get("teamOneScore"), m.get("teamTwoScore")
+                if isinstance(sh, int) and isinstance(sa, int) \
+                        and (home or t_home) and (away or t_away):
+                    _save(mid, label, home or t_home, away or t_away, sh, sa)
 
     # --- 2. partite aperte con riga nel ledger (active, punteggi live) ---
     meta = _sx_open_matches()

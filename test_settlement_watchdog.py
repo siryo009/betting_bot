@@ -527,3 +527,77 @@ class TestResiduoSettlement:
         # delle righe appena chiuse (non per saldare).
         assert res["cost_open_driven"] == []
         assert res["cost_heal_only"] == ["Serie A"]
+
+
+class TestCodaFantasma:
+    """`past_kickoff_open` / `past_kickoff_unplanned` (08/10/2026).
+
+    Rendono VISIBILE la "coda fantasma": righe di partite GIA' INIZIATE
+    ancora aperte e quante di quelle il prossimo referto NON interroghera'.
+    Caso reale che li ha motivati: **Botafogo RJ-CR Vasco da Gama**, 6
+    previsioni aperte 22h dopo il kickoff in una lega (Brasileirao) senza
+    alcuna puntata, quindi esclusa dal referto PAGATO da
+    `SETTLEMENT_BETS_ONLY=1`.
+
+    Senza questi due numeri una riga `awaiting_result` che nessun giro
+    saldera' mai e' indistinguibile da una che sta per essere saldata.
+    """
+
+    @staticmethod
+    def _seed_ghost(hours_ago: float = 22.0, mid: str = "m-ghost"):
+        """Partita GIA' INIZIATA con una previsione aperta (nessuna bet)."""
+        tracker.save_match(mid, "Brasileirao", "Botafogo RJ",
+                           "CR Vasco da Gama",
+                           (datetime.now(timezone.utc)
+                            - timedelta(hours=hours_ago)).isoformat())
+        tracker.save_prediction(mid, "OU", "Over 3.5", 2.0, 0.5, 0.03)
+
+    def test_riga_gia_iniziata_conta_nella_coda(self, temp_db, monkeypatch):
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "1")
+        self._seed_ghost()
+        # una partita FUTURA resta fuori dalla coda per costruzione
+        tracker.save_match("m-fut", "Serie A", "Inter", "Napoli",
+                           (datetime.now(timezone.utc)
+                            + timedelta(hours=3)).isoformat())
+        tracker.save_prediction("m-fut", "1X2", "1", 1.7, 0.60, 0.04)
+
+        res = tracker.settlement_residue()
+        assert res["reasons"]["awaiting_result"] == 1     # m-ghost
+        assert res["reasons"]["not_started"] == 1         # m-fut
+        assert res["past_kickoff_open"] == 1
+        # la lega della partita iniziata NON e' nel piano (nessuna puntata:
+        # e' la politica `SETTLEMENT_BETS_ONLY`, non un errore)
+        assert res["past_kickoff_unplanned"] == 1
+
+    def test_una_puntata_riporta_la_lega_nel_piano(self, temp_db, monkeypatch):
+        """Con una PUNTATA aperta sulla stessa lega il referto la interroga:
+        `past_kickoff_unplanned` torna a 0 (il piano segue il denaro)."""
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "1")
+        self._seed_ghost()
+        tracker.save_bet("m-ghost", "1X2", "1", "0xh", 1, 2.0, 1.0,
+                         mode="live")
+        res = tracker.settlement_residue()
+        assert res["past_kickoff_unplanned"] == 0
+        assert "Brasileirao" in res["leagues_to_query"]
+
+    def test_copertura_estesa_nessuna_coda_non_pianificata(
+            self, temp_db, monkeypatch):
+        """Controprova: senza `SETTLEMENT_BETS_ONLY` la lega entra nel piano
+        anche con le sole previsioni — la coda non pianificata e' tutta e
+        solo della politica solo-puntate."""
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "0")
+        self._seed_ghost()
+        res = tracker.settlement_residue()
+        assert res["past_kickoff_open"] == 1
+        assert res["past_kickoff_unplanned"] == 0
+        assert res["bets_only"] is False
+
+    def test_nessuna_riga_iniziata_coda_a_zero(self, temp_db, monkeypatch):
+        monkeypatch.setenv("SETTLEMENT_BETS_ONLY", "1")
+        tracker.save_match("m-fut", "Serie A", "Inter", "Napoli",
+                           (datetime.now(timezone.utc)
+                            + timedelta(hours=3)).isoformat())
+        tracker.save_prediction("m-fut", "1X2", "1", 1.7, 0.60, 0.04)
+        res = tracker.settlement_residue()
+        assert res["past_kickoff_open"] == 0
+        assert res["past_kickoff_unplanned"] == 0

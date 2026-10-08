@@ -2830,6 +2830,23 @@ def settlement_residue(window_days: int | None = None,
       awaiting_result refertabile: la lega viene interrogata, il risultato
                       non e' ancora arrivato.
 
+    DUE CONTATORI DICHIARANO LA "CODA FANTASMA" (08/10/2026):
+      `past_kickoff_open`      righe di partite GIA' INIZIATE ancora aperte
+                               (dentro la finestra /scores, lega mappata);
+      `past_kickoff_unplanned` quante di quelle il prossimo `_update_results`
+                               NON interroghera' — la lega non e' nel piano
+                               (con `SETTLEMENT_BETS_ONLY=1` significa: la
+                               lega non ha una puntata, quindi il referto
+                               PAGATO la salta per scelta).
+    Senza questi due numeri una riga "awaiting_result" che nessun giro
+    saldera' mai e' indistinguibile da una che sta per essere saldata: era
+    esattamente il caso Botafogo RJ-CR Vasco da Gama (22h dopo il kickoff).
+    Il referto GRATUITO SX-native le chiude comunque (dal 08/10/2026 legge il
+    `market_hash` anche delle sole previsioni), e la scadenza push a
+    `stale_days` resta il backstop per cio' che resta insaldabile. Queste
+    righe NON sono mai candidate pre-match: le corsie ordini filtrano per
+    kickoff futuro e c'e' la ghigliottina `auto_bet.prematch_guillotine`.
+
     `leagues_to_query`/`estimated_credits` = quello che il prossimo
     `_update_results` interroghera' DAVVERO (stesso pianificatore
     `get_leagues_with_open_rows`): la stima conta solo le leghe MAPPATE con
@@ -2865,6 +2882,7 @@ def settlement_residue(window_days: int | None = None,
     by_league: dict = {}
     overdue = 0
     refertabili: set = set()
+    past_leagues: list = []      # leghe con righe di partite gia' iniziate
     for kind, _mid, league, commence, created in rows:
         open_count["bets" if kind == "bet" else "predictions"] += 1
         if league is None:
@@ -2894,6 +2912,7 @@ def settlement_residue(window_days: int | None = None,
         reasons["awaiting_result"] += 1
         refertabili.add(league)
         by_league[league] = by_league.get(league, 0) + 1
+        past_leagues.append(league)
     # Costo atteso del prossimo giro coi numeri del pianificatore vero: una
     # lega costa 1 credito solo se la sua cache punteggi e' assente o piu'
     # vecchia di ODDS_TTL (altrimenti la serve la cache, costo 0).
@@ -2902,6 +2921,14 @@ def settlement_residue(window_days: int | None = None,
                                             days_back=window_days)
     except Exception:
         planned = sorted(refertabili)
+    # CODA FANTASMA (08/10/2026): righe di partite gia' iniziate che il piano
+    # non interroghera'. Il confronto e' con lo STESSO pianificatore che
+    # esegue il referto (`get_leagues_with_open_rows`), non con una copia
+    # della politica: cosi' i due numeri non possono divergere da cio' che
+    # il bot fa davvero.
+    planned_set = set(planned)
+    past_open = len(past_leagues)
+    past_unplanned = sum(1 for lg in past_leagues if lg not in planned_set)
     try:
         import odds_api
         ttl_h = float(odds_api.ODDS_TTL) / 3600.0
@@ -2927,6 +2954,10 @@ def settlement_residue(window_days: int | None = None,
         "cost_heal_only": [lg for lg in mapped if lg not in refertabili],
         "estimated_credits": estimated,
         "overdue_orphans": overdue,
+        # Coda fantasma: vedi il docstring (open = kickoff passato, unplanned
+        # = il referto non la interroghera' mai).
+        "past_kickoff_open": past_open,
+        "past_kickoff_unplanned": past_unplanned,
         "window_days": window_days,
         "stale_days": stale_days,
         "heal_interval_hours": _heal_interval_hours(),

@@ -585,6 +585,234 @@ class TestScadenzaRigheStale:
             tracker.set_settlement_paused(False)
 
 
+# --- REFERTO GRATUITO DELLE SOLE PREVISIONI (08/10/2026) --------------------
+#
+# Il percorso find nasceva dal `market_id` delle BET: una partita SENZA
+# puntata non era saldabile gratis, quindi la riga restava aperta fino alla
+# scadenza a 5 giorni e veniva chiusa come PUSH (P/L 0) — un verdetto
+# inventato — anche quando SX aveva il risultato vero (misurato sul volume:
+# `market_hash` in `market_quotes.extra_json` su 200/200 righe campionate,
+# `markets/find` a 200 con lo score dell'evento 22h dopo il kickoff).
+# Caso reale: Botafogo RJ-CR Vasco da Gama (1-2), Brasileirao, 6 previsioni
+# aperte e lega fuori dal referto PAGATO (`SETTLEMENT_BETS_ONLY`).
+
+
+def _event_market(market_hash, ev_id, mtype=1, outcome=1, sh=2, sa=1,
+                  home="Alpha", away="Beta", league="Brasileirao",
+                  ko_s=None):
+    """Evento come lo ritorna `markets/find` (chiave = `sportXeventId`)."""
+    return {"marketHash": market_hash, "type": mtype, "status": "INACTIVE",
+            "outcome": outcome, "teamOneScore": sh, "teamTwoScore": sa,
+            "teamOneName": home, "teamTwoName": away,
+            "outcomeOneName": home, "outcomeTwoName": f"Not {home}",
+            "leagueLabel": league, "sportXeventId": ev_id,
+            "gameTime": ko_s if ko_s is not None else NOW_S - 23 * 3600}
+
+
+def _quote_row(fixture_id, market_hash, *, mtype="OU", selection="over",
+               line=3.5, label="Over 3.5"):
+    """Riga di `market_quotes` col `market_hash` in `extra_json`.
+
+    E' esattamente il campo su cui si aggancia `_prediction_market_hashes`.
+    """
+    return {"fixture_id": fixture_id, "market_type": mtype,
+            "selection": selection, "line": line,
+            "line_key": "" if line is None else str(line),
+            "selection_label": label, "ledger_esito": label, "odds": 2.0,
+            "depth_usdc": 60.0,
+            "extra": {"market_hash": market_hash,
+                      "sport_x_event_id": fixture_id.replace("sx-", "")}}
+
+
+def _ago_hours(hours: float) -> str:
+    """ISO di `hours` fa, SEMPRE relativo a `now` (mai una data fissa:
+    lezione del 15/09, 17/09, 30/09)."""
+    return (datetime.now(timezone.utc)
+            - timedelta(hours=hours)).isoformat()
+
+
+class TestRefertoSoloPrevisioni:
+    """`_prediction_market_hashes` + find: le previsioni SENZA puntata si
+    saldano col verdetto VERO, gratis."""
+
+    def test_legge_gli_hash_dalle_quote(self, temp_db):
+        tracker.save_prediction("sx-L1", "1X2", "1", 2.0, 0.5, 0.03)
+        tracker.save_market_quotes([_quote_row("sx-L1", "0xq1")])
+        out = sx_signals._prediction_market_hashes()
+        assert list(out) == ["0xq1"]
+        t = out["0xq1"][0]
+        assert t["mid"] == "sx-L1"
+        # una previsione NON prende i punteggi sintetici (1,0)/(0,1) dei
+        # mercati a 2 esiti: il suo esito ('Under 3.5', nome giocatore) non
+        # e' un 1X2, accetta solo il punteggio REALE dell'evento
+        assert t["moneyline_ok"] is False
+
+    def test_la_chiave_e_lhash_non_il_fixture_id(self, temp_db):
+        """REGRESSIONE del 08/10: la chiave DEVE essere il `market_hash` —
+        e' quello che `markets/find` riceve. Chiavando per fixture id la
+        `find` rispondeva senza mercati riconosciuti e il referto gratuito
+        non salvava NIENTE (bug trovato scrivendo questi test)."""
+        tracker.save_prediction("sx-L1", "1X2", "1", 2.0, 0.5, 0.03)
+        tracker.save_market_quotes([_quote_row("sx-L1", "0xabc")])
+        out = sx_signals._prediction_market_hashes()
+        assert "sx-L1" not in out
+        assert "0xabc" in out
+
+    def test_una_sola_riga_per_fixture(self, temp_db):
+        """Qualunque mercato dello stesso evento porta il punteggio
+        dell'EVENTO: un hash per fixture basta (e costa meno)."""
+        tracker.save_prediction("sx-L1", "1X2", "1", 2.0, 0.5, 0.03)
+        tracker.save_prediction("sx-L1", "OU", "Over 3.5", 2.0, 0.5, 0.03)
+        tracker.save_market_quotes([
+            _quote_row("sx-L1", "0xq1"),
+            _quote_row("sx-L1", "0xq2", selection="under")])
+        out = sx_signals._prediction_market_hashes()
+        assert len(out) == 1                      # un hash per fixture
+        assert len(next(iter(out.values()))) == 1
+
+    def test_solo_previsioni_aperte_e_sx(self, temp_db):
+        """Righe di match non-`sx-` non producono hash: il percorso non
+        cresce a ogni giro."""
+        tracker.save_prediction("sx-L1", "1X2", "1", 2.0, 0.5, 0.03)
+        tracker.save_prediction("api-L2", "1X2", "1", 2.0, 0.5, 0.03)
+        tracker.save_market_quotes([_quote_row("sx-L1", "0xq1"),
+                                    _quote_row("api-L2", "0xq2")])
+        assert list(sx_signals._prediction_market_hashes()) == ["0xq1"]
+
+    def test_riga_senza_market_hash_ignorata(self, temp_db):
+        tracker.save_prediction("sx-L1", "1X2", "1", 2.0, 0.5, 0.03)
+        row = _quote_row("sx-L1", "0xq1")
+        row["extra"] = {"sport_x_event_id": "L1"}       # niente market_hash
+        tracker.save_market_quotes([row])
+        assert sx_signals._prediction_market_hashes() == {}
+
+    def test_extra_json_corrotto_non_solleva(self, temp_db):
+        tracker.save_prediction("sx-L1", "1X2", "1", 2.0, 0.5, 0.03)
+        tracker.save_market_quotes([_quote_row("sx-L1", "0xq1")])
+        conn = tracker._get_conn()
+        conn.execute("UPDATE market_quotes SET extra_json='{non json'")
+        conn.commit()
+        conn.close()
+        assert sx_signals._prediction_market_hashes() == {}
+
+    def test_nessuna_previsione_aperta_nessun_hash(self, temp_db):
+        tracker.save_market_quotes([_quote_row("sx-L1", "0xq1")])
+        assert sx_signals._prediction_market_hashes() == {}
+
+    def test_botafogo_saldata_col_punteggio_vero_senza_puntata(
+            self, temp_db, monkeypatch):
+        """Il caso reale: previsione aperta, ZERO puntate, partita finita
+        1-2 (3 gol). Prima: riga aperta fino alla scadenza push (P/L 0).
+        Ora: `find` sul `market_hash` delle quote -> punteggio vero -> la
+        previsione Over 3.5 e' PERSA col P/L reale."""
+        monkeypatch.setattr(
+            "odds_api.fetch_scores",
+            lambda sport=None, days_from=3: (_ for _ in ()).throw(
+                AssertionError("no crediti")))
+        mid = "sx-L20175875"
+        tracker.save_match(mid, "Brasileirao", "Botafogo RJ",
+                           "CR Vasco da Gama", _ago_hours(22))
+        tracker.save_prediction(mid, "OU", "Over 3.5", 2.0, 0.50, 0.03)
+        tracker.save_market_quotes([_quote_row(mid, "0xbfg")])
+        assert tracker.get_bets() == []           # nessuna puntata in gioco
+        prov = FakeSxSettle(find_data=[
+            _event_market("0xbfg", "L20175875", sh=1, sa=2,
+                          home="Botafogo RJ", away="CR Vasco da Gama")])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["source"] == "sx" and res["results"] == 1
+        assert prov.find_calls[0]["marketHashes"] == "0xbfg"
+        assert res["predictions"] == 1
+        assert _pred_outcome(mid) == ("lost", -1.0)
+
+    def test_hash_di_un_altro_evento_non_salda(self, temp_db, monkeypatch):
+        """GUARDIA DI EVENTO: i bersagli scelti per HASH devono appartenere
+        davvero a QUELLA partita (`sx-<eventId>` e' la chiave del ledger).
+        Senza la guardia un hash sbagliato salderebbe la previsione col
+        risultato di un'ALTRA partita."""
+        monkeypatch.setattr(
+            "odds_api.fetch_scores",
+            lambda sport=None, days_from=3: (_ for _ in ()).throw(
+                AssertionError("no crediti")))
+        mid = "sx-L77"
+        tracker.save_match(mid, "Brasileirao", "Time A", "Time B",
+                           _ago_hours(22))
+        tracker.save_prediction(mid, "1X2", "1", 2.0, 0.5, 0.03)
+        tracker.save_market_quotes([_quote_row(mid, "0xq77", mtype="1X2",
+                                               selection="1", line=None,
+                                               label="1")])
+        prov = FakeSxSettle(find_data=[
+            _event_market("0xq77", "ALTRO-EVENTO", sh=9, sa=0,
+                          home="Altra", away="Partita")])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["results"] == 0
+        assert _pred_outcome(mid) == (None, None)
+
+    def test_evento_corrispondente_salda(self, temp_db, monkeypatch):
+        """Controprova della guardia: con `sx-<eventId>` uguale al match_id
+        la previsione si salda col punteggio vero."""
+        monkeypatch.setattr(
+            "odds_api.fetch_scores",
+            lambda sport=None, days_from=3: (_ for _ in ()).throw(
+                AssertionError("no crediti")))
+        mid = "sx-L78"
+        tracker.save_match(mid, "Brasileirao", "Alpha", "Beta",
+                           _ago_hours(22))
+        tracker.save_prediction(mid, "1X2", "1", 2.0, 0.5, 0.03)
+        tracker.save_market_quotes([_quote_row(mid, "0xq78", mtype="1X2",
+                                               selection="1", line=None,
+                                               label="1")])
+        prov = FakeSxSettle(find_data=[
+            _event_market("0xq78", "L78", sh=2, sa=0)])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["results"] == 1 and res["predictions"] == 1
+        assert _pred_outcome(mid) == ("won", 1.0)
+
+    def test_bet_e_previsione_stesso_evento_entrambe_saldate(
+            self, temp_db, monkeypatch):
+        """Puntata (con `market_id`) E previsione per lo stesso evento: lo
+        stesso hash serve DUE righe del ledger. Il bersaglio e' una lista -
+        non una tupla - proprio per questo caso."""
+        monkeypatch.setattr(
+            "odds_api.fetch_scores",
+            lambda sport=None, days_from=3: (_ for _ in ()).throw(
+                AssertionError("no crediti")))
+        mid = "sx-L88"
+        tracker.save_match(mid, "Brasileirao", "Alpha", "Beta",
+                           _ago_hours(22))
+        tracker.save_bet(mid, "1X2", "1", "0xq88", 1, 2.0, 1.0,
+                         mode="live")
+        tracker.save_prediction(mid, "1X2", "1", 2.0, 0.5, 0.03)
+        tracker.save_market_quotes([_quote_row(mid, "0xq88", mtype="1X2",
+                                               selection="1", line=None,
+                                               label="1")])
+        prov = FakeSxSettle(find_data=[
+            _event_market("0xq88", "L88", sh=2, sa=0)])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert prov.find_calls[0]["marketHashes"] == "0xq88"
+        # un solo salvataggio per match_id (la riga del risultato e' una),
+        # ma BET e PREVISIONE sono entrambe chiuse
+        assert res["results"] == 1
+        assert _bet_outcome(mid) == ("won", 1.0)
+        assert _pred_outcome(mid)[0] == "won"
+
+    def test_solo_previsioni_nessuna_chiamata_pagata(self, temp_db,
+                                                     monkeypatch):
+        """`market_hash` assente dalle quote: il referto resta quello
+        PAGATO e la lega senza puntata viene saltata (referto segue il
+        denaro) - nessun credito bruciato per telemetria."""
+        calls = []
+        monkeypatch.setattr("odds_api.fetch_scores",
+                            lambda sport=None, days_from=3: calls.append(sport))
+        mid = "sx-L99"
+        tracker.save_match(mid, "Brasileirao", "Alpha", "Beta",
+                           _ago_hours(22))
+        tracker.save_prediction(mid, "1X2", "1", 2.0, 0.5, 0.03)
+        res = sx_signals.settle_sx_bets(provider=FakeSxSettle())
+        assert calls == []
+        assert res["results"] == 0
+        assert _pred_outcome(mid) == (None, None)
+
+
 class TestSettlementPausa:
     def test_pausa_blocca_anche_il_percorso_sx(self, temp_db, monkeypatch):
         """Pausa settlement: nessuna lettura SX, nessuna chiusura."""

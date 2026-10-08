@@ -251,6 +251,25 @@ T60_ORDER_VALIDATION = os.getenv("T60_ORDER_VALIDATION", "1").strip().lower() \
 T60_EXECUTION_ONLY = os.getenv("T60_EXECUTION_ONLY", "1").strip().lower() \
     in ("1", "true", "yes", "on")
 
+# --- GHIGLIOTTINA PRE-MATCH / HARD PRUNING (08/10/2026, direttiva del
+# proprietario) ----------------------------------------------------------
+# Un pick di una partita GIA' INIZIATA non e' un candidato: il mercato
+# pre-match su cui si sarebbe ordinato non esiste piu'. La finestra esecutiva
+# (`t60_window`) lo scarta gia' quando e' attiva, ma quella e' una guardia
+# CONFIGURABILE (`T60_EXECUTION_ONLY=0` la spegne per diagnostica) e dipende
+# dalla banda T-180..T-2: questa e' la regola INDIPENDENTE, non negoziabile —
+# oltre PREMATCH_MAX_AGE_H ore dal kickoff il pick esce dal board a
+# prescindere da qualunque interruttore, PRIMA del gate oracolo, del
+# harvesting e dell'esecuzione. (Le corsie eSports/tennis pagano la loro
+# quota dentro la funzione che COSTRUISCE il pick, quindi la ghigliottina non
+# puo' precedere quella spesa: li' e' la finestra interna della corsia a
+# garantire che non si interroghi un evento iniziato.)
+# Il caso che l'ha motivata: il pick Botafogo RJ-CR Vasco da Gama restava
+# visibile nelle diagnosi 22h dopo il kickoff.
+# Un kickoff NON leggibile NON viene scartato qui: non si nasconde un dato
+# mancante, lo dichiarano le guardie esistenti (fail-closed a valle).
+PREMATCH_MAX_AGE_H = float(os.getenv("PREMATCH_MAX_AGE_H", "5.0"))
+
 
 def _mins_label(value: float) -> str:
     """Minuti senza decimali quando sono interi (180.0 -> "180", 2.5 -> "2.5")."""
@@ -473,6 +492,52 @@ def pick_window(pick: dict) -> str:
         return t60_window(_parse_iso_utc(pick.get("commence")))
     except Exception:
         return "unknown"
+
+
+def prematch_age_hours(pick: dict) -> float | None:
+    """Ore trascorse dal kickoff del pick (None se il kickoff non e' leggibile).
+
+    Negativo = partita futura. Un kickoff assente o non parsabile NON e' un'eta'
+    (None): la differenza conta, perche' la ghigliottina non inventa un verdetto
+    su un dato che non ha letto.
+    """
+    dt = _parse_iso_utc(pick.get("commence") or pick.get("kickoff"))
+    if dt is None:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+
+
+def prematch_guillotine(picks: list[dict],
+                        max_age_h: float | None = None
+                        ) -> tuple[list[dict], list[tuple[dict, float]]]:
+    """HARD PRUNING pre-match: fuori i pick di partite gia' iniziate.
+
+    Ritorna `(tenuti, scartati)` dove ogni scartato porta con se' l'eta' in ore
+    (per il log e per i test: un taglio senza il numero non e' verificabile).
+    Le partite FUTURE e i kickoff illeggibili restano al chiamante: qui si
+    applica UNA regola sola, e un dato mancante non diventa un verdetto (lo
+    dichiarano le guardie fail-closed a valle, su `MIN_MINUTES_TO_START`).
+
+    Le corsie filtrano gia' per kickoff FUTURO e questa regola, sul board di
+    oggi, non taglia nulla: e' la garanzia che sopravvive a un cambio di
+    finestra, a `T60_EXECUTION_ONLY=0` e a una corsia nuova che dimenticasse
+    il filtro. L'eta' si calcola sul DATETIME (non sul confronto fra stringhe
+    ISO, lezione del 17/09): un kickoff con offset `+02:00` e' vecchio anche
+    quando la sua stringa "sembra" piu' recente di quella del ledger.
+    """
+    try:
+        limit = float(max_age_h) if max_age_h is not None else PREMATCH_MAX_AGE_H
+    except (TypeError, ValueError):
+        limit = PREMATCH_MAX_AGE_H
+    kept: list[dict] = []
+    dropped: list[tuple[dict, float]] = []
+    for pick in picks or []:
+        age = prematch_age_hours(pick)
+        if age is not None and age > limit:
+            dropped.append((pick, age))
+            continue
+        kept.append(pick)
+    return kept, dropped
 
 
 def _note_top_down_skip(pick: dict, reason: str, detail: str | None = None,
@@ -3472,6 +3537,20 @@ def run_today_bets(stake_eur: float | None = None,
         # misura di oggi (EV massimo +0.72% su 104 lati) la soglia 2.5% non
         # produce ordini: la corsia e' ARMATA e spara al primo disallineamento.
         board = board + _tennis_picks()
+    # --- GHIGLIOTTINA PRE-MATCH (08/10/2026): le partite gia' iniziate escono
+    # dal board PRIMA di qualunque valutazione (e quindi prima di qualunque
+    # spesa oracolo). Le corsie filtrano gia' per kickoff futuro, ma questa e'
+    # la regola indipendente: sopravvive a qualunque cambio di finestra,
+    # interruttore o corsia nuova che dimenticasse il filtro.
+    board, _ghosts = prematch_guillotine(board)
+    if _ghosts:
+        logger.warning(
+            "auto_bet: ghigliottina pre-match — %d pick scartati (kickoff da "
+            "oltre %.1fh, hard pruning indipendente dalla finestra): %s",
+            len(_ghosts), PREMATCH_MAX_AGE_H,
+            ", ".join(f"{g[0].get('match_id')}+{g[1]:.1f}h"
+                      for g in _ghosts[:5]))
+
     # DEDUP CROSS-CORSIA per (match_id, esito): la stessa riga del ledger puo'
     # arrivare da due corsie (value pick + corsia top-down) e il dedup sul
     # ledger (bet_exists_open) NON vede ancora l'ordine della prima: senza

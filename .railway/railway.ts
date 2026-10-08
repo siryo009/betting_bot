@@ -194,6 +194,12 @@ export default defineRailway(() => {
       // `T60_ORDER_VALIDATION=0` spegne il contratto CB3 sui payload.
       T60_EXECUTION_ONLY: preserve(),
       T60_ORDER_VALIDATION: preserve(),
+      // Ghigliottina PRE-MATCH / hard pruning (08/10/2026): oltre N ore dal
+      // kickoff un pick esce dal board prima di qualunque valutazione. E' la
+      // regola INDIPENDENTE dalla finestra (`T60_EXECUTION_ONLY=0` non la
+      // spegne), nata dal pick Botafogo RJ-CR Vasco da Gama ancora visibile
+      // 22h dopo il kickoff.
+      PREMATCH_MAX_AGE_H: preserve(),
       OU_LIVE_MIN_CLOSURES: preserve(),
       // Gate EV dei MERCATI LIQUIDI (04/10/2026, punto 4): AH/OU/Totals/BTTS/ML
       // usano una soglia dedicata (default 1.0%) mentre 1X2/eSports/tennis
