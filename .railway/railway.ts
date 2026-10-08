@@ -101,6 +101,7 @@ export default defineRailway(() => {
       LIVE_INTEL: preserve(),
       LIVE_INTEL_CACHE: preserve(),
       LIVE_INTEL_TIMEOUT_S: preserve(),
+      LIVE_INTEL_FAIL_TTL_H: preserve(),
       LIVE_INTEL_TTL_ELO: preserve(),
       LIVE_INTEL_TTL_FBREF: preserve(),
       LIVE_INTEL_TTL_MLB: preserve(),

@@ -9645,3 +9645,64 @@ web_api/market_diagnose/flow_measure/significance; bot/reports/
 league_dynamic/decision_feed/agent_hierarchy/adaptive_weighting.
 `verify_guardrails.py`: **A-H tutti bloccano** (exit 0). `compileall` OK,
 0 marker di conflitto.
+
+### Fix: ERROR TLS ripetuti di `soccerdata`/ClubElo (08/10/2026)
+
+**Sintomo**: nel log del container ~344 righe `TLSLibrary` in 13 minuti, di cui 49
+`ERROR Failed to download the required TLS library v1.13.1`, ripetute a ogni
+ciclo del giro ordini (ogni 60s).
+
+**Non era un blocco**: l'errore e' CATTURATO da `live_intel.soccer_elo()`
+(`except Exception` -> `INTEL_ERRORS`, ritorna `None`). L'intel non e' un gate
+(nessun impatto su ordini/denaro), ma il rumore dominava il log.
+
+**Catena**: `CHIEF_EXECUTION=live` -> la corsia chief gira ogni 60s ->
+`ChiefOrchestrator.data.process()` -> `DataAgent` -> `live_intel` ->
+`soccerdata.ClubElo()` -> `tls_requests`.
+
+**Causa radice MISURATA (non ipotizzata)**: `tls_requests` e' una dipendenza di
+`soccerdata` (NON di `ddgs`, che usa `primp`: la prima ipotesi era sbagliata) e
+cerca l'asset `tls-client-linux-amd64-*.so`, che nel release **v1.13.1 NON
+esiste** (esistono solo le varianti `-ubuntu-`, `-alpine-`, `-xgo-`). Il
+container e' **Debian 13**, quindi `IS_UBUNTU=False` (il flag si ricava da
+`freedesktop_os_release`) e il caricatore genera URL che danno 404. GitHub e'
+raggiungibile (200): il fallimento e' solo il NOME del file. `wrapper-tls-requests`
+1.2.5 e' l'ULTIMA versione -> nessun upgrade disponibile. Verificato che la
+build `ubuntu` (glibc) si carica sul container, `alpine` (musl) no.
+
+**Aggravante**: un fallimento non era mai messo in **cache negativa**, quindi il
+provider veniva ritentato a ogni ciclo, per sempre.
+
+**Fix (2 parti)**:
+1. **Dockerfile**: download a BUILD time della variante corretta
+   (`tls-client-linux-ubuntu-amd64-1.13.1.so`) dentro `TLSLibrary.BIN_DIR`,
+   che il caricatore scandisce da solo e da cui prende il file locale piu'
+   recente (versione nel nome = target -> nessun download a runtime). Riga NON
+   bloccante (`|| echo WARN`): se il download fallisce il comportamento resta
+   quello precedente, nessun deploy rotto. **NON si usa `TLS_LIBRARY_PATH`**:
+   puntare un env a un file assente creerebbe un nuovo modo di fallire, mentre
+   il drop-in in `BIN_DIR` degrada esattamente come prima.
+2. **Cache negativa** (`live_intel.py`): nuovo `DEFAULT_FAIL_TTL_H = 1.0` +
+   `_fail_ttl()` (env `LIVE_INTEL_FAIL_TTL_H`); una voce con `data` nullo vale il
+   TTL CORTO (1h) invece del TTL positivo (6h) -> un guasto permanente non
+   martella la fonte, uno transitorio non rende l'intel cieca per ore.
+   `soccer_elo` e `nba_team_stats` ora RISPETTANO la voce negativa (prima la
+   ignoravano e riprovavano) e tutti i provider (`fbref`, `elo`, `news`, `mlb`,
+   `nba`) scrivono la cache negativa sul fallimento.
+
+**Verifica**: `test_live_intel.py` -> nuova `TestCacheNegativa` (7 test) +
+`test_dockerfile_fornisce_la_libreria_tls`; 57 verdi. Regressioni verdi:
+`test_railway_drift_check`, `test_agent_hierarchy`, `test_advisor_agent`,
+`test_exposure_gate`, `test_secret_hygiene`, `test_chief_shadow_wiring` (106).
+Sul container: la riga del Dockerfile e' stata riprodotta a mano e con il `.so`
+presente **l'errore TLS sparisce** (soccerdata arriva all'HTTP).
+
+⚠️ **Limite ESTERNO trovato nella stessa verifica**: `api.clubelo.com` risponde
+**502 su tutte le date** (oggi e precedenti) dal container. Anche col TLS
+riparato, il provider ELO non produce dati: e' un guasto del servizio esterno,
+non del nostro codice. La cache negativa lo rende comunque silenzioso ed
+economico (max 1 tentativo/ora per squadra invece di uno ogni 60s).
+
+**Regola permanente**: quando un provider fallisce a ripetizione, il primo
+sospetto non e' il provider ma il **nome dell'asset/URL che la libreria genera**
+(qui un release che ha cambiato naming).

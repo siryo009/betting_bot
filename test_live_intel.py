@@ -250,6 +250,93 @@ class TestCache:
 
 
 # ---------------------------------------------------------------------------
+# Cache NEGATIVA (08/10/2026): un provider che fallisce non si ritenta a ogni
+# ciclo. Il giro del Chief gira ogni 60s: senza questa cache un guasto
+# permanente (la libreria nativa di `tls_requests` non scaricabile da
+# `soccerdata`) produceva ERROR a ripetizione e chiamate di rete inutili.
+# ---------------------------------------------------------------------------
+
+class TestCacheNegativa:
+    def test_fail_ttl_default_env_e_valore_impossibile(self, monkeypatch):
+        monkeypatch.delenv("LIVE_INTEL_FAIL_TTL_H", raising=False)
+        assert live_intel._fail_ttl() == live_intel.DEFAULT_FAIL_TTL_H
+        monkeypatch.setenv("LIVE_INTEL_FAIL_TTL_H", "3")
+        assert live_intel._fail_ttl() == 3.0
+        # Un env sbagliato non spegne la guardia: si ricade sul default.
+        for bad in ("", "abc", "0", "-2"):
+            monkeypatch.setenv("LIVE_INTEL_FAIL_TTL_H", bad)
+            assert live_intel._fail_ttl() == live_intel.DEFAULT_FAIL_TTL_H
+
+    def test_voce_negativa_scade_col_ttl_corto(self, tmp_path):
+        live_intel._cache_write("elo", "elo|X", None)
+        assert live_intel._cache_read("elo", "elo|X") is not None
+        path = next((tmp_path / "intel").glob("elo_*.json"))
+        blob = json.loads(path.read_text())
+        blob["ts"] = time.time() - 2 * 3600      # 2h: oltre il fail TTL (1h)
+        path.write_text(json.dumps(blob))
+        assert live_intel._cache_read("elo", "elo|X") is None
+
+    def test_voce_positiva_regge_il_ttl_lungo(self, tmp_path):
+        """Controprova: un dato VALIDO non usa il TTL corto dei fallimenti."""
+        live_intel._cache_write("elo", "elo|Y", 1750.0)
+        path = next((tmp_path / "intel").glob("elo_*.json"))
+        blob = json.loads(path.read_text())
+        blob["ts"] = time.time() - 2 * 3600      # oltre il fail TTL, sotto 6h
+        path.write_text(json.dumps(blob))
+        assert live_intel._cache_read("elo", "elo|Y") is not None
+
+    def test_clubelo_fallito_non_si_ritenta_a_ogni_ciclo(self, monkeypatch):
+        calls = []
+
+        class _ClubElo:
+            def __init__(self, *a, **k): ...
+            def read_by_date(self):
+                calls.append(1)
+                raise OSError(
+                    "Failed to download the required TLS library v1.13.1.")
+
+        monkeypatch.setitem(sys.modules, "soccerdata",
+                            types.SimpleNamespace(ClubElo=_ClubElo))
+        assert live_intel.soccer_elo("Inter") is None
+        assert live_intel.soccer_elo("Inter") is None
+        assert len(calls) == 1        # la seconda lettura e' la cache negativa
+        assert "clubelo" in INTEL_ERRORS
+
+    def test_news_fallite_non_si_ritentano(self, monkeypatch):
+        calls = []
+
+        class _FakeDDGS:
+            def news(self, query, max_results=5):
+                calls.append(query)
+                raise ConnectionError("reset by peer")
+
+        monkeypatch.setitem(sys.modules, "ddgs",
+                            types.SimpleNamespace(DDGS=_FakeDDGS))
+        assert collect_news("q-neg") == []
+        assert collect_news("q-neg") == []
+        assert len(calls) == 1
+
+    def test_nba_voce_negativa_letta_senza_ritentare(self, monkeypatch):
+        live_intel._cache_write("nba", "nba|BOS", None)
+        monkeypatch.setitem(sys.modules, "nba_api", None)   # un retry esploderebbe
+        assert nba_team_stats("boston celtics") is None
+
+    def test_dockerfile_fornisce_la_libreria_tls(self):
+        """La libreria nativa TLS e' fornita a BUILD time.
+
+        `tls_requests` (via `soccerdata`) genera l'asset
+        `tls-client-linux-amd64-*`, che nel release v1.13.1 NON esiste: il
+        download fallisce a ogni ciclo. Il Dockerfile scarica la variante che
+        il release pubblica davvero e che si carica su questo container
+        (`-ubuntu-` = glibc).
+        """
+        src = Path("Dockerfile").read_text(encoding="utf-8")
+        assert "tls-client-linux-ubuntu-amd64-1.13.1.so" in src
+        assert "tls_requests.models.libraries" in src
+        assert "BIN_DIR" in src
+
+
+# ---------------------------------------------------------------------------
 # Guardie di rete (29/09/2026): la suite non deve poter bloccare se stessa
 # ---------------------------------------------------------------------------
 
@@ -424,6 +511,7 @@ class TestIaC:
     """
 
     ENV = ("LIVE_INTEL", "LIVE_INTEL_CACHE", "LIVE_INTEL_TIMEOUT_S",
+           "LIVE_INTEL_FAIL_TTL_H",
            "LIVE_INTEL_TTL_FBREF", "LIVE_INTEL_TTL_ELO", "LIVE_INTEL_TTL_NEWS",
            "LIVE_INTEL_TTL_MLB", "LIVE_INTEL_TTL_NBA")
 

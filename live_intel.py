@@ -104,6 +104,31 @@ def _ttl(provider: str, default_h: float) -> float:
         return default_h
 
 
+#: TTL della cache NEGATIVA (`data` nullo): un provider che fallisce (rete,
+#: libreria nativa mancante, fonte bloccata) viene marcato e NON ritentato a
+#: ogni ciclo. Il giro del Chief gira ogni 60s: senza questa cache un guasto
+#: permanente produceva ERROR a ripetizione (misurato 08/10/2026: 49
+#: `Failed to download the required TLS library` in ~13 minuti, da
+#: `soccerdata`/ClubElo). Piu' CORTO del TTL positivo (default 6h) perche' un
+#: guasto transitorio non deve rendere l'intel cieca per ore, piu' LUNGO del
+#: ciclo per non martellare la fonte.
+DEFAULT_FAIL_TTL_H = 1.0
+
+
+def _fail_ttl() -> float:
+    """TTL della cache negativa (env `LIVE_INTEL_FAIL_TTL_H`, default 1h).
+
+    Un valore non numerico o <= 0 ricade sul default: una guardia non si
+    spegne con un env sbagliato.
+    """
+    raw = os.getenv("LIVE_INTEL_FAIL_TTL_H", "")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FAIL_TTL_H
+    return val if val > 0 else DEFAULT_FAIL_TTL_H
+
+
 #: Budget di rete di DEFAULT per singola chiamata a un provider (secondi).
 DEFAULT_TIMEOUT_S = 20.0
 
@@ -153,7 +178,12 @@ def _cache_read(kind: str, key: str) -> Optional[dict]:
         blob = json.loads(path.read_text(encoding="utf-8"))
         ts = float(blob.get("ts") or 0.0)
         age_h = (datetime.now(timezone.utc).timestamp() - ts) / 3600.0
-        if age_h > _ttl(kind.split("_", 1)[0], 6.0):
+        # Una voce NEGATIVA (`data` nullo) vale il TTL corto di `_fail_ttl()`:
+        # un provider che fallisce non viene ritentato a ogni ciclo, ma
+        # nemmeno resta cieco per il TTL positivo intero.
+        ttl_h = (_ttl(kind.split("_", 1)[0], 6.0)
+                 if blob.get("data") is not None else _fail_ttl())
+        if age_h > ttl_h:
             return None
         return blob
     except Exception:
@@ -374,9 +404,11 @@ def soccer_team_stats(team: str, league: str) -> Optional[TeamStats]:
             except Exception as exc:  # stagione/giorno senza dati
                 last_err = str(exc)[:120]
         INTEL_ERRORS["fbref"] = last_err or "nessuna stagione disponibile"
+        _cache_write("fbref", key, None)   # cache negativa: no retry a ogni ciclo
         return None
     except Exception as exc:
         INTEL_ERRORS["fbref"] = str(exc)[:120]
+        _cache_write("fbref", key, None)   # cache negativa: no retry a ogni ciclo
         return None
 
 
@@ -384,8 +416,11 @@ def soccer_elo(team: str) -> Optional[float]:
     """Rating ELO ClubElo (solo club europei: le grandi leghe)."""
     key = f"elo|{team}"
     cached = _cache_read("elo", key)
-    if cached is not None and cached.get("data") is not None:
-        return float(cached["data"])
+    if cached is not None:
+        # Voce NEGATIVA (`data` nullo): squadra non coperta o provider fallito
+        # di recente -> si rispetta la cache, senza riprovare.
+        data = cached.get("data")
+        return float(data) if data is not None else None
     try:
         import soccerdata as sd  # import pigro
 
@@ -403,6 +438,7 @@ def soccer_elo(team: str) -> Optional[float]:
         return value
     except Exception as exc:
         INTEL_ERRORS["clubelo"] = str(exc)[:120]
+        _cache_write("elo", key, None)     # cache negativa: no retry a ogni ciclo
         return None
 
 
@@ -437,6 +473,7 @@ def collect_news(query: str, *, max_results: int = 5) -> list[NewsItem]:
         return items
     except Exception as exc:
         INTEL_ERRORS["ddgs"] = str(exc)[:120]
+        _cache_write("news", key, None)    # cache negativa: no retry a ogni ciclo
         return []
 
 
@@ -508,6 +545,7 @@ def mlb_probable_pitchers(home: str, away: str) -> dict[str, str]:
         return out
     except Exception as exc:
         INTEL_ERRORS["mlb"] = str(exc)[:120]
+        _cache_write("mlb", key, None)     # cache negativa: no retry a ogni ciclo
         return {}
 
 
@@ -537,8 +575,10 @@ def nba_team_stats(team: str) -> Optional[TeamStats]:
         return None  # NON e' un fallimento: il match non e' NBA
     key = f"nba|{abbr}"
     cached = _cache_read("nba", key)
-    if cached is not None and cached.get("data"):
-        return TeamStats(provider="nba_api", **cached["data"])
+    if cached is not None:
+        # Voce NEGATIVA (`data` nullo): si rispetta la cache (no retry).
+        data = cached.get("data") or {}
+        return TeamStats(provider="nba_api", **data) if data else None
     try:
         from nba_api.stats.endpoints import leaguedashteamstats  # import pigro
 
@@ -562,6 +602,7 @@ def nba_team_stats(team: str) -> Optional[TeamStats]:
         return stats
     except Exception as exc:
         INTEL_ERRORS["nba_api"] = str(exc)[:120]
+        _cache_write("nba", key, None)     # cache negativa: no retry a ogni ciclo
         return None
 
 
