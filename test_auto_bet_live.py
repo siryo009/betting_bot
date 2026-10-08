@@ -467,18 +467,82 @@ class TestBankrollEquity:
         monkeypatch.setattr(ee, "ExecutionEngine", lambda *a, **k: engine)
         return ee
 
-    def test_snapshot_legge_disponibile_e_esposizione(self, monkeypatch):
-        self._engine(monkeypatch, self._Prov({"availableBalance": 33.98,
-                                              "exposure": 2.0}))
-        assert auto_bet._live_wallet_snapshot() == {
-            "available": 33.98, "exposure": 2.0, "equity": 35.98}
+    def _open_bet(self, stake=1.31, mid="sx-open-1"):
+        """Semina una PUNTATA LIVE APERTA (posizione riempita in gioco)."""
+        tracker.save_bet(mid, "TENNIS", "2", market_id="0xopen",
+                         selection_id=2, price=2.0, stake=stake, mode="live",
+                         status="FULLY_FILLED", bet_id="0xbetopen")
 
-    def test_snapshot_senza_exposure_e_prudente(self, monkeypatch):
-        """Provider che non espone l'esposizione: equity = solo disponibile.
-        La stima puo' far scattare lo stop PRIMA, mai dopo (fail-closed)."""
+    def test_esposizione_dal_ledger_se_sx_riporta_zero(self, monkeypatch,
+                                                       temp_db):
+        """Regressione 07/10/2026: SX riporta `escrowedAmount = 0` mentre una
+        posizione RIEMPITA e' aperta -> l'equity deve contarla lo stesso (dal
+        ledger). Senza questo, due breaker (-8,8% daily, -12,0% weekly) sono
+        scattati su un wallet INTATTO."""
+        self._open_bet(1.31)
+        self._engine(monkeypatch, self._Prov({"availableBalance": 27.83,
+                                              "exposure": 0.0}))
+        snap = auto_bet._live_wallet_snapshot()
+        assert snap["exposure"] == pytest.approx(1.31)
+        assert snap["equity"] == pytest.approx(29.14)
+        assert snap["exposure_source"] == "ledger"
+        assert snap["open_orders"] == 1
+
+    def test_ignora_lescrow_gonfiato_di_sx(self, monkeypatch, temp_db):
+        """L'escrow di SX puo' anche SOVRA-stimare (misurato 5,60 USDC con
+        4,38 di stake aperto): il ledger e' la fonte di verita'."""
+        self._open_bet(1.31, "sx-a")
+        self._open_bet(1.62, "sx-b")
+        self._open_bet(2.21, "sx-c")
+        self._engine(monkeypatch, self._Prov({"availableBalance": 25.0,
+                                              "exposure": 5.6}))
+        snap = auto_bet._live_wallet_snapshot()
+        assert snap["exposure"] == pytest.approx(5.14)
+        assert snap["equity"] == pytest.approx(30.14)
+
+    def test_equity_stabile_al_fill(self, monkeypatch, temp_db):
+        """Il fill NON deve muovere l'equity: il disponibile scende dello
+        stake e l'esposizione (dal ledger) sale dello stesso importo."""
+        self._engine(monkeypatch, self._Prov({"availableBalance": 29.14,
+                                              "exposure": 0.0}))
+        prima = auto_bet._live_wallet_snapshot()["equity"]
+        self._open_bet(1.31)
+        self._engine(monkeypatch, self._Prov({"availableBalance": 27.83,
+                                              "exposure": 0.0}))
+        dopo = auto_bet._live_wallet_snapshot()["equity"]
+        assert prima == pytest.approx(dopo) == pytest.approx(29.14)
+
+    def test_senza_ordini_aperti_lescrow_sx_non_conta(self, monkeypatch,
+                                                      temp_db):
+        """Nessuna posizione aperta sul ledger -> l'escrow residuo di SX non
+        entra nell'equity (era la causa del picco gonfiato di 31,43)."""
+        self._engine(monkeypatch, self._Prov({"availableBalance": 27.83,
+                                              "exposure": 2.0}))
+        snap = auto_bet._live_wallet_snapshot()
+        assert snap["exposure"] == 0.0
+        assert snap["equity"] == pytest.approx(27.83)
+
+    def test_fallback_sul_provider_se_il_ledger_non_e_leggibile(
+            self, monkeypatch, temp_db):
+        monkeypatch.setattr(auto_bet, "_open_live_snapshot",
+                            lambda: (float("inf"), -1))
+        self._engine(monkeypatch, self._Prov({"availableBalance": 30.0,
+                                              "exposure": 2.0}))
+        snap = auto_bet._live_wallet_snapshot()
+        assert snap["exposure"] == 2.0 and snap["equity"] == 32.0
+        assert snap["exposure_source"] == "provider"
+
+    def test_snapshot_senza_exposure_ne_ledger_e_prudente(self, monkeypatch,
+                                                          temp_db):
+        """Provider senza `exposure` E ledger non leggibile: equity = solo
+        disponibile. La stima puo' far scattare lo stop PRIMA, mai dopo
+        (fail-closed)."""
+        monkeypatch.setattr(auto_bet, "_open_live_snapshot",
+                            lambda: (float("inf"), -1))
         self._engine(monkeypatch, self._Prov({"availableBalance": 10.0}))
         snap = auto_bet._live_wallet_snapshot()
         assert snap["exposure"] == 0.0 and snap["equity"] == 10.0
+        assert snap["exposure_source"] == "none"
 
     def test_snapshot_dry_run_e_errore_danno_none(self, monkeypatch):
         import execution_engine as ee

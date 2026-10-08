@@ -2899,14 +2899,26 @@ def _live_wallet_snapshot() -> "dict | None":
 
     - `available` = saldo libero, spendibile per un NUOVO ordine (vincolo di
       cassa);
-    - `exposure` = fondi in escrow (bet aperte) + prenotati;
+    - `exposure` = stake delle PUNTATE LIVE ANCORA APERTE (posizioni in gioco);
     - `equity` = available + exposure: il PATRIMONIO del wallet. E' l'unico
       valore che non si muove quando una bet passa da libera a "in gioco",
       quindi e' il riferimento per Kelly, drawdown e stop-loss.
 
-    Se il provider non espone `exposure` la stima e' PRUDENTE (equity = solo
-    disponibile): lo stop-loss puo' scattare un po' prima, mai dopo — resta
-    la direzione fail-closed.
+    ⚠️ L'esposizione viene dal LEDGER, non dal campo `exposure` di SX Bet.
+    Il 07/10/2026 due circuit breaker (stop-loss giornaliero -8,8% e
+    settimanale -12,0%) sono scattati su un wallet INTATTO: SX riporta le
+    posizioni RIEMPITE in `escrowedAmount` in modo INCOERENTE (misurato sul
+    container: `escrowedAmount = 0` con un ordine FULLY_FILLED da 1,31 USDC
+    aperto, e 5,60 USDC con 4,38 di stake aperto). Il `availableBalance`,
+    invece, e' gia' al netto dello stake ed e' autoritativo. Con l'esposizione
+    dal ledger l'equity cambia SOLO al settlement (mai al fill), quindi non
+    oscilla e i breaker non scattano su un artefatto.
+
+    Il campo SX resta in `provider_exposure` per la telemetria (le differenze
+    oltre 0,5 USDC sono loggate a DEBUG, senza rumore per ciclo).
+    Se il provider non espone `exposure` E il ledger non e' leggibile la
+    stima e' PRUDENTE (equity = solo disponibile): lo stop-loss puo' scattare
+    un po' prima, mai dopo — resta la direzione fail-closed.
     """
     try:
         import execution_engine as ee
@@ -2916,14 +2928,28 @@ def _live_wallet_snapshot() -> "dict | None":
         bal = engine.provider.get_balance()
         available = float(bal.get("availableBalance") or 0.0)
         raw_exposure = bal.get("exposure")
-        if raw_exposure is None:
-            logger.warning("auto_bet: wallet senza campo 'exposure' — equity "
-                           "= solo disponibile (stima PRUDENTE: lo stop-loss "
-                           "puo' scattare prima)")
-            exposure = 0.0
+        provider_exposure = (float(raw_exposure or 0.0)
+                             if raw_exposure is not None else None)
+        ledger_stake, ledger_count = _open_live_snapshot()
+        if ledger_stake != float("inf"):
+            exposure, source = ledger_stake, "ledger"
+        elif provider_exposure is not None:
+            exposure, source = provider_exposure, "provider"
         else:
-            exposure = float(raw_exposure or 0.0)
+            exposure, source = 0.0, "none"
+            logger.warning("auto_bet: wallet senza campo 'exposure' e ledger "
+                           "non leggibile — equity = solo disponibile "
+                           "(stima PRUDENTE: lo stop-loss puo' scattare prima)")
+        if (provider_exposure is not None
+                and abs(provider_exposure - exposure) > 0.5):
+            logger.debug("auto_bet: escrow SX %.2f != stake aperto dal ledger "
+                         "%.2f (%d ordini) — uso il ledger (il campo SX non e' "
+                         "affidabile sulle posizioni riempite)",
+                         provider_exposure, exposure, ledger_count)
         return {"available": available, "exposure": exposure,
+                "provider_exposure": provider_exposure,
+                "exposure_source": source,
+                "open_orders": ledger_count if ledger_count >= 0 else None,
                 "equity": available + exposure}
     except Exception as e:
         logger.warning("auto_bet: lettura saldo wallet fallita: %s", e)
