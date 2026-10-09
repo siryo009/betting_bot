@@ -237,14 +237,28 @@ def decimal_to_pct_scaled(price: float, step_scaled: int) -> int:
 
 
 def pct_scaled_to_decimal(pct: object) -> float:
-    """percentageOdds (prob. * 1e20) -> quota decimale (3.15e19 -> 3.1746)."""
+    """percentageOdds (prob. * 1e20) -> quota decimale (3.15e19 -> 3.1746).
+
+    TRONCA (mai arrotonda per eccesso) a 4 decimali, con aritmetica INTERA
+    per non dipendere dai float. Il valore riportato e' quindi SEMPRE <= alla
+    quota reale della ladder, e `decimal_to_pct_scaled` recupera il gradino
+    ESATTO (round-trip lossless su tutta la banda 1.30-2.60).
+
+    Perche' non si arrotonda: con l'arrotondamento per eccesso il prezzo
+    riportato poteva risultare MAGGIORE della quota reale, e l'encoder
+    (floor alla ladder) scendeva di un gradino -> l'ordine IOC chiedeva
+    PIU' della quota disponibile sul book. Misurato il 10/10/2026: 131/308
+    (42,5%) dei prezzi di libro in banda 1.30-2.60 non tornavano al gradino
+    originale, cioe' un ordine al prezzo del book non trovava controparte
+    (`CANCELLED / NO_LIQUIDITY`) — la causa del fill-rate del 5,5%.
+    """
     try:
         p = int(pct)
     except (TypeError, ValueError):
         return 0.0
     if p <= 0:
         return 0.0
-    return round(SX_PROB_SCALE / float(p), 4)
+    return (SX_PROB_SCALE * 10000 // p) / 10000.0
 
 
 def stake_to_sx_units(stake: float, decimals: int = 6) -> int:

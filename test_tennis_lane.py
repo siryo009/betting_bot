@@ -373,7 +373,9 @@ class TestFasciaQuota:
         # candidato. Prova che e' la FASCIA a scartare, non l'EV o il book.
         _write_cache(monkeypatch, _oracle_payload())
         out = tl.picks(provider=_event_provider(2.40, 1.60))
-        assert len(out) == 1 and out[0]["quota"] == pytest.approx(2.40)
+        # Tolleranza = granularita' della ladder SX: 2.40 non e' un gradino
+        # esatto (decodifica troncata), il prezzo riportato e' 2.4024.
+        assert len(out) == 1 and out[0]["quota"] == pytest.approx(2.40, abs=0.01)
 
     @pytest.mark.parametrize("longshot,counterpart", [
         (2.60, 1.60), (4.28, 1.31), (17.02, 1.07),

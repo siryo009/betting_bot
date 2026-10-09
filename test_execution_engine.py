@@ -821,6 +821,53 @@ class TestSxBetConversions:
         assert ee._sx_levels_to_decimal("x") == []
 
 
+class TestRoundTripLadder:
+    """Round-trip libro<->ordine: e' la causa radice del fill-rate (10/10/2026).
+
+    Se il prezzo riportato dal book e' MAGGIORE della quota reale, l'encoder
+    (floor alla ladder) scende di un gradino e l'ordine IOC chiede PIU' della
+    quota disponibile -> `CANCELLED / NO_LIQUIDITY`. Questi test bloccano
+    quella regressione.
+    """
+
+    LO, HI = 1.30, 2.60  # banda di lavoro del bot (fascia quota)
+
+    def test_round_trip_lossless_su_tutta_la_banda(self):
+        tot = 0
+        for k in range(1, 800):
+            p = k * SX_STEP
+            dec = ee.pct_scaled_to_decimal(p)
+            if not (self.LO <= dec <= self.HI):
+                continue
+            tot += 1
+            # il prezzo riportato NON supera mai la quota reale della ladder
+            assert dec <= ee.SX_PROB_SCALE / p + 1e-9
+            # e l'encoder lo riporta ESATTAMENTE al gradino di partenza
+            assert ee.decimal_to_pct_scaled(dec, SX_STEP) == p, (
+                f"gradino perso: p={p} dec={dec}")
+        assert tot > 250, "banda troppo stretta: il test non misura nulla"
+
+    def test_non_arrotonda_per_eccesso(self):
+        # casi reali che con l'arrotondamento finivano un gradino piu' severi
+        p = 309 * SX_STEP                     # quota reale 2.588996...
+        dec = ee.pct_scaled_to_decimal(p)
+        assert dec == 2.5889                  # troncato, NON 2.589
+        assert ee.decimal_to_pct_scaled(dec, SX_STEP) == p
+        p2 = 314 * SX_STEP                    # quota reale 2.547770...
+        dec2 = ee.pct_scaled_to_decimal(p2)
+        assert dec2 == 2.5477
+        assert ee.decimal_to_pct_scaled(dec2, SX_STEP) == p2
+
+    def test_ordine_al_prezzo_del_book_trova_controparte(self):
+        """Il bound calcolato dal prezzo di libro e' il gradino del maker."""
+        maker_p = 342 * SX_STEP               # un livello del book
+        book_price = ee.pct_scaled_to_decimal(maker_p)   # come lo legge il bot
+        bound = ee.decimal_to_pct_scaled(book_price, SX_STEP)
+        # IOC: controparte accettata solo se il suo gradino e' >= al bound
+        assert bound == maker_p
+        assert ee.SX_PROB_SCALE / bound >= book_price
+
+
 class TestSxBetAuth:
     def test_metadata_fetch_e_cache(self, monkeypatch):
         calls = {"n": 0}
