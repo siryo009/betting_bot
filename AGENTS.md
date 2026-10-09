@@ -9909,3 +9909,170 @@ armati, esposizione 3.58/11.94 (40%).
 (ogni **6h**, prossimo ~**00:20 UTC**) rinfresca **prima** dell'apertura della
 finestra.
 
+
+### Arbitraggio SX Bet <-> Smarkets: passo 1, il MISURATORE (10/10/2026)
+
+**Richiesta del proprietario**: "massimizzare la potenza del bot per piazzare
+piu' ordini — arbitraggio su SX Bet + altri strumenti piu' potenti e
+profittevoli". Direzione scelta con `ask_user`: **arbitraggio SX Bet <->
+Smarkets**, budget crediti the-odds-api **da non toccare**, capitale
+**~30 USDC invariato**.
+
+**⚠️ LA PREMESSA "ARBITRAGGIO SU SX BET" NON E' REALIZZABILE COSI' COM'E' —
+e il motivo e' strutturale, non una soglia.** SX Bet e' **un singolo exchange
+P2P**: al suo interno NON esiste arbitraggio, perche' i due lati del book
+*sono* il prezzo (back "X a 2.00" e il complementare "Not X" ~1.98). Comprare e
+vendere sullo stesso book = pagare due volte lo spread. L'arbitraggio **e' per
+definizione cross-venue**: servono DUE prezzi diversi sullo stesso esito.
+
+**Perche' la finestra e' aperta ADESSO**: `execution_engine.py` contiene GIA'
+**due provider di exchange** — `SxBetProvider` (riga 817) e
+`SmarketsProvider` (riga 549), entrambi con `list_market_catalogue` 1X2 calcio
+e `get_market_book`. E dal **cutover AMS del 01/10** il container e'
+ad Amsterdam: `api.smarkets.com`, che **dall'Italia e' inibito dall'ADM**
+(DNS -> sito-inibito-giochi.adm.gov.it), da li' e' raggiungibile. La porta si
+e' aperta e nessuno l'ha ancora bussata.
+
+**⚠️ VINCOLO DI CAPITALE (il motivo per cui si misura PRIMA di costruire)**:
+l'arbitraggio e' **due gambe su due venue** -> servono fondi su **entrambe**.
+Con ~30 USDC **tutti su SX** la gamba Smarkets non e' coperta. Serve un
+**account Smarkets finanziato**: e' una **dipendenza ESTERNA** che l'agente non
+puo' risolvere (creazione account + deposito + `SMARKETS_USERNAME`/
+`SMARKETS_PASSWORD` nelle env, regola 7: mai in chat).
+
+**✅ CONSEGNATO — `arbitrage_scan.py` (nuovo, 34 test verdi TUTTI OFFLINE).**
+Misuratore read-only, stesso pattern di `line_intersection.py`/
+`liquidity_impact.py`/`gate_audit.py`: **decide dopo, col dato in mano**.
+- **Discovery per venue**: SX (`sportIds=5`, type 1: TRE mercati binari
+  "X vs Not X" per evento, raggruppati per squadre+kickoff e mappati su 1/X/2
+  col nome dell'esito UNO) e Smarkets (`football_match`/`match_odds`, un
+  mercato con i tre contratti Home/Draw/Away).
+- **Matching per NOMI** (`team_names.same_team`, deterministico e simmetrico —
+  stessa regola del settlement) + **tolleranza kickoff**
+  (`ARB_MATCH_WINDOW_MIN`, 90'): evita di accoppiare andata e ritorno della
+  stessa coppia. Mai fuzzy.
+- **Detection**: per ogni esito il **MIGLIOR prezzo fra le due venue** (le
+  gambe possono essere DIVISE fra venue: 1 su SX, X e 2 su Smarkets e' un
+  arbitraggio valido) -> `sum(1/quota) < 1 - soglia` (`ARB_MIN_MARGIN`, 0.5%).
+- **Piano di capitale reale**, non teorico: stake proporzionale all'inverso,
+  **cassa per venue**, **budget massimo per PROFONDITA'** (il tetto che entra
+  in tutti i lati) e **rispetto dello stake minimo** per venue. Cosi' il
+  report dice se l'arbitraggio e' **realizzabile col capitale disponibile**,
+  non solo se esiste.
+- **Fail-closed**: profondita' ignota (book non letto) -> `max_budget_by_depth
+  = 0.0` e `executable_at_budget = False`. Mai fingere che un lato sia capiente.
+- **Zero ordini / zero scritture / zero crediti**: SX e Smarkets hanno API
+  proprie, quindi **non tocca il budget the-odds-api** (vincolo rispettato:
+  gli strumenti nuovi devono starci dentro). Tripwire ast-based (il controllo
+  giudica il CODICE, non la docstring — lezione del 30/09 sui tripwire che
+  bocciavano la prosa) + test in sottoprocesso che `import arbitrage_scan` NON
+  carica `execution_engine`/`tracker`/`auto_bet`/`bot` (import dei provider
+  PIGRO, dentro le funzioni).
+
+**Env** (`ARB_MIN_MARGIN` 0.005, `ARB_MATCH_WINDOW_MIN` 90,
+`ARB_MAX_EVENTS` 60, `ARB_BUDGET` 30, `ARB_MIN_STAKE_SX` 1.0,
+`ARB_MIN_STAKE_SMARKETS` 1.0) lette a RUNTIME, **default di codice**: nessuna
+env impostata su Railway, **nessuna modifica a `.railway/railway.ts`**.
+
+**CLI**: `venv/bin/python arbitrage_scan.py [--json] [--min-margin X]
+[--budget N] [--max-events N] [--window-min N]`.
+
+**⚠️ NON collegato alla produzione**: `auto_bet` non lo importa, nessuna
+pipeline lo chiama. **Prossimo passo** (da decidere col dato in mano):
+eseguire lo scan sul container AMS e leggere `opportunities`/`verdict`. Se il
+numero di opportunita' e' zero, l'arbitraggio e' chiuso prima di scrivere una
+riga di esecuzione; se e' positivo, servono (a) account Smarkets finanziato e
+(b) un esecutore a **due gambe atomiche** con monitoraggio dello slippage.
+
+### Misura del FILL-RATE: il vero collo di bottiglia degli ordini (10/10/2026)
+
+Nella stessa sessione e' stata confermata una misura che **ridimensiona la
+premessa "piu' ordini = piu' pick"**. Report ordini reali 25/09 -> 02/10
+(fonte log Railway, `orders-v3`):
+
+| | valore |
+|---|---|
+| POST a `/orders-v3` | **221** |
+| accettati dall'exchange | 126 |
+| **FULLY_FILLED** | **7** |
+| CANCELLED `NO_LIQUIDITY` | **119** |
+| **fill rate** | **5,5%** |
+
+Il bot **ha gia' trovato e inviato 126 ordini validi**: ne sono passati **7**.
+Gli altri 119 sono stati cancellati perche' l'**IOC** chiedeva un prezzo senza
+controparte (`cancelReason: NO_LIQUIDITY`). **Conseguenza dichiarata**:
+moltiplicare i pick per 3 non cambia quasi nulla se 19 ordini su 20 muoiono
+nel fill. Il leverage per "piazzare piu' ordini" e' nel **fill**, non nel
+volume di segnali — e il vincolo di capitale resta (equity ~29,85 USDC, stake
+Kelly k 0,15-0,25 con cap 12% -> ~3,5 USDC/ordine, recinto 40%).
+
+**Non e' stato modificato nulla** su questo fronte: e' una misura registrata
+per orientare la prossima decisione (ordini resting GTC vs cap di slippage
+sull'IOC), non un intervento.
+
+### Fill rate: la causa era il TRONCAMENTO della quota di libro (10/10/2026)
+
+**Sintomo**: 221 POST a `/orders-v3` fra il 25/09 e il 02/10, 126 accettati,
+**7 riempiti (5,5%)**, 119 `CANCELLED / NO_LIQUIDITY`. Dopo il cutover AMS
+(01/10) il geo-block e' finito (126/126 accettati) ma il fill rate e' rimasto
+il collo di bottiglia: moltiplicare i pick per 3 non cambia nulla se 19 ordini
+su 20 muoiono al riempimento.
+
+**CAUSA RADICE (misurata, non ipotizzata): la quota del libro veniva
+ARROTONDATA PER ECCESSO, e l'encoder la riportava un gradino PIU' SEVERA.**
+
+`pct_scaled_to_decimal` (execution_engine) fa `round(1e20/p, 4)`. Sulla ladder
+SX (gradino 0.125% di probabilita') il valore arrotondato puo' risultare
+**maggiore** della quota reale. `decimal_to_pct_scaled` poi fa il **floor**
+alla ladder: con un input appena piu' alto scende di un gradino, quindi la
+quota "accettata" dall'ordine risulta **superiore** a quella disponibile sul
+book e l'IOC non trova controparte.
+
+Misura sul campo (script di verifica, banda di lavoro 1.30-2.60):
+```
+pct_scaled_to_decimal (round 4)  in-band=308  mismatch=131  (42,5%)
+truncate 4                       in-band=308  mismatch=0    (0,0%)
+```
+Esempio reale: gradino 2.588996 -> riportato 2.589 -> ri-encodato 2.5974
+(un gradino peggiore). Un ordine "al prezzo del libro" chiedeva 0,3% in piu'
+di quanto il mercato offriva: **spiegato il 94,5% di ordini non riempiti**
+(il fill avveniva solo quando il libro MIGLIORAVA dopo il segnale).
+
+**FIX (`execution_engine.pct_scaled_to_decimal`)**: la quota riportata viene
+**TRONCATA** (mai arrotondata per eccesso) a 4 decimali, con aritmetica INTERA
+(`SX_PROB_SCALE * 10000 // p`) per non dipendere dai float. Il valore riportato
+e' quindi sempre <= alla quota reale, l'encoder recupera il gradino ESATTO e il
+round-trip libro<->ordine e' lossless su tutta la banda (0/308 mismatch).
+La garanzia "mai riempimenti sotto la quota richiesta" resta intatta (l'encoder
+e' invariato): cambia solo che ora la quota riportata e' raggiungibile.
+Comportamento osservabile: le quote mostrate possono essere piu' basse di
+0,00005 (es. 2.589 -> 2.5889), cioe' conservative.
+
+**Tripwire (`test_execution_engine.TestRoundTripLadder`)**: round-trip lossless
+su tutta la banda (fallisce con l'arrotondamento), caso reale 2.5889 vs 2.589,
+"il bound calcolato dal prezzo del libro e' il gradino del maker" (l'IOC trova
+controparte), valori esatti invariati (2.0, 3.1746).
+
+**Impatto atteso**: gli ordini IOC al prezzo del libro possono finalmente
+incontrare la controparte che il book espone (prima era possibile solo con un
+miglioramento del prezzo). Ogni corsia che legge il book via
+`pct_scaled_to_decimal` (1X2 `sx_signals`, multi-mercato OU/AH, tennis,
+eSports, book shadow) ne beneficia.
+
+**NON ancora confermato in produzione**: la prova e' matematica + test; il
+prima/dopo va letto dal fill rate nei log `orders-v3` dopo il deploy.
+⚠️ Nota: `tennis_sandbox.pct_scaled_to_decimal` ha una propria copia
+(paper-only, non toccata).
+
+**Seconda leva rimasta APERTA (decisione, non implementata)**: gli ordini sono
+sempre **IOC** (`_live_fill` non passa `persistence`, quindi vale il default
+`SX_TIME_IN_FORCE`; `place_limit_order` supporta gia' `persistence="PERSIST"`
+-> `timeInForce=GTC`, con test dedicato).
+Un ordine resting resta sul book e si riempie quando arriva la controparte
+(utile se la controparte non c'e' nell'istante dell'ordine). Il blocco e' di
+LEDGER, non tecnico: `bets` registra solo i RIEMPIMENTI e il recinto/settlement
+lavorano su righe aperte; un ordine resting non riempito non ha ne' stake
+matched ne' verdetto, quindi oggi verrebbe scartato da `_live_fill`
+(`not order.ok or matched_stake <= 0`). Servirebbe un terzo stato (ordine
+resting aperto + riconciliazione/cancel a scadenza) con impatto sul denaro
+reale: **decisione del proprietario**.
