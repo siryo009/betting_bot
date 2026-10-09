@@ -9805,3 +9805,107 @@ end-to-end: 38,7843 NON arma il picco, 35,0843 diventa il picco vero dopo il
 settlement, 32,82 -> dd 6,45% **sotto** il 12%, 29,85 -> arma con peak
 35,0843). `WEEKLY_RECONCILE_TOLERANCE_USDC` dichiarata `preserve()` in
 `.railway/railway.ts`.
+
+### Test dell'oracolo a LINEA in dry-run (09/10/2026): 6 crediti, 0 pick sbloccati
+
+**Direttiva**: verificare se riaccendere l'oracolo a linea OU/AH
+(`ORACLE_ENABLED=1`) su due partite reali in finestra — Dortmund-Werder
+(Bundesliga, `core`) e West Ham-QPR (EFL Championship, `probation`). Scelta
+dell'utente: **A - Dry-run** (nessun ordine reale).
+
+**Setup verificato sul container**: `ORACLE_ENABLED=1` + `ORACLE_BUDGET_DAY=2` +
+`AUTO_BET_DRY_RUN=1`, redeploy `3eab638e` (PID 1 alle 18:07:57 UTC) ->
+`odds_api.ORACLE_ENABLED=True`, `ORACLE_BUDGET_DAY=2`, `auto_bet.DRY_RUN=True`.
+⚠️ Tutte e tre sono lette **all'IMPORT**: cambiarle richiede un **redeploy**, non
+basta il set della variabile.
+
+**Le 2 fetch sono partite DAVVERO** (non un test a vuoto):
+`oracle_budget_used()=2`, crediti **257 -> 251** (**6 crediti** = 2 leghe x 3),
+cache `toao_soccer_germany_bundesliga.json` e `toao_soccer_efl_champ.json`
+scritte e fresche (`age 0.05h`, 1 evento ciascuna).
+
+**Verdetto del gate (log 18:09:04)** — stesso motivo su entrambe le partite:
+
+| partita (esito) | verdetto | linee Pinnacle |
+|---|---|---|
+| `sx-L20172929` Dortmund-Werder (`Over 2.5`) | `no_oracle/LINE_MISMATCH` | `[3.25]` |
+| `sx-L20245170` West Ham-QPR (`Under 3.5`) | `no_oracle/LINE_MISMATCH` | `[3.25]` |
+
+**Pinnacle quota 3.25 su ENTRAMBE le partite** (la main quarter-line), mentre SX
+quota a passi di **0,5**: OU 2.0 / 2.5 / 3.0 / 3.5 / 4.0 / 4.5 / 5.0 (Dortmund,
+22 quote) e 1.5 ... 4.5 (West Ham, 24 quote). **Le due griglie non si
+intersecano**: nessuna linea prezzabile, quindi nessun `p_true` e nessun ordine.
+Da notare: anche il pick `Over 3` di Dortmund **non** sarebbe passato (Pinnacle
+prezza 3.25, non 3.0).
+Verifica indipendente post-test sul container:
+`pinnacle_oracle.oracle_lines(home, away, market_type)` -> **`None`** sui
+**4 casi** (Dortmund OU, Dortmund AH, West Ham OU, West Ham AH).
+
+**Esito: 6 crediti spesi, 0 pick sbloccati, 0 ordini** (dry-run). E' la conferma
+**strutturale** dello stesso schema gia' misurato su MLS (Pinnacle `totals 3.25`
+vs SX `3.0/3.5`, 06-07/10) e della decisione del **07/10**
+(`ORACLE_ENABLED=0`): l'intersezione fra le due griglie e' **l'eccezione, non la
+regola**. La corsia OU/AH resta in **telemetria** (`multi_market` continua a
+ingerire e registrare) e la decisione si riapre solo se `line_intersection.py`
+mostra una copertura di linee **ricorrente**.
+
+**Ripristino (verificato)**: `ORACLE_ENABLED=0` + `ORACLE_BUDGET_DAY=1` +
+`AUTO_BET_DRY_RUN` **cancellata** -> deployment finale `5e025fa5` **SUCCESS**.
+Sul container: `ORACLE_ENABLED` env `0` / import `False`, `ORACLE_BUDGET_DAY`
+`1`, `AUTO_BET_DRY_RUN` **assente** -> `auto_bet.DRY_RUN=False`,
+`kill_switch_status()` = `{effective: 'live', provider_ready: True}`, cicli
+`auto_bet` puliti ogni 60s (`equity 29.85 USDC`, 0 candidati giocabili, 0
+dry-run). Crediti residui **251**.
+
+⚠️ **Incidente operativo (risolto) — `variable delete` e il redeploy.**
+`railway variable delete` **NON accetta `--skip-deploys`** (errore "For more
+information, try '--help'"); la cancellazione avviene comunque, ma il redeploy
+partito subito dopo ha ripreso la variabile **ancora presente**: sul container
+`AUTO_BET_DRY_RUN=1` / `ab.DRY_RUN=True` (deployment `5b287b39`). Risolto con un
+secondo `railway redeploy` (`5e025fa5`) e ri-verificato.
+**Regola**: dopo una `variable delete`, controllare con
+`railway variable list --service betting_bot --kv` **PRIMA** del redeploy.
+
+#### Corsia tennis: perche' il 09/10 non ha piu' ordinato dopo l'alba
+
+Verifica richiesta dal proprietario ("la corsia tennis non ha piazzato ordini
+oggi"). **Ha ordinato, ma solo nella finestra notturna:**
+- **#24** (01:00 UTC), **#25** (02:24), **#26** (03:35) — tre ordini REALI su ATP
+  Shanghai (le finestre aperte implicano kickoff fra ~01:00 e ~06:35 UTC), tutti
+  `FULLY_FILLED` e tutti **persi** (`-1.07`, `-1.90`, `-2.26` = **-5.23 USDC**);
+- dalle **06:38** alle ~**11:35** UTC nessuna corsia poteva ordinare: era armato
+  il **circuito settimanale fantasma** (fix `6d9514a`, sezione precedente);
+- dopo lo sblocco l'unico ordine del giorno e' il calcio **#27** (PSV `1`
+  @1.3356, 3.58 USDC, 15:00 UTC).
+
+**Dalle 11:35 in poi la corsia non aveva NULLA da giocare — e non per un gate:**
+la discovery tennis (`sportId 6`, type 52) alla sera restituisce **36 eventi**,
+**tutti con kickoff del 10/10 o successivi**; nessun match del 09/10 con kickoff
+futuro (l'ultimo della giornata era alle **07:30 UTC**, Cerundolo-Safiullin) e
+`today_late` vuoto. `t60_window` sui 36 eventi: **36 `before`, 0 `within`, 0
+`missed`**: non e' un gate che scarta, e' l'assenza di partite.
+
+**I pick di domani IN FINESTRA** (kickoff 10/10 05:10 UTC -> finestra
+**02:10-05:08 UTC**):
+```
+Bu Yunchaokete vs Casper Ruud   -> Casper Ruud      @ 1.7738  EV +3.73%  (2)  depth 8274
+Dalibor Svrcina vs Etcheverry   -> Dalibor Svrcina  @ 2.3529  EV +5.35%  (1)  depth 5166
+```
+Entrambi passano il pre-filtro completo (quota in fascia 1.30-2.50, `inv_sum`
+1.0075 / 1.0112, liquidita' >> 20 USDC, `_tennis_picks()` = 2 senza scarti):
+**entreranno in finestra domani** se al momento le condizioni reggono — sono
+riverificati a ogni ciclo di 60s, quindi il pick puo' anche sparire se il prezzo
+esce dalla banda o l'EV scende sotto `TENNIS_EV_MIN` 2.5%. Nessun blocco attivo:
+kill-switch `live`, CB2 non armato (equity 29.85 > 25), daily/weekly stop non
+armati, esposizione 3.58/11.94 (40%).
+⚠️ Gli altri match del 10/10 alle **03:00 UTC** (WTA) aprono la finestra alle
+**00:00 UTC**: sono candidati solo se +EV in quel momento.
+
+**Cache oracolo tennis**: `oracle_cache_dir()` = `/app/data` (file
+`toa_tennis_atp_shanghai_masters.json`, `toa_tennis_wta_china_open.json`,
+`age 11.99h` con TTL `TENNIS_ORACLE_TTL_MIN` **720'** -> `_cache_is_fresh()`
+`False` **al bordo**). Non blocca gli ordini: `picks()` legge via
+`pinnacle_oracle.load_oracle` (tetto assoluto 24h) e il job `tennis_lane_job`
+(ogni **6h**, prossimo ~**00:20 UTC**) rinfresca **prima** dell'apertura della
+finestra.
+
