@@ -390,84 +390,35 @@ class TestChiefExecution:
         agent_src = Path(ea.__file__).read_text(encoding="utf-8")
         assert "PlaceOrderGateway(" not in agent_src
 
-    def test_candidati_chief_rispettano_il_tetto(self, monkeypatch, temp_db):
-        """Anche se la Finanza proponesse uno stake alto, il tetto vale."""
-        monkeypatch.setenv("CHIEF_EXECUTION", "live")
-        _seed_one(monkeypatch, quota=1.65, strong=True)
+    def test_candidati_chief_rispettano_il_cap_dinamico(self, monkeypatch):
+        """Il piano chief porta lo stake della Finanza; a limitarlo e' il CAP
+        DINAMICO (12% dell'equity) applicato da `refresh_live_stakes`.
 
-        class _Fin:
-            bankroll, mode = 100.0, "live"
+        Regressione 08/10/2026: questo test era VACUO (i fake non
+        implementavano `data.process`/`process_trades`, quindi `out` era vuoto
+        e il ciclo `for c in out` non asseriva NULLA) e STANTIO (`<= 1.50` era
+        il tetto fisso dell'era pre-Kelly aggressivo). Ora la corsia e'
+        esercitata davvero e l'invariante e' quella di oggi.
+        """
+        out = _chief_candidates(monkeypatch, stake=99.0)
+        assert out, "il piano approvato deve produrre un candidato"
+        # Dentro la corsia lo stake della Finanza NON viene toccato...
+        assert out[0]["stake"] == 99.0
+        # ...e' il cap dinamico (12% di 100 = 12.00) a limitarlo prima
+        # dell'ordine, non il vecchio tetto assoluto da 1.50.
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: {
+            "available": 100.0, "exposure": 0.0, "equity": 100.0})
+        kept, _ = auto_bet.refresh_live_stakes(list(out))
+        assert len(kept) == 1
+        assert kept[0]["stake"] == 12.00
 
-            def process_many(self, signals, now=None):
-                from agents.contracts import FinanceOutput
-                from decision.engine import build_plan
-                out = FinanceOutput()
-                for s in signals:
-                    p = build_plan(s, bankroll=100.0, mode="live")
-                    out.plans.append(p)
-                    out.approved += 1
-                return out
-
-        class _Chief:
-            finance = _Fin()
-
-            def data(self_ignored=None, **kw):
-                raise AssertionError
-
-        chief = _Chief()
-        chief.data = lambda **kw: type("M", (), {
-            "validated": True,
-            "gate": type("G", (), {"reason": type("R", (), {"value": "ok"})}),
-            "signals": [],
-        })()
-        chief.strategy = type("S", (), {"process": staticmethod(lambda sigs: sigs)})
-        chief.finance = _Fin()
-        _Fin.process_many = lambda self, signals, now=None: _plans()
-
-        import chief_orchestrator
-        monkeypatch.setattr(chief_orchestrator, "ChiefOrchestrator",
-                            lambda *a, **k: chief)
-        out = auto_bet._chief_live_candidates(bankroll=100.0)
-        for c in out:
-            assert c["stake"] <= 1.50
-            assert c["lane"] == "chief"
-
-    def test_candidati_chief_portano_il_flag_di_corsia(self, monkeypatch,
-                                                       temp_db):
+    def test_candidati_chief_portano_il_flag_di_corsia(self, monkeypatch):
         """TRIPWIRE 08/10/2026: ogni pick chief DEVE dichiarare la propria
         corsia (`chief_trade`). Senza il flag `refresh_live_stakes` lo
         passerebbe al motore Kelly, che azzera lo stake della Finanza
         (`no_true_prob`) e lo fa scartare dal ticket minimo.
         """
-        from agents.contracts import ValidatedTrade
-        monkeypatch.setenv("CHIEF_EXECUTION", "live")
-        kickoff = datetime.now(timezone.utc) + timedelta(hours=3)
-        trade = ValidatedTrade(
-            signal_id="sx-1|1X2|1", match_id="sx-1", esito="1",
-            market="1X2", league="Premier League", home="Home", away="Away",
-            kickoff=kickoff, price=1.65, true_prob=0.62, ev=0.05, stake=3.70,
-            executable=True, kelly_fraction=0.20, kelly_full=0.31,
-            raw_stake=3.70)
-
-        fin = type("F", (), {})()
-        fin.bankroll, fin.mode = 100.0, "live"
-        fin.process_trades = lambda trades, bankroll=None: type(
-            "O", (), {"trades": [trade]})()
-        chief = type("C", (), {})()
-        chief.finance = fin
-        chief.data = type("D", (), {"process": staticmethod(lambda **kw: type(
-            "M", (), {"validated": True,
-                     "gate": type("G", (), {
-                         "reason": type("R", (), {"value": "ok"})}),
-                     "signals": []})())})()
-        chief.strategy = type("S", (), {
-            "process": staticmethod(lambda sigs: type("SO", (), {
-                "signals": []})())})()
-
-        import chief_orchestrator
-        monkeypatch.setattr(chief_orchestrator, "ChiefOrchestrator",
-                            lambda *a, **k: chief)
-        out = auto_bet._chief_live_candidates(bankroll=100.0)
+        out = _chief_candidates(monkeypatch, stake=3.70)
         assert out, "il piano approvato deve produrre un candidato"
         assert out[0]["chief_trade"] is True
         assert out[0]["lane"] == "chief"
@@ -480,39 +431,43 @@ class TestChiefExecution:
         assert kept[0]["stake"] == 3.70
 
 
-def _plans():
-    """Piano approvato eseguibile con stake sproporzionato (fuori tetto)."""
-    from agents.contracts import FinanceOutput
-    from decision.commands import CommandKind, Command, CommandPlan
-    from decision.models import (DataQuality, RiskDecision, Signal, StakeDecision,
-                                 DecisionRecord, ReasonCode)
-    from pydantic import datetime as _dt
-    signal = Signal(
-        signal_id="sx-1|1X2|1", match_id="sx-1", outcome="1", market="1X2",
-        price=1.65, home="Home", away="Away", league="Premier League",
-        kickoff=(datetime.now(timezone.utc) + timedelta(hours=3))
-        .isoformat().replace("+00:00", "Z"),
-        model_prob=0.62, market_prob=0.58, edge=0.04, ev=0.05,
-        tier="strong_value", confidence=0.6, data_quality=DataQuality(),
-    )
-    record = DecisionRecord(
-        record_id="r1", signal=signal, mode="live",
-        risk=RiskDecision(verdict="approve", reason=ReasonCode.OK),
-        stake=StakeDecision(stake=99.0, executable=True),
-    )
-    cmd = Command(
-        kind=CommandKind.PLACE_ORDER, mode="live", signal_id=signal.signal_id,
-        record_id="r1", dedup_key="k1",
-        payload={"match_id": "sx-1", "league": "Premier League",
-                 "home": "Home", "away": "Away", "market": "1X2",
-                 "outcome": "1", "selection_label": "Home",
-                 "kickoff": signal.kickoff, "price": 1.65, "stake": 99.0,
-                 "mode": "live", "provider": ""},
-    )
-    out = FinanceOutput()
-    out.plans = [CommandPlan(plan_id="p1", record=record, commands=[cmd])]
-    out.approved = 1
-    return out
+def _chief_candidates(monkeypatch, *, stake: float = 3.70, price: float = 1.65,
+                      h_to_kickoff: float = 3.0):
+    """Candidati della corsia CHIEF da un ciclo finto ma COMPLETO.
+
+    Lezione dell'08/10/2026: fake parziali (senza `data.process` o
+    `process_trades`) facevano fallire il ciclo in silenzio dentro il
+    `try/except` di `_chief_live_candidates` -> lista vuota -> asserzioni
+    vacue. Qui tutte le tappe della catena (Dati -> Strategia -> Analisi ->
+    Cervello -> Finanza) sono soddisfatte, quindi l'uscita e' un candidato
+    vero con lo stake deciso dalla Finanza.
+    """
+    from agents.contracts import ValidatedTrade
+    monkeypatch.setenv("CHIEF_EXECUTION", "live")
+    trade = ValidatedTrade(
+        signal_id="sx-1|1X2|1", match_id="sx-1", esito="1", market="1X2",
+        league="Premier League", home="Home", away="Away",
+        kickoff=datetime.now(timezone.utc) + timedelta(hours=h_to_kickoff),
+        price=price, true_prob=0.62, ev=0.05, stake=stake,
+        executable=True, kelly_fraction=0.20, kelly_full=0.31,
+        raw_stake=stake)
+    fin = type("F", (), {})()
+    fin.bankroll, fin.mode = 100.0, "live"
+    fin.process_trades = lambda trades, bankroll=None: type(
+        "O", (), {"trades": [trade]})()
+    chief = type("C", (), {})()
+    chief.finance = fin
+    chief.data = type("D", (), {"process": staticmethod(lambda **kw: type(
+        "M", (), {"validated": True,
+                 "gate": type("G", (), {
+                     "reason": type("R", (), {"value": "ok"})}),
+                 "signals": []})())})()
+    chief.strategy = type("S", (), {"process": staticmethod(
+        lambda sigs: type("SO", (), {"signals": []})())})()
+    import chief_orchestrator
+    monkeypatch.setattr(chief_orchestrator, "ChiefOrchestrator",
+                        lambda *a, **k: chief)
+    return auto_bet._chief_live_candidates(bankroll=100.0)
 
 
 def _seed_one(monkeypatch, quota=1.65, strong=False):
