@@ -324,11 +324,19 @@ class TestFailSafeECapo:
 
     def test_ciclo_con_advisor_ammette_micro_stake(self, conn, tmp_path):
         """E2E: un segnale bloccato per liquidita' con depth abbondante per il
-        ridotto entra nel ciclo tramite l'Advisor (percorso shadow)."""
+        ridotto entra nel ciclo tramite l'Advisor (percorso shadow).
+
+        08/10/2026: con bankroll 100 la finestra in cui il micro-stake e'
+        legittimo e' VUOTA — lo stake e' cappato al 2% (tier) = 2.00 USDC,
+        quindi la soglia assoluta di liquidita' (20 USDC) domina sia lo stake
+        pieno sia quello ridotto: o passano entrambi o non passa nessuno.
+        Con bankroll 1000 lo stake pieno chiede 2x20 = 40 USDC e il ridotto
+        resta sulla soglia assoluta di 20: un book da 30 sta nella finestra.
+        """
         from decision.models import KillSwitchStatus
         data = DataAgent()
         strategy = StrategyAgent()
-        finance = FinanceAgent(bankroll=100.0)
+        finance = FinanceAgent(bankroll=1000.0)
         advisor = AdvisorAgent(finance=finance, strategy=strategy)
         chief = ChiefOrchestrator(data=data, strategy=strategy, finance=finance,
                                   execution=ExecutionAgent(shadow_path=tmp_path / "s.jsonl"),
@@ -336,15 +344,26 @@ class TestFailSafeECapo:
         market = data.process(conn=conn, now=NOW)
         # Blocco il piano 1X2 per liquidita', poi do' depth abbondante al segnale
         signal = strategy.process(market.signals).signals[0]
-        signal.data_quality.depth_usdc = 2.0
+        # Book SOTTILE per lo stake pieno (serve 40 USDC) ma sufficiente per
+        # quello ridotto (soglia assoluta 20 USDC). Con `depth=2.0` il blocco
+        # era STRUTTURALE (nemmeno il ridotto era sostenibile) e il test non
+        # esercitava il percorso che dichiarava (08/10/2026).
+        signal.data_quality.depth_usdc = 30.0
         plan = finance.process(signal)
         assert plan.record.stake.executable is False
         # resolution diretta (il ramo del Capo e' gia' coperto da
         # test_agent_hierarchy; qui si verifica l'ammissione del micro-stake)
-        res = advisor.resolve_blocker(signal, market, strategy.process(market.signals),
-                                      finance.process_many([signal]))
-        if res.resolved and res.override_approved:
-            assert res.modified_plan.record.stake.executable is True
+        # Si passa il piano BLOCCATO (`plan`), non un ricalcolo: con
+        # `process_many([signal])` il piano tornava sano e l'assert finale
+        # cadeva nel ramo `if` senza esercitare nulla (test vacuo, 08/10/2026).
+        res = advisor.resolve_blocker(signal, market,
+                                      strategy.process(market.signals), plan)
+        # PRECONDIZIONE esplicita: il piano di partenza e' bloccato proprio
+        # dalla liquidita'. Senza questa asserzione un cambio di soglie che
+        # rendesse il piano sano farebbe passare il test "a vuoto".
+        assert plan.record.stake.reason == ReasonCode.LIQUIDITY_LOW
+        assert res.resolved is True and res.override_approved is True
+        assert res.modified_plan.record.stake.executable is True
 
     def test_advisor_spento_ciclo_invariato(self, conn, tmp_path):
         chief = ChiefOrchestrator(data=DataAgent(), strategy=StrategyAgent(),
@@ -363,15 +382,24 @@ class TestFailSafeECapo:
         finance = FinanceAgent(bankroll=100.0)
         advisor = AdvisorAgent(finance=finance, strategy=strategy)
         execution = ExecutionAgent(shadow_path=tmp_path / "s.jsonl")
-        chief = ChiefOrchestrator(data=data, strategy=strategy, finance=finance,
-                                  execution=execution, advisor=advisor)
+        # Serve un piano BLOCCATO, altrimenti il Capo non interpella nemmeno
+        # l'Advisor (`piano sano: skip`) e il test passava senza esercitare il
+        # ramo (vacuo fino all'08/10/2026): book sottile -> stake non
+        # eseguibile per liquidita'.
+        market = data.process(conn=conn, now=NOW)
+        market.signals[0].data_quality.depth_usdc = 2.0
+        blocked_data = type("D", (), {
+            "process": staticmethod(lambda **kw: market)})()
+        chief = ChiefOrchestrator(data=blocked_data, strategy=strategy,
+                                  finance=finance, execution=execution,
+                                  advisor=advisor)
         report = chief.run_cycle(conn=conn, now=NOW)
         # I gateway montati dall'Execution Agent restano solo shadow:
         names = [getattr(g, "name", "?") for g in execution._gateways()]
         assert names == ["shadow"]
-        if report.advisor:
-            for advice in report.advisor:
-                assert "override_approved" in advice   # contratto presente
+        assert report.advisor, "scenario non esercitato: atteso almeno un consiglio"
+        for advice in report.advisor:
+            assert "override_approved" in advice       # contratto presente
 
     def test_contratto_advisor_resolution_serializzabile(self):
         res = AdvisorResolution(resolved=False, reason_no="blocco confermato",
