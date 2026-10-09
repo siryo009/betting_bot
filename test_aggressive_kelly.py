@@ -338,6 +338,32 @@ class TestRefreshLiveStakes:
         assert kept[0]["stake"] == 9.0      # solo min(stake, cap 12.00)
         assert "kelly" not in kept[0]
 
+    def test_trade_chief_non_viene_ri_kelly(self, monkeypatch):
+        """REGRESSIONE 08/10/2026: un piano della corsia chief arriva con lo
+        stake GIA' dimensionato dalla Finanza e SENZA `p_true`/EV (nasce da un
+        piano approvato, non da un segnale grezzo). Il ricalcolo Kelly lo
+        azzererebbe con `no_true_prob` e il ticket lo scarterebbe: con
+        `chief_trade` lo stake si mantiene e si passa al ticket minimo.
+        """
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
+                            lambda: _snapshot(available=100.0))
+        cand = [{"match_id": "m1", "esito_key": "1", "price": 1.66,
+                 "stake": 3.70, "lane": "chief", "chief_trade": True}]
+        kept, _ = auto_bet.refresh_live_stakes(cand)
+        assert len(kept) == 1
+        assert kept[0]["stake"] == 3.70          # stake della Finanza, intatto
+        assert kept[0]["lane"] == "chief"
+
+    def test_trade_chief_sotto_il_ticket_viene_scartato(self, monkeypatch):
+        """La regola dell'08/10 non scavalca il ticket: resta il controllo
+        sul capitale fresco, solo senza il ricalcolo sovrascrittore."""
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
+                            lambda: _snapshot(available=100.0))
+        cand = [{"match_id": "m1", "esito_key": "1", "price": 1.66,
+                 "stake": 0.50, "lane": "chief", "chief_trade": True}]
+        kept, info = auto_bet.refresh_live_stakes(cand)
+        assert kept == [] and info["skipped"] == 1
+
     def test_scarta_sotto_il_ticket(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
                             lambda: _snapshot(available=10.0))   # raw 0.72 < ticket

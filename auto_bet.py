@@ -2051,6 +2051,14 @@ def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
     quanto, e ri-calcolare lo stake li scavalcherebbe: per quelli si applicano
     solo il cap dinamico e il ticket minimo sul capitale fresco.
 
+    Stessa regola per i trade della CORSIA CHIEF (`chief_trade`): lo stake e'
+    gia' stato dimensionato dal Finance Agent col motore Kelly (k dinamico,
+    cap tier/lega/risk), ma il pick chief NON porta `p_true`/`ev` (nasce da un
+    piano approvato, non da un segnale grezzo), quindi ricalcolarlo qui
+    azzererebbe lo stake con `no_true_prob` e il trade verrebbe scartato dal
+    ticket minimo. Si mantiene lo stake della Finanza e si passa direttamente
+    al controllo del ticket minimo sul capitale fresco.
+
     Fail-closed: wallet non leggibile -> nessun candidato passa (un saldo
     ignoto non autorizza ordini reali).
     """
@@ -2081,7 +2089,8 @@ def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
         return [], info
     kept: list[dict] = []
     for cand in candidates:
-        if cand.get("corr_cap") or cand.get("total_cap"):
+        if (cand.get("chief_trade") or cand.get("corr_cap")
+                or cand.get("total_cap")):
             stake = min(float(cand.get("stake") or 0.0), cap)
         else:
             res = kelly_size_for_pick(cand, price=float(cand.get("price") or 0.0),
@@ -4191,6 +4200,10 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
                 "price": price,
                 "stake": float(trade.stake),
                 "lane": "chief",
+                # Segnala esplicitamente la corsia: lo stake e' gia'
+                # dimensionato dalla Finanza e `refresh_live_stakes` NON deve
+                # ricalcolarlo col Kelly (il pick non porta p_true/EV).
+                "chief_trade": True,
                 "signal_id": trade.signal_id or "",
                 "kelly": {"kelly_fraction": trade.kelly_fraction,
                           "kelly_full": trade.kelly_full,

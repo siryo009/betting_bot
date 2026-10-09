@@ -432,6 +432,53 @@ class TestChiefExecution:
             assert c["stake"] <= 1.50
             assert c["lane"] == "chief"
 
+    def test_candidati_chief_portano_il_flag_di_corsia(self, monkeypatch,
+                                                       temp_db):
+        """TRIPWIRE 08/10/2026: ogni pick chief DEVE dichiarare la propria
+        corsia (`chief_trade`). Senza il flag `refresh_live_stakes` lo
+        passerebbe al motore Kelly, che azzera lo stake della Finanza
+        (`no_true_prob`) e lo fa scartare dal ticket minimo.
+        """
+        from agents.contracts import ValidatedTrade
+        monkeypatch.setenv("CHIEF_EXECUTION", "live")
+        kickoff = datetime.now(timezone.utc) + timedelta(hours=3)
+        trade = ValidatedTrade(
+            signal_id="sx-1|1X2|1", match_id="sx-1", esito="1",
+            market="1X2", league="Premier League", home="Home", away="Away",
+            kickoff=kickoff, price=1.65, true_prob=0.62, ev=0.05, stake=3.70,
+            executable=True, kelly_fraction=0.20, kelly_full=0.31,
+            raw_stake=3.70)
+
+        fin = type("F", (), {})()
+        fin.bankroll, fin.mode = 100.0, "live"
+        fin.process_trades = lambda trades, bankroll=None: type(
+            "O", (), {"trades": [trade]})()
+        chief = type("C", (), {})()
+        chief.finance = fin
+        chief.data = type("D", (), {"process": staticmethod(lambda **kw: type(
+            "M", (), {"validated": True,
+                     "gate": type("G", (), {
+                         "reason": type("R", (), {"value": "ok"})}),
+                     "signals": []})())})()
+        chief.strategy = type("S", (), {
+            "process": staticmethod(lambda sigs: type("SO", (), {
+                "signals": []})())})()
+
+        import chief_orchestrator
+        monkeypatch.setattr(chief_orchestrator, "ChiefOrchestrator",
+                            lambda *a, **k: chief)
+        out = auto_bet._chief_live_candidates(bankroll=100.0)
+        assert out, "il piano approvato deve produrre un candidato"
+        assert out[0]["chief_trade"] is True
+        assert out[0]["lane"] == "chief"
+        # E la corsia dichiarata NON viene ri-dimensionata dal Kelly: lo stake
+        # della Finanza arriva INTATTO al controllo del ticket minimo.
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: {
+            "available": 100.0, "exposure": 0.0, "equity": 100.0})
+        kept, _ = auto_bet.refresh_live_stakes(list(out))
+        assert len(kept) == 1
+        assert kept[0]["stake"] == 3.70
+
 
 def _plans():
     """Piano approvato eseguibile con stake sproporzionato (fuori tetto)."""
