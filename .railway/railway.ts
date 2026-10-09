@@ -254,6 +254,13 @@ export default defineRailway(() => {
       QUOTAVERACE_BOT_TOKEN: preserve(),
       SETTLEMENT_HEAL_INTERVAL_HOURS: preserve(),
       SMART_HEDGING: preserve(),
+      // Riconciliazione del picco settimanale (09/10/2026): una bet con payout
+      // GIA' accreditato da SX (mercato risolto) ma ancora aperta nel ledger
+      // fino al job di settlement gonfiava l'equity campionata (available +
+      // stake aperto) e faceva scattare il circuit breaker settimanale su un
+      // -15.4% inesistente. `reconciled_equity()` corregge i campioni spiegati
+      // dal P/L delle righe saldate entro questa tolleranza (USDC).
+      WEEKLY_RECONCILE_TOLERANCE_USDC: preserve(),
       STAKE_CAP_HARD: preserve(),
       STAKE_CAP_PCT: preserve(),
       STAKE_CAP_PCT_STRONG: preserve(),

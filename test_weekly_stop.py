@@ -9,6 +9,7 @@ file corrotto ma blocco attivo rispettato.
 Tutti i test sono OFFLINE: lo stato vive in tmp (isolato da `conftest.py`).
 """
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -235,3 +236,166 @@ def test_run_today_bets_invoca_il_controllo_settimanale():
     from pathlib import Path
     src = Path(auto_bet.__file__).read_text(encoding="utf-8")
     assert "check_weekly_stop(" in src
+
+
+# ---------------------------------------------------------------------------
+# 7. Il PICCO non si gonfia col doppio conteggio dell'escrow (09/10/2026)
+#    equity = available (payout gia' accreditato) + stake ancora in ledger
+# ---------------------------------------------------------------------------
+
+def _sql(db, q, params=()):
+    conn = sqlite3.connect(db)
+    conn.execute(q, params)
+    conn.commit()
+    conn.close()
+
+
+def _seed_match(db, match_id, minutes_ago=120):
+    """Partita GIA' INIZIATA (il mercato puo' essere risolto su SX)."""
+    commence = (_now() - timedelta(minutes=minutes_ago)).isoformat()
+    _sql(db, "INSERT OR REPLACE INTO matches VALUES (?,?,?,?,?,?,?)",
+         (match_id, "Tennis", "A", "B", commence, "scheduled",
+          _now().isoformat()))
+
+
+def _seed_bet(db, match_id, esito="1", stake=3.70, price=1.61):
+    _sql(db, "INSERT INTO bets (match_id, mercato, esito, price, stake, mode, "
+             "created_at) VALUES (?,?,?,?,?,?,?)",
+         (match_id, "1X2", esito, price, stake, "live",
+          (_now() - timedelta(hours=2)).isoformat()))
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT id FROM bets WHERE match_id=? AND esito=?",
+                       (match_id, esito)).fetchone()
+    conn.close()
+    return int(row[0])
+
+
+def _settle_bet(db, bet_id, profit, when):
+    _sql(db, "UPDATE bets SET esito_finale=?, profit=?, settled_at=? WHERE id=?",
+         ("won" if profit > 0 else "lost", float(profit), when.isoformat(),
+          int(bet_id)))
+
+
+class TestRiconciliazioneColLedger:
+    """Il picco del drawdown usa la contabilita' dei settlement, non il grezzo."""
+
+    def test_caso_reale_09_10_il_gonfiaggio_non_entra_nel_picco(self, temp_db):
+        """38,7843 grezzo (available 35,0843 + stake #22 3,70) -> 32,8732."""
+        t0 = _now() - timedelta(hours=1)
+        auto_bet.record_bankroll_sample(30.8232, basis_key="live_equity", now=t0)
+        _seed_match(temp_db, "m22")                 # iniziata, payout in corso
+        _seed_bet(temp_db, "m22", stake=3.70)      # #22: aperta nel ledger
+        b23 = _seed_bet(temp_db, "m23", "2", stake=3.36)
+        _settle_bet(temp_db, b23, 2.05, t0 + timedelta(minutes=30))
+        value, info = auto_bet.reconciled_equity(38.7843, now=_now())
+        assert info["applied"] is True
+        assert info["reason"] == "unexplained_growth"
+        assert info["settled_pl"] == pytest.approx(2.05, abs=0.001)
+        assert value == pytest.approx(32.8732, abs=0.001)
+        assert auto_bet.reconciled_equity(32.8732, now=_now())[0] == \
+            pytest.approx(32.8732, abs=0.001)
+
+    def test_crescita_spiegata_dai_settlement_passa_intatta(self, temp_db):
+        t0 = _now() - timedelta(hours=1)
+        auto_bet.record_bankroll_sample(100.0, basis_key="live_equity", now=t0)
+        _seed_match(temp_db, "m1")
+        _seed_bet(temp_db, "m1", stake=1.0)
+        b = _seed_bet(temp_db, "m2", "2", stake=10.0)
+        _settle_bet(temp_db, b, 20.0, t0 + timedelta(minutes=30))
+        value, info = auto_bet.reconciled_equity(120.0, now=_now())
+        assert info["applied"] is False and info["reason"] == "explained"
+        assert value == pytest.approx(120.0)
+
+    def test_deposito_senza_puntate_iniziate_non_viene_corretto(self, temp_db):
+        """Un top-up e' una crescita REALE: nessuna bet iniziata -> passa."""
+        t0 = _now() - timedelta(hours=1)
+        auto_bet.record_bankroll_sample(100.0, basis_key="live_equity", now=t0)
+        value, info = auto_bet.reconciled_equity(150.0, now=_now())
+        assert info["applied"] is False
+        assert info["reason"] == "no_open_started"
+        assert value == pytest.approx(150.0)
+
+    def test_lettura_del_ledger_rotta_non_corregge(self, temp_db, monkeypatch):
+        t0 = _now() - timedelta(hours=1)
+        auto_bet.record_bankroll_sample(100.0, basis_key="live_equity", now=t0)
+        _seed_match(temp_db, "m1")
+        _seed_bet(temp_db, "m1", stake=1.0)
+        monkeypatch.setattr(auto_bet, "_settled_profit_between",
+                            lambda a, b: None)
+        value, info = auto_bet.reconciled_equity(150.0, now=_now())
+        assert info["applied"] is False and info["reason"] == "read_error"
+        assert value == pytest.approx(150.0)
+
+    def test_tolleranza_sotto_soglia(self, temp_db):
+        t0 = _now() - timedelta(hours=1)
+        auto_bet.record_bankroll_sample(100.0, basis_key="live_equity", now=t0)
+        _seed_match(temp_db, "m1")
+        _seed_bet(temp_db, "m1", stake=1.0)
+        value, info = auto_bet.reconciled_equity(100.05, now=_now())
+        assert info["reason"] == "no_growth"
+        assert value == pytest.approx(100.05)
+
+    def test_senza_campione_precedente_non_si_corregge(self, temp_db):
+        _seed_match(temp_db, "m1")
+        _seed_bet(temp_db, "m1", stake=1.0)
+        value, info = auto_bet.reconciled_equity(500.0, now=_now())
+        assert info["reason"] == "no_sample"
+        assert value == pytest.approx(500.0)
+
+    def test_record_registra_il_valore_riconciliato(self, temp_db):
+        t0 = _now() - timedelta(hours=1)
+        auto_bet.record_bankroll_sample(30.8232, basis_key="live_equity", now=t0)
+        _seed_match(temp_db, "m22")
+        _seed_bet(temp_db, "m22", stake=3.70)
+        b23 = _seed_bet(temp_db, "m23", "2", stake=3.36)
+        _settle_bet(temp_db, b23, 2.05, t0 + timedelta(minutes=30))
+        rec = auto_bet.record_bankroll_sample(38.7843, basis_key="live_equity")
+        assert rec["recorded"] is True
+        assert rec["value"] == pytest.approx(32.8732, abs=0.001)
+        hist = json.loads(auto_bet.BANKROLL_HISTORY_FILE.read_text())
+        assert float(hist["samples"][-1][1]) == pytest.approx(32.8732, abs=0.001)
+        assert hist["reconciled"] == 1
+
+
+class TestSerieRealeDel09_10:
+    """End-to-end: il breaker NON arma sul picco gonfiato, arma su quello vero."""
+
+    def test_il_blocco_non_scatta_col_picco_gonfiato(self, temp_db):
+        t0 = _now() - timedelta(hours=6)
+        _seed_match(temp_db, "m22")
+        b22 = _seed_bet(temp_db, "m22", stake=3.70)
+        b23 = _seed_bet(temp_db, "m23", "2", stake=3.36)
+        _settle_bet(temp_db, b23, 2.05, t0 + timedelta(minutes=30))
+
+        auto_bet.check_weekly_stop(30.8232, basis="equity wallet",
+                                   basis_key="live_equity", now=t0)
+        # il payout di #22 e' in available ma il ledger non l'ha ancora saldata
+        r1 = auto_bet.check_weekly_stop(38.7843, basis="equity wallet",
+                                        basis_key="live_equity",
+                                        now=t0 + timedelta(hours=1))
+        assert r1["stopped"] is False
+        auto_bet.check_weekly_stop(38.7843, basis_key="live_equity",
+                                   now=t0 + timedelta(hours=2))
+        # il ledger salda #22 (+2,26): ora il picco VERO (35,0843) e' legittimo
+        _settle_bet(temp_db, b22, 2.26, t0 + timedelta(hours=2, minutes=30))
+        auto_bet.check_weekly_stop(35.0843, basis_key="live_equity",
+                                   now=t0 + timedelta(hours=3))
+        dd = auto_bet.weekly_drawdown(35.0843, now=t0 + timedelta(hours=3))
+        assert dd["peak"] == pytest.approx(35.0843, abs=0.001)
+        # 32,82 -> 6,45%: sotto la soglia, NIENTE blocco
+        r = auto_bet.check_weekly_stop(32.82, basis="equity wallet",
+                                       basis_key="live_equity",
+                                       now=t0 + timedelta(hours=4))
+        assert r["stopped"] is False
+        assert r["drawdown_pct"] == pytest.approx(6.45, abs=0.1)
+        # 29,85 -> 14,9%: qui il blocco e' legittimo
+        r = auto_bet.check_weekly_stop(29.85, basis="equity wallet",
+                                       basis_key="live_equity",
+                                       now=t0 + timedelta(hours=5))
+        assert r["stopped"] is True and r["just_triggered"] is True
+        assert r["peak"] == pytest.approx(35.0843, abs=0.001)
+
+    def test_env_dichiarata_nella_iac(self):
+        from pathlib import Path
+        iac = Path(".railway/railway.ts").read_text(encoding="utf-8")
+        assert "WEEKLY_RECONCILE_TOLERANCE_USDC" in iac

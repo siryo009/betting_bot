@@ -9722,3 +9722,86 @@ dedicato, NON e' stato fatto (fuori dal perimetro della direttiva).
 **Regola permanente**: quando un provider fallisce a ripetizione, il primo
 sospetto non e' il provider ma il **nome dell'asset/URL che la libreria genera**
 (qui un release che ha cambiato naming).
+
+### Falso stop settimanale del 09/10/2026: picco del drawdown GONFIATO dall'escrow
+
+**Sintomo**: il bot pareva "fermo" (nessuna puntata dalle 06:38 UTC). Il
+servizio era invece **sano**: health 200, cicli `auto_bet` ogni 60s, 0 ERROR,
+crediti 259, feed validato, kill-switch `live`, CB2 non armato, stop
+**giornaliero** non armato. Ad essere armato era il **circuit breaker
+settimanale** (`data/execution/weekly_stop.json` → `stopped_until`
+2026-10-10T06:38:10Z), con drawdown rolling 168h misurato **15,37%** (soglia
+`WEEKLY_STOP_LOSS_PCT` 12%) dal picco **38,7843**.
+
+**Causa radice — il PICCO era gonfiato di 3,70 USDC (bug di misura, non un
+drawdown reale).** Serie reale dei campioni di `bankroll_history.json`:
+
+```
+09/10 01:52  30.8232
+09/10 02:53  38.7843   <- salto +7.96 (di cui +2.05 e' il settlement di #23)
+09/10 03:54  38.7843   (identico)
+09/10 04:55  38.7843   (identico)
+09/10 05:56  35.0843   <- -3.70 ESATTO = stake della bet #22
+09/10 09:32  29.85     (= 35.0843 - 5.23 delle 3 bet perse) ✓ conti coerenti
+```
+
+`_live_wallet_snapshot` calcola `equity = available (SX) + stake aperto DAL
+LEDGER`. Il 07/10 quella scelta era corretta (l'`escrowedAmount` di SX e'
+INCOERENTE e faceva oscillare l'equity al fill), ma apre una finestra di
+**doppio conteggio**: quando il mercato si risolve, il **payout entra in
+`available`** mentre la riga nel ledger resta aperta fino al job di settlement
+(per il tennis, ore). Nella finestra il payout e' contato **e** lo stake anche.
+Qui: `38.7843 (available 35.0843 + stake #22 3.70)`; al settlement di #22
+(04:56) l'equity scende di **esattamente 3.70**. Misura di controllo su 112
+campioni (delta eq vs P/L dei settlement): le due transizioni anomale sono
+speculari, `+5.9111` e `-5.96` (= payout di #22), somma ~0.
+
+**Impatto sul breaker — falso positivo nel momento del trigger.** Alle 06:38
+l'equity vera era **32,82**: col picco corretto il drawdown era
+`(35,0843-32,82)/35,0843 = 6,45%`, **sotto** il 12%. Col picco gonfiato era
+15,37% -> blocco. (Il dd reale e' poi salito a 14,93% con l'equity a 29,85 per
+le 3 bet perse: il blocco sarebbe stato **legittimo** ~1,5h dopo, non alle
+06:38.) E' la stessa CLASSE del falso stop del 21/09 (base sbagliata), qui con
+la base corretta ma il VALORE gonfiato.
+
+**Intervento eseguito (sul volume, con backup `*.bak-<ts>` reversibile)**:
+corretti i **3 campioni gonfiati** (38.7843 -> 35.0843), **riavviata la
+finestra rolling** (base = equity corrente 29,854349) e **rimosso**
+`weekly_stop.json`. Verifica post-intervento: `weekly_stop_status()` stopped
+`False`, `weekly_drawdown(29.85)` = **0,01%** (peak 29,854349), ciclo
+`auto_bet` pulito senza `STOP-LOSS`.
+⚠️ La finestra riavviata **dimentica le perdite passate**: e' una scelta del
+proprietario (reset manuale del breaker), non un effetto collaterale. Il
+breaker resta ATTIVO e si riarma a -12% dalla nuova base.
+
+**✅ FIXATO (09/10/2026, su direttiva del proprietario)**: il campione
+registrato per il PICCO non puo' piu' catturare la finestra
+*payout-accreditato/settlement-non-fatto*. Nuova
+`auto_bet.reconciled_equity(bankroll)` (`auto_bet.py`): agisce SOLO quando il
+valore grezzo supera l'ultimo campione oltre
+`WEEKLY_RECONCILE_TOLERANCE_USDC` (env, default **0.10 USDC**), esiste almeno
+una puntata LIVE aperta il cui **kickoff e' gia' passato**
+(`_open_live_started`, JOIN `matches` su `datetime(commence_time) <= now`) e il
+P/L dei settlement registrati fra i due istanti e' leggibile
+(`_settled_profit_between`, `SUM(profit)` delle bet live con `datetime(settled_at)`
+nel range). In quel caso il valore viene riportato a
+`ultimo_campione + P/L_settlement` (**il massimo giustificato**), il picco vero
+arriva al campione successivo, quando il settlement e' registrato.
+`record_bankroll_sample(..., reconcile=True)` usa il valore corretto (esposto in
+`out["value"]`/`out["reconciled"]`, e conta la correzione in
+`bankroll_history.json["reconciled"]`); `check_weekly_stop` misura il drawdown
+sul **valore riconciliato**.
+Perche' il filtro richiede una puntata **gia' iniziata**: senza, una crescita
+non spiegata e' un **deposito/top-up** e viene registrata com'e' (il patrimonio
+reale e' cresciuto). **Fail-open** su ogni errore di lettura (una telemetria
+rotta non deve fermare il portafoglio), **fail-closed** sul resto: agisce solo
+quando ha davvero gli elementi per correggere.
+Tripwire dedicati (`test_weekly_stop.py`): `TestRiconciliazioneColLedger` (7: il
+caso reale 38,7843 -> **32,8732** con `settled_pl` 2,05; crescita spiegata;
+deposito senza puntate iniziate `no_open_started`; lettura rotta `read_error`;
+tolleranza; `no_sample`; `record_bankroll_sample` che registra il valore
+corretto e incrementa il contatore) e `TestSerieRealeDel09_10` (la serie reale
+end-to-end: 38,7843 NON arma il picco, 35,0843 diventa il picco vero dopo il
+settlement, 32,82 -> dd 6,45% **sotto** il 12%, 29,85 -> arma con peak
+35,0843). `WEEKLY_RECONCILE_TOLERANCE_USDC` dichiarata `preserve()` in
+`.railway/railway.ts`.

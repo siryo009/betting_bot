@@ -121,6 +121,10 @@ WEEKLY_STOP_WINDOW_H = float(os.getenv("WEEKLY_STOP_WINDOW_H", "168"))
 WEEKLY_STOP_FILE = DATA_DIR / "execution" / "weekly_stop.json"
 BANKROLL_HISTORY_FILE = DATA_DIR / "execution" / "bankroll_history.json"
 WEEKLY_SAMPLE_MIN_SECONDS = float(os.getenv("WEEKLY_SAMPLE_MIN_SECONDS", "3600"))
+# Tolleranza (USDC) della riconciliazione del campione col ledger: sotto questa
+# soglia una crescita e' arrotondamento (quote/payout), sopra e' un segnale.
+WEEKLY_RECONCILE_TOLERANCE_USDC = float(
+    os.getenv("WEEKLY_RECONCILE_TOLERANCE_USDC", "0.10"))
 
 # --- Correlation risk cap ---
 # Kelly assume indipendenza tra le puntate: due o piu' esiti correlati nello
@@ -2830,7 +2834,119 @@ def _prune_history(samples, now, window_h) -> list:
     return out
 
 
-def record_bankroll_sample(bankroll, basis_key=None, now=None) -> dict:
+def _settled_profit_between(since_ts, until_ts):
+    """P/L dei settlement LIVE registrati fra due istanti.
+
+    None se il ledger non e' leggibile: in quel caso il campione NON viene
+    corretto (fail-open, come il resto del breaker).
+    """
+    try:
+        from tracker import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(profit), 0) FROM bets "
+            "WHERE mode = 'live' AND settled_at IS NOT NULL "
+            "AND datetime(settled_at) > datetime(?) "
+            "AND datetime(settled_at) <= datetime(?)",
+            (since_ts.isoformat(), until_ts.isoformat())).fetchone()
+        conn.close()
+        return float(row[0] or 0.0) if row else 0.0
+    except Exception as e:
+        logger.debug("auto_bet: lettura settlement per il picco fallita (%s)", e)
+        return None
+
+
+def _open_live_started() -> int:
+    """Puntate LIVE aperte il cui mercato e' GIA' INIZIATO (kickoff passato).
+
+    Sono le sole candidate al doppio conteggio: quando il mercato si risolve,
+    SX accredita il payout in `available` mentre il ledger tiene ancora la
+    riga aperta fino al job di settlement -> lo stake verrebbe contato due
+    volte (09/10/2026: equity 38,7843 invece di 35,0843). `-1` = lettura
+    fallita.
+    """
+    try:
+        from tracker import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM bets b "
+            "LEFT JOIN matches m ON m.id = b.match_id "
+            "WHERE b.esito_finale IS NULL AND b.mode = 'live' "
+            "AND m.commence_time IS NOT NULL "
+            "AND datetime(m.commence_time) <= datetime('now')").fetchone()
+        conn.close()
+        return int(row[0]) if row else 0
+    except Exception as e:
+        logger.debug("auto_bet: lettura puntate iniziate fallita (%s)", e)
+        return -1
+
+
+def reconciled_equity(bankroll, now=None) -> "tuple[float, dict]":
+    """Equity GIUSTIFICATA dalla contabilita', per il PICCO del drawdown.
+
+    Una crescita dell'equity NON spiegata dai settlement registrati e' il
+    segnale del doppio conteggio: il payout di una puntata gia' risolta e'
+    dentro `available` (SX paga alla risoluzione del mercato) mentre il ledger
+    la conta ancora in gioco (fino al job di settlement, ore dopo). In quel
+    caso il valore viene riportato a `ultimo_campione + P/L dei settlement`,
+    cioe' al massimo giustificato: il picco vero arriva al campione successivo,
+    quando il settlement e' registrato.
+
+    Il filtro scatta SOLO con almeno una puntata aperta gia' iniziata: senza,
+    una crescita non spiegata e' un deposito/top-up e viene registrata com'e'
+    (il patrimonio reale e' cresciuto). Fail-open su ogni errore di lettura.
+
+    Ritorna `(valore, info)` con `info["applied"]` e `info["reason"]`.
+    """
+    raw = float(bankroll or 0.0)
+    out = {"applied": False, "raw": raw}
+    try:
+        if raw <= 0:
+            out["reason"] = "no_bankroll"
+            return raw, out
+        now = now or datetime.now(timezone.utc)
+        data = _load_history()
+        samples = _prune_history(data.get("samples"), now, WEEKLY_STOP_WINDOW_H)
+        if not samples:
+            out["reason"] = "no_sample"
+            return raw, out
+        last_ts = _parse_iso_utc(samples[-1][0])
+        last_v = float(samples[-1][1])
+        if last_ts is None:
+            out["reason"] = "no_sample"
+            return raw, out
+        if raw <= last_v + WEEKLY_RECONCILE_TOLERANCE_USDC:
+            out["reason"] = "no_growth"
+            return raw, out
+        if _open_live_started() <= 0:
+            out["reason"] = "no_open_started"
+            return raw, out
+        pl = _settled_profit_between(last_ts, now)
+        if pl is None:
+            out["reason"] = "read_error"
+            return raw, out
+        ceiling = last_v + pl + WEEKLY_RECONCILE_TOLERANCE_USDC
+        if raw <= ceiling:
+            out["reason"] = "explained"
+            return raw, out
+        corrected = round(last_v + pl, 4)
+        out.update({"applied": True, "reason": "unexplained_growth",
+                    "corrected": corrected, "ceiling": round(ceiling, 4),
+                    "settled_pl": round(pl, 4),
+                    "last_sample": last_ts.isoformat()})
+        logger.warning("auto_bet: campione di equity CORRETTO per il picco "
+                       "%.4f -> %.4f (crescita +%.2f non spiegata dai "
+                       "settlement dal %s: puntata iniziata non ancora "
+                       "saldata)", raw, corrected, raw - corrected,
+                       last_ts.isoformat()[:16])
+        return corrected, out
+    except Exception as e:
+        logger.debug("auto_bet: reconciled_equity fallito (%s)", e)
+        return raw, out
+
+
+def record_bankroll_sample(bankroll, basis_key=None, now=None,
+                           reconcile: bool = True) -> dict:
     """Aggiunge un campione di equity allo storico rolling (max 1/ora).
 
     La scrittura e' FAIL-SAFE: un errore non ferma il giro (lo storico e' una
@@ -2838,18 +2954,28 @@ def record_bankroll_sample(bankroll, basis_key=None, now=None) -> dict:
     autorevole (cassa dopo un errore di lettura del wallet) NON viene
     registrata: mischiare equity e cassa avrebbe prodotto un falso drawdown
     (stessa classe di bug del 21/09/2026 sullo stop giornaliero).
+
+    Con `reconcile=True` (default) il valore passa da `reconciled_equity`: il
+    PICCO non cattura una crescita che i settlement non spiegano (09/10/2026).
+    `out["value"]` e' il valore EFFETTIVAMENTE registrato (o usato), cosi' il
+    chiamante non deve ricalcolarlo.
     """
     out = {"recorded": False, "samples": 0}
     try:
         now = now or datetime.now(timezone.utc)
         if not bankroll or float(bankroll) <= 0 or WEEKLY_STOP_WINDOW_H <= 0:
             return out
+        if reconcile:
+            bankroll, recon = reconciled_equity(bankroll, now=now)
+            out["reconciled"] = recon
+        out["value"] = float(bankroll)
         data = _load_history()
         key = data.get("basis_key")
         if basis_key and key and key != basis_key:
             if _basis_priority(basis_key) < _basis_priority(key):
                 return {"recorded": False, "samples": 0,
-                        "basis_mismatch": True}
+                        "basis_mismatch": True,
+                        "value": float(bankroll)}
             data = {"basis_key": basis_key, "samples": []}
         elif basis_key and not key:
             data["basis_key"] = basis_key
@@ -2859,8 +2985,11 @@ def record_bankroll_sample(bankroll, basis_key=None, now=None) -> dict:
                 (now - last_ts).total_seconds() >= WEEKLY_SAMPLE_MIN_SECONDS:
             samples.append([now.isoformat(), float(bankroll)])
         data["samples"] = samples
+        recon = out.get("reconciled") or {}
+        if recon.get("applied"):
+            data["reconciled"] = int(data.get("reconciled") or 0) + 1
         _save_json_dict(BANKROLL_HISTORY_FILE, data)
-        out = {"recorded": True, "samples": len(samples)}
+        out.update({"recorded": True, "samples": len(samples)})
     except Exception as e:
         logger.debug("auto_bet: record_bankroll_sample fallito (%s)", e)
     return out
@@ -2946,7 +3075,11 @@ def check_weekly_stop(bankroll, basis: str = "bankroll",
                            "su base '%s' meno autorevole dello storico", basis_key)
             return {"stopped": False, "just_triggered": False,
                     "drawdown_pct": None, "basis_mismatch": True}
-        dd = weekly_drawdown(bankroll, now=now)
+        # Il current del drawdown e' il valore RICONCILIATO, non quello grezzo:
+        # un picco non giustificato non deve entrare nella misura (ne' in su
+        # col valore corrente, ne' restando nello storico).
+        _cur = rec.get("value")
+        dd = weekly_drawdown(_cur if _cur else bankroll, now=now)
         if dd["drawdown_pct"] / 100.0 >= WEEKLY_STOP_LOSS_PCT:
             until = now + timedelta(hours=WEEKLY_STOP_HOURS)
             _save_json_dict(WEEKLY_STOP_FILE, {
