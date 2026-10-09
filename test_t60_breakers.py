@@ -556,3 +556,46 @@ class TestFinestraT15MercatiDerivati:
         # il verdetto di finestra vive in UN solo posto e delega a `t60_window`
         assert src.count("def pick_window(") == 1
         assert src.count('t60_window(_parse_iso_utc(pick.get("commence")))') == 1
+
+
+class TestRegolaStakeDecisoAMonte:
+    """Lo stake deciso A MONTE non viene ri-dimensionato dal Kelly (08/10/2026).
+
+    Una corsia le cui quote arrivano con lo stake GIA' deciso (Finanza della
+    catena piramidale, cap di correlazione, cap di esposizione totale) NON
+    deve passare dal ricalcolo Kelly in `refresh_live_stakes`: il ricalcolo la
+    azzererebbe (`no_true_prob`: un piano non porta p_true/EV). La corsia T-60
+    e' **immune per costruzione** — usa `t60_stake` (micro-allocazione CB1) e
+    non il motore Kelly — e questo tripwire lo fissa, cosi' nessuno puo'
+    instradarla nel ricalcolo (o aggiungere una chiave T-60 alla regola)
+    senza accorgersene.
+    """
+
+    def test_regola_con_una_definizione_sola(self):
+        """La chiave della regola e il predicato vivono in UN punto."""
+        assert auto_bet.STAKE_DECIDED_KEYS == ("chief_trade", "corr_cap",
+                                               "total_cap")
+        src = Path("auto_bet.py").read_text(encoding="utf-8")
+        assert src.count("STAKE_DECIDED_KEYS = ") == 1
+        assert src.count("def stake_decided_upstream(") == 1
+
+    def test_corsia_t60_immune_dal_kelly(self):
+        """Il dispatch T-60 e `t60_stake` non chiamano il motore Kelly: il
+        loro stake viene da `t60_stake` (tetto CB1), mai dal ricalcolo."""
+        import inspect
+        disp = inspect.getsource(auto_bet.t60_dispatch_pending)
+        stake = inspect.getsource(auto_bet.t60_stake)
+        for corpo in (disp, stake):
+            assert "kelly_size_for_pick" not in corpo
+            assert "refresh_live_stakes" not in corpo
+            assert "stake_decided_upstream" not in corpo
+        # il dispatch usa la micro-allocazione CB1 (UNICA fonte del suo stake)
+        assert "t60_stake(" in disp
+
+    def test_nessuna_chiave_t60_nella_regola(self):
+        """Se una corsia T-60 venisse instradata nel ricalcolo dovrebbe prima
+        dichiararla in `STAKE_DECIDED_KEYS`: questo test lo segnala."""
+        keys = " ".join(auto_bet.STAKE_DECIDED_KEYS).lower()
+        assert "t60" not in keys
+        # la catena piramidale resta coperta (regressione 08/10/2026)
+        assert "chief_trade" in keys

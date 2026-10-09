@@ -2041,6 +2041,31 @@ def kelly_size_for_pick(pick: dict, *, price: float, bankroll: float,
     return res
 
 
+# --- REGOLA DEL RICALCOLO DELLO STAKE PRE-ORDINE (08-09/10/2026) -----------
+# Una corsia le cui quote ARRIVANO con lo stake GIA' DECISO a monte non viene
+# ri-dimensionata dal motore Kelly in `refresh_live_stakes`. Il ricalcolo la
+# azzererebbe (`no_true_prob`: un PIANO non porta `p_true`/EV) oppure
+# riscriverebbe un cap di portafoglio o il sizing della Finanza.
+#
+#   chief_trade -> corsia della catena piramidale (stake del Finance Agent)
+#   corr_cap    -> stake ridotto dal cap di CORRELAZIONE (30% per blocco)
+#   total_cap   -> stake ridotto dal cap di ESPOSIZIONE TOTALE (40%/giorno)
+#
+# Una corsia NUOVA che porta con se' uno stake deciso va dichiarata QUI: la
+# regola sta in un solo posto apposta (stessa lezione del 13/09 sul doppio
+# Kelly e del 27/09 sulla doppia soglia).
+# ⚠️ La corsia T-60 (`t60_dispatch_pending`) NON compare: non usa il motore
+# Kelly, applica `t60_stake` (micro-allocazione col tetto CB1), quindi e'
+# immune per costruzione — e un tripwire lo verifica, cosi' nessuno puo'
+# aggiungerlo li' senza accorgersene.
+STAKE_DECIDED_KEYS = ("chief_trade", "corr_cap", "total_cap")
+
+
+def stake_decided_upstream(cand: dict) -> bool:
+    """True se lo stake del candidato e' deciso A MONTE (vedi regola sopra)."""
+    return any(cand.get(k) for k in STAKE_DECIDED_KEYS)
+
+
 def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
     """Ri-fetcha il saldo REALE e ri-dimensiona i candidati prima degli ordini.
 
@@ -2058,6 +2083,10 @@ def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
     azzererebbe lo stake con `no_true_prob` e il trade verrebbe scartato dal
     ticket minimo. Si mantiene lo stake della Finanza e si passa direttamente
     al controllo del ticket minimo sul capitale fresco.
+
+    Le chiavi ammesse sono dichiarate in UN solo posto (`STAKE_DECIDED_KEYS`,
+    vedi la regola sopra): una corsia nuova che porta uno stake deciso la
+    aggiunge li' e viene rispettata da questo stesso ramo.
 
     Fail-closed: wallet non leggibile -> nessun candidato passa (un saldo
     ignoto non autorizza ordini reali).
@@ -2089,8 +2118,7 @@ def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
         return [], info
     kept: list[dict] = []
     for cand in candidates:
-        if (cand.get("chief_trade") or cand.get("corr_cap")
-                or cand.get("total_cap")):
+        if stake_decided_upstream(cand):
             stake = min(float(cand.get("stake") or 0.0), cap)
         else:
             res = kelly_size_for_pick(cand, price=float(cand.get("price") or 0.0),

@@ -364,6 +364,23 @@ class TestRefreshLiveStakes:
         kept, info = auto_bet.refresh_live_stakes(cand)
         assert kept == [] and info["skipped"] == 1
 
+    def test_ogni_chiave_dichiarata_protegge_lo_stake(self, monkeypatch):
+        """La regola e' una SOLA (`STAKE_DECIDED_KEYS`) e `refresh_live_stakes`
+        la applica per intero: ogni chiave dichiarata preserva lo stake, mentre
+        una chiave NON dichiarata torna a passare dal Kelly."""
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
+                            lambda: _snapshot(available=100.0))
+        for key in auto_bet.STAKE_DECIDED_KEYS:
+            cand = [{"match_id": "m1", "esito_key": "1", "price": 1.66,
+                     "stake": 9.0, key: True}]
+            kept, _ = auto_bet.refresh_live_stakes(cand)
+            assert kept and kept[0]["stake"] == 9.0, key
+        # controprova: una chiave qualsiasi NON dichiarata non protegge nulla
+        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
+                 "price": 1.66, "stake": 9.0, "non_dichiarata": True}]
+        kept, _ = auto_bet.refresh_live_stakes(cand)
+        assert kept and kept[0]["stake"] == 7.18     # ri-kelly col saldo fresco
+
     def test_scarta_sotto_il_ticket(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
                             lambda: _snapshot(available=10.0))   # raw 0.72 < ticket
