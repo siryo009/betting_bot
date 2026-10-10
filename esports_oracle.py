@@ -287,8 +287,22 @@ def account_quota(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     Ordine: sottoscrizione corrente -> prima attiva -> prima disponibile ->
     livello superiore (retrocompatibilita' col formato piatto).
+
+    Accetta anche l'INVOLUCRO di `account()` (`{ok, status, payload, error}`)
+    e ne scarta la busta: passando l'oggetto intero invece del suo `payload` si
+    otterrebbe `None/None` con una chiave VALIDA — lo stesso display fuorviante
+    del 30/09, per la stessa causa di fondo (campi cercati nel posto sbagliato).
+    Un payload legittimo che contiene `subscriptions` non viene mai scartato.
     """
     payload = payload if isinstance(payload, dict) else {}
+    # Difesa dal chiamante che passa l'ESITO di `account()` invece del payload.
+    # L'involucro si riconosce da `ok` + `payload` e dall'assenza dei campi della
+    # quota: una busta non e' mai un payload (mutualmente esclusivi sui dati
+    # reali, verificati il 10/10/2026 sul container).
+    if ("ok" in payload and "subscriptions" not in payload
+            and isinstance(payload.get("payload"), dict)
+            and not any(k in payload for k in ("request_limit", "request_count"))):
+        payload = payload["payload"]
     subs = payload.get("subscriptions")
     chosen: Optional[Dict[str, Any]] = None
     if isinstance(subs, list) and subs:

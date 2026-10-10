@@ -569,6 +569,33 @@ class TestAccountQuota:
         assert "None/None" not in out
         assert "non dichiarata" in out
 
+    def test_involucro_di_account_non_restituisce_none(self):
+        """Passare l'ESITO di `account()` (non il suo payload) non deve mentire.
+
+        Regressione del 10/10/2026: la verifica in produzione passava l'oggetto
+        `{ok, status, payload, error}` e leggeva `None/None` con una chiave
+        VALIDA — la stessa classe di errore del 30/09 (campi cercati nel posto
+        sbagliato), questa volta lato CHIAMANTE. L'involucro ora viene scartato.
+        """
+        inner = {"current_subscription_id": self._SUB["subscription_id"],
+                 "subscriptions": [self._SUB]}
+        q = eo.account_quota({"ok": True, "status": 200, "payload": inner,
+                              "error": None})
+        assert q["request_limit"] == 250
+        assert q["request_count"] == 29
+        assert q["remaining"] == 221
+        assert q["plan"] == "free"
+
+    def test_un_payload_legittimo_non_viene_mai_scartato(self):
+        """Il riconoscimento dell'involucro non tocca una risposta vera."""
+        payload = {"subscriptions": [self._SUB], "ok": True,
+                   "payload": {"annidato": 1}}
+        q = eo.account_quota(payload)
+        assert q["request_limit"] == 250 and q["request_count"] == 29
+        flat = eo.account_quota({"request_limit": 500, "request_count": 100,
+                                 "payload": "roba"})
+        assert flat["request_limit"] == 500
+
 
 class TestTripwireStruttura:
     def test_nessun_motore_statistico(self):
