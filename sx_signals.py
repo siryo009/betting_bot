@@ -1123,11 +1123,25 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
     prov = provider or SxBetProvider()
     conn = _get_conn()
     try:
+        # IL FILTRO E' IL `market_id`, NON IL PREFISSO `sx-` (10/10/2026).
+        # Il referto gratuito si aggancia al MARKET HASH, non al match_id:
+        # i nomi e i punteggi arrivano dalla risposta di SX
+        # (`teamOneName`/`teamTwoScore`), quindi la riga `matches` non serve.
+        # Pretendere `match_id LIKE 'sx-%'` escludeva le bet piazzate su
+        # partite con l'id DI THE-ODDS-API, che pure portano il `market_id`
+        # dell'ordine: restavano appese per ore al percorso ESTERNO (pagato,
+        # con finestra 3 giorni e cache punteggi TTL 24h) pur essendo
+        # saldabili GRATIS all'istante. Caso reale misurato: la bet #31
+        # Arsenal-Leeds (id the-odds-api, con market hash SX) risolta e VINTA
+        # su SX mentre il ledger la teneva aperta — con lo stake contato
+        # DUE volte nell'equity (payout in `available` + stake ancora
+        # "aperto"), cioe' un capitale per il sizing piu' alto del reale.
+        # Il `market_id` resta il discriminante: una bet senza hash (SIM,
+        # o provider non-SX) non entra nel batch di `markets/find`.
         rows = conn.execute(
             "SELECT match_id, market_id, selection_id, esito FROM bets "
             "WHERE mode='live' AND esito_finale IS NULL "
-            "AND match_id LIKE 'sx-%' AND market_id IS NOT NULL "
-            "AND market_id != ''").fetchall()
+            "AND market_id IS NOT NULL AND market_id != ''").fetchall()
     finally:
         conn.close()
     saved = 0

@@ -1004,7 +1004,10 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
                 logger.error("auto_bet: T60 wallet non leggibile: nessun "
                              "ordine (fail-closed)")
                 return []
-            equity = snap["equity"]
+            # CB2 e stake T-60 si misurano sull'equity RICONCILIATA: un
+            # capitale gonfiato dalla finestra payout/settlement farebbe
+            # dimensionare (e sorvegliare) un patrimonio inesistente.
+            equity = sizing_equity(snap["equity"])
             if t60_check_wallet_kill(equity):
                 return []
             bankroll = equity
@@ -2116,10 +2119,15 @@ def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
         logger.warning("auto_bet: saldo wallet non leggibile prima degli "
                        "ordini: nessuna puntata (fail-closed)")
         return [], info
-    equity = float(snap["equity"])
+    raw_equity = float(snap["equity"])
+    # Il cap dinamico (12%) e il ticket si misurano sul capitale GIUSTIFICATO
+    # dai settlement registrati, non sul picco gonfiato dalla finestra
+    # payout/settlement (10/10/2026: tre ordini sopra il cap per-ordine).
+    equity = sizing_equity(raw_equity)
     available = float(snap["available"])
     set_last_bankroll(equity)
-    info.update({"ok": True, "equity": equity, "available": available})
+    info.update({"ok": True, "equity": equity, "equity_raw": raw_equity,
+                 "available": available})
     min_ticket = aggressive_min_ticket()
     try:
         from decision.stake_engine import aggressive_cap_usdc
@@ -2959,6 +2967,36 @@ def reconciled_equity(bankroll, now=None) -> "tuple[float, dict]":
         return raw, out
 
 
+def sizing_equity(equity) -> float:
+    """Equity da usare per DIMENSIONARE: Kelly, cap per-ordine, recinto, CB2.
+
+    NON e' l'equity grezza del wallet. Quando SX ha gia' accreditato il payout
+    di una puntata risolta ma il job di settlement non ha ancora chiuso la
+    riga, lo stake viene contato DUE volte (il payout e' dentro `available`,
+    lo stake e' ancora "in gioco" dal ledger) e l'equity risulta gonfiata.
+
+    `reconciled_equity` riporta il valore al massimo giustificato dai
+    settlement REGISTRATI. Dal 10/10/2026 la riconciliazione vale anche per il
+    dimensionamento, non solo per il picco del drawdown: misurata in
+    produzione la finestra di doppio conteggio aveva gonfiato l'equity di
+    +5.95 USDC su ~34.8 (≈ +17%), con tre ordini sopra il cap per-ordine e un
+    superamento del recinto 40% (14.10 vs 13.47) — i cap erano misurati su un
+    capitale che non esisteva. Un solo punto di verita': tutte le corsie che
+    dimensionano un ordine reale passano da qui.
+
+    Fail-open: se la riconciliazione non e' applicabile (nessun campione,
+    nessuna puntata iniziata, lettura fallita) ritorna l'equity grezza — la
+    direzione resta quella di `reconciled_equity`, che non inventa mai una
+    correzione senza gli elementi per farla.
+    """
+    try:
+        value, _info = reconciled_equity(equity)
+        return float(value)
+    except Exception as e:                                    # pragma: no cover
+        logger.debug("auto_bet: sizing_equity fallito (%s), uso il grezzo", e)
+        return float(equity or 0.0)
+
+
 def record_bankroll_sample(bankroll, basis_key=None, now=None,
                            reconcile: bool = True) -> dict:
     """Aggiunge un campione di equity allo storico rolling (max 1/ora).
@@ -3677,12 +3715,22 @@ def run_today_bets(stake_eur: float | None = None,
         else:
             _wallet_balance = snapshot["available"]
             _wallet_exposure = snapshot["exposure"]
-            _wallet_equity = snapshot["equity"]
             _spendable = snapshot["available"]
-            # Kelly, drawdown protection e stop-loss misurano l'EQUITY: cosi'
-            # una bet piazzata (liberi -> escrow) non e' una perdita.
-            _bankroll = snapshot["equity"]
-            _peak = snapshot["equity"]
+            # Kelly, cap per-ordine, recinto 40%, CB2 e stop-loss misurano
+            # l'EQUITY RICONCILIATA: cosi' una bet piazzata (liberi -> escrow)
+            # non e' una perdita E una puntata gia' risolta ma non ancora
+            # saldata non gonfia il capitale di DIMENSIONAMENTO (10/10/2026:
+            # con l'equity grezza i cap si misuravano su un capitale fantasma,
+            # con ordini sopra il cap e un recinto 40% superato).
+            _equity_raw = snapshot["equity"]
+            _bankroll = sizing_equity(_equity_raw)
+            _wallet_equity = _bankroll
+            _peak = _bankroll
+            if abs(_bankroll - _equity_raw) > 0.005:
+                logger.warning(
+                    "auto_bet: equity grezza %.2f -> %.2f per il "
+                    "dimensionamento (payout accreditato / settlement non "
+                    "ancora registrato)", _equity_raw, _bankroll)
             logger.info("auto_bet: bankroll LIVE = equity %.2f USDC "
                         "(disponibile %.2f + in gioco %.2f)",
                         _bankroll, _wallet_balance, _wallet_exposure)

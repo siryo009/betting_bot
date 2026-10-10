@@ -132,11 +132,21 @@ def cap_pct() -> float:
 
 
 def current_equity() -> Optional[float]:
-    """Equity corrente del wallet (None se non leggibile)."""
+    """Equity corrente del wallet (None se non leggibile).
+
+    E' l'equity RICONCILIATA, la STESSA base su cui il bot dimensiona gli
+    ordini (`auto_bet.sizing_equity`): l'audit e il sizing devono misurare lo
+    stesso capitale, altrimenti la verifica del cap per-ordine segnala
+    violazioni su ordini che il motore ha dimensionato correttamente (e
+    viceversa). La riconciliazione corregge la finestra "payout accreditato /
+    settlement non ancora registrato", che gonfiava l'equity del 10/10/2026.
+    """
     try:
         snap = _ab()._live_wallet_snapshot() or {}
         eq = snap.get("equity")
-        return float(eq) if eq else None
+        if eq is None:
+            return None
+        return float(_ab().sizing_equity(eq))
     except Exception:
         return None
 

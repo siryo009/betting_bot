@@ -824,3 +824,112 @@ class TestBaseStopLossDichiarata:
         assert calls, "il giro prosegue in live (fallback documentato)"
         _, basis, basis_key = calls[0]
         assert basis == "cassa" and basis_key == "cassa"
+
+
+class TestEquityRiconciliataNelSizing:
+    """Fix 10/10/2026: il DIMENSIONAMENTO usa l'equity RICONCILIATA.
+
+    Misurato in produzione: SX accredita il payout alla risoluzione del
+    mercato, mentre il ledger conta la puntata ancora "in gioco" fino al job
+    di settlement (ore dopo). Nella finestra l'equity grezza valeva +5.95
+    USDC su ~34.8 (~+17%) e il bot dimensionava su un capitale che non
+    esisteva: tre ordini sopra il cap per-ordine e un recinto 40% superato
+    (14.10 contro 13.47). La riconciliazione esisteva dal 09/10 ma era
+    applicata SOLO al picco del drawdown: ora e' la base di OGNI percorso che
+    dimensiona un ordine reale (auto_bet, T-60, refresh pre-ordine, audit).
+    """
+
+    @staticmethod
+    def _reconcile(monkeypatch, value, applied=True):
+        monkeypatch.setattr(
+            auto_bet, "reconciled_equity",
+            lambda equity, now=None: (value, {"applied": applied,
+                                             "raw": float(equity or 0.0)}))
+
+    def test_sizing_equity_usa_il_valore_riconciliato(self, monkeypatch):
+        self._reconcile(monkeypatch, 34.8012)
+        assert auto_bet.sizing_equity(40.7504) == pytest.approx(34.8012)
+
+    def test_senza_correzione_ritorna_il_grezzo(self, monkeypatch):
+        self._reconcile(monkeypatch, 34.80, applied=False)
+        assert auto_bet.sizing_equity(34.80) == pytest.approx(34.80)
+
+    def test_fail_open_se_la_riconciliazione_esplode(self, monkeypatch):
+        def _boom(equity, now=None):
+            raise RuntimeError("storico corrotto")
+
+        monkeypatch.setattr(auto_bet, "reconciled_equity", _boom)
+        assert auto_bet.sizing_equity(40.75) == pytest.approx(40.75)
+        assert auto_bet.sizing_equity(None) == 0.0
+
+    def test_il_kelly_pre_ordine_riceve_l_equity_riconciliata(self,
+                                                              monkeypatch):
+        """Il cap 12% vive dentro il motore Kelly (`kelly_size_for_pick`
+        -> `calculate_kelly_stake(bankroll=...)`): se il pre-ordine passasse
+        il valore grezzo il cap sarebbe quello del capitale FANTASMA (4.89 su
+        40.75) invece di quello reale (3.60 su 30.0). Qui si cattura l'argomento
+        `bankroll` del motore: e' il punto esatto in cui la correzione vale.
+
+        Il vincolo di CASSA resta separato: `spendable` e' il disponibile
+        GREZZO (i soldi in escrow non si spendono due volte).
+        """
+        seen = {}
+        monkeypatch.setattr(auto_bet, "aggressive_enabled", lambda: True)
+        monkeypatch.setattr(
+            auto_bet, "kelly_size_for_pick",
+            lambda pick, **kw: (seen.update(kw), {"stake": 3.0})[1])
+        self._reconcile(monkeypatch, 30.0)
+        _stub_wallet(monkeypatch, 40.75)
+        cand = {"match_id": "m1", "esito_key": "1", "price": 1.65,
+                "mercato": "1X2", "quota": 1.65}
+        kept, info = auto_bet.refresh_live_stakes([dict(cand)])
+        assert info["equity_raw"] == pytest.approx(40.75)
+        assert info["equity"] == pytest.approx(30.0)
+        assert seen["bankroll"] == pytest.approx(30.0)
+        assert seen["spendable"] == pytest.approx(40.75)
+        assert len(kept) == 1 and kept[0]["stake"] == pytest.approx(3.0)
+
+    def test_il_cap_12_percento_segue_il_bankroll_che_riceve(self):
+        """Controprova col MOTORE VERO (chiamata diretta: nei test di questo
+        file il Kelly e' isolato dal conftest). Con un edge forte il cap 12%
+        e' VINCOLANTE, e lo stake diventa 4.89 sull'equity gonfiata contro
+        3.60 su quella riconciliata: +36% di denaro su un capitale che non
+        esiste, cioe' esattamente le violazioni misurate il 10/10."""
+        from decision.stake_engine import calculate_kelly_stake
+        kw = dict(ev=0.15, edge=0.08, league=ALLOWED_LEAGUE, market="1X2")
+        gonfiato = calculate_kelly_stake(0.85, 1.65, 40.75, **kw)
+        reale = calculate_kelly_stake(0.85, 1.65, 30.0, **kw)
+        assert gonfiato["cap_usdc"] == pytest.approx(4.89, abs=0.01)
+        assert reale["cap_usdc"] == pytest.approx(3.60, abs=0.01)
+        assert gonfiato["stake"] == pytest.approx(4.89, abs=0.01)
+        assert reale["stake"] == pytest.approx(3.60, abs=0.01)
+
+    def test_il_giro_puntate_dimensiona_sul_valore_riconciliato(
+            self, monkeypatch, temp_db):
+        """Il riferimento del giorno (e quindi Kelly, cap e recinto) e' il
+        valore riconciliato, non il picco gonfiato."""
+        _fixed_stake(monkeypatch)
+        _seed_value_match(quota=1.65)
+        self._reconcile(monkeypatch, 30.0)
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        _stub_wallet(monkeypatch, 40.75)
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda pick, stake, floor: _filled())
+        auto_bet.run_today_bets(stake_eur=1.0)
+        assert auto_bet.daily_stop_status()["start_bankroll"] == \
+            pytest.approx(30.0)
+
+    def test_il_cb2_t60_usa_l_equity_riconciliata(self, monkeypatch,
+                                                  temp_db):
+        """CB2 (soglia wallet) non puo' essere aggirato da un capitale
+        gonfiato: con la grezza 40.75 il kill switch NON scatta, con la
+        riconciliata 20.0 (sotto i 25 della soglia) ARRESTA."""
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "live")
+        monkeypatch.setattr(auto_bet, "T60_KILL_WALLET_USDC", 25.0)
+        auto_bet.t60_clear_kill()
+        self._reconcile(monkeypatch, 20.0)
+        _stub_wallet(monkeypatch, 40.75)
+        auto_bet.t60_dispatch_pending()
+        assert auto_bet.t60_kill_switch_status()["triggered"] is True

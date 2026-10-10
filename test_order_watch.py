@@ -380,3 +380,48 @@ class TestGaranzie:
         assert order_watch.expected_stake() == pytest.approx(1.50)
         monkeypatch.setattr(auto_bet, "OPEN_EXPOSURE_CAP_PCT", 0.25)
         assert order_watch.cap_pct() == pytest.approx(0.25)
+
+
+class TestEquityRiconciliata:
+    """Fix 10/10/2026: l'audit misura lo STESSO capitale del sizing.
+
+    Il cap per-ordine e il recinto si calcolano sull'equity: se il bot
+    dimensiona sull'equity RICONCILIATA (`auto_bet.sizing_equity`) e l'audit
+    leggesse quella GREZZA, la verifica segnalerebbe violazioni su ordini
+    dimensionati correttamente — e, peggio, NON le segnalerebbe quando il
+    capitale e' gonfiato dalla finestra payout/settlement (l'anomalia vera,
+    misurata in produzione il 10/10: +5.95 USDC su ~34.8, con tre ordini
+    sopra il cap).
+    """
+
+    def test_usa_la_riconciliazione(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
+                            lambda: {"available": 40.75, "exposure": 0.0,
+                                     "equity": 40.75})
+        monkeypatch.setattr(auto_bet, "reconciled_equity",
+                            lambda equity, now=None: (30.0, {"applied": True}))
+        assert order_watch.current_equity() == pytest.approx(30.0)
+
+    def test_senza_correzione_resta_il_grezzo(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
+                            lambda: {"available": 30.0, "exposure": 0.0,
+                                     "equity": 30.0})
+        monkeypatch.setattr(auto_bet, "reconciled_equity",
+                            lambda equity, now=None: (30.0,
+                                                      {"applied": False}))
+        assert order_watch.current_equity() == pytest.approx(30.0)
+
+    def test_wallet_illeggibile_resta_none(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: None)
+        assert order_watch.current_equity() is None
+
+    def test_equity_esattamente_zero_e_una_lettura_valida(self, monkeypatch):
+        """Regressione: la vecchia `return float(eq) if eq else None` trattava
+        lo 0.0 come 'illeggibile' (capitalizzato a zero = wallet prosciugato,
+        che e' proprio il caso in cui l'audit serve)."""
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
+                            lambda: {"available": 0.0, "exposure": 0.0,
+                                     "equity": 0.0})
+        monkeypatch.setattr(auto_bet, "reconciled_equity",
+                            lambda equity, now=None: (0.0, {"applied": False}))
+        assert order_watch.current_equity() == pytest.approx(0.0)

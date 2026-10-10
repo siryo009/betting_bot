@@ -10222,3 +10222,123 @@ advisor_agent, railway_drift_check, weekly_stop.
 `orders-v3`: `state`/`cancelReason`) e quante righe `status='RESTING_FILLED'`
 compaiono in `bets`. La prova che il resting aumenta gli ordini e' quella
 misura, non l'implementazione.
+
+### Sizing sull'equity RICONCILIATA + audit allineato (10/10/2026)
+
+**Sintomo misurato in produzione**: l'equity grezza del wallet era gonfiata di
+**+11,19 USDC su ~34,80 (+32%)** — `auto_bet` loggava
+`campione di equity CORRETTO per il picco 45.9935 -> 34.8012 (crescita +11.19
+non spiegata dai settlement dal 2026-10-10T13:54: puntata iniziata non ancora
+saldata)`. La riconciliazione esisteva dal 09/10 ma era applicata **SOLO al
+picco del drawdown**: Kelly, cap per-ordine (12%), recinto 40% e CB2 si
+misuravano ancora sul capitale fantasma.
+
+**Conseguenza osservata** — le 4 violazioni di `order_watch`:
+```
+stake_over_max    | stake 3.7000 > tetto per-ordine 3.58
+stake_over_max    | stake 4.1400 > tetto per-ordine 3.73
+stake_over_max    | stake 3.8900 > tetto per-ordine 3.86
+exposure_over_cap | esposizione aperta 14.1000 > tetto 13.4683 (40% di 33.67)
+```
+
+**Fix**: nuova **`auto_bet.sizing_equity(equity)`** — UNICO punto di verita' del
+capitale di dimensionamento (fail-open: se la riconciliazione non e'
+applicabile ritorna il grezzo, direzione di `reconciled_equity`). Applicata in
+TUTTI i percorsi che dimensionano un ordine reale:
+- `run_today_bets` (`_bankroll`, `_wallet_equity`, `_peak`, stop giornaliero e
+  settimanale; log dedicato quando la correzione si applica);
+- `t60_dispatch_pending` (stake T-60 **e** soglia CB2);
+- `refresh_live_stakes` (cap 12% + ticket, con `equity_raw` nel `info`; il
+  vincolo di CASSA `spendable` resta il disponibile GREZZO, i soldi in escrow
+  non si spendono due volte);
+- `order_watch.current_equity()` — l'audit deve misurare lo **stesso** capitale
+  del sizing, altrimenti segnala violazioni su ordini corretti (e non le
+  segnala quando il capitale e' gonfiato). Fix collaterale: `float(eq) if eq
+  else None` trattava l'equity esattamente 0.0 come "illeggibile".
+
+**Effetto misurato a parita' di edge** (cap 12% vincolante): stake **4,89**
+sull'equity gonfiata contro **3,60** su quella riconciliata — **+36% di denaro
+su un capitale inesistente**.
+
+**Test**: `test_auto_bet_live.TestEquityRiconciliataNelSizing` (7: valore
+riconciliato, fallback al grezzo, fail-open su eccezione, cattura
+dell'argomento `bankroll`/`spendable` passato al motore — con `bankroll` =
+riconciliato e `spendable` = disponibile grezzo —, controprova numerica col
+motore vero, giro puntate che usa il valore riconciliato come riferimento del
+giorno, CB2 T-60 che non si fa aggirare dal capitale gonfiato) +
+`test_order_watch.TestEquityRiconciliata` (4, incluso lo zero valido).
+Regressioni verdi: **790 test** (auto_bet x2, order_watch, weekly_stop,
+capital_enclosure, exposure_gate, t60, risk_guards, aggressive_kelly, agent_
+kelly, brain, decision_limits/pipeline, bot, chief_shadow_wiring, hierarchy,
+advisor, decision_shadow, top_down, liquidity_monitor, railway_drift_check,
+tennis_lane, adaptive_weighting). `verify_guardrails.py`: **A–H tutti
+bloccano** (exit 0).
+
+**Misure di contorno (10/10)**:
+- **Crediti**: 239 residui, reset fra 21 giorni (**11,4/giorno sostenibili**);
+  il ritmo misurato di **18,7/giorno** e' contaminato dal test dell'oracolo a
+  linea del 09/10 (6 crediti, **gia' revertito con `ORACLE_ENABLED=0`**) e dal
+  burst di Argentina Primera del 05/10. Profilo reale per fonte (ultime 24h,
+  `credit_calls.jsonl`): **tennis oracle 4** + **rotation 4** + **settlement
+  2-4** = **~10-12/giorno**, dentro i 11,4 sostenibili. Nessun taglio
+  applicato: le tre voci sono la corsia che ordina (tennis), il feed delle
+  analisi (rotation) e il referto di **puntate reali aperte** (EPL).
+- **`SETTLEMENT_BETS_ONLY=1`** confermato attivo (`policy: solo-puntate`),
+  `estimated_credits 0`, `leagues_to_query ['ATP - Shanghai', 'Premier
+  League']` (la prima non mappata = 0 crediti).
+
+### Settlement LENTO: la causa era il prefisso `sx-` nel referto gratuito (10/10/2026)
+
+**Sintomo**: la bet **#31 Arsenal-Leeds** (kickoff 11:30 UTC) restava APERTA
+**oltre 3h dopo il fischio finale** mentre SX l'aveva gia' risolta e VINTA. Il
+suo stake veniva contato **due volte** nell'equity: il payout era gia' in
+`available` (il mercato si era chiuso) e lo stake risultava ancora "aperto"
+nel ledger -> capitale di sizing piu' grande del reale (la causa delle 4
+violazioni `order_watch` e, potenzialmente, di un falso stop).
+
+**Causa radice (misurata, non ipotizzata)**: in `sx_signals._results_from_sx`
+il percorso GRATUITO (`markets/find` sui `market_id` salvati sugli ordini)
+filtrava `match_id LIKE 'sx-%'` nella query sulle bet aperte. Una puntata su
+una partita con **l'id di the-odds-api** (come quelle piazzate dalla corsia
+1X2 `fixture_engine`/top-down) porta il `market_id` SX ma NON il prefisso
+`sx-`: restava quindi appesa al percorso **ESTERNO** — pagato, finestra 3
+giorni, cache punteggi TTL 24h — pur essendo saldabile gratis all'istante.
+Il referto gratuito si aggancia al **market hash**, non al match_id: nomi e
+punteggi arrivano dalla risposta di SX (`teamOneName`/`teamTwoName`/
+`teamOneScore`/`teamTwoScore`), quindi la riga `matches` **non serve**
+(proprieta' gia' sfruttata dalle bet orfane `sx-*`).
+
+**Fix**: il discriminante della query e' il **`market_id`** (non vuoto), non
+il prefisso — una bet senza hash (SIM o provider non-SX) resta fuori dal
+batch di `markets/find`. Il resto della catena e' invariato:
+`_sx_open_matches()` resta `sx-*` (il suo percorso `/markets/active` fa
+match su `sx-<eventId>`), quindi per le bet con id esterno **non** veniva e
+non viene speso nulla sulle fonti pagate within `settle_sx_bets` (il referto
+esterno di quelle righe resta a `bot._update_results`, che segue
+`SETTLEMENT_BETS_ONLY`).
+
+**Verifica in PRODUZIONE**: la bet #31 e' stata forzata a mano dal container
+(`save_result` + `settle_bets`), con il punteggio preso da SX
+(`markets/find` -> Arsenal 2-1 Leeds United, outcome 1, status INACTIVE):
+**VINTA, profitto +1,83 USDC** (stake 4,14 @ 1,4414). Subito dopo, sul
+container: esposizione del ledger **7,20 -> 3,06** (restava solo la #33
+Chelsea, legittimamente aperta), equity grezza **42,10 -> 37,96** e
+`reconciled_equity` passata da `applied=True / unexplained_growth` a
+**`applied=False / explained`** — la crescita era esattamente il doppio
+conteggio, non denaro in piu'. `weekly_drawdown` 0,0% (picco = corrente),
+daily stop non armato, kill switch `live`.
+
+**Test** (`test_sx_native_settlement.py`, nuova classe
+`TestBetConIdEsterno`, 4): la bet con id the-odds-api viene saldata GRATIS
+(unica chiamata `markets/find`, `marketHashes == "0xhArsenal"`, verdetto
+`won` con P/L esatto); nessun tocco alle fonti pagate; saldata anche **senza
+riga `matches`** (nomi dalla risposta SX); una bet **senza `market_id`** resta
+fuori dal batch (nessuna chiamata, riga invariata). I primi tre **falliscono
+senza il fix** (verificato con `git stash push -- sx_signals.py`: `find_calls`
+vuoto, `settled 0`).
+
+**Lezione permanente**: il referto di una puntata NON dipende dal formato del
+`match_id` — dipende dalla **fonte dell'esito** (il market hash). Ogni
+filtro che seleziona le righe da saldare va scritto sulla chiave che la fonte
+usa davvero: un `LIKE 'sx-%'` in un percorso gratuito e' una **tassa occulta**
+sul percorso esterno.

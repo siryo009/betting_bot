@@ -212,6 +212,77 @@ class TestFindPath:
         assert res["settled"] == 0 and res["source"] is None
 
 
+class TestBetConIdEsterno:
+    """10/10/2026: il referto gratuito si aggancia al `market_id`, NON al
+    prefisso `sx-` del match_id.
+
+    Caso reale (bet #31): una PUNTATA su una partita con l'id di
+    the-odds-api porta comunque il `market_id` SX dell'ordine, e
+    `markets/find` ne conosce esito e punteggi. Il filtro `match_id LIKE
+    'sx-%'` la escludeva dal percorso GRATUITO, lasciandola appesa al
+    percorso esterno (pagato, finestra 3 giorni, cache punteggi TTL 24h)
+    per ore: con l'esito gia' risolto dall'exchange e lo stake contato DUE
+    volte nell'equity (payout in `available` + stake ancora "aperto"),
+    cioe' un capitale di sizing piu' grande del reale.
+    """
+
+    ODS_ID = "b870dcfba5e5920d3f1551a3aa1ea435"      # id the-odds-api
+
+    def test_bet_id_the_odds_api_saldata_gratis(self, temp_db):
+        tracker.save_match(self.ODS_ID, "Premier League", "Arsenal",
+                           "Leeds United", "2026-10-10T11:30:00Z")
+        tracker.save_bet(self.ODS_ID, "1X2", "1", "0xhArsenal", 1,
+                         1.4414, 4.14, mode="live")
+        prov = FakeSxSettle(find_data=[_find_market(
+            "0xhArsenal", outcome=1, sh=2, sa=1, home="Arsenal",
+            away="Leeds United", league="English Premier League")])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert len(prov.find_calls) == 1
+        assert prov.find_calls[0]["marketHashes"] == "0xhArsenal"
+        assert res["source"] == "sx" and res["results"] == 1
+        assert res["settled"] == 1
+        assert _bet_outcome(self.ODS_ID)[0] == "won"
+        # profitto per unita' di stake: (1.4414 - 1) * 4.14 arrotondato
+        assert _bet_outcome(self.ODS_ID)[1] == pytest.approx(1.83)
+
+    def test_bet_esterna_non_tocca_le_fonti_pagate(self, temp_db,
+                                                   monkeypatch):
+        """Il percorso pagato NON viene nemmeno sfiorato: una bet con id
+        esterno non entra in `_sx_open_matches()` (che resta sx-*), quindi
+        `settle_sx_bets` non scarica risultati per la sua lega."""
+        paid = []
+        monkeypatch.setattr(sx_signals, "_results_from_the_odds_api",
+                            lambda *a, **k: paid.append(a) or 0)
+        tracker.save_bet(self.ODS_ID, "1X2", "1", "0xh1", 1, 1.44, 4.14,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[_find_market("0xh1", sh=2, sa=1)])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["settled"] == 1
+        assert paid == []
+
+    def test_bet_esterna_senza_riga_matches(self, temp_db):
+        """Nomi e punteggi vengono dalla risposta di SX: la riga `matches`
+        non serve (come per le bet orfane sx-*)."""
+        tracker.save_bet(self.ODS_ID, "1X2", "1", "0xh1", 1, 1.44, 4.14,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[_find_market(
+            "0xh1", sh=3, sa=0, home="Arsenal", away="Leeds United")])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["settled"] == 1
+        assert _bet_outcome(self.ODS_ID)[0] == "won"
+
+    def test_bet_senza_market_id_fuori_dal_batch(self, temp_db):
+        """Il discriminante resta il `market_id`: senza hash non c'e' nulla
+        da chiedere a `markets/find` (nessuna chiamata, riga invariata)."""
+        tracker.save_bet(self.ODS_ID, "1X2", "1", "", None, 1.44, 4.14,
+                         mode="live")
+        prov = FakeSxSettle(find_data=[_find_market("0xALTRO", sh=2, sa=1)])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert prov.find_calls == []
+        assert res["settled"] == 0
+        assert _bet_outcome(self.ODS_ID) == (None, None)
+
+
 def _tennis_market(market_hash, outcome=1, home="Adrian Mannarino",
                    away="Nikoloz Basilashvili", league="ATP - Shanghai",
                    sh=None, sa=None, mtype=52, with_outcome=True):
