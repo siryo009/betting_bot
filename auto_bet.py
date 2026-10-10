@@ -1704,6 +1704,14 @@ def _open_live_snapshot() -> tuple[float, int]:
     ma per `esito_finale IS NULL`, cioe' per gli ordini ANCORA IN CORSO —
     appena un settlement chiude una riga l'esposizione scende da sola, senza
     finestre giornaliere da riarmare (direttiva 28/09/2026).
+
+    ORDINI RESTING (10/10/2026): un ordine RESTING (GTC) immobilizza capitale
+    sull'exchange (escrow) ma NON ha una riga in `bets` finche' non si riempie.
+    Senza contarli qui l'equity (`available + exposure`) SCENDEREBBE al
+    piazzamento e risalirebbe alla cancellazione: un drawdown fantasma, la
+    stessa classe del falso stop settimanale del 09/10. E il recinto 40% non
+    vedrebbe un capitale realmente impegnato. Fail-open sulla lettura (0):
+    una telemetria rotta non deve aprire il recinto ne' muovere l'equity.
     """
     try:
         from tracker import _get_conn
@@ -1714,10 +1722,16 @@ def _open_live_snapshot() -> tuple[float, int]:
         conn.close()
         stake = float(row[0]) if row and row[0] is not None else 0.0
         count = int(row[1]) if row and row[1] is not None else 0
-        return stake, count
     except Exception as e:
         logger.warning("auto_bet: lettura esposizione aperta fallita: %s", e)
         return float("inf"), -1
+    try:
+        import resting_orders as _ro
+        stake += float(_ro.open_stake() or 0.0)
+        count += len(_ro.open_orders())
+    except Exception as e:                                    # pragma: no cover
+        logger.debug("auto_bet: ordini resting non leggibili (%s)", e)
+    return stake, count
 
 
 def _open_live_exposure() -> float:
@@ -3134,7 +3148,11 @@ def _live_wallet_snapshot() -> "dict | None":
 
     - `available` = saldo libero, spendibile per un NUOVO ordine (vincolo di
       cassa);
-    - `exposure` = stake delle PUNTATE LIVE ANCORA APERTE (posizioni in gioco);
+    - `exposure` = stake delle PUNTATE LIVE ANCORA APERTE (posizioni in gioco)
+      PIU' il capitale degli ORDINI RESTING aperti (10/10/2026): un ordine
+      GTC immobilizza l'escrow sull'exchange e, senza questa voce, l'equity
+      calerebbe al piazzamento per risalire alla cancellazione — un drawdown
+      fantasma della stessa classe del falso stop settimanale del 09/10;
     - `equity` = available + exposure: il PATRIMONIO del wallet. E' l'unico
       valore che non si muove quando una bet passa da libera a "in gioco",
       quindi e' il riferimento per Kelly, drawdown e stop-loss.
@@ -3252,6 +3270,77 @@ def _live_available_size(prov, market_id: str, selection_id: int,
             if p + 1e-9 >= min_price:
                 total += size
         return total
+    return None
+
+
+def _resting_place(prov, pick: dict, stake: float, price: float,
+                   market_id: str, sel: int, why: str) -> dict | None:
+    """Tenta un ordine RESTING (GTC) quando il percorso taker non e' eseguibile.
+
+    PERCHE' (10/10/2026). Misurato sui log di produzione: **221 POST a
+    /orders-v3, 126 accettati, 7 riempiti (5,5%) e 119 cancellati con
+    `NO_LIQUIDITY`**. Chiedere il prezzo con un IOC su un exchange dove la
+    controparte non e' li' in quel secondo uccide l'ordine e butta via l'edge.
+    Un ordine RESTING invece aspetta. Tutta la logica di registro/sicurezza sta
+    in `resting_orders.py` (delega: nessuna regola duplicata qui).
+
+    Ritorna:
+    - `{ok: True, resting: True, ...}` — ordine RESTING **aperto**: NON e' un
+      riempimento, quindi il chiamante NON deve scrivere una riga sul ledger
+      (la scrive `resting_orders.reconcile` quando si riempie). `bet_id` e'
+      None di proposito: anche se il check sul flag venisse rimosso, la
+      scrittura resterebbe bloccata dal controllo sul `bet_id`.
+    - `{ok: True, ...}` normale — l'ordine si e' riempito ALL'ISTANTE (era
+      attraversabile): e' una puntata normale, la tratta il percorso esistente.
+    - `None` — non si e' piazzato nulla: il chiamante prosegue col percorso che
+      aveva prima di questa funzione (comportamento invariato).
+    """
+    try:
+        import resting_orders
+    except Exception as e:
+        logger.debug("auto_bet: resting_orders non disponibile (%s)", e)
+        return None
+    try:
+        if not resting_orders.enabled():
+            return None
+    except Exception:
+        return None
+    try:
+        res = resting_orders.place(
+            prov, pick=pick, stake=float(stake), price=float(price),
+            market_id=str(market_id), selection_id=int(sel))
+    except Exception as e:
+        logger.warning("auto_bet: ordine resting %s fallito (%s): %s",
+                       pick.get("match_id"), why, e)
+        return None
+    if not isinstance(res, dict):
+        return None
+    if res.get("filled"):
+        logger.warning("auto_bet: ordine RESTING %s (%s vs %s, %s) riempito "
+                       "SUBITO @ %s per %.2f USDC: trattato come ordine "
+                       "normale", market_id, pick.get("home"),
+                       pick.get("away"), pick.get("esito_key"),
+                       res.get("price"), float(res.get("stake") or stake))
+        return {"ok": True, "market_id": market_id, "selection_id": sel,
+                "bet_id": res.get("order_id"),
+                "status": res.get("status") or "FILLED",
+                "price": res.get("price") or float(price),
+                "stake": float(res.get("stake") or stake)}
+    if res.get("placed"):
+        logger.info("auto_bet: ORDINE RESTING aperto su SX per %s (%s vs %s, "
+                    "%s) @ %.2f per %.2f USDC [%s] — motivo: %s; nessuna "
+                    "riga sul ledger finche' non si riempie",
+                    market_id, pick.get("home"), pick.get("away"),
+                    pick.get("esito_key"), float(price), float(stake),
+                    str(res.get("order_id"))[:12], why)
+        return {"ok": True, "resting": True, "market_id": market_id,
+                "selection_id": sel, "bet_id": None,
+                "order_id": res.get("order_id"),
+                "status": "RESTING_OPEN", "price": float(price),
+                "stake": float(stake)}
+    logger.info("auto_bet: ordine resting non piazzato per %s (%s): %s",
+                pick.get("match_id"), pick.get("esito_key"),
+                res.get("reason") or "?")
     return None
 
 
@@ -3412,6 +3501,14 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
                                "min_exec_depth": MIN_EXEC_DEPTH_USDC})
         except Exception:
             pass
+        # RESTING (10/10/2026): il taker non ha la size al floor, ma il
+        # PREZZO del segnale resta quello giusto. Un ordine RESTING al floor
+        # aspetta la controparte invece di morire: e' esattamente l'edge che
+        # il taker stava buttando via.
+        _r = _resting_place(prov, pick, stake, floor, market_id, sel,
+                            "book_sottile")
+        if _r is not None:
+            return _r
         return None
 
     try:
@@ -3429,6 +3526,19 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
         logger.warning("auto_bet: ordine reale %s non riempito (%s vs %s, "
                        "%s): %s", market_id, pick["home"], pick["away"],
                        order.status, order.error or "nessun match")
+        # RESTING (10/10/2026): l'ordine e' ARRIVATO all'exchange e non ha
+        # trovato controparte (`NO_LIQUIDITY`/CANCELLED) -> si riprova come
+        # RESTING. Si esclude `FAILURE`, che nel provider significa errore
+        # VERO (credenziali, stake minimo, ladder, firma, rete): li' un
+        # secondo ordine sarebbe inutile e sporcherebbe il book. Si esclude
+        # anche il caso "riempito ma senza orderId" (`matched_stake > 0`):
+        # e' ambiguo e non va mai raddoppiato.
+        if matched_stake <= 0 and \
+                str(order.status or "").upper() != "FAILURE":
+            _r = _resting_place(prov, pick, stake, floor, market_id, sel,
+                                str(order.status or "CANCELLED"))
+            if _r is not None:
+                return _r
         return {"ok": False, "market_id": market_id,
                 "selection_id": sel, "status": order.status or "FAILURE",
                 "error": order.error}
@@ -4142,6 +4252,7 @@ def run_today_bets(stake_eur: float | None = None,
     placed: list[dict] = []
     dry_run_blocked = 0
     open_exposure_skipped = 0
+    resting_opened = 0
     for cand in candidates:
         pick_stake = cand["stake"]
         price = cand["price"]
@@ -4193,6 +4304,18 @@ def run_today_bets(stake_eur: float | None = None,
             if filled is None:
                 # Saltata (mercato assente/ambiguo, prezzo sotto il floor EV,
                 # errore di rete): nessun ordine, nessuna riga sul ledger.
+                continue
+            if filled.get("resting"):
+                # ORDINE RESTING APERTO (10/10/2026): l'ordine vive sul book
+                # senza essere riempito. NON e' una puntata: nessuna riga sul
+                # ledger, nessun `placed`. La riga `mode='live'` la scrive la
+                # riconciliazione (`resting_orders.reconcile`) quando si
+                # riempie, con lo stake REALE riempito.
+                resting_opened += 1
+                logger.info("auto_bet: %s (%s @ %.2f, %.2f USDC) parcheggiato "
+                            "come ordine RESTING: nessuna riga ledger finche' "
+                            "non si riempie", cand.get("match_id"),
+                            cand.get("esito_key"), price, pick_stake)
                 continue
             if not filled.get("ok"):
                 # Ordine rifiutato/non riempito dall'exchange: niente riga
@@ -4262,6 +4385,10 @@ def run_today_bets(stake_eur: float | None = None,
                        "tutti i gate e sono stati INTERCETTATI prima "
                        "dell'ordine (dettagli nei log qui sopra)",
                        mode, dry_run_blocked)
+    elif resting_opened:
+        logger.info("auto_bet: %d ordini RESTING aperti (nessun riempimento "
+                    "immediato) — %s: il capitale si impegna al riempimento",
+                    resting_opened, mode)
     else:
         logger.info("auto_bet: nessuna puntata (%s) — 0 candidati giocabili",
                     mode)

@@ -375,6 +375,21 @@ export default defineRailway(() => {
       // non e' ordinabile, quindi non si paga l'EV per conoscerlo. Soglia in
       // USDC (default 20.0).
       SX_PREFILTER_MIN_DEPTH_USDC: preserve(),
+      // ORDINI RESTING GTC su SX Bet (10/10/2026, `resting_orders.py`): il
+      // taker IOC viene CANCELLED senza controparte (119/126 il 25/09-02/10)
+      // perche' SX e' un exchange senza market maker. Un ordine RESTING resta
+      // sul book e attende il flusso, con la PROPRIETA' della ladder che rende
+      // l'EV sicuro: `decimal_to_pct_scaled` arrotonda la probabilita' PER
+      // DIFETTO, quindi il fill avviene alla quota del segnale o MEGLIO.
+      // La job (ogni 5') riconcilia i fill e cancella prima del kickoff.
+      // Dichiarate con preserve(): un `config apply` non deve distruggere
+      // interruttore/tetti/TTL che l'operatore tara senza redeploy.
+      RESTING_ORDERS: preserve(),
+      RESTING_MAX_OPEN: preserve(),
+      RESTING_TTL_MIN: preserve(),
+      RESTING_CANCEL_BEFORE_MIN: preserve(),
+      RESTING_EXPIRY_MARGIN_S: preserve(),
+      RESTING_STATE: preserve(),
     },
   });
 

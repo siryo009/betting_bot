@@ -1118,7 +1118,8 @@ class SxBetProvider(ExecutionProvider):
 
     def place_limit_order(self, market_id: str, selection_id: int,
                           side: str, price: float, size: float,
-                          persistence: str = "LAPSE") -> OrderResult:
+                          persistence: str = "LAPSE",
+                          expiry_seconds: Optional[int] = None) -> OrderResult:
         """Ordine firmato EIP-712 su /orders-v3 (waitForOutcome).
 
         Mappatura: side BACK su selection 1|2 -> si scommette quell'esito;
@@ -1126,6 +1127,14 @@ class SxBetProvider(ExecutionProvider):
         prezzo equivalente (prob. complementare). persistence "PERSIST" ->
         GTC (resta sul book), altrimenti il timeInForce configurato
         (default IOC = take al prezzo richiesto o meglio).
+
+        `expiry_seconds` (10/10/2026): scadenza PER-ORDINE. Serve agli ordini
+        RESTING (`resting_orders.py`): allineando la scadenza on-chain alla
+        NOSTRA deadline, l'assenza dell'ordine dalla lista degli aperti diventa
+        un'informazione non ambigua (prima della scadenza = riempito, dopo =
+        spirato). Con la sola costante globale (default 3600s) un ordine
+        resting morirebbe da solo in un'ora e "sparito dal book" non
+distinguerebbe un riempimento da una scadenza naturale.
         """
         side = side.upper()
         sel = 1 if int(selection_id) == 1 else 2
@@ -1185,7 +1194,9 @@ class SxBetProvider(ExecutionProvider):
             "totalBetSize": str(units),
             "percentageOdds": str(p_bound),
             "salt": "0x" + secrets.token_hex(32),
-            "expiry": int(time.time()) + SX_EXPIRY_SECONDS,
+            "expiry": int(time.time()) + (int(expiry_seconds)
+                                         if expiry_seconds else
+                                         SX_EXPIRY_SECONDS),
             "baseToken": base_token,
             "isMakerBettingOutcomeOne": sel == 1,
             "timeInForce": tif,
@@ -1255,6 +1266,38 @@ class SxBetProvider(ExecutionProvider):
                 if filled_state else
                 (None if not state else "ordine non riempito")),
         )
+
+    def list_open_orders(self) -> Optional[List[Dict]]:
+        """Ordini ANCORA APERTI dell'account (GET /orders-v3) — o `None`.
+
+        E' l'unico modo per sapere se un ordine RESTING e' ancora sul book:
+        SX non espone uno storico ordini utilizzabile. Il contratto e' a TRE
+        valori, e la differenza conta:
+
+        - `None`  = NON leggibile (errore, payload inatteso, chiave assente):
+          il chiamante DEVE trattarlo come fail-closed — nessuna inferenza su
+          cosa sia successo a un ordine;
+        - `[]`    = leggibile e NESSUN ordine aperto (informazione vera);
+        - `[...]` = gli ordini aperti.
+
+        Un payload senza `data.orders` NON diventa una lista vuota: sarebbe
+        esattamente il falso negativo che trasforma "parametro sbagliato" in
+        "ordine riempito".
+        """
+        if not self.api_key:
+            return None
+        try:
+            data = self._get("orders-v3", auth=True)
+        except Exception as e:
+            logger.warning("sxbet: lettura ordini aperti fallita: %s", e)
+            return None
+        d = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(d, dict):
+            return None
+        orders = d.get("orders")
+        if not isinstance(orders, list):
+            return None
+        return [o for o in orders if isinstance(o, dict)]
 
     def cancel_order(self, market_id: str, bet_id: str) -> bool:
         """Cancella ordini per id (DELETE /orders-v3, solo x-sx-api-key)."""

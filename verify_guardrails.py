@@ -72,6 +72,26 @@ os.environ["ESPORTS_LIVE"] = "0"
 # GUARDRAIL, non l'oracolo: qui la rete non si tocca (la meccanica e' coperta da
 # `test_line_oracle.TestFetchOnDemand` con il fetch iniettato).
 os.environ["ORACLE_ONDEMAND_ENABLED"] = "0"
+# Ordini RESTING GTC OFF (10/10/2026): quando il percorso taker non e'
+# eseguibile (`book_sottile` nella scenario E, oppure ordine non riempito)
+# `_live_fill` prova a PARCHEGGIARE il prezzo sul book, e quel percorso fa un
+# POST reale al provider. Lo scenario E misura il GUARDRAIL di liquidita'
+# (l'ordine NON deve partire): con il resting acceso conterebbe un ordine
+# parcheggiato e il verdetto non sarebbe piu' quello che lo scenario vuole
+# misurare. La meccanica del resting e' coperta da `test_resting_orders.py`,
+# che gira offline con un provider finto.
+os.environ["RESTING_ORDERS"] = "0"
+os.environ.setdefault("RESTING_STATE", "/tmp/qv_resting_orders_verify.json")
+# Registro azzerato a ogni run. E' un percorso FISSO: un file lasciato da un
+# run interrotto (o da una prova manuale) entrerebbe nel calcolo del capitale
+# immobilizzato (`_open_live_snapshot` conta anche i resting aperti) e
+# altererebbe lo scenario H, che misura il 40% sui SOLI ordini del ledger.
+try:
+    _stale_resting = os.environ.get("RESTING_STATE")
+    if _stale_resting and os.path.exists(_stale_resting):
+        os.remove(_stale_resting)
+except Exception:
+    pass
 
 # --- Cattura dei log --------------------------------------------------------
 _RECORDS: list[str] = []

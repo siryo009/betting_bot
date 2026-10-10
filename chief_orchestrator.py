@@ -233,6 +233,22 @@ class ChiefOrchestrator:
         execution = self.execution.process(approved_plans)
         report.execution = execution.as_json()
 
+        # --- 4b. ORDINI RESTING (GTC) su SX Bet (direttiva 10/10/2026) -----
+        # Il capitale PARCHEGGIATO sul book. Un ordine resting non e' ancora
+        # una puntata (nessuna riga `bets`, nessun `placed`): e' il prezzo
+        # messo li' ad aspettare la controparte, e si impegna al riempimento.
+        # Chi lo sa e' l'Execution Engine (unico che parla con l'exchange),
+        # quindi la lettura passa da lui. Fail-safe: una telemetria rotta non
+        # rompe il ciclo.
+        try:
+            report.resting = self.execution.open_resting()
+            if report.resting.get("open"):
+                logger.info("chief: %s ordini RESTING aperti (%.2f USDC "
+                            "parcheggiati sul book)", report.resting.get("open"),
+                            report.resting.get("open_stake") or 0.0)
+        except Exception as exc:  # la telemetria non rompe il ciclo
+            logger.warning("chief: stato ordini resting non leggibile: %s", exc)
+
         report.finished_at = datetime.now(timezone.utc).isoformat()
         return report
 
@@ -303,6 +319,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"  strategia : {report.strategy}")
         print(f"  finanza   : {report.finance}")
         print(f"  esecuzione: {report.execution}")
+        if report.resting:
+            print(f"  resting   : {report.resting}")
     return 0 if report.ok else 1
 
 

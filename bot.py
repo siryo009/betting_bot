@@ -3043,6 +3043,84 @@ async def line_oracle_job(context: ContextTypes.DEFAULT_TYPE):
                     res.get("requests_today"))
 
 
+async def resting_orders_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Ordini RESTING (GTC) su SX Bet: ritiro + riconciliazione (10/10/2026).
+
+    Nato dalla misura del fill rate (25/09 -> 02/10): **221 POST, 126
+    accettati, 7 riempiti (5,5%)**, 119 cancellati con `NO_LIQUIDITY`.
+    Chiedere il prezzo con un IOC dove la controparte non c'e' in quel secondo
+    uccide l'ordine: un ordine RESTING invece aspetta.
+
+    Ogni giro fa DUE cose, in quest'ordine: (1) RITIRA gli ordini oltre la
+    deadline, (2) rilegge il book e chiude come RIEMPITI quelli spariti. E' il
+    **solo** punto che scrive sul ledger la riga `bets` mode='live' di un
+    resting: l'ordine non riempito non e' una puntata, e non deve diventarlo.
+
+    Costo: zero crediti the-odds-api (nessuna quota), nessun ordine nuovo.
+    Sola lettura del book + una DELETE per il ritiro, e null'altro.
+    `RESTING_ORDERS=0` lo spegne (e a monte nessun ordine viene parcheggiato).
+    Fail-safe: un errore non ferma il giro puntate e non solleva.
+    """
+    try:
+        import resting_orders as ro
+    except Exception as e:
+        logger.debug("resting_orders_job: %s", e)
+        return
+    if not ro.enabled():
+        return
+    try:
+        if not ro.open_orders():
+            # Nessun ordine parcheggiato: niente da fare e nessun provider da
+            # costruire (zero rete, zero log ripetuti: il giro gira ogni 5').
+            return
+    except Exception as e:
+        logger.debug("resting_orders_job: registro non leggibile (%s)", e)
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        res = await loop.run_in_executor(None, ro.run_cycle)
+    except Exception as e:                        # pragma: no cover
+        logger.error("resting_orders_job: %s", e)
+        return
+    rec = res.get("reconciled") or {}
+    exp = res.get("expired") or {}
+    if rec.get("unavailable"):
+        # Book degli ordini NON leggibile: nessuna inferenza su denaro reale.
+        # Gli ordini restano `open` e si ritenta al giro dopo (fail-closed).
+        logger.warning("resting_orders_job: book ordini NON leggibile: nessuna "
+                       "inferenza (%s ordini aperti in attesa)",
+                       rec.get("checked"))
+        return
+    if rec.get("checked") or exp.get("checked"):
+        logger.info("resting_orders_job: %s aperti letti | riempiti %s | "
+                    "ritirati %s | ancora aperti %s | da verificare %s",
+                    rec.get("checked"), rec.get("filled"),
+                    exp.get("cancel_ok") or 0, rec.get("still_open"),
+                    rec.get("unconfirmed"))
+    fills = rec.get("fills") or []
+    if not fills:
+        return
+    # Notifica su OGNI riempimento: e' un ordine REALE eseguito a un prezzo
+    # che il taker non riusciva a prendere (stessa logica delle notifiche
+    # FULLY_FILLED: sugli ordini veri non si fa anti-spam).
+    lines = ["🅾️ ORDINE RESTING RIEMPITO (GTC su SX Bet)", ""]
+    for f in fills:
+        home = str(f.get("home") or "?").replace("_", " ").replace("*", "")
+        away = str(f.get("away") or "?").replace("_", " ").replace("*", "")
+        lines.append(f"✅ {home} vs {away} ({f.get('esito')})")
+        lines.append(f"   {f.get('mercato')} @ {float(f.get('price') or 0):.4f} "
+                     f"| stake {float(f.get('stake') or 0):.2f} USDC")
+    text = "\n".join(lines)
+    if context is None:
+        logger.info("resting_orders_job: %d riempimenti (nessun context, "
+                    "solo log)", len(fills))
+        return
+    try:
+        await _send_report_to_recipients(context, text)
+    except Exception as e:                        # pragma: no cover
+        logger.warning("resting_orders_job: notifica fallita: %s", e)
+
+
 async def btts_watch_job(context: ContextTypes.DEFAULT_TYPE = None):
     """Sorveglianza GRATUITA del mercato BTTS su SX Bet (25/09/2026).
 
@@ -3495,6 +3573,14 @@ def main() -> None:
         # lettura dalla cache quote: zero crediti, zero ordini. Piu' frequente
         # degli altri monitor perche' il fischio cade fra due giri.
         job_queue.run_repeating(closing_line_job, interval=300, first=180,
+                                job_kwargs={"max_instances": 1})
+        # Ordini RESTING (GTC) su SX Bet (10/10/2026): ogni 5' ritira gli
+        # ordini oltre la deadline e riconcilia i RIEMPIMENTI. E' l'unico
+        # punto che scrive la riga `bets` mode='live' di un resting (prima
+        # del riempimento l'ordine non e' una puntata). Zero crediti: legge
+        # il book degli ordini e cancella, non chiede quote. Se non c'e'
+        # nessun ordine parcheggiato esce subito senza toccare la rete.
+        job_queue.run_repeating(resting_orders_job, interval=300, first=240,
                                 job_kwargs={"max_instances": 1})
         # Flusso dell'order book SX (26/09): ogni 6h legge il registro degli
         # ingressi di liquidita' e allerta SOLO se ce ne sono nelle ultime

@@ -10076,3 +10076,149 @@ matched ne' verdetto, quindi oggi verrebbe scartato da `_live_fill`
 (`not order.ok or matched_stake <= 0`). Servirebbe un terzo stato (ordine
 resting aperto + riconciliazione/cancel a scadenza) con impatto sul denaro
 reale: **decisione del proprietario**.
+
+### ORDINI RESTING (GTC) su SX Bet — la leva scelta al posto dell'arbitraggio (10/10/2026)
+
+**Direttiva del proprietario**: far partire ordini reali con profitto senza
+alzare il budget crediti e **senza depositi su altri bookmaker**.
+
+**1) L'ARBITRAGGIO E' STATO CHIUSO DAI DATI, NON DA UN'OPINIONE.** Prima di
+scrivere codice sono state fatte **tre misure** (letture pubbliche SX, zero
+crediti, zero ordini) su `arbitrage_scan.py` (committato in `68bcb98`):
+- **copertura 1X2** su 98 partite: cover diretto 3x selezione 1 -> min
+  **1.0025**, mediana 1.0175; "tutti i Not" -> min **1.0001**, mediana 1.0082;
+  a 2 gambe -> min 1.0325; **0 coperture < 1.0000**;
+- **stessa scommessa in due mercati** (1X2 vs AH ±0.5): 45 partite -> min
+  **1.0038**, 0 sotto 1.0;
+- **eSports**: 0 eventi.
+L'**overround interno mediano di SX e' 1,75%** (Pinnacle 3,8-5,4%): SX e'
+un exchange con spread stretto, non un book con margine. **L'arbitraggio
+intra-SX non esiste** e quello cross-venue e' irrealizzabile (Smarkets non
+registrabile + vincolo "nessun deposito altrove") -> `arbitrage_scan.py`
+resta nel repo ma **inutilizzabile** (serve Smarkets). Nessuna riga di
+produzione poggia su di esso.
+
+**2) LA LEVA VERA ERA IL FILL RATE — misurato.** 25/09 -> 02/10:
+**221 POST `/orders-v3`, 126 accettati, 7 `FULLY_FILLED` (5,5%)**, **119
+`CANCELLED` con `cancelReason=NO_LIQUIDITY`**. I 95 risposte 403 sono TUTTI del
+01/10 00:00-02:00 UTC (geo-block USA, prima del cutover AMS): dopo il cutover
+**126/126 accettati**. Il collo di bottiglia non era piu' l'accettazione ma
+l'**assenza di controparte all'istante dell'ordine IOC** — per costruzione,
+su un exchange senza market maker.
+
+**3) IL FIX DEL PREZZO (commit `4fbab93`, deploy `40a186ff`, region ams)**:
+`pct_scaled_to_decimal` (execution_engine.py ~239) tronca con aritmetica
+intera `(SX_PROB_SCALE * 10000 // p) / 10000.0`; con `round(.,4)` c'erano
+**131 mismatch su 308 (42,5%)**, con il troncamento **0**. Tripwire
+`TestRoundTripLadder`.
+
+**4) IL MODULO `resting_orders.py` (NUOVO)** — il terzo stato che mancava.
+Un ordine **RESTING NON e' una puntata**: resta parcheggiato sul book e diventa
+una riga `bets` SOLO quando la riconciliazione ha la prova che l'ha riempito.
+- **Stati**: `open`, `filled`, `cancelled`, `filled_duplicate`,
+  `expired_unconfirmed`.
+- **Registro** persistente su volume (`RESTING_STATE`, default
+  `DATA_DIR/execution/resting_orders.json`), scrittura atomica tmp+`os.replace`
+  +fsync, **mai eccezioni**; file corrotto -> registro vuoto + campo `error`,
+  **non sovrascritto**.
+- **`place(...)`**: gate `disabled` / `below_min_ticket` / `state_unreadable` /
+  `max_open` / `duplicate` (match_id+esito) / `deadline_too_close` (<60s);
+  chiama `place_limit_order(..., persistence="PERSIST", expiry_seconds=)` con
+  fallback `except TypeError` (provider vecchio senza il parametro). Se
+  `size_matched > 0` -> **fill immediato** (resta un ordine normale, NON scrive
+  sul registro); altrimenti riga `open`. Se `save()` fallisce tenta la
+  **cancellazione immediata** (`state_unwritable_cancelled`).
+- **`deadline_ts`** = `min(now + RESTING_TTL_MIN, kickoff - RESTING_CANCEL_BEFORE_MIN)`:
+  si cancella **prima del kickoff** (un ordine che resta sul book a partita
+  iniziata e' denaro esposto senza sorveglianza).
+- **`expire`** chiede la cancellazione oltre la deadline e marca
+  `cancel_attempted/cancel_ok` (NON marca `cancelled`: lo decide `reconcile`).
+- **`reconcile`** legge `list_open_orders()` e in un verso solo: fuori dagli
+aperti + cancellato da noi -> `cancelled`; fuori dagli aperti + **oltre
+`expires_at`** -> `expired_unconfirmed` (log ERROR, "verificare a mano": mai
+una riga scritta su un dubbio); altrimenti **RIEMPITO** ->
+`save_bet_fn(...)` con `status="RESTING_FILLED"` e `bet_id=order_id`, oppure
+`filled_duplicate` se la riga esiste (`_bet_row_exists` **fail-closed**: su
+errore risponde True, nessuna scrittura).
+- **`list_open_orders()`** (execution_engine) ha un contratto a TRE valori:
+`None` = NON leggibile (fail-closed, `reconcile` non conclude nulla), `[]` =
+nessun ordine aperto, `[...]` = gli aperti. Un payload inatteso -> `None`, mai
+una lista vuota.
+- **SICUREZZA DELL'EV (proprieta' della ladder)**: su SX un BACK viene postato
+con la probabilita' **arrotondata PER DIFETTO** (`decimal_to_pct_scaled`),
+quindi la quota effettiva e' **>= a quella richiesta**: un fill avviene alla
+quota del segnale **o meglio, mai peggio**. E' il motivo per cui il resting e'
+sicuro dal punto di vista del prezzo.
+- **`run_cycle`** = `expire` **poi** `reconcile` (l'ordine dei due passi non e'
+arbitrario: un ordine riempito all'ultimo istante risulta comunque fuori dagli
+aperti). Fail-safe: ogni errore diventa un campo (`expire:...`,
+`reconcile:...`), mai un'eccezione. Accetta `save_bet_fn` iniettabile (i test
+girano senza DB).
+
+**4b) CAPITALE IMMOBILIZZATO — la correzione che evita il falso drawdown.**
+Un ordine RESTING immobilizza l'escrow sull'exchange ma NON ha una riga in
+`bets` finche' non si riempie. Con l'equity calcolata come `available +
+esposizione` (dal 07/10 l'esposizione viene dal LEDGER, non dal campo di SX),
+l'equity sarebbe SCESA al piazzamento e risalita alla cancellazione: **la
+stessa classe del falso stop settimanale del 09/10**, e il recinto 40% non
+avrebbe visto un capitale realmente impegnato. `auto_bet._open_live_snapshot()`
+— l'UNICO punto di "capitale immobilizzato", letto sia dall'equity
+(`_live_wallet_snapshot`) sia dal recinto (`open_exposure_status`,
+`exposure_allows`) — ora somma `resting_orders.open_stake()` e il numero di
+ordini aperti. Effetti: (a) l'equity non si muove al piazzamento ne' alla
+cancellazione; (b) `RESTING_MAX_OPEN` non puo' portare il parcheggiato oltre il
+40% (es. bankroll 20 → cap 8.0: cinque resting da 2.0 gia' lo sfondano e il
+recinto blocca); (c) al riempimento la riga passa a `filled` E nasce quella di
+`bets`, quindi il capitale non si conta due volte. **Fail-open sulla lettura**
+(registro illeggibile → +0): una telemetria rotta non deve aprire il recinto
+ne' muovere l'equity, stessa direzione del resto.
+
+**5) WIRING in `auto_bet._live_fill`** — `_resting_place(prov, pick, stake,
+price, market_id, sel, why)` viene invocata in DUE punti, e solo quando il
+percorso taker e' NON eseguibile:
+- **ramo book sottile** (dopo il `record_skip("order", "depth_vs_stake")`):
+  il pick non e' eseguibile come taker ma l'edge esiste -> si parcheggia;
+- **ramo ordine non riempito** (`matched_stake <= 0` **e**
+  `status != "FAILURE"`): un IOC `CANCELLED` per `NO_LIQUIDITY` si riprova
+  RESTING; un **errore vero** (credenziali/stake/ladder/firma/rete) e'
+  `FAILURE` e **non** si ritenta (non e' un problema di controparte).
+Ritorna `{ok: True, resting: True, bet_id: None, order_id, status:
+"RESTING_OPEN", ...}` se parcheggiato, oppure `{ok: True, bet_id, ...}` per un
+fill immediato, o `None` per salti/errori (mai eccezioni). In `run_today_bets`
+un nuovo contatore `resting_opened` separa i parcheggi dalle puntate nel
+riepilogo ("N ordini RESTING aperti (nessun riempimento immediato)").
+
+**6) JOB `bot.resting_orders_job`** ogni **300s** (`first=240`,
+`max_instances=1`), registrato dopo `closing_line_job`: esce SUBITO se non ci
+sono ordini aperti (zero rete, zero log ripetuti), altrimenti esegue
+`run_cycle` in executor e notifica iscritti+admin **solo sui fill**, con header
+"🅾️ ORDINE RESTING RIEMPITO (GTC su SX Bet)". Un `unavailable` (book non
+leggibile) produce un warning e **non** conclude nulla.
+
+**7) AGENTI + CHIEF**: `ExecutionOutput.resting` e `CycleReport.resting`
+(`as_json` con `resting_open`/`resting_stake`);
+`ExecutionAgent.open_resting(reader=None)` delega a `resting_orders.summary`
+con **import pigro** e non solleva mai; `chief_orchestrator` ha il blocco
+**4b** (`report.resting = self.execution.open_resting()`), fail-safe, stampato
+anche dalla CLI.
+
+**8) Env** (tutte `preserve()` in `.railway/railway.ts`): `RESTING_ORDERS`
+(default **ON**; off = `0/false/no/off`), `RESTING_MAX_OPEN` **5**,
+`RESTING_TTL_MIN` **720**, `RESTING_CANCEL_BEFORE_MIN` **2**,
+`RESTING_EXPIRY_MARGIN_S` **600** (min 60), `RESTING_STATE`.
+
+**9) ISOLAMENTO NEI TEST**: `conftest.py` sposta SEMPRE `RESTING_STATE` nella
+tmp e mette `RESTING_ORDERS=0` per tutti i file **tranne**
+`test_resting_orders` (l'eccezione dichiarata); `verify_guardrails.py` fa lo
+stesso (`RESTING_ORDERS=0`) cosi' gli scenari A-H misurano i guardrail e non il
+resting. `test_resting_orders.py` = **81 verdi, tutti OFFLINE** (provider finto
+in memoria, registro nella tmp, zero rete/credenziali/ordini).
+`verify_guardrails.py` = **A-H tutti bloccano** (exit 0); regressioni verdi su
+execution_engine, auto_bet x2, capital_enclosure, exposure_gate, t60_breakers,
+liquidity_monitor, bot, secret_hygiene, agent_hierarchy, chief_shadow_wiring,
+advisor_agent, railway_drift_check, weekly_stop.
+
+**⚠️ Da misurare dopo il deploy**: il **fill rate** dei resting (`grep` sui log
+`orders-v3`: `state`/`cancelReason`) e quante righe `status='RESTING_FILLED'`
+compaiono in `bets`. La prova che il resting aumenta gli ordini e' quella
+misura, non l'implementazione.

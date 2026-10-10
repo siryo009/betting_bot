@@ -261,6 +261,17 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # e' opt-in e i test che la vogliono la accendono esplicitamente.
     import league_dynamic as _ld
     _ld.reset_cache()
+    # Ordini RESTING (GTC) su SX Bet (10/10/2026): quando il percorso taker non
+    # e' eseguibile (`book_sottile` o ordine non riempito) `auto_bet._live_fill`
+    # prova a PARCHEGGIARE il prezzo sul book invece di buttare via l'edge. Nei
+    # test che misurano altro (liquidita', cap, wallet, stop-loss, T-60)
+    # questo cambierebbe l'esito atteso di `_live_fill` (da `None` a un ordine
+    # registrato) e — con un provider reale — manderebbe un POST vero: spento
+    # alla fonte. Il registro va comunque nella tmp (mai sul volume), e il file
+    # dedicato (`test_resting_orders`) lo riaccende con un provider finto.
+    monkeypatch.setenv("RESTING_STATE", str(tmp_path / "resting_orders.json"))
+    if "test_resting_orders" not in request.node.nodeid:
+        monkeypatch.setenv("RESTING_ORDERS", "0")
     yield
     _ld.reset_cache()
     _oracle_skips.reset_dedup()

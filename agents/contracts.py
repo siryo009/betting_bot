@@ -345,12 +345,19 @@ class ExecutionOutput(BaseModel):
     reports: list[DispatchReport] = Field(default_factory=list)
     executed: int = 0
     shadow: bool = True
+    #: Ordini RESTING (GTC) su SX Bet (direttiva 10/10/2026): l'Execution
+    #: Engine e' l'unico che sa cosa e' VIVO sul book. Un ordine parcheggiato
+    #: NON e' una puntata (nessuna riga ledger, nessun `placed`), ma impegna
+    #: capitale AL RIEMPIMENTO: va riportato nel ciclo, non taciuto.
+    resting: dict[str, Any] = Field(default_factory=dict)
 
     def as_json(self) -> dict[str, Any]:
         return {
             "dispatched": len(self.reports),
             "executed": self.executed,
             "shadow": self.shadow,
+            "resting_open": self.resting.get("open"),
+            "resting_stake": self.resting.get("open_stake"),
         }
 
 
@@ -419,6 +426,10 @@ class CycleReport(BaseModel):
     #: Recinto di esposizione aperta (direttiva 28/09/2026): ordini in corso,
     #: capitale immobilizzato e tetto del 40% ricalcolato sull'equity corrente.
     exposure: dict[str, Any] = Field(default_factory=dict)
+    #: Ordini RESTING (GTC) su SX Bet (10/10/2026): capitale parcheggiato sul
+    #: book in attesa di controparte — non e' ancora una puntata, ma si impegna
+    #: quando si riempie. Il Capo lo vede a ogni ciclo.
+    resting: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -437,6 +448,7 @@ class CycleReport(BaseModel):
             "execution": self.execution,
             "advisor": self.advisor,
             "exposure": self.exposure,
+            "resting": self.resting,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }

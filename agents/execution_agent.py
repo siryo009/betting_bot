@@ -21,6 +21,13 @@ l'unico che sa cosa e' stato eseguito, quindi e' anche la fonte dello stato
 del capitale immobilizzato. `open_exposure()` legge gli ordini reali ancora
 in corso (`mode='live'`, non saldati) e dice se un NUOVO stake entra nel
 tetto del 40%: e' la lettura che l'Advisor interroga a ogni ciclo.
+
+**Ordini RESTING (GTC) su SX Bet (direttiva 10/10/2026)**: la stessa ragione
+vale per il capitale PARCHEGGIATO sul book. `open_resting()` legge il registro
+degli ordini RESTING (delega a `resting_orders.summary`) e lo espone al Capo:
+l'ordine parcheggiato non e' ancora una puntata — nessuna riga sul ledger,
+nessun `placed` nel giro — ma impegna capitale quando si riempie. Chi sa cosa
+c'e' sul book e' l'esecuzione, non la strategia.
 """
 
 from __future__ import annotations
@@ -120,6 +127,38 @@ class ExecutionAgent:
             return dict(reader(bankroll, new_stake))
         except Exception as exc:  # lettura del ledger esplosa
             return _exposure_unavailable(exc, bankroll)
+
+    # ------------------------------------------------------------------
+    # Stato degli ORDINI RESTING (GTC) — capitale parcheggiato sul book
+    # ------------------------------------------------------------------
+    def open_resting(self, *, reader=None) -> dict:
+        """Stato degli ordini RESTING (GTC) su SX Bet (direttiva 10/10/2026).
+
+        Perche' lo legge l'Execution Engine: e' l'unico componente che sa cosa
+        e' VIVO sull'exchange. Un ordine parcheggiato NON e' ancora una puntata
+        (nessuna riga `bets`, nessun `placed` nel giro) ma e' capitale che si
+        impegna AL RIEMPIMENTO: il Capo deve vederlo, altrimenti la differenza
+        fra "non ho trovato niente" e "ho messo il prezzo e aspetto" sparisce.
+
+        Delega a `resting_orders.summary()` con import PIGRO (`import agents`
+        resta leggero) e non solleva MAI: un registro rotto torna come stato
+        vuoto DICHIARATO (`unavailable=True` + motivo), non come un'eccezione
+        dentro il ciclo del denaro.
+        """
+        if reader is None:
+            try:
+                import resting_orders as ro
+                reader = ro.summary
+            except Exception as exc:
+                return {"unavailable": True,
+                        "reason": f"resting_orders non disponibile: {exc}"}
+        try:
+            state = dict(reader())
+        except Exception as exc:
+            return {"unavailable": True,
+                    "reason": f"lettura registro fallita: {exc}"}
+        state["unavailable"] = False
+        return state
 
     def process(self, plans: list[CommandPlan]) -> ExecutionOutput:
         out = ExecutionOutput(shadow=True)
