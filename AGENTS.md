@@ -10342,3 +10342,15 @@ vuoto, `settled 0`).
 filtro che seleziona le righe da saldare va scritto sulla chiave che la fonte
 usa davvero: un `LIKE 'sx-%'` in un percorso gratuito e' una **tassa occulta**
 sul percorso esterno.
+
+**VERIFICA POST-DEPLOY (commit `982c73a`, deploy `eb227d5e` SUCCESS, health
+200)**: sul container `auto_bet.sizing_equity` presente e la query delle bet
+senza il filtro `sx-` (`filtro sx- nella query delle bet: False`). Log del
+giro: `bankroll LIVE = equity 37.96 USDC (disponibile 34.90 + in gioco 3.06)`
+e `esposizione aperta 3.06/15.19 USDC su 1 ordini` (15,19 = 40% di 37,96): il
+cap e' ora calcolato sul capitale VERO, non sui 42,10 gonfiati. Zero ERROR.
+Le **4 violazioni storiche di `order_watch` restano nel report e sono
+CORRETTE**: il bot eccedeva davvero il tetto perche' dimensionava sull'equity
+gonfiata; non vengono "assolte" (il tetto per-ordine non e' negoziabile, c'e'
+un test che lo difende anche sulle righe pre-direttiva) — e' il fix a
+impedirne di nuove.
