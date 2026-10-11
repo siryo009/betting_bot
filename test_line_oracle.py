@@ -750,14 +750,24 @@ class TestGateTopDownConLinea:
         assert v.get("ok") is False
         assert v.get("reason") == "no_oracle/MISSING_MARKET"
 
-    def test_1x2_conserva_il_motivo_secco(self, monkeypatch, tmp_path):
-        """Il 1X2 NON cambia: il motivo granulare e' solo per i mercati a linea."""
+    def test_1x2_ha_la_diagnosi_granulare(self, monkeypatch, tmp_path):
+        """11/10/2026: anche il 1X2 dice la CAUSA, non `no_oracle` secco.
+
+        Cache della lega assente -> `NO_CACHE`, recuperabile con un refresh
+        `h2h` (1 credito). Prima il ramo 1X2 restituiva lo stesso testo per il
+        dato scaduto e per il mercato mai pubblicato.
+        """
         import auto_bet
         monkeypatch.setattr(auto_bet, "_top_down_load", lambda h, a: None)
         monkeypatch.setattr(auto_bet, "_TOP_DOWN_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(auto_bet, "_h2h_skip_reason", lambda p: {
+            "reason": "no_oracle/NO_CACHE", "detail": "nessuna cache",
+            "recoverable": True})
         pick = self._pick(esito_key="1", mercato="1X2")
         v = auto_bet._top_down_eval(pick)
-        assert v.get("ok") is False and v.get("reason") == "no_oracle"
+        assert v.get("ok") is False
+        assert v.get("reason") == "no_oracle/NO_CACHE"
+        assert v.get("action") is None      # fetch_missing=False (nessuna spesa)
 
     def test_gate_espone_line_mismatch_end_to_end(self, monkeypatch, tmp_path):
         """Linea che Pinnacle NON prezza: il gate lo dice, non 'no_oracle'."""
@@ -1867,6 +1877,235 @@ class TestTripwire:
         import line_oracle
         assert line_oracle.budget_credits_per_day() == \
             float(odds_api.ORACLE_BUDGET_DAY * 3)
+
+
+# ---------------------------------------------------------------------------
+# 8. Oracolo h2h ON-DEMAND (11/10/2026)
+#
+#    Rimedio ai pick 1X2 persi con `no_oracle` perche' la cache della lega era
+#    SCADUTA: rotazione a 7 giorni contro un tetto di freschezza di 24h =
+#    ~5 giorni su 7 senza oracolo (misurato il 10/10: Brasileirao 62,5h,
+#    Superliga Danimarca 46,5h). Si paga la SOLA `h2h` (1 credito, non 3) sulla
+#    cache di ROTAZIONE `toa_<sport>.json`, quella che `load_oracle` legge.
+# ---------------------------------------------------------------------------
+
+class TestFetchH2hOdds:
+    """`odds_api.fetch_h2h_odds`: 1 credito, budget PROPRIO, cache di rotazione."""
+
+    class _R:
+        status_code = 200
+        def __init__(self, payload, remaining="231"):
+            self._payload = payload
+            self.headers = {"x-requests-remaining": remaining}
+            self.text = "[]"
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._payload
+
+    def _env(self, monkeypatch, tmp_path, cap=2, per_league=1):
+        monkeypatch.setattr(odds_api, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(odds_api, "ORACLE_H2H_BUDGET_DAY", cap)
+        monkeypatch.setattr(odds_api, "ORACLE_H2H_MAX_CALLS_PER_LEAGUE", per_league)
+        monkeypatch.setenv("ORACLE_H2H_BUDGET_STATE", str(tmp_path / "h2h.json"))
+        monkeypatch.setenv("ODDS_API_KEY", "test")
+        monkeypatch.setattr(odds_api, "should_query_sport", lambda s: True)
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: False)
+        odds_api.reset_oracle_h2h_budget()
+
+    def test_paga_una_chiamata_e_scrive_la_cache_di_rotazione(
+            self, monkeypatch, tmp_path):
+        """La cache scritta DEVE essere `toa_*`: e' quella che l'oracolo legge."""
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: self._R([{"id": "m1"}]))
+        payload, remaining = odds_api.fetch_h2h_odds(
+            "soccer_brazil_campeonato", "f", "t")
+        assert payload == [{"id": "m1"}] and remaining == 231
+        assert (tmp_path / "toa_soccer_brazil_campeonato.json").exists()
+        assert not (tmp_path / "toao_soccer_brazil_campeonato.json").exists()
+        assert odds_api._oracle_h2h_req_day["n"] == 1
+
+    def test_budget_separato_da_quello_a_linea(self, monkeypatch, tmp_path):
+        """Le due contabilita' NON si consumano a vicenda."""
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: self._R([{"id": "m1"}]))
+        odds_api._oracle_req_day = {"day": "2000-01-01", "n": 0,
+                                    "by_league": {}}
+        odds_api.fetch_h2h_odds("soccer_x", "f", "t")
+        assert odds_api._oracle_h2h_req_day["n"] == 1
+        # il percorso a linea non ha pagato nulla
+        assert odds_api._oracle_req_day["n"] == 0
+
+    def test_tetto_giornaliero_blocca_la_chiamata(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, tmp_path, cap=2)
+        odds_api._oracle_h2h_req_day["n"] = 2
+        calls = []
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: calls.append(1))
+        payload, remaining = odds_api.fetch_h2h_odds("soccer_x", "f", "t")
+        assert payload == [] and remaining == 999 and calls == []
+
+    def test_tetto_per_lega_non_ripaga_la_stessa_lega(self, monkeypatch,
+                                                      tmp_path):
+        self._env(monkeypatch, tmp_path, cap=5, per_league=1)
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: self._R([{"id": "m1"}]))
+        assert odds_api.fetch_h2h_odds("soccer_a", "f", "t")[0]
+        calls = []
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: calls.append(1))
+        assert odds_api.fetch_h2h_odds("soccer_a", "f", "t") == ([], 999)
+        assert calls == []
+        # un'ALTRA lega resta pagabile (budget 5, tetto per lega 1)
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: self._R([{"id": "m2"}]))
+        assert odds_api.fetch_h2h_odds("soccer_b", "f", "t")[0]
+
+    def test_hard_stop_crediti_blocca(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: True)
+        calls = []
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: calls.append(1))
+        assert odds_api.fetch_h2h_odds("soccer_x", "f", "t") == ([], 999)
+        assert calls == []
+
+    def test_cache_fresca_zero_http_e_zero_budget(self, monkeypatch, tmp_path):
+        self._env(monkeypatch, tmp_path)
+        _write_oracle_cache(tmp_path, "soccer_x", [{"id": "m1"}],
+                            prefix="toa_")
+        calls = []
+        monkeypatch.setattr(odds_api.requests, "get",
+                            lambda *a, **k: calls.append(1))
+        # TTL ampia: la cache e' considerata fresca -> zero spesa
+        payload, _ = odds_api.fetch_h2h_odds("soccer_x", "f", "t", ttl_s=3600)
+        assert payload == [{"id": "m1"}] and calls == []
+        assert odds_api._oracle_h2h_req_day["n"] == 0
+
+    def test_oracle_enabled_non_spegne_il_percorso_h2h(self, monkeypatch,
+                                                       tmp_path):
+        """`ORACLE_ENABLED` e' l'interruttore del percorso a LINEA (3 crediti):
+        spegnerlo non deve spegnere in silenzio anche il 1X2."""
+        monkeypatch.setenv("ORACLE_H2H_BUDGET_STATE", str(tmp_path / "h2h.json"))
+        monkeypatch.setattr(odds_api, "ORACLE_ENABLED", False)
+        monkeypatch.setattr(odds_api, "ORACLE_H2H_BUDGET_DAY", 1)
+        monkeypatch.setattr(odds_api, "credits_hard_stopped", lambda: False)
+        odds_api._oracle_h2h_req_day = {"day": None, "n": 0, "by_league": {}}
+        assert odds_api.oracle_h2h_refusal("soccer_x") is None
+
+    def test_status_dichiara_un_credito_per_chiamata(self, monkeypatch,
+                                                     tmp_path):
+        self._env(monkeypatch, tmp_path, cap=2)
+        st = odds_api.oracle_h2h_budget_status()
+        assert st["credits_per_call"] == 1 and st["cap"] == 2
+        assert st["credits_used_today"] == 0.0 and st["exhausted"] is False
+
+
+class TestFetchH2hForPick:
+    """`line_oracle.fetch_h2h_for_pick`: dedup, rifiuti pre-HTTP, TTL dinamica."""
+
+    NOW = 1_000_000_000.0
+    # NOW + 30' -> TTL corta (2') -> la cache risulta STALE e la HTTP parte.
+    KICKOFF = "2001-09-09T02:16:40Z"
+
+    @pytest.fixture(autouse=True)
+    def _reset(self, monkeypatch):
+        import line_oracle
+        monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "1")
+        monkeypatch.setenv("ORACLE_H2H_DEDUP_S", "120")
+        line_oracle.reset_ondemand_dedup()
+        yield
+        line_oracle.reset_ondemand_dedup()
+
+    def _pick(self, league="Premier League", **kw):
+        d = {"match_id": "m1", "home": "Arsenal", "away": "Everton",
+             "mercato": "1X2", "esito_key": "1", "quota": 1.65,
+             "league": league, "commence": self.KICKOFF}
+        d.update(kw)
+        return d
+
+    def test_lega_non_mappata_non_paga(self):
+        import line_oracle
+        res = line_oracle.fetch_h2h_for_pick(self._pick(league="Lega Inventata"),
+                                            now=self.NOW)
+        assert res["fetched"] is False
+        assert "lega non mappata" in res["reason"]
+
+    def test_interruttore_spento_non_paga(self, monkeypatch):
+        import line_oracle
+        monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "0")
+        calls = []
+        monkeypatch.setattr(odds_api, "fetch_h2h_odds",
+                            lambda *a, **k: calls.append(1))
+        res = line_oracle.fetch_h2h_for_pick(self._pick(), now=self.NOW)
+        assert res["fetched"] is False and calls == []
+        assert "disattivata" in res["reason"]
+
+    def test_rifiuto_pre_http_non_consuma_la_dedup(self, monkeypatch):
+        """Un rifiuto che NON fa HTTP non deve sembrare un tentativo speso."""
+        import line_oracle
+        monkeypatch.setattr(odds_api, "oracle_h2h_refusal",
+                            lambda sport=None: "budget oracolo h2h esaurito (2/2)")
+        res = line_oracle.fetch_h2h_for_pick(self._pick(), now=self.NOW)
+        assert res["fetched"] is False and res["refused_before_http"] is True
+        assert "budget oracolo h2h esaurito" in res["reason"]
+        assert line_oracle._last_ondemand_h2h == {}
+
+    def test_dedup_per_lega(self, monkeypatch):
+        import line_oracle
+        monkeypatch.setattr(odds_api, "oracle_h2h_refusal",
+                            lambda sport=None: None)
+        paid = []
+        monkeypatch.setattr(odds_api, "fetch_h2h_odds",
+                            lambda sport, frm, to, ttl_s=None: (
+                                paid.append(sport)
+                                or ([{"id": "m1"}], 231)))
+        first = line_oracle.fetch_h2h_for_pick(self._pick(), now=self.NOW)
+        assert first["fetched"] is True and paid == ["soccer_epl"]
+        second = line_oracle.fetch_h2h_for_pick(self._pick(), now=self.NOW + 5)
+        assert second["fetched"] is False and "dedup" in second["reason"]
+        assert paid == ["soccer_epl"]           # una sola chiamata
+
+    def test_ttl_dinamica_e_finestra_di_rotazione(self, monkeypatch):
+        """La TTL deve essere quella del TEMPO AL KICKOFF: con la TTL di
+        rotazione (7 giorni) la cache non risulterebbe scaduta e la HTTP non
+        partirebbe — esattamente il problema da risolvere."""
+        import line_oracle
+        monkeypatch.setattr(odds_api, "oracle_h2h_refusal",
+                            lambda sport=None: None)
+        cap: dict = {}
+        def _fake(sport, frm, to, ttl_s=None):
+            cap.update({"sport": sport, "frm": frm, "to": to, "ttl_s": ttl_s})
+            return [{"id": "m1"}], 231
+        monkeypatch.setattr(odds_api, "fetch_h2h_odds", _fake)
+        line_oracle.fetch_h2h_for_pick(self._pick(), now=self.NOW)
+        mtk = po.minutes_to_kickoff(self.KICKOFF, now=self.NOW)
+        assert cap["ttl_s"] == pytest.approx(po.cache_ttl_minutes(mtk) * 60.0)
+        assert cap["ttl_s"] < 24 * 3600            # << tetto di freschezza
+        a = datetime.strptime(cap["frm"], "%Y-%m-%dT%H:%M:%SZ")
+        b = datetime.strptime(cap["to"], "%Y-%m-%dT%H:%M:%SZ")
+        assert (b - a).days == odds_api.QUERY_WINDOW_DAYS
+
+    def test_payload_vuoto_dichiara_il_motivo(self, monkeypatch):
+        import line_oracle
+        monkeypatch.setattr(odds_api, "oracle_h2h_refusal",
+                            lambda sport=None: "budget oracolo h2h esaurito (2/2)")
+        monkeypatch.setattr(odds_api, "fetch_h2h_odds",
+                            lambda *a, **k: ([], 999))
+        res = line_oracle.fetch_h2h_for_pick(self._pick(), now=self.NOW)
+        assert res["fetched"] is False
+        assert "budget oracolo h2h esaurito" in res["reason"]
+
+    def test_dedup_da_env_impossibile_ricade_sul_default(self, monkeypatch):
+        import line_oracle
+        for bad in ("abc", "-5", "0"):
+            monkeypatch.setenv("ORACLE_H2H_DEDUP_S", bad)
+            assert line_oracle.ondemand_h2h_dedup_s() == \
+                line_oracle._ONDEMAND_H2H_DEFAULT_DEDUP_S
+        monkeypatch.setenv("ORACLE_H2H_DEDUP_S", "45")
+        assert line_oracle.ondemand_h2h_dedup_s() == 45.0
 
 
 if __name__ == "__main__":

@@ -232,11 +232,22 @@ class TestTopDownEval:
         assert v["p_true"] == 0.60
 
     def test_no_oracle_fail_closed(self, monkeypatch):
+        """Fail-closed SENZA oracolo, con la causa DICHIARATA (11/10/2026).
+
+        Prima il ramo 1X2 rispondeva `no_oracle` secco: la STESSA stringa per
+        il dato esaurito e per il mercato mai pubblicato. Con la cache della
+        lega assente la diagnosi dice `NO_CACHE` — e' RECUPERABILE con un
+        refresh `h2h` da 1 credito, quindi il pick non e' perso per sempre
+        (misurato in produzione il 10/10: Brasileirao 62,5h, Danimarca 46,5h).
+        """
         _patch_load(monkeypatch, None)
         v = auto_bet._top_down_eval({"match_id": "m4", "home": "A",
                                      "away": "B", "esito_key": "1",
                                      "quota": 1.65})
-        assert v["ok"] is False and v["reason"] == "no_oracle"
+        assert v["ok"] is False
+        assert v["reason"] == "no_oracle/NO_CACHE"
+        # Nessuna spesa richiesta: il gate non ha `fetch_missing` (ramo dry).
+        assert v["action"] is None and v["refusal"] is None
 
     def test_esito_non_coperto_dall_oracolo(self, monkeypatch):
         _patch_load(monkeypatch, {"1": 0.60, "X": 0.25, "2": 0.15,
@@ -630,6 +641,151 @@ class TestConsensoNelGateEv:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Oracolo h2h ON-DEMAND (11/10/2026): la causa DICHIARATA e la spesa
+#     dove serve (misurata in produzione il 10/10: Brasileirao con cache di
+#     62,5h e Superliga Danimarca 46,5h, rotazione 7gg contro freschezza 24h)
+# ---------------------------------------------------------------------------
+
+class TestDiagnosiH2h:
+    """`pinnacle_oracle.h2h_oracle_reason`: la causa machine-readable."""
+
+    def test_ok_con_cache_fresca(self, cache_dir):
+        _write_cache(cache_dir, "soccer_epl", [_match()], age_h=1.0)
+        info = po.h2h_oracle_reason("Arsenal", "Everton", cache_dir=cache_dir)
+        assert info["code"] == "OK" and info["recoverable"] is False
+        assert info["age_h"] == pytest.approx(1.0, abs=0.2)
+
+    def test_stale_cache_e_recuperabile(self, cache_dir):
+        """Il caso reale del 10/10: il dato c'e' ma e' vecchio -> 1 credito."""
+        _write_cache(cache_dir, "soccer_epl", [_match()], age_h=40.0)
+        info = po.h2h_oracle_reason("Arsenal", "Everton", cache_dir=cache_dir)
+        assert info["code"] == "STALE_CACHE" and info["recoverable"] is True
+        assert info["age_h"] == pytest.approx(40.0, abs=0.5)
+        assert "refresh h2h" in info["detail"]
+
+    def test_no_cache_e_recuperabile(self, cache_dir):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        info = po.h2h_oracle_reason("Arsenal", "Everton", cache_dir=cache_dir)
+        assert info["code"] == "NO_CACHE" and info["recoverable"] is True
+
+    def test_not_in_cache_non_e_recuperabile(self, cache_dir):
+        """Cache DELLA LEGA fresca senza la partita: pagare non la fa comparire."""
+        _write_cache(cache_dir, "soccer_epl", [_match(home="X", away="Y")],
+                     age_h=1.0)
+        info = po.h2h_oracle_reason("Arsenal", "Everton",
+                                    cache_dir=cache_dir, sport_key="soccer_epl")
+        assert info["code"] == "NOT_IN_CACHE" and info["recoverable"] is False
+
+    def test_missing_market_non_e_recuperabile(self, cache_dir):
+        """Partita in cache FRESCA ma nessuno sharp coi tre esiti."""
+        row = _match()
+        row["bookmakers"] = []
+        _write_cache(cache_dir, "soccer_epl", [row], age_h=1.0)
+        info = po.h2h_oracle_reason("Arsenal", "Everton", cache_dir=cache_dir)
+        assert info["code"] == "MISSING_MARKET" and info["recoverable"] is False
+
+    def test_sport_key_limita_la_lettura(self, cache_dir):
+        """Una cache SCADUTA di un'ALTRA lega non deve produrre STALE_CACHE:
+        senza `sport_key` il segnale di freschezza sarebbe un falso negativo."""
+        _write_cache(cache_dir, "soccer_epl", [_match()], age_h=40.0)
+        info = po.h2h_oracle_reason("Arsenal", "Everton", cache_dir=cache_dir,
+                                    sport_key="soccer_italy_serie_a")
+        assert info["code"] == "NO_CACHE"
+
+    def test_nomi_non_interpretabili_fail_closed(self, cache_dir):
+        info = po.h2h_oracle_reason("", "Everton", cache_dir=cache_dir)
+        assert info["code"] == "UNKNOWN" and info["recoverable"] is False
+
+
+class TestH2hSkipReason:
+    """`auto_bet._h2h_skip_reason`: il ponte verso il verdetto del gate."""
+
+    def test_motivo_granulare(self, monkeypatch):
+        monkeypatch.setattr(po, "h2h_oracle_reason", lambda *a, **k: {
+            "code": "STALE_CACHE", "recoverable": True,
+            "detail": "cache di 62.5h > tetto 24h"})
+        info = auto_bet._h2h_skip_reason({"home": "A", "away": "B",
+                                          "league": "Premier League"})
+        assert info["reason"] == "no_oracle/STALE_CACHE"
+        assert info["recoverable"] is True
+        assert "62.5h" in info["detail"]
+
+    def test_diagnosi_rotta_non_autorizza_una_spesa(self, monkeypatch):
+        """Fail-safe: nessun codice ricavabile -> NON recuperabile (no spesa)."""
+        def _boom(*a, **k):
+            raise RuntimeError("cache illeggibile")
+        monkeypatch.setattr(po, "h2h_oracle_reason", _boom)
+        info = auto_bet._h2h_skip_reason({"home": "A", "away": "B"})
+        assert info["reason"] == "no_oracle"
+        assert info["recoverable"] is False
+
+
+class TestFetchH2hDalGate:
+    """Il gate 1X2 paga SOLO quando puo' cambiare l'esito."""
+
+    def _pick(self, **kw):
+        base = {"match_id": "m1", "home": "Arsenal", "away": "Everton",
+                "esito_key": "1", "mercato": "1X2", "quota": 1.65,
+                "league": ALLOWED_LEAGUE}
+        base.update(kw)
+        return base
+
+    def test_fuori_finestra_non_paga(self, monkeypatch, cache_dir):
+        """Il gate gira su TUTTO il board: un pick a ore dal kickoff non deve
+        spendere (il refresh servirebbe piu' tardi, in finestra)."""
+        monkeypatch.setattr(auto_bet, "_top_down_load", lambda h, a: None)
+        monkeypatch.setattr(auto_bet, "_TOP_DOWN_CACHE_DIR", cache_dir)
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "before")
+        import line_oracle
+        paid = []
+        monkeypatch.setattr(line_oracle, "fetch_h2h_for_pick",
+                            lambda p, now=None: paid.append(1) or {
+                                "fetched": True, "reason": "ok"})
+        v = auto_bet._top_down_eval(self._pick(), fetch_missing=True)
+        assert paid == []
+        assert v["action"] == "outside_window"
+
+    def test_in_finestra_paga_e_lo_dichiara(self, monkeypatch, cache_dir):
+        monkeypatch.setattr(auto_bet, "_top_down_load", lambda h, a: None)
+        monkeypatch.setattr(auto_bet, "_TOP_DOWN_CACHE_DIR", cache_dir)
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "1")
+        import line_oracle
+        paid = []
+        monkeypatch.setattr(line_oracle, "fetch_h2h_for_pick",
+                            lambda p, now=None: paid.append(
+                                p["league"]) or {
+                                    "fetched": True, "reason": "ok",
+                                    "sport_key": "soccer_epl", "matches": 3,
+                                    "remaining": 232})
+        v = auto_bet._top_down_eval(self._pick(), fetch_missing=True)
+        assert paid == [ALLOWED_LEAGUE]
+        assert v["action"] == "fetched"
+        assert "FETCH ON-DEMAND" in v["detail"]
+        assert v["reason"] == "no_oracle/NO_CACHE"
+
+    def test_dato_scaduto_e_recuperabile_end_to_end(self, monkeypatch,
+                                                    cache_dir):
+        """Caso Brasileirao: cache SCADUTA -> `STALE_CACHE` + la fetch parte."""
+        _write_cache(cache_dir, "soccer_epl", [_match()], age_h=62.5)
+        monkeypatch.setattr(auto_bet, "_top_down_load", lambda h, a: None)
+        monkeypatch.setattr(auto_bet, "_TOP_DOWN_CACHE_DIR", cache_dir)
+        monkeypatch.setattr(auto_bet, "pick_window", lambda p: "within")
+        monkeypatch.setenv("ORACLE_ONDEMAND_ENABLED", "1")
+        import line_oracle
+        paid = []
+        monkeypatch.setattr(line_oracle, "fetch_h2h_for_pick",
+                            lambda p, now=None: paid.append(p["match_id"]) or {
+                                "fetched": True, "reason": "ok",
+                                "sport_key": "soccer_epl", "matches": 4,
+                                "remaining": 232})
+        v = auto_bet._top_down_eval(self._pick(), fetch_missing=True)
+        assert v["reason"] == "no_oracle/STALE_CACHE"
+        assert paid == ["m1"]
+        assert "62.5h" in v["detail"]
+
+
+# ---------------------------------------------------------------------------
 # 3. Tripwire: la pipeline resta ecolgicamente coerente
 # ---------------------------------------------------------------------------
 
@@ -649,7 +805,12 @@ class TestTripwire:
         src = Path(".railway/railway.ts").read_text(encoding="utf-8")
         for env in ("TOP_DOWN_EV", "TOP_DOWN_MARGIN", "AUTO_BET_DRY_RUN",
                     "PINNACLE_CONSENSUS", "PINNACLE_CONSENSUS_METHOD",
-                    "PINNACLE_VALIDATOR_TOLERANCE"):
+                    "PINNACLE_VALIDATOR_TOLERANCE",
+                    # Oracolo h2h on-demand (11/10/2026): senza preserve() un
+                    # `config apply` riporterebbe il budget h2h al default e
+                    # il contatore al path di default, riaprendo il tetto.
+                    "ORACLE_H2H_BUDGET_DAY", "ORACLE_H2H_MAX_CALLS_PER_LEAGUE",
+                    "ORACLE_H2H_BUDGET_STATE", "ORACLE_H2H_DEDUP_S"):
             assert env in src, f"{env} non dichiarata in .railway/railway.ts"
 
     def test_pinnacle_oracle_senza_riferimenti_al_percorso_ordini(self):

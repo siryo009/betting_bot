@@ -376,6 +376,30 @@ export default defineRailway(() => {
       // cosi' un mercato che Pinnacle non pubblica non viene richiesto a ogni
       // ciclo di 60s (fino a 1440 richieste/giorno sulla stessa partita).
       ORACLE_CHECKPOINT_STATE: preserve(),
+      // ORACOLO h2h ON-DEMAND (11/10/2026, `odds_api.fetch_h2h_odds` +
+      // `line_oracle.fetch_h2h_for_pick`): il ramo 1X2 pagava il fail-closed
+      // perche' la cache della lega era SCADUTA — rotazione a 7 giorni contro
+      // un tetto di freschezza di 24h significa ~5 giorni su 7 di oracolo
+      // mancante (misurato il 10/10: Brasileirao 62,5h, Superliga Danimarca
+      // 46,5h). Qui si paga la SOLA `h2h` (1 credito, non 3) sulla cache di
+      // ROTAZIONE `toa_<sport>.json`, la stessa che `load_oracle` legge.
+      // Budget GIORNALIERO DEDICATO, separato da `ORACLE_BUDGET_DAY` (tarato su
+      // chiamate da 3 crediti per i mercati a linea): default di codice 2
+      // chiamate/giorno = 2 crediti. `0` spegne il percorso h2h.
+      ORACLE_H2H_BUDGET_DAY: preserve(),
+      // Tetto di concentrazione per lega del percorso h2h (come il gemello a
+      // linea): con budget 2 le unita' vanno a due leghe distinte, non due
+      // volte sulla stessa.
+      ORACLE_H2H_MAX_CALLS_PER_LEAGUE: preserve(),
+      // Stato PERSISTITO del budget h2h: file SEPARATO da quello a linea, cosi'
+      // il reset o il tetto di un percorso non azzera/consuma l'altro. Senza
+      // preserve() un `config apply` riporterebbe il contatore al path di
+      // default, riaprendo il tetto dopo ogni deploy.
+      ORACLE_H2H_BUDGET_STATE: preserve(),
+      // Dedup per lega del fetch h2h on-demand (secondi, default 120): il gate
+      // gira su TUTTO il board e piu' pick della stessa lega non devono pagare
+      // la stessa chiamata due volte.
+      ORACLE_H2H_DEDUP_S: preserve(),
       // Pre-filtro SX del candidato PRIMA di qualunque spesa oracolo
       // (05/10/2026, `auto_bet._sx_prefilter`): quota fuori dalla fascia
       // giocabile o profondita' SX insufficiente sulla leg giocata -> il pick

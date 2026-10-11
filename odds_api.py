@@ -134,6 +134,40 @@ ORACLE_ENABLED = os.getenv("ORACLE_ENABLED", "1").strip().lower() \
 # sul GIORNO e non sul processo.
 _oracle_req_day = {"day": None, "n": 0, "by_league": {}}
 
+# ---------------------------------------------------------------------------
+# ORACOLO h2h ON-DEMAND (11/10/2026) — 1 CREDITO per lega, budget DEDICATO
+# ---------------------------------------------------------------------------
+# Perche' esiste, misurato in produzione il 10/10/2026: `pinnacle_oracle`
+# considera "fresca" una cache `toa_<sport>.json` solo entro `CACHE_MAX_AGE_H`
+# (24h), mentre le leghe in `SPORTS_INTERVAL_DAYS` a **7 giorni** vengono
+# interrogate una volta a settimana. Risultato: per ~5 giorni su 7 la partita
+# e' presente nella cache ma SCADUTA, quindi `load_oracle` torna None e il gate
+# top-down scarta ogni pick 1X2 con il generico `no_oracle` (Brasileirao: cache
+# 62,5h; Superliga Danimarca: 46,5h). Il rimedio paga UNA chiamata `h2h`
+# (1 credito, NON 3: niente totals/spreads) SOLO per la lega di un pick 1X2 in
+# finestra esecutiva, e riscrive la STESSA cache di rotazione: al giro
+# successivo l'oracolo c'e'.
+#
+# Perche' un budget DEDICATO e non `ORACLE_BUDGET_DAY`: quello misura le
+# chiamate a LINEA (3 crediti l'una, `h2h,totals,spreads`) e ha un tetto
+# tarato su quel costo; mescolare le due spese renderebbe il tetto
+# incomprensibile (1 chiamata h2h vale 1/3 di una a linea) e l'oracolo a linea
+# consumerebbe il budget del percorso 1X2. Con un tetto proprio il costo
+# massimo di questo percorso e' esattamente `ORACLE_H2H_BUDGET_DAY` crediti al
+# giorno. Il DEFAULT e' **2** (2 crediti/giorno): i crediti sono il vincolo
+# stretto del progetto e il consumo misurato (17,5/giorno contro 11,7
+# sostenibili) non lascia margine — alzarlo e' una decisione, non un default.
+ORACLE_H2H_BUDGET_DAY = int(os.getenv("ORACLE_H2H_BUDGET_DAY", "2"))
+# Tetto di CONCENTRAZIONE: con budget 2 una sola lega non puo' prendersi
+# entrambe le unita' (stessa ragione di `ORACLE_MAX_CALLS_PER_LEAGUE` del
+# 06/10, quando due fetch sulla stessa lega lasciarono senza oracolo le altre).
+ORACLE_H2H_MAX_CALLS_PER_LEAGUE = int(
+    os.getenv("ORACLE_H2H_MAX_CALLS_PER_LEAGUE", "1"))
+# Contatore del giorno per il percorso h2h (`n` = chiamate pagate, 1 credito
+# l'una; `by_league` = quante per lega). Persistito sul volume come quello a
+# linea: un riavvio NON deve riaprire il tetto.
+_oracle_h2h_req_day = {"day": None, "n": 0, "by_league": {}}
+
 
 def oracle_max_calls_per_league() -> int:
     """Tetto di chiamate per SINGOLA lega al giorno (0 = nessun tetto)."""
@@ -141,6 +175,64 @@ def oracle_max_calls_per_league() -> int:
         return max(0, int(ORACLE_MAX_CALLS_PER_LEAGUE))
     except (TypeError, ValueError):                             # pragma: no cover
         return 1
+
+
+def _budget_state_from(path: Path,
+                       day: Optional[str] = None) -> Dict[str, Any]:
+    """Stato PERSISTITO del giorno letto da `path`: `{n, by_league}`.
+
+    UNICA implementazione della lettura: la usano il budget dell'oracolo a
+    linea e quello h2h (`oracle_budget_state`/`oracle_h2h_budget_state`), cosi'
+    le due contabilita' non possono divergere su cosa significa "di oggi".
+    Fail-safe: file assente, corrotto o di un altro giorno -> zeri.
+    """
+    target = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"n": 0, "by_league": {}}
+    except Exception as exc:
+        logger.warning("oracolo: stato del budget %s illeggibile (%s)",
+                       path.name, exc)
+        return {"n": 0, "by_league": {}}
+    if not isinstance(data, dict) or str(data.get("day") or "") != target:
+        return {"n": 0, "by_league": {}}
+    try:
+        n = max(0, int(data.get("n") or 0))
+    except (TypeError, ValueError):
+        n = 0
+    by_league: Dict[str, int] = {}
+    raw_bl = data.get("by_league")
+    if isinstance(raw_bl, dict):
+        for k, v in raw_bl.items():
+            try:
+                by_league[str(k)] = max(0, int(v))
+            except (TypeError, ValueError):
+                continue
+    return {"n": n, "by_league": by_league}
+
+
+def _budget_write_to(path: Path, day: str, n: int,
+                     by_league: Optional[Dict[str, int]] = None) -> bool:
+    """Persiste il consumo del giorno (scrittura atomica, mai eccezioni).
+
+    UNICA implementazione della scrittura (linea + h2h). La telemetria del
+    budget non deve MAI far fallire una fetch: un errore di scrittura lascia
+    il contatore in-process (che resta la fonte della decisione) e torna
+    `False`.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        payload: Dict[str, Any] = {"day": str(day), "n": int(n)}
+        if by_league:
+            payload["by_league"] = {str(k): int(v) for k, v in by_league.items()}
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        logger.debug("oracolo: stato del budget non scritto (%s)", exc)
+        return False
 
 
 def oracle_budget_state_path() -> Path:
@@ -164,29 +256,44 @@ def oracle_budget_state(day: Optional[str] = None) -> Dict[str, Any]:
     file illeggibile: il tetto resta comunque applicato, per il resto del
     processo, dal contatore in-process che questa funzione SEMINA.
     """
-    target = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    try:
-        data = json.loads(oracle_budget_state_path().read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {"n": 0, "by_league": {}}
-    except Exception as exc:
-        logger.warning("oracolo a linea: stato del budget illeggibile (%s)", exc)
-        return {"n": 0, "by_league": {}}
-    if not isinstance(data, dict) or str(data.get("day") or "") != target:
-        return {"n": 0, "by_league": {}}
-    try:
-        n = max(0, int(data.get("n") or 0))
-    except (TypeError, ValueError):
-        n = 0
-    by_league: Dict[str, int] = {}
-    raw_bl = data.get("by_league")
-    if isinstance(raw_bl, dict):
-        for k, v in raw_bl.items():
-            try:
-                by_league[str(k)] = max(0, int(v))
-            except (TypeError, ValueError):
-                continue
-    return {"n": n, "by_league": by_league}
+    return _budget_state_from(oracle_budget_state_path(), day)
+
+
+def oracle_h2h_budget_state_path() -> Path:
+    """Path dello stato del budget h2h (env `ORACLE_H2H_BUDGET_STATE`).
+
+    File SEPARATO da quello a linea (`oracle_budget.json`): due contabilita'
+    diverse non vanno nello stesso file, altrimenti il tetto di una consuma
+    il budget dell'altra (e un `reset` azzererebbe entrambe).
+    """
+    raw = (os.getenv("ORACLE_H2H_BUDGET_STATE") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path(DATA_DIR) / "decision" / "oracle_h2h_budget.json"
+
+
+def oracle_h2h_budget_state(day: Optional[str] = None) -> Dict[str, Any]:
+    """Stato persistito del giorno per il budget h2h (`{n, by_league}`)."""
+    return _budget_state_from(oracle_h2h_budget_state_path(), day)
+
+
+def oracle_h2h_budget_used(day: Optional[str] = None) -> int:
+    """Chiamate h2h GIA' pagate in quel giorno (0 se lo stato non e' di oggi)."""
+    return int(oracle_h2h_budget_state(day).get("n") or 0)
+
+
+def save_oracle_h2h_budget(day: str, n: int,
+                           by_league: Optional[Dict[str, int]] = None) -> bool:
+    """Persiste il consumo h2h del giorno (atomico, mai eccezioni)."""
+    return _budget_write_to(oracle_h2h_budget_state_path(), day, n, by_league)
+
+
+def reset_oracle_h2h_budget(day: Optional[str] = None) -> None:
+    """Azzera il contatore h2h del giorno su MEMORIA e volume (test/diagnostica)."""
+    global _oracle_h2h_req_day
+    d = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    _oracle_h2h_req_day = {"day": d, "n": 0, "by_league": {}}
+    save_oracle_h2h_budget(d, 0, {})
 
 
 def oracle_budget_used(day: Optional[str] = None) -> int:
@@ -202,19 +309,7 @@ def save_oracle_budget(day: str, n: int,
     scrittura lascia il contatore in-process (che resta la fonte della
     decisione) e torna `False`.
     """
-    try:
-        target = oracle_budget_state_path()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(target.suffix + ".tmp")
-        payload: Dict[str, Any] = {"day": str(day), "n": int(n)}
-        if by_league:
-            payload["by_league"] = {str(k): int(v) for k, v in by_league.items()}
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(tmp, target)
-        return True
-    except Exception as exc:
-        logger.debug("oracolo a linea: stato del budget non scritto (%s)", exc)
-        return False
+    return _budget_write_to(oracle_budget_state_path(), day, n, by_league)
 
 
 def reset_oracle_budget(day: Optional[str] = None) -> None:
@@ -328,6 +423,104 @@ def oracle_budget_status() -> Dict[str, Any]:
                     "left": max(0, cap - used), "leagues": len(bl),
                     "by_league": bl,
                     "credits_used_today": round(used * per_call, 1),
+                    "exhausted": used >= cap})
+    except Exception as exc:                                     # pragma: no cover
+        out["error"] = str(exc)
+    return out
+
+
+def oracle_h2h_max_calls_per_league() -> int:
+    """Tetto di chiamate h2h per SINGOLA lega al giorno (0 = nessun tetto)."""
+    try:
+        return max(0, int(ORACLE_H2H_MAX_CALLS_PER_LEAGUE))
+    except (TypeError, ValueError):                             # pragma: no cover
+        return 1
+
+
+def _oracle_h2h_ensure_day() -> Dict[str, Any]:
+    """Assicura che il contatore h2h in-process sia quello del GIORNO corrente.
+
+    Idempotente: alla prima chiamata semina dal volume (un riavvio non riapre
+    il tetto), al cambio di giorno UTC riparte da zero. Gemella di
+    `_oracle_budget_ensure_day`, con contatore e file PROPRI.
+    """
+    global _oracle_h2h_req_day
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _oracle_h2h_req_day.get("day") is None:
+        state = oracle_h2h_budget_state(today)
+        _oracle_h2h_req_day = {"day": today, "n": int(state.get("n") or 0),
+                               "by_league": dict(state.get("by_league") or {})}
+    elif _oracle_h2h_req_day.get("day") != today:
+        _oracle_h2h_req_day = {"day": today, "n": 0, "by_league": {}}
+    if not isinstance(_oracle_h2h_req_day.get("by_league"), dict):
+        _oracle_h2h_req_day["by_league"] = {}
+    return _oracle_h2h_req_day
+
+
+def oracle_h2h_league_calls(sport: Optional[str]) -> int:
+    """Chiamate h2h pagate OGGI per quella lega (0 se nessuna)."""
+    try:
+        _oracle_h2h_ensure_day()
+        return int((_oracle_h2h_req_day.get("by_league") or {}).get(str(sport)) or 0)
+    except Exception:                                            # pragma: no cover
+        return 0
+
+
+def oracle_h2h_refusal(sport: Optional[str] = None) -> Optional[str]:
+    """Causa per cui il fetch h2h NON farebbe ALCUNA HTTP (None = libero).
+
+    UNICA definizione dei rifiuti del percorso h2h: `fetch_h2h_odds` le applica
+    e `line_oracle.fetch_h2h_for_pick` le INTERROGA prima di spendere (un
+    rifiuto che non fa HTTP non deve mai risultare come un tentativo pagato).
+
+    NON legge `ORACLE_ENABLED`: quello e' l'interruttore dell'oracolo a LINEA
+    (3 crediti/chiamata) e spegnerlo non deve spegnere in silenzio anche il
+    percorso 1X2 — sono due spese diverse, con due budget diversi. Per
+    spegnere il percorso h2h: `ORACLE_H2H_BUDGET_DAY=0`.
+    """
+    try:
+        if credits_hard_stopped():
+            return "hard-stop crediti"
+    except Exception:                                            # pragma: no cover
+        pass
+    try:
+        state = _oracle_h2h_ensure_day()
+        used = int(state.get("n") or 0)
+        cap = max(0, int(ORACLE_H2H_BUDGET_DAY))
+        if used >= cap:
+            logger.info("oracolo h2h: budget giornaliero %s esaurito "
+                        "(%s chiamate), rinvio a domani", cap, used)
+            return f"budget oracolo h2h esaurito ({used}/{cap} oggi)"
+        if sport:
+            k = int((state.get("by_league") or {}).get(str(sport)) or 0)
+            per_cap = oracle_h2h_max_calls_per_league()
+            if per_cap > 0 and k >= per_cap:
+                return f"tetto h2h per lega raggiunto ({k}/{per_cap} oggi)"
+    except Exception:                                            # pragma: no cover
+        pass
+    return None
+
+
+def oracle_h2h_budget_status() -> Dict[str, Any]:
+    """Istantanea del budget h2h per la telemetria (`credit_diagnose`).
+
+    Gemella di `oracle_budget_status`, ma con `credits_per_call = 1`: il
+    percorso 1X2 paga la SOLA `h2h` (niente totals/spreads).
+    """
+    out: Dict[str, Any] = {"day": None, "used": 0, "cap": 0, "left": 0,
+                           "leagues": 0, "by_league": {},
+                           "max_calls_per_league":
+                           oracle_h2h_max_calls_per_league(),
+                           "credits_per_call": 1,
+                           "credits_used_today": 0, "exhausted": False}
+    try:
+        state = _oracle_h2h_ensure_day()
+        bl = dict(state.get("by_league") or {})
+        used = int(state.get("n") or 0)
+        cap = max(0, int(ORACLE_H2H_BUDGET_DAY))
+        out.update({"day": state.get("day"), "used": used, "cap": cap,
+                    "left": max(0, cap - used), "leagues": len(bl),
+                    "by_league": bl, "credits_used_today": round(used * 1.0, 1),
                     "exhausted": used >= cap})
     except Exception as exc:                                     # pragma: no cover
         out["error"] = str(exc)
@@ -915,7 +1108,8 @@ def _env(name):
         if k.strip() == name: return v.strip()
     return ""
 
-def _get_odds(sport, frm, to, *, markets="h2h", cache_prefix="toa_", ttl_s=None):
+def _get_odds(sport, frm, to, *, markets="h2h", cache_prefix="toa_", ttl_s=None,
+              source=None):
     """Quote the-odds-api per UNA lega, con cache su `<prefix><sport>.json`.
 
     `markets` default "h2h" (1 credito/chiamata): e' il percorso della
@@ -924,11 +1118,18 @@ def _get_odds(sport, frm, to, *, markets="h2h", cache_prefix="toa_", ttl_s=None)
     prefisso cache `toao_` e TTL propri: mai mescolare le due cache (forme
     diverse nello stesso file renderebbero ambiguo il payload per i
     consumatori h2h-only).
+
+    `source` (11/10/2026): etichetta della telemetria crediti. Di default si
+    deriva dal prefisso di cache (`oracle` per `toao_`, `rotation` per gli
+    altri), ma il refresh h2h on-demand scrive sulla cache di ROTAZIONE senza
+    essere rotazione: si attribuisce a se' (`oracle_h2h`) per non gonfiare il
+    costo della rotazione e per poterlo misurare separatamente.
     """
     cache_file = CACHE_DIR / f"{cache_prefix}{sport}.json"
     # Sorgente della chiamata (la cache oracolo usa un prefisso dedicato):
     # serve alla telemetria crediti, che attribuisce il costo per sorgente.
-    _source = "oracle" if cache_prefix == ORACLE_CACHE_PREFIX else "rotation"
+    _source = source or ("oracle" if cache_prefix == ORACLE_CACHE_PREFIX
+                         else "rotation")
     _default_ttl = ttl_s is None
     if ttl_s is None:
         ttl_s = interval_for_sport(sport) * 86400
@@ -1057,6 +1258,65 @@ def fetch_line_odds(sport, frm, to, ttl_s: Optional[float] = None):
         bl[str(sport)] = int(bl.get(str(sport)) or 0) + 1
         save_oracle_budget(state["day"], state["n"], bl)
     return payload, remaining
+
+
+def fetch_h2h_odds(sport, frm, to, ttl_s: Optional[float] = None):
+    """Quote `h2h` per UNA lega (1 CREDITO): rinfresca la cache di ROTAZIONE.
+
+    Rimedio del 11/10/2026: e' il percorso che sblocca i pick 1X2 quando la
+    cache della lega e' SCADUTA (rotazione a 7 giorni contro il tetto di
+    freschezza di 24h di `pinnacle_oracle.CACHE_MAX_AGE_H`). A differenza di
+    `fetch_line_odds` (3 crediti: `h2h,totals,spreads`, cache `toao_*`), qui:
+
+      - si paga la SOLA `h2h` (1 credito: totals/spreads servono ai mercati a
+        linea, non al 1X2);
+      - la cache scritta e' `toa_<sport>.json`, la STESSA che legge
+        `pinnacle_oracle.load_oracle`: al giro successivo l'oracolo 1X2 c'e'
+        (una cache separata non verrebbe MAI letta dal gate);
+      - il budget e' DEDICATO (`ORACLE_H2H_BUDGET_DAY`, 1 credito l'una): non
+        consuma `ORACLE_BUDGET_DAY`, tarato su chiamate da 3 crediti.
+
+    `ttl_s` (dal chiamante, `pinnacle_oracle.cache_ttl_minutes`) DEVE essere
+    piccola perche' la cache risulti STALE e la HTTP parta davvero: con la TTL
+    di rotazione (7 giorni) `_get_odds` la servirebbe senza spendere e senza
+    aggiornare — esattamente il problema da risolvere. Se `None` vale la TTL
+    di finestra (`oracle_cache_ttl_s()`), comunque << 24h.
+
+    `frm`/`to`: finestra del payload. Il chiamante usa la finestra di
+    rotazione (`now .. now + QUERY_WINDOW_DAYS`) cosi' la partita del pick
+    entra nel payload; il costo the-odds-api e' per CHIAMATA, quindi allargare
+    la finestra non costa di piu'.
+
+    Ritorna `(payload, remaining)`, come le altre fetch del modulo.
+    """
+    ttl = oracle_cache_ttl_s() if ttl_s is None else float(ttl_s)
+    # Rifiuti "a monte della richiesta" (budget h2h, tetto per lega,
+    # hard-stop): UNICA definizione in `oracle_h2h_refusal`.
+    refusal = oracle_h2h_refusal(sport)
+    if refusal:
+        return [], 999
+    # Pre-check cache: un HIT non consuma budget (zero spesa = zero costo).
+    cache_file = CACHE_DIR / f"toa_{sport}.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text())
+            if time.time() - data.get("ts", 0) < ttl:
+                return data.get("payload", []), data.get("remaining", 999)
+        except Exception:
+            pass
+    payload, remaining = _get_odds(sport, frm, to, markets="h2h",
+                                   cache_prefix="toa_", ttl_s=ttl,
+                                   source="oracle_h2h")
+    if payload or remaining != 999:
+        # Consumo su ENTRAMBI i contatori h2h (totale crediti + concentrazione
+        # per lega). Scrittura atomica e fail-safe, come il percorso a linea.
+        state = _oracle_h2h_ensure_day()
+        state["n"] = int(state.get("n") or 0) + 1
+        bl = state.setdefault("by_league", {})
+        bl[str(sport)] = int(bl.get(str(sport)) or 0) + 1
+        save_oracle_h2h_budget(state["day"], state["n"], bl)
+    return payload, remaining
+
 
 def fetch_odds(sport=None, commence_time_from=None, commence_time_to=None, **kwargs):
     if not sport: return []

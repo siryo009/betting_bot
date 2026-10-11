@@ -419,9 +419,41 @@ def ondemand_dedup_s() -> float:
     return val
 
 
+# Dedup del percorso h2h ON-DEMAND (11/10/2026): stessa idea di quella a
+# linea, ma su un dizionario SEPARATO. Le due spese hanno budget diversi (1
+# credito contro 3) e una dedup condivisa farebbe credere "gia' pagata" una
+# lega per l'ALTRO percorso (o, peggio, lo bloccherebbe).
+_ONDEMAND_H2H_DEFAULT_DEDUP_S = 120.0
+_last_ondemand_h2h: Dict[str, float] = {}
+
+
+def ondemand_h2h_dedup_s() -> float:
+    """Secondi minimi fra due refresh h2h on-demand della STESSA lega.
+
+    Env `ORACLE_H2H_DEDUP_S` (default 120s). Un valore assente, non numerico o
+    non positivo ricade sul default (una guardia non si spegne con un env
+    sbagliato).
+    """
+    raw = os.getenv("ORACLE_H2H_DEDUP_S")
+    if raw in (None, ""):
+        return _ONDEMAND_H2H_DEFAULT_DEDUP_S
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("line_oracle: ORACLE_H2H_DEDUP_S=%r non numerico, "
+                       "uso %s", raw, _ONDEMAND_H2H_DEFAULT_DEDUP_S)
+        return _ONDEMAND_H2H_DEFAULT_DEDUP_S
+    if val <= 0:
+        logger.warning("line_oracle: ORACLE_H2H_DEDUP_S=%r non positivo, "
+                       "uso %s", raw, _ONDEMAND_H2H_DEFAULT_DEDUP_S)
+        return _ONDEMAND_H2H_DEFAULT_DEDUP_S
+    return val
+
+
 def reset_ondemand_dedup() -> None:
-    """Azzera la memo in-process (test e diagnostica: nessun altro uso)."""
+    """Azzera ENTRAMBE le memo in-process (test e diagnostica)."""
     _last_ondemand.clear()
+    _last_ondemand_h2h.clear()
 
 
 def ondemand_enabled() -> bool:
@@ -738,6 +770,109 @@ def fetch_for_pick(pick: Dict[str, Any],
     return {"fetched": False, "reason": _no_payload_reason(),
             "sport_key": sport, "remaining": remaining,
             "checkpoint": label}
+
+
+def fetch_h2h_for_pick(pick: Dict[str, Any],
+                       now: Optional[float] = None) -> Dict[str, Any]:
+    """Rinfresca la cache `h2h` (1 CREDITO) della lega di QUESTO pick 1X2.
+
+    Rimedio del 11/10/2026 per i pick 1X2 scartati con `no_oracle` perche' la
+    cache della lega era SCADUTA (rotazione a 7 giorni contro un tetto di
+    freschezza di 24h: Brasileirao 62,5h, Superliga Danimarca 46,5h). Gemella
+    di `fetch_for_pick`, ma con TRE differenze dichiarate:
+
+      - paga 1 credito invece di 3 (`odds_api.fetch_h2h_odds`: solo `h2h`);
+      - NESSUN checkpoint: il dato esiste e va solo rinfrescato
+        (`STALE_CACHE`/`NO_CACHE`), non e' un mercato mai pubblicato;
+      - budget DEDICATO (`ORACLE_H2H_BUDGET_DAY`), separato dall'oracolo a
+        linea tarato su chiamate da 3 crediti.
+
+    Ritorna SEMPRE un dict con `fetched` e `reason` machine-readable.
+    `refused_before_http: True` segnala i rifiuti che NON hanno fatto alcuna
+    richiesta (budget/lega/hard-stop). Fail-safe: mai un'eccezione (un
+    problema dell'oracolo non ferma il bot).
+
+    Il chiamante (`auto_bet._ondemand_fetch`, `mode="h2h"`) verifica PRIMA la
+    finestra esecutiva e il tier a pagamento; qui si applicano la dedup per
+    lega e i rifiuti a monte tramite `odds_api.oracle_h2h_refusal`.
+    """
+    if not ondemand_enabled():
+        return {"fetched": False, "sport_key": None,
+                "reason": "fetch on-demand disattivata (ORACLE_ONDEMAND_ENABLED)"}
+    try:
+        import odds_api as oa
+        from sx_signals import league_to_sport
+    except Exception as exc:                                     # pragma: no cover
+        return {"fetched": False, "reason": f"dipendenze non disponibili ({exc})",
+                "sport_key": None}
+    sport = league_to_sport(str(pick.get("league") or ""))
+    if not sport:
+        return {"fetched": False, "reason": "lega non mappata a uno sport key",
+                "sport_key": None}
+    ts_now = time.time() if now is None else float(now)
+    # Rifiuto A MONTE della richiesta (budget h2h, tetto per lega, hard-stop):
+    # `fetch_h2h_odds` tornerebbe senza fare HTTP, quindi si esce PRIMA di
+    # toccare la memo di dedup (un rifiuto che non ha fatto HTTP non deve
+    # risultare come un tentativo speso).
+    try:
+        refusal = oa.oracle_h2h_refusal(sport)
+    except Exception:                                            # pragma: no cover
+        refusal = None
+    if refusal:
+        return {"fetched": False, "sport_key": sport, "reason": refusal,
+                "refused_before_http": True}
+    dedup = ondemand_h2h_dedup_s()
+    last = _last_ondemand_h2h.get(sport)
+    if last is not None and (ts_now - last) < dedup:
+        return {"fetched": False, "sport_key": sport,
+                "reason": f"dedup ({ts_now - last:.0f}s < {dedup:.0f}s)"}
+    # TTL DINAMICA sul tempo al kickoff: il payload appena scaricato deve
+    # risultare FRESCO al giro successivo (altrimenti la spesa non cambierebbe
+    # nulla) e la TTL di rotazione (7 giorni) NON deve servire la cache senza
+    # HTTP — era esattamente il problema da risolvere.
+    ttl_s: Optional[float] = None
+    try:
+        import pinnacle_oracle as po
+        _mtk = po.minutes_to_kickoff(pick.get("commence") or pick.get("kickoff"),
+                                     now=ts_now)
+        if _mtk is not None:
+            ttl_s = float(po.cache_ttl_minutes(_mtk) * 60.0)
+    except Exception:                                            # pragma: no cover
+        ttl_s = None
+    now_dt = datetime.fromtimestamp(ts_now, tz=timezone.utc)
+    frm = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    to = (now_dt + timedelta(days=int(getattr(oa, "QUERY_WINDOW_DAYS", 7)))
+          ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # La memo si aggiorna PRIMA della chiamata: un errore di rete non deve
+    # produrre un nuovo tentativo a ogni pick dello stesso giro.
+    _last_ondemand_h2h[sport] = ts_now
+    try:
+        payload, remaining = oa.fetch_h2h_odds(sport, frm, to, ttl_s=ttl_s)
+    except Exception as exc:
+        return {"fetched": False, "reason": f"errore fetch ({exc})",
+                "sport_key": sport}
+    if payload:
+        return {"fetched": True, "reason": "fetch h2h on-demand eseguita",
+                "sport_key": sport, "matches": len(payload),
+                "remaining": remaining}
+    return {"fetched": False, "reason": _no_payload_h2h_reason(),
+            "sport_key": sport, "remaining": remaining}
+
+
+def _no_payload_h2h_reason() -> str:
+    """PERCHE' il refresh h2h non ha prodotto payload (causa DICHIARATA).
+
+    Le cause "a monte della richiesta" arrivano da `odds_api.oracle_h2h_refusal`
+    (stessa fonte del controllo pre-HTTP: una sola definizione).
+    """
+    try:
+        import odds_api as oa
+        refusal = oa.oracle_h2h_refusal()
+    except Exception:                                            # pragma: no cover
+        refusal = None
+    if refusal:
+        return refusal
+    return "nessun payload (nessuna partita in finestra o cache non riscritta)"
 
 
 def _no_payload_reason() -> str:

@@ -243,8 +243,19 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # che non hanno speso nulla. Stato nella tmp + contatore azzerato.
     monkeypatch.setenv("ORACLE_BUDGET_STATE",
                        str(tmp_path / "oracle_budget.json"))
+    # Budget h2h ON-DEMAND (11/10/2026, `ORACLE_H2H_BUDGET_*`): contabilita'
+    # SEPARATA da quella a linea (1 credito/chiamata contro 3). Stesso motivo
+    # dell'isolamento sopra: senza, un test che paga il refresh h2h
+    # scriverebbe il contatore nel data dir VERO e il contatore in-process
+    # resterebbe carico fra i test dello stesso processo (facendo apparire
+    # "budget h2h esaurito" in prove che non hanno speso nulla).
+    monkeypatch.setenv("ORACLE_H2H_BUDGET_STATE",
+                       str(tmp_path / "oracle_h2h_budget.json"))
     import odds_api as _oa
     _oa._oracle_req_day = {"day": None, "n": 0, "by_league": {}}
+    _oa._oracle_h2h_req_day = {"day": None, "n": 0, "by_league": {}}
+    import line_oracle as _lo
+    _lo.reset_ondemand_dedup()
     import oracle_skips as _oracle_skips
     _oracle_skips.reset_dedup()
     # Gate di prontezza dell'Over/Under (26/09): la memoria vive a livello di

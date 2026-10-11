@@ -184,6 +184,15 @@ def oracle_budget(*, days: float = 7.0) -> Dict[str, Any]:
         out["budget"] = oa.oracle_budget_status()
     except Exception as e:                                       # pragma: no cover
         out["budget"] = {"error": str(e)}
+    # Budget h2h (11/10/2026): contabilita' SEPARATA da quella a linea (1
+    # credito/chiamata contro 3). Senza questa riga il tetto saturato del
+    # percorso 1X2 sarebbe invisibile nella diagnosi — la stessa classe di
+    # difetto del 06/10 sull'oracolo a linea.
+    try:
+        import odds_api as oa
+        out["budget_h2h"] = oa.oracle_h2h_budget_status()
+    except Exception as e:                                       # pragma: no cover
+        out["budget_h2h"] = {"error": str(e)}
     try:
         import oracle_skips
         s = oracle_skips.summary(days=days)
@@ -273,6 +282,22 @@ def format_report(d: Dict[str, Any]) -> str:
             lines.append("    rifiuti del fetch (finestra "
                          f"{d.get('days')} gg): " + ", ".join(
                              f"{k} {v}" for k, v in list(ref.items())[:4]))
+    # Budget h2h (11/10/2026): il percorso 1X2 che si paga quando la cache
+    # della lega e' SCADUTA (rotazione 7gg vs freschezza 24h).
+    oh = orc.get("budget_h2h") or {}
+    if oh.get("error"):
+        lines.append(f"  ⚠️ budget oracolo h2h non leggibile: {oh['error']}")
+    else:
+        lines.append(f"  🎯 oracolo h2h: {oh.get('used')}/{oh.get('cap')} "
+                     f"chiamate usate oggi ({oh.get('left')} residue) | "
+                     f"{oh.get('leagues')} leghe distinte | tetto per lega "
+                     f"{oh.get('max_calls_per_league')} | "
+                     f"~{oh.get('credits_used_today')} crediti"
+                     + ("  ⚠️ TETTO ESAURITO" if oh.get("exhausted") else ""))
+        blh = oh.get("by_league") or {}
+        if blh:
+            lines.append("    per lega: " + ", ".join(
+                f"{k.replace('soccer_', '')} {v}" for k, v in blh.items()))
     inv = d.get("inventory") or {}
     lines.append("  🗃️ cache per categoria:")
     for cat in SOURCES + ("other",):

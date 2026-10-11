@@ -1465,6 +1465,109 @@ def h2h_cache_is_stale(home: str, away: str, *,
     return False
 
 
+def h2h_oracle_reason(home: str, away: str, *,
+                      cache_dir: Optional[Path] = None,
+                      sport_key: Optional[str] = None,
+                      now: Optional[float] = None) -> Dict[str, Any]:
+    """PERCHE' l'oracolo 1X2 manca per una partita (0 crediti, sola lettura).
+
+    Speculare a `line_oracle_reason`, ma per il percorso h2h. Il gate top-down
+    rispondeva `no_oracle` con lo STESSO testo a due cause OPPOSTE:
+      - 'il dato esiste ed e' solo VECCHIO' -> si rinfresca con UNA chiamata
+        `h2h` (1 credito) e il pick torna giocabile;
+      - 'la partita non e' nel palinsesto' -> pagare non la fa comparire.
+    Misurato in produzione il 10/10/2026: Brasileirao con cache di **62,5h** e
+    Superliga Danimarca **46,5h** contro il tetto `CACHE_MAX_AGE_H` (24h). Le
+    due leghe hanno la rotazione a **7 giorni**, quindi per ~5 giorni su 7 la
+    partita e' in cache ma SCADUTA: ogni pick 1X2 di quelle leghe moriva senza
+    oracolo, senza che il log dicesse che bastava un refresh.
+
+    Codici (UNICA definizione della diagnosi: il gate non reinterpreta la
+    cache, la legge qui):
+      - `OK`             — l'oracolo 1X2 c'e' (nessun problema da risolvere);
+      - `STALE_CACHE`    — la partita e' in cache ma oltre `CACHE_MAX_AGE_H`
+                           -> **RECUPERABILE** con un refresh h2h;
+      - `MISSING_MARKET` — cache FRESCA con la partita, ma nessuna fonte sharp
+                           ha i tre esiti (il 1X2 si pubblica presto: raro)
+                           -> non si ripaga;
+      - `NO_CACHE`       — nessuna cache per la lega (mai interrogata di
+                           recente) -> **RECUPERABILE**;
+      - `NOT_IN_CACHE`   — la cache DELLA LEGA e' fresca e NON contiene la
+                           partita: non e' pubblicata, pagare ora non cambia
+                           nulla;
+      - `UNKNOWN`        — nomi non interpretabili o errore di lettura:
+                           nessuna conclusione, nessuna spesa (fail-closed).
+
+    `sport_key`: restringe la lettura al file della lega (`toa_<sport>.json`),
+    cosi' 'cache fresca presente' significa 'QUESTA lega e' stata interrogata
+    di recente'. Senza, si scandiscono tutte le cache ma il segnale di
+    freschezza NON si usa (una cache fresca di un'ALTRA lega non dice nulla su
+    questa: sarebbe un falso `NOT_IN_CACHE`, cioe' un pick perso in silenzio).
+
+    Fail-safe: qualunque errore -> `UNKNOWN` + `recoverable=False` (mai una
+    spesa su una diagnosi che non si e' potuta fare).
+    """
+    out: Dict[str, Any] = {"code": "UNKNOWN", "recoverable": False,
+                           "detail": "", "age_h": None}
+    try:
+        folder = Path(cache_dir) if cache_dir else Path(DATA_DIR)
+        ts_now = time.time() if now is None else float(now)
+        h, a = _cf(home), _cf(away)
+        if not h or not a:
+            out["detail"] = "nomi squadra non interpretabili"
+            return out
+        paths = ([folder / f"toa_{sport_key}.json"] if sport_key
+                 else _cache_files(folder))
+        fresh_file = False
+        stale_age: Optional[float] = None
+        for path in paths:
+            data = _read_cache(path)
+            if not isinstance(data, dict):
+                continue
+            age_h = (ts_now - float(data.get("ts") or 0)) / 3600.0
+            fresh = age_h <= CACHE_MAX_AGE_H
+            if fresh and sport_key:
+                fresh_file = True
+            match = None
+            for row in (data.get("payload") or []):
+                if _row_matches(row, h, a):
+                    match = row
+                    break
+            if match is None:
+                continue
+            if not fresh:
+                if stale_age is None or age_h < stale_age:
+                    stale_age = age_h
+                continue
+            if oracle_quotes([match], match.get("home_team") or "",
+                             match.get("away_team") or ""):
+                return {"code": "OK", "recoverable": False,
+                        "age_h": round(age_h, 1),
+                        "detail": f"oracolo presente (cache {age_h:.1f}h)"}
+            return {"code": "MISSING_MARKET", "recoverable": False,
+                    "age_h": round(age_h, 1),
+                    "detail": (f"partita in cache fresca ({age_h:.1f}h) ma "
+                               f"nessuna fonte sharp con i tre esiti: il 1X2 "
+                               f"non e' ancora pubblicato")}
+        if stale_age is not None:
+            return {"code": "STALE_CACHE", "recoverable": True,
+                    "age_h": round(stale_age, 1),
+                    "detail": (f"cache di {stale_age:.1f}h > tetto "
+                               f"{CACHE_MAX_AGE_H:g}h: il dato esiste ma non e' "
+                               f"piu' il mercato (un refresh h2h lo rende "
+                               f"utilizzabile)")}
+        if fresh_file:
+            return {"code": "NOT_IN_CACHE", "recoverable": False,
+                    "detail": ("la cache della lega e' FRESCA ma non contiene "
+                               "la partita: quote non ancora pubblicate")}
+        return {"code": "NO_CACHE", "recoverable": True,
+                "detail": ("nessuna cache per la lega (mai interrogata di "
+                           "recente): un refresh h2h la copre")}
+    except Exception as exc:
+        out["detail"] = f"diagnosi non disponibile: {exc}"
+        return out
+
+
 def _ou_label(line: float) -> str:
     """Linea OU in formato ledger ('2.5' -> '2.5', '2.25' -> '2.25').
 

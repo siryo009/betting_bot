@@ -483,6 +483,50 @@ def _line_skip_reason(pick: dict, mercato: str, line: float | None) -> dict:
                           f"diagnosi non disponibile: {exc})"}
 
 
+def _h2h_skip_reason(pick: dict) -> dict:
+    """Motivo GRANULARE (`no_oracle/<CODE>`) dello scarto di un pick 1X2.
+
+    11/10/2026. Il ramo 1X2 rispondeva `no_oracle` con lo STESSO testo a due
+    cause OPPOSTE (misurato in produzione il 10/10: Brasileirao con cache di
+    62,5h, Superliga Danimarca 46,5h):
+
+      - `STALE_CACHE`  -> il dato esiste ed e' solo VECCHIO: un refresh `h2h`
+        (1 credito) lo rende utilizzabile -> RECUPERABILE;
+      - `NO_CACHE`     -> la lega non e' mai stata scaricata di recente ->
+        RECUPERABILE;
+      - `MISSING_MARKET` / `NOT_IN_CACHE` -> la partita non e' nel palinsesto
+        (o nessuno sharp ha i tre esiti): pagare NON la farebbe comparire;
+      - `OK`            -> l'oracolo c'e' (nessun problema da risolvere);
+      - `UNKNOWN`       -> diagnosi impossibile: nessuna spesa (fail-closed).
+
+    La diagnosi vive in `pinnacle_oracle.h2h_oracle_reason` (UNICA definizione:
+    questo gate non reinterpreta la cache). `sport_key` restringe la lettura al
+    file della lega, cosi' "cache fresca" significa "QUESTA lega e' stata
+    interrogata di recente" e `NOT_IN_CACHE` non diventa un falso negativo su
+    una cache fresca di un'ALTRA lega.
+
+    Fail-safe: qualunque errore ricade sul generico (mai una spesa su una
+    diagnosi che non si e' potuta fare).
+    """
+    try:
+        import pinnacle_oracle as po
+        from sx_signals import league_to_sport
+        sport = league_to_sport(str(pick.get("league") or "")) or None
+        info = po.h2h_oracle_reason(
+            pick.get("home") or "", pick.get("away") or "",
+            cache_dir=_TOP_DOWN_CACHE_DIR, sport_key=sport)
+        code = str((info or {}).get("code") or "UNKNOWN")
+        detail = str((info or {}).get("detail") or "")
+        return {"reason": f"no_oracle/{code}", "detail": detail,
+                "recoverable": bool((info or {}).get("recoverable"))}
+    except Exception as exc:                                # pragma: no cover
+        return {"reason": "no_oracle",
+                "detail": f"Pinnacle assente/incompleto/stantio "
+                          f"(fail-closed: senza verita' non si decide; "
+                          f"diagnosi non disponibile: {exc})",
+                "recoverable": False}
+
+
 def pick_window(pick: dict) -> str:
     """Verdetto di finestra esecutiva di un pick (UNICA definizione).
 
@@ -590,7 +634,7 @@ def _oracle_code(info: dict) -> str | None:
 
 
 def _ondemand_fetch(pick: dict, info: dict, enabled: bool,
-                    out: dict | None = None) -> str:
+                    out: dict | None = None, *, mode: str = "line") -> str:
     """Avvia la fetch on-demand della lega del pick: ritorna il SUFFISSO di log.
 
     Il budget dell'oracolo a linea e' scarso e CONDIVISO con lo scheduler
@@ -654,7 +698,16 @@ def _ondemand_fetch(pick: dict, info: dict, enabled: bool,
                     f"pagamento (ORACLE_PAID_TIERS; valutazione solo sulla "
                     f"cache passiva)")
         import line_oracle
-        res = line_oracle.fetch_for_pick(pick, code=_oracle_code(info))
+        # DUE PERCORSI, un solo punto di chiamata. `mode="h2h"` (11/10/2026):
+        # il ramo 1X2 paga UNA chiamata `h2h` (1 credito) sulla cache di
+        # ROTAZIONE, con budget proprio (`ORACLE_H2H_BUDGET_DAY`) — e' il
+        # rimedio ai pick persi perche' la cache della lega era scaduta
+        # (rotazione 7 giorni vs freschezza 24h). `mode="line"` (default):
+        # il percorso storico OU/AH a 3 crediti, INVARIATO.
+        if mode == "h2h":
+            res = line_oracle.fetch_h2h_for_pick(pick)
+        else:
+            res = line_oracle.fetch_for_pick(pick, code=_oracle_code(info))
     except Exception:
         out["action"] = "error"
         return ""
@@ -685,6 +738,12 @@ def _top_down_eval(pick: dict, league: str | None = None, *,
     e' la seconda forma della stessa condizione: `quota >= true_odd x
     (1 + margine)`. Un'eventuale divergenza fra le due letture e' un bug
     del gate, non una soglia nuova.
+
+    Nessun credito in piu' per il percorso OU/AH: `fetch_for_pick` passa da
+    `odds_api.fetch_line_odds`, che applica lo STESSO tetto giornaliero
+    dell'altro percorso a linea. Il percorso h2h (`mode="h2h"`) ha invece un
+    budget SUO (`ORACLE_H2H_BUDGET_DAY`, 1 credito/chiamata): vedi
+    `line_oracle.fetch_h2h_for_pick`.
 
     Corsia top-down (25/09, `TOP_DOWN_BYPASS`): nelle leghe in PROBATION
     l'oracolo deve battere il segnale di un extra (`TOP_DOWN_PROBATION_EXTRA`,
@@ -763,9 +822,20 @@ def _top_down_eval(pick: dict, league: str | None = None, *,
                         "detail": (info["detail"] + extra) if extra else info["detail"],
                         "action": _fetch_action.get("action"),
                         "refusal": _fetch_action.get("refusal")}
-            return {"ok": False, "reason": "no_oracle",
-                    "detail": "Pinnacle assente/incompleto/stantio "
-                              "(fail-closed: senza verita' non si decide)"}
+            # Ramo 1X2 (11/10/2026): la stessa diagnosi granulare dei mercati a
+            # linea. Il testo secco non distingueva il dato SCADUTO (basta un
+            # refresh `h2h` da 1 credito: rotazione 7gg vs freschezza 24h =
+            # ~5 giorni su 7 di cache scaduta) dal mercato non pubblicato da
+            # Pinnacle: misurato in produzione il 10/10 su Brasileirao
+            # (cache 62,5h) e Superliga Danimarca (46,5h).
+            info = _h2h_skip_reason(pick)
+            _fetch_action: dict = {}
+            extra = _ondemand_fetch(pick, info, fetch_missing,
+                                    out=_fetch_action, mode="h2h")
+            return {"ok": False, "reason": info["reason"],
+                    "detail": (info["detail"] + extra) if extra else info["detail"],
+                    "action": _fetch_action.get("action"),
+                    "refusal": _fetch_action.get("refusal")}
         _esito_key = str(pick.get("esito_key") or "")
         if probs.get("__key"):
             _esito_key = str(probs["__key"])
