@@ -2955,6 +2955,44 @@ async def tennis_lane_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error("tennis_lane_job: scan (%s)", e)
 
 
+async def gridiron_lane_job(context: ContextTypes.DEFAULT_TYPE):
+    """Corsia FOOTBALL USA (11/10/2026): oracolo NFL/NCAA + telemetria.
+
+    Il ciclo dell'ordine vero e' in `auto_bet` (`_gridiron_picks`, corsia LIVE).
+    Questo job fa i due pezzi che non hanno senso a ogni giro da 60s: (1)
+    aggiorna le cache dell'oracolo Pinnacle football USA (`regions=eu`,
+    `markets=h2h`: **1 credito per lega con cache scaduta**, budget giornaliero
+    4 e hard-stop crediti); (2) registra la telemetria nel ledger (`predictions`
+    mercato `1X2`, `match_id` `sx-<eventId>`: il settlement SX-native la salda
+    GRATIS col market hash). `GRIDIRON_LANE=0` spegne tutto. Fail-safe: un
+    errore non ferma il bot.
+    """
+    try:
+        import gridiron_lane
+    except Exception as e:                                       # pragma: no cover
+        logger.error("gridiron_lane_job: modulo non disponibile (%s)", e)
+        return
+    if not gridiron_lane.enabled():
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        refreshed = await loop.run_in_executor(_scan_executor,
+                                               gridiron_lane.refresh_oracle)
+        logger.info("gridiron_lane_job: oracolo — leghe %s, scaricate %s, "
+                    "richieste oggi %s/%s", refreshed.get("keys"),
+                    refreshed.get("fetched"), refreshed.get("requests_today"),
+                    gridiron_lane.REQ_BUDGET_DAY)
+    except Exception as e:
+        logger.error("gridiron_lane_job: refresh oracolo (%s)", e)
+    try:
+        res = await loop.run_in_executor(_scan_executor, gridiron_lane.scan)
+        logger.info("gridiron_lane_job: %s partite, %s candidati, %s "
+                    "registrati", res.get("events"), res.get("candidates"),
+                    res.get("registered"))
+    except Exception as e:
+        logger.error("gridiron_lane_job: scan (%s)", e)
+
+
 async def tennis_oracle_job(context: ContextTypes.DEFAULT_TYPE):
     """Tornei tennis NUOVI (11/10/2026): prezzati entro pochi minuti.
 
@@ -3533,6 +3571,15 @@ def main() -> None:
         _tennis_min = max(60, int(os.getenv("TENNIS_JOB_INTERVAL_MIN", "360")))
         job_queue.run_repeating(tennis_lane_job, interval=_tennis_min * 60,
                                 first=330,
+                                job_kwargs={"max_instances": 1})
+        # Corsia FOOTBALL USA (11/10/2026, torneo SX "Gridiron Gauntlet"):
+        # oracolo Pinnacle NFL/NCAA + telemetria. Ogni 3h (le cache hanno TTL
+        # 12h e le leghe sono 2: ~4 crediti/giorno, il budget della corsia).
+        # Gli ORDINI football USA sono nella corsia LIVE di auto_bet
+        # (`_gridiron_picks`), quindi questo job non decide nulla sul denaro.
+        _grid_min = max(60, int(os.getenv("GRIDIRON_JOB_INTERVAL_MIN", "180")))
+        job_queue.run_repeating(gridiron_lane_job, interval=_grid_min * 60,
+                                first=420,
                                 job_kwargs={"max_instances": 1})
         # Tornei NUOVI (11/10/2026): l'elenco delle chiavi attive e' GRATUITO,
         # quindi si controlla ogni pochi minuti (default 10') e si paga 1

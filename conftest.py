@@ -218,6 +218,29 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # dall'ordine dei test. `reset_cache()` azzera ENTRAMBE le memo.
     import tennis_lane as _tl
     _tl.reset_cache()
+    # Corsia FOOTBALL USA (11/10/2026, torneo Gridiron Gauntlet): stessa logica
+    # della corsia tennis — senza isolamento un `scan()` di test scriverebbe la
+    # cache `toa_americanfootball_*.json` e lo stato del budget nella cartella
+    # dati REALE, da cui la produzione li leggerebbe come FRESCHI (un test non
+    # deve poter cambiare cio' che la produzione vede). La corsia e' SPENTA di
+    # default nei test — discovery pubblica SX + oracolo sarebbero rete reale
+    # per misurare altro — e il file dedicato la riaccende con provider e
+    # `http_get` iniettati.
+    monkeypatch.setenv("GRIDIRON_LANE_STATE",
+                       str(tmp_path / "gridiron_state.json"))
+    monkeypatch.setenv("GRIDIRON_ORACLE_CACHE",
+                       str(tmp_path / "gridiron_oracle"))
+    import gridiron_lane as _gl
+    _gl.reset_cache()
+    if "test_gridiron_lane" not in request.node.nodeid:
+        monkeypatch.setenv("GRIDIRON_LANE", "0")
+    # Staking del TORNEO (11/10/2026, `tournament.py`): il layer puo' solo
+    # ALZARE lo stake di un pick gia' approvato (return-based), ma nei test che
+    # misurano altro (cap, wallet, liquidita', T-60, recinto) un incremento
+    # cambierebbe l'importo atteso e l'esito delle asserzioni. Spento alla
+    # fonte: il file dedicato lo riaccende esplicitamente.
+    if "test_tournament" not in request.node.nodeid:
+        monkeypatch.setenv("TOURNAMENT_MODE", "0")
     # Motore quantitativo TENNIS (03/10/2026, `tennis_quant.py`): il ledger ELO
     # vive nel ledger SQLite PRINCIPALE e la telemetria in un JSONL. In test
     # entrambi vanno nella tmp: senza isolamento un `run_cycle()` scriverebbe

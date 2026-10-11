@@ -318,6 +318,42 @@ export default defineRailway(() => {
       TENNIS_QUANT_HOURS_AHEAD: preserve(),
       TENNIS_QUANT_MIN_MODEL_MATCHES: preserve(),
       TENNIS_QUANT_SHARP_METHOD: preserve(),
+      // Corsia FOOTBALL USA (11/10/2026, `gridiron_lane.py`): discovery SX
+      // sportId 8 (NFL/NCAA) + oracolo Pinnacle `regions=eu` a 2 esiti + gate
+      // EV e fascia quota 1.30-3.00. Gli ORDINI sono nella corsia LIVE di
+      // `auto_bet` (`_gridiron_picks`); il job aggiorna l'oracolo (1 credito
+      // per lega con cache scaduta) e registra la telemetria.
+      GRIDIRON_LANE: preserve(),
+      GRIDIRON_SX_SPORT_ID: preserve(),
+      GRIDIRON_TYPES: preserve(),
+      GRIDIRON_SPORTS: preserve(),
+      GRIDIRON_HOURS_AHEAD: preserve(),
+      GRIDIRON_MAX_MARKETS: preserve(),
+      GRIDIRON_EV_MIN: preserve(),
+      GRIDIRON_ODDS_MIN: preserve(),
+      GRIDIRON_ODDS_MAX: preserve(),
+      GRIDIRON_MIN_INV_SUM: preserve(),
+      GRIDIRON_MAX_INV_SUM: preserve(),
+      GRIDIRON_ORACLE_TTL_MIN: preserve(),
+      GRIDIRON_REQ_BUDGET_DAY: preserve(),
+      GRIDIRON_ORACLE_CACHE: preserve(),
+      GRIDIRON_LANE_STATE: preserve(),
+      GRIDIRON_DISCOVERY_TTL_S: preserve(),
+      GRIDIRON_JOB_INTERVAL_MIN: preserve(),
+      GRIDIRON_ODDS_BASE: preserve(),
+      // TORNEO RETURN-BASED (11/10/2026, `tournament.py`): layer di staking
+      // SOPRA il percorso live (SX "Gridiron Gauntlet": i punti sono i ritorni
+      // lordi delle vincite, le perdite non tolgono nulla). Puo' solo ALZARE
+      // lo stake di un segnale GIA' approvato, entro un budget di esposizione,
+      // un cap per ordine e una soglia di sicurezza sull'equity. `TOURNAMENT_MODE`
+      // e' SPENTO di default: con 0 il giro e' identico a prima.
+      TOURNAMENT_MODE: preserve(),
+      TOURNAMENT_LABEL: preserve(),
+      TOURNAMENT_BUDGET_USDC: preserve(),
+      TOURNAMENT_SAFETY_FLOOR_USDC: preserve(),
+      TOURNAMENT_MAX_STAKE_USDC: preserve(),
+      TOURNAMENT_AGGRESSION: preserve(),
+      TOURNAMENT_CLASSES: preserve(),
       TEST_NOTIFY_KEY: preserve(),
       TOP_DOWN_EV: preserve(),
       TOP_DOWN_MARGIN: preserve(),

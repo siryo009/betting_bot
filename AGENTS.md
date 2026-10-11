@@ -10672,3 +10672,118 @@ leghe). Il taglio precedente resta invariato e verificato nella stessa lettura:
 supera il sostenibile, le leve sono `ORACLE_H2H_MAX_CALLS_PER_LEAGUE`
 (concentrazione per lega) o tornare a 2-3; la sorveglianza e' la stessa del
 burn crediti (finestra 48h + `alert`).
+
+### Corsia FOOTBALL USA + torneo "Gridiron Gauntlet" (11/10/2026)
+
+**Direttiva del proprietario**: partecipare al torneo SX Bet **Gridiron
+Gauntlet** (08/10 06:00 -> 20/10 06:00, 58 partecipanti, **$7.777 divisi fra i
+top 30**, regola **RETURN betting**: "wins increase your standing, losses will
+have no impact"), con integrazione dei mercati NFL/NCAA, staking piu'
+aggressivo (le perdite non tolgono punti) ma con soglia di sicurezza sul
+bankroll, e obiettivo **top 30**.
+
+**⚠️ CAMBIO DI DECISIONE DICHIARATO.** Il 01/10/2026 questo file registrava
+*"NON costruire la corsia sport USA"* (tennis + eSports coprono gia' la notte
+europea). La direttiva attuale **revoca quella decisione**: il motivo nuovo non
+e' un edge, e' un **torneo sponsorizzato** con un premio reale — e la
+partecipazione richiede che il football USA sia VISIBILE al sistema, cosa che
+non era (la discovery del calcio e' `sportIds=5`, il tennis 6, gli eSports 9;
+`market_shadow` legge lo sport 8 **solo in telemetria**).
+
+**⚠️ IL TORNEO NON E' UN EDGE — e il codice non lo tratta come tale.** In un
+torneo return-based l'ottimale *per la classifica* e' la massima varianza
+possibile, anche a EV negativo volontario. Il progetto e' costruito al
+contrario (solo +EV, oracolo sharp fail-closed, edge minimo, cap severo):
+il layer del torneo puo' solo **ALZARE lo stake di un segnale che i gate hanno
+GIA' approvato**, entro un budget e una soglia di sicurezza. Nessun gate viene
+bypassato, nessun EV negativo diventa giocabile.
+
+**1) `gridiron_lane.py` (NUOVO) — la corsia football USA.** Discovery SX
+pubblica (sportId **8**, type **226** = moneyline 1 mercato/evento, lati sulle
+chiavi book `1`/`2`), oracolo Pinnacle **a 2 esiti**, gate EV, pick con
+`match_id=sx-<eventId>`, `mercato="1X2"`, `esito_key` `1`/`2`,
+`market_id`/`selection_id` e il flag `gridiron_lane`. Zero chiavi, zero
+crediti in discovery, zero ordini.
+- **ORACOLO: `regions=eu`.** Misurato (probe reali): con `regions=eu` Pinnacle
+  copre **5/5 eventi NFL** e 15/59 NCAA (1 credito/chiamata); con `regions=us`
+  Pinnacle ha **0 eventi** (solo betmgm/draftkings/fanduel/bovada, che non sono
+  sharp). Quindi la scelta utente "oracolo US" si realizza cosi': **la regione
+  e' `eu`, lo sport e' americano** — stessa regione di tutta la rotazione quote.
+- **Struttura SX misurata** (probe pubblico): type 226 (moneyline, no linea),
+  type 342 (spread, `line` dal punto di vista di teamOne), type 28 (totale,
+  `line`). I tre tipi sono nativi del contratto 2.0 (`ML_OT`/`AH_OT`/`OU_OT`);
+  il default della corsia e' il **solo 226** (unico che l'oracolo `h2h` copre a
+  1 credito).
+- **SETTLEMENT GRATIS e NATIVO**: `market_id` = market hash e `match_id`
+  `sx-<eventId>` sono le due chiavi che `sx_signals._results_from_sx` usa per
+  saldare senza toccare the-odds-api (zero crediti). Gli esiti restano nelle
+  convenzioni di ledger (`1X2` `1`/`2`, `AH` `Home ±x`, `OU` `Over x`): nessuna
+  riga di settle nuovo.
+- **STAKING**: quota 1.30-3.00 (piu' larga della calcistica: su un moneyline NFL
+  il favorito sta a 1.30-1.60 e lo sfavorito di un match equilibrato a 2.00-3.00)
+  e l'incremento del torneo sta nel layer separato.
+
+**2) `tournament.py` (NUOVO) — staking return-based. TRE protezioni, tutte
+fail-closed** (dichiarate a inizio file):
+1. **BUDGET**: l'esposizione APERTA totale (bet live non saldate) non supera
+   `TOURNAMENT_BUDGET_USDC` (default **10.0**, ~33% dell'equity reale di ~30
+   USDC — scelta del proprietario). Vincolo sull'esposizione *corrente*: chiuso
+   un match il capitale si libera da solo.
+2. **SOGLIA DI SICUREZZA**: sotto `TOURNAMENT_SAFETY_FLOOR_USDC` (default
+   **20.0**) di equity il torneo si mette in pausa (si continua a giocare col
+   percorso standard, senza l'incremento).
+3. **CAP PER ORDINE**: `TOURNAMENT_MAX_STAKE_USDC` (default **2.50**).
+   Stake torneo = `min(base x aggressione x1.5, cap, budget residuo)`; sotto il
+   minimo ordine (1 USDC) il pick e' **bloccato** (fail-closed, mai un importo
+   diverso per farlo passare).
+- **PERIMETRO**: `TOURNAMENT_CLASSES` vuoto = **tutte le corsie** (decisione del
+  proprietario: l'incremento non e' riservato al football USA).
+- `deployed()` **delega** a `auto_bet._open_live_snapshot` (l'unico punto che
+  "sa" cos'e' il capitale immobilizzato, RESTING incluso): mai una seconda
+  definizione di esposizione.
+- I guardrail di portafoglio (recinto 40%, correlazione 30%, CB2, stop
+  giornaliero/settimanale) restano quelli del giro: il layer sta **sopra** il
+  sizing e **sotto** i cap di portafoglio.
+
+**3) CABLAGGIO.** `auto_bet`: `_gridiron_picks()` entra nel board **solo in
+`mode == "live"`** (difesa in profondita' sulla fascia quota, fail-closed);
+i pick `gridiron_lane` sono **esentati dal gate top-down del CALCIO** (che legge
+le cache del calcio e risponderebbe `no_oracle` uccidendo ogni ordine — stessa
+esenzione di eSports `ML` e tennis `TENNIS`); `_live_fill` riconosce il flag e
+usa l'identita' di mercato GIA' nel pick (come il tennis: niente
+ri-risoluzione). `_apply_tournament(candidates, bankroll=...)` gira in FASE 2
+dopo `refresh_live_stakes`, cosi' il recinto della FASE 3 vede lo stake con
+l'incremento. `bot.py`: nuovo `gridiron_lane_job` (refresh oracolo + scan
+telemetria, `GRIDIRON_JOB_INTERVAL_MIN` 180) registrato dopo `tennis_lane_job`.
+
+**4) TEST**: `test_gridiron_lane.py` + `test_tournament.py` (**70 verdi, TUTTI
+OFFLINE**: provider SX finto, `http_get` iniettato, cache oracolo in tmp, ledger
+temporaneo) + `conftest.py` esteso (isolamento `GRIDIRON_LANE_STATE`/
+`GRIDIRON_ORACLE_CACHE` in tmp, corsia spenta fuori dal file dedicato,
+`TOURNAMENT_MODE=0` fuori da `test_tournament`). Regressioni verdi:
+auto_bet x2/capital_enclosure/t60/tennis/top_down (411), bot/secret_hygiene/
+railway_drift/risk_guards/favourites_only/multi_market (222),
+aggressive_kelly/order_watch/hierarchy/chief_shadow/exposure_gate/
+liquidity_monitor (170). `verify_guardrails.py` **A-H tutti bloccano** (exit 0),
+`railway config plan` **already up to date** (0 to destroy), `compileall` OK,
+0 marker di conflitto.
+
+**5) Env** (tutte `preserve()` in `.railway/railway.ts`): `GRIDIRON_LANE`
+(default ON), `GRIDIRON_SX_SPORT_ID` (8), `GRIDIRON_TYPES` (226),
+`GRIDIRON_SPORTS` (nfl+ncaaf), `GRIDIRON_HOURS_AHEAD` (48),
+`GRIDIRON_MAX_MARKETS` (400), `GRIDIRON_EV_MIN`, `GRIDIRON_ODDS_MIN` (1.30),
+`GRIDIRON_ODDS_MAX` (3.00), `GRIDIRON_MIN_INV_SUM`/`MAX_INV_SUM` (0.98/1.08),
+`GRIDIRON_ORACLE_TTL_MIN` (720), `GRIDIRON_REQ_BUDGET_DAY` (4),
+`GRIDIRON_ORACLE_CACHE`, `GRIDIRON_LANE_STATE`, `GRIDIRON_DISCOVERY_TTL_S`
+(300), `GRIDIRON_JOB_INTERVAL_MIN` (180), `GRIDIRON_ODDS_BASE`, piu'
+`TOURNAMENT_MODE` (default **0** = spento), `TOURNAMENT_LABEL`,
+`TOURNAMENT_BUDGET_USDC` (10.0), `TOURNAMENT_SAFETY_FLOOR_USDC` (20.0),
+`TOURNAMENT_MAX_STAKE_USDC` (2.50), `TOURNAMENT_AGGRESSION` (1.5),
+`TOURNAMENT_CLASSES` (vuoto). ⚠️ **Il torneo va ACCESO con
+`TOURNAMENT_MODE=1`** (default spento: la corsia produce candidati, il layer di
+staking resta inerte finche' non lo si attiva).
+
+**6) COSTO CREDITI**: l'oracolo football USA e' `h2h` a 1 credito/chiamata, con
+budget proprio `GRIDIRON_REQ_BUDGET_DAY=4` (4 crediti/giorno al massimo) —
+separato da quelli dell'oracolo a linea e h2h del calcio. Nessuna spesa in
+discovery (lettura pubblica SX).

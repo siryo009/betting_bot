@@ -190,6 +190,14 @@ CHIEF_EXECUTION = (os.getenv("CHIEF_EXECUTION", "off").strip().lower()
 STAKE_STEP_EUR = float(os.getenv("STAKE_STEP_EUR", "0.01"))
 MIN_STAKE_EUR = float(os.getenv("MIN_STAKE_EUR", "1.0"))
 
+# Corsia FOOTBALL USA (11/10/2026, torneo SX "Gridiron Gauntlet"): marcatore
+# dei suoi pick. Ha un ORACOLO PROPRIO (Pinnacle NFL/NCAA a 2 esiti) e i suoi
+# esiti NON sono un 1X2 calcistico, quindi va esentata dal gate top-down del
+# calcio (le cui cache non contengono partite NFL: risponderebbe `no_oracle`
+# su ogni pick). Deve restare ALLINEATA a `gridiron_lane.PICK_FLAG` (tripwire
+# in `test_gridiron_lane.py`).
+GRIDIRON_FLAG = "gridiron_lane"
+
 # CAP SEVERO OBBLIGATORIO (11/09/2026): il cap per singola bet (1% value/
 # moderate, 2% strong_value) NON puo' MAI essere superato dal floor
 # dell'exchange. Con STAKE_CAP_HARD attivo (default) una bet il cui stake
@@ -2237,6 +2245,76 @@ def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
     return kept, info
 
 
+# --- TORNEO RETURN-BASED (11/10/2026, direttiva del proprietario) -----------
+# SX Bet sponsorizza tornei a periodo ("Gridiron Gauntlet", 08/10 -> 20/10,
+# $7.777 divisi fra i top 30) dove i punti sono i RITORNI LORDI delle vincite e
+# le perdite non tolgono nulla. `tournament.py` e' il layer di staking: puo'
+# solo ALZARE lo stake di un segnale GIA' approvato (x1.5 di default) entro un
+# budget di esposizione e un cap per ordine, con una soglia di sicurezza
+# sull'equity. NON bypassa nessun gate: i cap di portafoglio (correlazione 30%,
+# esposizione 40%), il recinto aperto, CB2 e gli stop restano quelli del giro.
+def _apply_tournament(candidates: list[dict], *,
+                      bankroll: float | None = None) -> tuple[list[dict], dict]:
+    """Applica il layer di staking del torneo ai candidati LIVE. Fail-safe.
+
+    Gira DOPO `refresh_live_stakes` (lo stake e' gia' quello finale: Kelly
+    fresco, cap dinamico, ticket minimo) e PRIMA della FASE 3, cosi' il
+    recinto d'esposizione della FASE 3 vede lo stake con l'incremento.
+
+    Con `TOURNAMENT_MODE=0` (default) la lista torna INVARIATA: il giro e'
+    identico a prima della direttiva.
+    """
+    info: dict = {"enabled": False, "raised": 0, "blocked": 0, "reason": ""}
+    try:
+        import tournament
+    except Exception as exc:
+        logger.debug("auto_bet: layer torneo non disponibile (%s)", exc)
+        return candidates, info
+    try:
+        if not tournament.active():
+            return candidates, info
+    except Exception as exc:
+        logger.warning("auto_bet: stato torneo non leggibile (%s): nessun "
+                       "incremento di stake", exc)
+        return candidates, info
+    info["enabled"] = True
+    kept: list[dict] = []
+    for cand in candidates:
+        try:
+            current = float(cand.get("stake") or 0.0)
+        except (TypeError, ValueError):
+            current = 0.0
+        res = tournament.stake_for(current, pick=cand, capital=bankroll)
+        if res.get("blocked"):
+            info["blocked"] += 1
+            logger.info("auto_bet: %s (%s @ %.2f) TORNEO bloccato [%s]: %s",
+                        cand.get("match_id"), cand.get("esito_key"),
+                        float(cand.get("price") or 0.0), res.get("reason"),
+                        res.get("detail") or "")
+            continue
+        if res.get("applied"):
+            new_stake = round(float(res.get("stake") or 0.0), 2)
+            if new_stake > 0 and abs(new_stake - current) > 1e-9:
+                info["raised"] += 1
+                logger.info("auto_bet: %s (%s) stake TORNEO %.2f -> %.2f USDC "
+                            "[%s]", cand.get("match_id"),
+                            cand.get("esito_key"), current, new_stake,
+                            res.get("detail") or "")
+            cand["stake"] = new_stake
+        kept.append(cand)
+    info["reason"] = "tournament"
+    if info["raised"] or info["blocked"]:
+        try:
+            left = tournament.budget_left()
+        except Exception:
+            left = 0.0
+        logger.info("auto_bet: torneo %s — %d stake alzati, %d bloccati "
+                    "(budget residuo %.2f USDC)",
+                    getattr(tournament, "LABEL", "torneo"), info["raised"],
+                    info["blocked"], left)
+    return kept, info
+
+
 def chief_execution_enabled() -> bool:
     """La catena piramidale puo' emettere ordini REALI in questo giro?
 
@@ -2500,6 +2578,54 @@ def _tennis_picks() -> list[dict]:
     if picks:
         logger.info("auto_bet: %d pick tennis dall'oracolo Pinnacle a 2 esiti",
                     len(picks))
+    return picks
+
+
+def _gridiron_picks() -> list[dict]:
+    """Corsia FOOTBALL USA (NFL/NCAA): candidati +EV dall'oracolo a 2 esiti.
+
+    Direttiva 11/10/2026 (torneo SX "Gridiron Gauntlet"): il football USA non
+    era visibile al sistema — la discovery del calcio (`sx_signals`,
+    `multi_market`) e' `sportIds=5`, il tennis `6`, gli eSports `9`, e
+    `market_shadow` legge lo sport 8 **solo in telemetria**. La corsia
+    `gridiron_lane` fa discovery SX pubblica (sportId 8, type 226 = moneyline),
+    aggancia l'oracolo Pinnacle NFL/NCAA (`regions=eu`: misurato come l'unica
+    regione dove lo sharp pubblica il football USA) e calcola l'EV contro le
+    probabilita' fair de-vigate a 2 esiti.
+
+    E' SOLO una fonte di candidati: stake (Kelly aggressivo + layer torneo),
+    recinto 40%, T-60, liquidita', dedup e gate di mercato restano quelli del
+    giro, applicati a valle. Il pick porta `market_id`/`selection_id` di SX e il
+    flag `gridiron_lane` (esenta la corsia dal gate top-down del CALCIO).
+
+    Fail-safe: qualunque errore (o corsia spenta) ritorna [] — una classe di
+    rischio nuova non deve poter fermare le puntate delle altre corsie.
+    """
+    try:
+        import gridiron_lane
+        picks = gridiron_lane.picks()
+    except Exception as e:
+        logger.warning("auto_bet: corsia football USA non disponibile (%s)", e)
+        return []
+    # Difesa in profondita' (stessa regola del tennis, 02/10/2026): la FASCIA
+    # QUOTA e' un invariante del DENARO, non una cortesia della corsia a monte.
+    # Fail-closed: se il gate non e' valutabile, NON si ordina nulla per questa
+    # classe di rischio.
+    try:
+        kept = [p for p in picks
+                if gridiron_lane.in_odds_band(p.get("quota") or p.get("price"))]
+    except Exception as e:
+        logger.warning("auto_bet: gate quota football USA non valutabile (%s)", e)
+        return []
+    if len(kept) != len(picks):
+        logger.warning(
+            "auto_bet: %d pick football USA scartati fuori fascia quota "
+            "%.2f-%.2f", len(picks) - len(kept),
+            gridiron_lane.ODDS_MIN, gridiron_lane.ODDS_MAX)
+    picks = kept
+    if picks:
+        logger.info("auto_bet: %d pick football USA (NFL/NCAA) dall'oracolo "
+                    "Pinnacle a 2 esiti", len(picks))
     return picks
 
 
@@ -3511,18 +3637,27 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
     # un mercato per SQUADRA, come gli eSports) ne' col resolver 1X2. Fail-closed
     # se l'identita' del mercato non c'e': meglio nessun ordine che uno sul
     # lato sbagliato.
+    # Corsia FOOTBALL USA (11/10/2026): come il tennis, il pick porta GIA'
+    # `market_id`/`selection_id` di SX. La struttura moneyline football e' un
+    # mercato binario coi lati sulle chiavi 1/2, quindi NON si ri-risolve: il
+    # catalogo 1X2 e' calcio (tre mercati "X vs Not X") e
+    # `resolve_moneyline_market` cerca un mercato per SQUADRA (struttura
+    # eSports). Fail-closed se l'identita' del mercato non c'e'.
     is_tennis = str(pick.get("mercato") or "").upper() == "TENNIS"
+    is_gridiron = bool(pick.get(GRIDIRON_FLAG))
     mkt = None
-    if is_tennis:
+    if is_tennis or is_gridiron:
         mid_t = str(pick.get("market_id") or "").strip()
         sel_t = pick.get("selection_id")
         if not mid_t or sel_t not in (1, 2, "1", "2"):
-            logger.warning("auto_bet: pick tennis %s senza market_id/selection "
-                           "validi, salto (fail-closed)", pick.get("match_id"))
+            logger.warning("auto_bet: pick %s %s senza market_id/selection "
+                           "validi, salto (fail-closed)",
+                           "tennis" if is_tennis else "football USA",
+                           pick.get("match_id"))
             return None
         mkt = {"market_id": mid_t, "selection_id": int(sel_t),
                "event_name": f"{pick.get('home')} vs {pick.get('away')}",
-               "label": str(pick.get("team") or ""),
+               "label": str(pick.get("esito_raw") or pick.get("team") or ""),
                "market_type": "ML", "line": None, "provider": "sxbet"}
     target = None
     if not is_tennis and str(pick.get("mercato") or "").upper() in ("OU", "AH"):
@@ -3935,6 +4070,12 @@ def run_today_bets(stake_eur: float | None = None,
         # misura di oggi (EV massimo +0.72% su 104 lati) la soglia 2.5% non
         # produce ordini: la corsia e' ARMATA e spara al primo disallineamento.
         board = board + _tennis_picks()
+        # Corsia FOOTBALL USA (11/10/2026): NFL/NCAA dall'oracolo Pinnacle a 2
+        # esiti. SOLO LIVE (l'oracolo costa 1 credito/lega e il suo scopo e'
+        # decidere il PREZZO di un ordine reale). Gli esiti di questa corsia non
+        # sono un 1X2 calcistico: porta il flag `gridiron_lane` che la esenta
+        # dal gate top-down del calcio (vedi il gate piu' sotto).
+        board = board + _gridiron_picks()
     # --- GHIGLIOTTINA PRE-MATCH (08/10/2026): le partite gia' iniziate escono
     # dal board PRIMA di qualunque valutazione (e quindi prima di qualunque
     # spesa oracolo). Le corsie filtrano gia' per kickoff futuro, ma questa e'
@@ -4011,9 +4152,14 @@ def run_today_bets(stake_eur: float | None = None,
         # passano dal gate 1X2 di Pinnacle: i loro esiti non sono un 1X2 e il
         # gate li ucciderebbe con `no_oracle`. Il tennis aggancia la cache per
         # NOMI giocatore con la forma a 2 esiti (gia' nella sua corsia).
+        # I pick con ORACOLO PROPRIO non passano dal gate 1X2: eSports (`ML`),
+        # tennis (`TENNIS`) e football USA (`gridiron_lane`). Per la corsia
+        # football USA l'esenzione e' il FLAG, non il `mercato` (che resta il
+        # canonico `1X2` perche' e' quello che il settlement legge).
         if (TOP_DOWN_EV and mode == "live"
                 and str(pick.get("mercato") or "1X2").upper()
-                not in ("ML", "TENNIS")):
+                not in ("ML", "TENNIS")
+                and not pick.get(GRIDIRON_FLAG)):
             # --- PRE-FILTER SX (05/10/2026, direttiva del proprietario):
             # ZERO SPESE PER PICK NON ORDINABILI. Prima di qualunque fetch a
             # pagamento si verificano i requisiti minimi di SX Bet (quota
@@ -4364,6 +4510,14 @@ def run_today_bets(stake_eur: float | None = None,
             else:
                 logger.warning("auto_bet: saldo non leggibile prima degli "
                                "ordini (%s): nessuna puntata", _fresh.get("reason"))
+
+        # --- TORNEO RETURN-BASED (11/10/2026): layer di staking SOPRA il
+        # percorso live, applicato quando lo stake e' gia' quello finale (Kelly
+        # fresco + cap dinamico + ticket). Puo' solo ALZARE lo stake entro il
+        # budget del torneo (esposizione aperta) e il cap per ordine, con la
+        # soglia di sicurezza sull'equity; un pick bloccato dal torneo viene
+        # scartato. A OFF (default) la lista e' invariata.
+        candidates, _tour = _apply_tournament(candidates, bankroll=_bankroll)
 
     # --- FASE 3: esegui e registra (LIVE via execution_engine oppure SIM) ---
     from tracker import save_bet
