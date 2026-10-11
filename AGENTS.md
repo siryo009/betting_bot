@@ -10605,14 +10605,70 @@ dà EV ~0. E' la "overconfidence" gia' documentata: il gate top-down **non
 sbaglia**, e' il motivo per cui esiste (dal 25/09 il prezzo lo giudica
 Pinnacle, non il modello di gol). **0 ordini oggi da questi pick — corretto.**
 
-⚠️ **Prossimo collo di bottiglia misurato**: il tetto `ORACLE_H2H_BUDGET_DAY=2`
-con `max_calls_per_league=1` copre **2 leghe/giorno**. Oggi bastava (2 pick, 2
-leghe); con 4+ pick in 4+ leghe solo 2 sarebbero valutabili. Da decidere quando
-si avra' la misura di quanti pick 1X2 arrivano al giorno — non alzato ora
-(nessuna evidenza, e il margine crediti e' di ~1 cr/giorno).
+⚠️ **Collo di bottiglia misurato**: il tetto `ORACLE_H2H_BUDGET_DAY=2` con
+`max_calls_per_league=1` copriva **2 leghe/giorno**: con 4+ pick in 4+ leghe solo
+2 sarebbero valutabili. **ALZATO A 4 l'11/10/2026** (ogni verifica riporta ora
+`used 2 / cap 4  left 2`): vedi la sezione seguente «Budget h2h alzato a 4».
 
 **Nota**: con una sola fonte sharp il consenso ritorna
 `fallback: 'consensus_disabled'` / `n_sources: 1` (Pinnacle secca = comportamento
 storico): non e' un errore, ma la telemetria del consenso multi-oracolo su
 Brasileirao/Danimarca **non si popola** (Betfair/Matchbook assenti da quelle
 cache).
+
+### Budget h2h alzato a 4 (11/10/2026) — piu' leghe 1X2 valutate al giorno
+
+**Direttiva del proprietario**: alzare il tetto del percorso 1X2 on-demand per
+non esaurire il budget prima di aver valutato tutte le leghe con pick in
+finestra.
+
+**1) IMPLEMENTAZIONE (env, ZERO codice).** `ORACLE_H2H_BUDGET_DAY` e' letta
+**all'IMPORT** (`odds_api.py` riga 160, `int(os.getenv("ORACLE_H2H_BUDGET_DAY",
+"2"))`) -> il set env da' un valore nuovo **solo dopo un redeploy**, non basta
+`--skip-deploys`. Sequenza eseguita:
+- `railway variables --service betting_bot --set ORACLE_H2H_BUDGET_DAY=4
+--skip-deploys` -> readback `ORACLE_H2H_BUDGET_DAY=4`;
+- **redeploy `374dd1b3` SUCCESS** (11/10 06:30 +02:00).
+
+**2) VERIFICA SUL CONTAINER.** `/proc/1/environ` -> `ORACLE_H2H_BUDGET_DAY=4`;
+all'import `odds_api.ORACLE_H2H_BUDGET_DAY = 4` e
+`ORACLE_H2H_MAX_CALLS_PER_LEAGUE = 1` (invariato). `oracle_h2h_budget_status()`:
+
+```
+{day 2026-10-11, used 2, cap 4, left 2, leagues 2,
+ by_league {soccer_brazil_campeonato: 1, soccer_denmark_superliga: 1},
+ max_calls_per_league 1, credits_per_call 1, credits_used_today 2.0,
+ exhausted False}
+```
+
+**Prova diretta del cambio**: prima di questa modifica il percorso era **gia'
+esaurito** (`used 2 / cap 2`, `left 0`) — le due unita' residue (`left 2`)
+coprono **2 leghe in piu'** nella stessa giornata. `oracle_h2h_refusal(
+'soccer_italy_serie_a')` = **None** (percorso libero, nessun rifiuto pre-HTTP).
+
+**3) SEMANTICA DEL TETTO — non leggerlo come una spesa fissa.**
+`ORACLE_H2H_BUDGET_DAY` e' un **CAP pagato ON-DEMAND** (1 credito/chiamata, e
+solo quando esiste un pick 1X2 in finestra in quella lega): +2 sul cap **non**
+sono +2 cr/giorno garantiti, ma **al piu'** +2. Con
+`ORACLE_H2H_MAX_CALLS_PER_LEAGUE=1` il cap 4 vale **fino a 4 leghe distinte al
+giorno** (era 2) — che e' esattamente l'obiettivo della direttiva.
+
+**4) IMPATTO CREDITI DICHIARATO.** `credit_budget_status()` allo stesso
+controllo: remaining **227**, `sustainable_per_day` **11,3**, `rate_per_day`
+**17,3** (finestra 47,2h), `days_to_reset` 20, `exhaustion_date` **2026-10-24**,
+`alert True`. Il tetto di regime resta **sopra** il sostenibile: alzare l'h2h
+sposta l'esaurimento **al piu' di ~1 giorno** e **solo se** il flusso 1X2 arriva
+davvero a 3-4 leghe/giorno (oggi il consumo reale h2h e' **2 cr/giorno**, 2
+leghe). Il taglio precedente resta invariato e verificato nella stessa lettura:
+`ORACLE_ENABLED=0` (linea), `TENNIS_ORACLE_TTL_MIN=1080`, `ORACLE_BUDGET_DAY=1`.
+
+**5) IaC**: `ORACLE_H2H_BUDGET_DAY` era **gia'** dichiarata `preserve()` in
+`.railway/railway.ts` (riga 389, accanto a `ORACLE_H2H_MAX_CALLS_PER_LEAGUE`,
+`ORACLE_H2H_BUDGET_STATE`, `ORACLE_H2H_DEDUP_S`) -> `railway config plan` =
+**"already up to date"** (0 to add, 0 to change, **0 to destroy**).
+
+**6) DA MISURARE** (non deducibile ora): quante **leghe distinte** finiscono in
+`by_league` nei giorni con piu' pick 1X2. Se arriva a 4 e il `rate_per_day`
+supera il sostenibile, le leve sono `ORACLE_H2H_MAX_CALLS_PER_LEAGUE`
+(concentrazione per lega) o tornare a 2-3; la sorveglianza e' la stessa del
+burn crediti (finestra 48h + `alert`).
