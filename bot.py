@@ -2955,6 +2955,42 @@ async def tennis_lane_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error("tennis_lane_job: scan (%s)", e)
 
 
+async def tennis_oracle_job(context: ContextTypes.DEFAULT_TYPE):
+    """Tornei tennis NUOVI (11/10/2026): prezzati entro pochi minuti.
+
+    Il job dell'oracolo (`tennis_lane_job`) gira ogni 6h: un torneo ATTIVATO a
+    meta' giornata su the-odds-api (es. WTA Wuhan) restava senza cache fino al
+    giro successivo, e senza oracolo il gate EV del tennis e' fail-closed —
+    tutte le partite di quel torneo nella finestra esecutiva erano non
+    ordinabili (misurato l'11/10/2026: 4 match in finestra, 0 prezzo sharp).
+
+    L'elenco delle chiavi attive e' GRATUITO, quindi il controllo si puo' fare
+    spesso; il costo e' 1 credito SOLO per un torneo mai prezzato (budget e
+    hard-stop restano quelli di `refresh_oracle`). Nessun ordine, nessun
+    effetto sul denaro. Silenzioso quando non c'e' nulla di nuovo.
+    """
+    try:
+        import tennis_lane
+    except Exception as e:                                       # pragma: no cover
+        logger.error("tennis_oracle_job: modulo non disponibile (%s)", e)
+        return
+    if not tennis_lane.enabled():
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        res = await loop.run_in_executor(
+            _scan_executor, tennis_lane.refresh_new_tournaments)
+    except Exception as e:
+        logger.error("tennis_oracle_job: (%s)", e)
+        return
+    if res.get("fetched"):
+        logger.info("tennis_oracle_job: tornei NUOVI prezzati %s "
+                    "(richieste oggi %s)", res.get("new"),
+                    res.get("requests_today"))
+    elif res.get("error"):
+        logger.info("tennis_oracle_job: %s", res.get("error"))
+
+
 async def tennis_quant_job(context: ContextTypes.DEFAULT_TYPE):
     """Motore quantitativo TENNIS (03/10/2026): ELO superficie + Poisson.
 
@@ -3497,6 +3533,16 @@ def main() -> None:
         _tennis_min = max(60, int(os.getenv("TENNIS_JOB_INTERVAL_MIN", "360")))
         job_queue.run_repeating(tennis_lane_job, interval=_tennis_min * 60,
                                 first=330,
+                                job_kwargs={"max_instances": 1})
+        # Tornei NUOVI (11/10/2026): l'elenco delle chiavi attive e' GRATUITO,
+        # quindi si controlla ogni pochi minuti (default 10') e si paga 1
+        # credito SOLO per un torneo mai prezzato. Senza questo, un torneo
+        # attivato a meta' giornata restava senza oracolo fino al job a 6h e il
+        # gate EV del tennis (fail-closed) non poteva ordinare nulla.
+        _tennis_oracle_min = max(5, int(os.getenv("TENNIS_ORACLE_CHECK_MIN", "10")))
+        job_queue.run_repeating(tennis_oracle_job,
+                                interval=_tennis_oracle_min * 60,
+                                first=150,
                                 job_kwargs={"max_instances": 1})
         # Motore quantitativo TENNIS (03/10/2026): ELO superficie + Poisson +
         # Shin in MISURA. Stesso intervallo della corsia tennis (i rating si

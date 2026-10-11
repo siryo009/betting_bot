@@ -291,6 +291,13 @@ export default defineRailway(() => {
       TENNIS_LANE_STATE: preserve(),
       TENNIS_JOB_INTERVAL_MIN: preserve(),
       TENNIS_DISCOVERY_TTL_S: preserve(),
+      // Tornei NUOVI (11/10/2026): il job a 6h non basta per un torneo attivato
+      // a meta' giornata (WTA Wuhan: 4 partite in finestra senza oracolo =
+      // zero ordini). Il controllo delle chiavi e' GRATUITO, quindi gira ogni
+      // `TENNIS_ORACLE_CHECK_MIN` (10') e paga 1 credito solo per un torneo mai
+      // prezzato; `TENNIS_NEW_KEYS_CHECK_S` e' la memo dell'elenco chiavi.
+      TENNIS_ORACLE_CHECK_MIN: preserve(),
+      TENNIS_NEW_KEYS_CHECK_S: preserve(),
       // Motore quantitativo TENNIS (03/10/2026, `tennis_quant.py`): ELO
       // superficie-specifico + Poisson da hold/break in parallelo al de-vig
       // di Shin. Modalita' SOLO MISURA (nessun ordine: lo stake reale resta

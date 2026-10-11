@@ -126,14 +126,33 @@ REQ_BUDGET_DAY = int(os.getenv("TENNIS_REQ_BUDGET_DAY", "8"))
 #: prezzo d'ordine viene riletto vivo al momento dell'ordine). Default 5 minuti.
 DISCOVERY_TTL_S = float(os.getenv("TENNIS_DISCOVERY_TTL_S", "300"))
 
+#: Cadenza del controllo "tornei NUOVI" (chiavi attive senza alcuna cache).
+#: L'elenco delle chiavi e' GRATUITO (`/v4/sports`), quindi lo si puo' fare
+#: spesso; il costo e' 1 credito SOLO per un torneo mai prezzato.
+#: Perche' esiste (misurato l'11/10/2026): il job dell'oracolo gira ogni 6h,
+#: quindi un torneo ATTIVATO a meta' giornata (WTA Wuhan: 4 partite in finestra
+#: esecutiva) restava senza prezzo sharp — e senza oracolo il gate EV del tennis
+#: e' fail-closed: zero ordini possibili per tutte le sue partite del giorno.
+NEW_KEYS_CHECK_S = float(os.getenv("TENNIS_NEW_KEYS_CHECK_S", "600"))
+
 _DISCOVERY_MEMO: Dict[str, Any] = {"key": None, "ts": 0.0, "rows": []}
+
+#: Memo dell'elenco dei tornei attivi (endpoint gratuito: non si martella).
+_KEYS_MEMO: Dict[str, Any] = {"ts": 0.0, "keys": []}
 
 
 def reset_cache() -> None:
-    """Azzera la memo di discovery (usata dai test e a cambio finestra)."""
+    """Azzera le memo di discovery E dei tornei attivi (test/cambio finestra)."""
     _DISCOVERY_MEMO["key"] = None
     _DISCOVERY_MEMO["ts"] = 0.0
     _DISCOVERY_MEMO["rows"] = []
+    reset_keys_memo()
+
+
+def reset_keys_memo() -> None:
+    """Azzera la memo dell'elenco tornei (usata dai test)."""
+    _KEYS_MEMO["keys"] = []
+    _KEYS_MEMO["ts"] = 0.0
 
 #: Ledger/keyword tennis nel payload the-odds-api.
 TENNIS_KEY_PREFIX = "tennis_"
@@ -282,6 +301,27 @@ def active_tennis_keys(*, http_get: Any = None) -> List[str]:
     return out
 
 
+def active_tennis_keys_cached(*, http_get: Any = None,
+                              now: Optional[float] = None) -> List[str]:
+    """`active_tennis_keys` con MEMO (`NEW_KEYS_CHECK_S`).
+
+    L'endpoint e' gratuito ma non si chiama ogni 60s: la memo tiene il costo in
+    richieste HTTP sotto controllo senza ritardare la scoperta di un torneo
+    nuovo oltre `NEW_KEYS_CHECK_S` (default 10 minuti).
+    """
+    ts_now = time.time() if now is None else float(now)
+    try:
+        fresh = (ts_now - float(_KEYS_MEMO.get("ts") or 0.0)) < NEW_KEYS_CHECK_S
+    except (TypeError, ValueError):
+        fresh = False
+    if _KEYS_MEMO.get("keys") and fresh:
+        return list(_KEYS_MEMO["keys"])
+    keys = active_tennis_keys(http_get=http_get)
+    _KEYS_MEMO["keys"] = list(keys)
+    _KEYS_MEMO["ts"] = ts_now
+    return list(keys)
+
+
 def _log_credit_call(sport: str, remaining: Any, resp: Any) -> None:
     """Registra la chiamata PAGATA nella telemetria crediti (fail-safe).
 
@@ -307,8 +347,8 @@ def _log_credit_call(sport: str, remaining: Any, resp: Any) -> None:
         pass
 
 
-def refresh_oracle(*, http_get: Any = None, now: Optional[float] = None
-                   ) -> dict:
+def refresh_oracle(*, http_get: Any = None, now: Optional[float] = None,
+                   only_new: bool = False) -> dict:
     """Aggiorna le cache dell'oracolo tennis. Ritorna un riepilogo, mai eccezioni.
 
     Costo: 1 credito per torneo la cui cache e' scaduta (`ORACLE_TTL_MIN`).
@@ -316,16 +356,22 @@ def refresh_oracle(*, http_get: Any = None, now: Optional[float] = None
     ATTIVI, non dai giri. Rispetta il budget giornaliero e l'hard-stop crediti
     globale (dentro `budget_left`, l'UNICA definizione della regola) e registra
     ogni spesa pagata in `credit_calls.jsonl`.
+
+    `only_new=True` scarica SOLO i tornei MAI prezzati (chiavi attive senza file
+    di cache): e' il percorso veloce di `refresh_new_tournaments()`, pensato per
+    essere chiamato spesso (l'elenco chiavi e' gratis). Nessuna cache esistente
+    viene toccata — nemmeno se scaduta: quella resta compito del job a 6h.
     """
     out: dict = {"keys": 0, "fetched": 0, "skipped": 0, "requests": 0,
-                 "remaining": None, "error": None, "cached": []}
+                 "remaining": None, "error": None, "cached": [], "new": []}
     if not enabled():
         out["error"] = "corsia spenta (TENNIS_LANE=0)"
         return out
     state, healthy = _load_state()
     state = _roll_day(state)
     try:
-        keys = active_tennis_keys(http_get=http_get)
+        keys = (active_tennis_keys_cached(http_get=http_get, now=now)
+                if only_new else active_tennis_keys(http_get=http_get))
     except Exception as exc:
         out["error"] = f"chiavi tennis non leggibili ({exc})"
         _save_state(state)
@@ -339,6 +385,9 @@ def refresh_oracle(*, http_get: Any = None, now: Optional[float] = None
     changed = False
     for key in keys:
         path = folder / f"toa_{key}.json"
+        if only_new and path.exists():
+            out["skipped"] += 1
+            continue
         if _cache_is_fresh(path):
             out["skipped"] += 1
             out["cached"].append(key)
@@ -375,6 +424,8 @@ def refresh_oracle(*, http_get: Any = None, now: Optional[float] = None
             out["fetched"] += 1
             out["requests"] += 1
             out["cached"].append(key)
+            if only_new:
+                out["new"].append(key)
             if remaining is not None:
                 out["remaining"] = remaining
             # Telemetria del consumo: 1 riga per chiamata PAGATA.
@@ -387,6 +438,26 @@ def refresh_oracle(*, http_get: Any = None, now: Optional[float] = None
         _save_state(state)
     out["requests_today"] = int(state.get("requests") or 0)
     return out
+
+
+def refresh_new_tournaments(*, http_get: Any = None,
+                            now: Optional[float] = None) -> dict:
+    """Prezza SUBITO i tornei appena attivati (mai visti), spendendo 1 credito.
+
+    Perche' esiste (misurato l'11/10/2026): `refresh_oracle` gira nel job a 6h,
+    quindi un torneo ATTIVATO a meta' giornata su the-odds-api non ha alcuna
+    cache fino al giro successivo — e senza oracolo il gate EV del tennis e'
+    fail-closed ("ORACOLO ASSENTE"). Osservato su WTA Wuhan: 4 partite in
+    finestra esecutiva, zero prezzo sharp, zero ordini possibili per l'intera
+    giornata del torneo.
+
+    Il costo e' quello di `refresh_oracle` (1 credito per torneo NUOVO,
+    `budget_left` + hard-stop globale), ma il PERIMETRO e' minimo: le chiavi
+    attive si leggono gratis (memo `NEW_KEYS_CHECK_S`) e le cache esistenti non
+    vengono toccate. Chiamato da un job a pochi minuti, un torneo nuovo risulta
+    prezzato entro quel lasso di tempo invece che entro 6 ore.
+    """
+    return refresh_oracle(http_get=http_get, now=now, only_new=True)
 
 
 # ---------------------------------------------------------------------------

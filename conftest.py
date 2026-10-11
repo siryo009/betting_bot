@@ -212,9 +212,10 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # dell'oracolo va nella tmp di ogni test.
     import pinnacle_oracle as _po
     monkeypatch.setattr(_po, "DATA_DIR", tmp_path)
-    # Memo di discovery a livello di MODULO: senza reset un caso "trovato"
-    # resterebbe in cache per i test successivi (stesso processo) e la
-    # discovery sembrerebbe vuota/piena in base all'ultimo test eseguito.
+    # Memo a livello di MODULO: senza reset un caso "trovato" (discovery) o un
+    # elenco tornei resterebbe in cache per i test successivi (stesso processo)
+    # e la discovery / il conteggio delle chiamate a `/v4/sports` dipenderebbero
+    # dall'ordine dei test. `reset_cache()` azzera ENTRAMBE le memo.
     import tennis_lane as _tl
     _tl.reset_cache()
     # Motore quantitativo TENNIS (03/10/2026, `tennis_quant.py`): il ledger ELO

@@ -522,6 +522,129 @@ class TestBudget:
 
 
 # ---------------------------------------------------------------------------
+# 6ter. TORNEI NUOVI: prezzati subito, non al giro a 6h (11/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestTorneiNuovi:
+    """Un torneo ATTIVATO a meta' giornata deve avere l'oracolo entro pochi minuti.
+
+    Misurato in produzione l'11/10/2026: WTA Wuhan era attivo su the-odds-api ma
+    senza cache `toa_tennis_wta_wuhan_open.json`, quindi il job a 6h lo avrebbe
+    prezzato fino a 6 ore dopo — e senza oracolo il gate EV del tennis e'
+    fail-closed: le 4 partite in finestra esecutiva erano non ordinabili.
+    """
+
+    @staticmethod
+    def _http(calls, keys):
+        def http(url, params=None, timeout=None):
+            calls.append(url)
+            if url.endswith("/sports"):
+                return FakeResp(200, [{"key": k, "active": True}
+                                      for k in keys])
+            return FakeResp(200, _oracle_payload(),
+                            {"x-requests-remaining": "300"})
+        return http
+
+    def test_torneo_nuovo_prezzato(self, monkeypatch):
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        calls = []
+        res = tl.refresh_new_tournaments(
+            http_get=self._http(calls, ["tennis_wta_wuhan_open"]))
+        assert res["fetched"] == 1
+        assert res["new"] == ["tennis_wta_wuhan_open"]
+        assert (tl.oracle_cache_dir() / "toa_tennis_wta_wuhan_open.json").exists()
+        assert res["requests_today"] == 1
+
+    def test_torno_con_cache_esistente_non_si_ripaga(self, monkeypatch, tmp_path):
+        """Il giro veloce non tocca le cache ESISTENTI, nemmeno se scadute.
+
+        Il perimetro e' minimo di proposito: le scadute restano compito del job a
+        6h, altrimenti il controllo ogni 10' rifarebbe tutte le fetch.
+        """
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        folder = tl.oracle_cache_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        stale = folder / "toa_tennis_atp_x.json"
+        stale.write_text(json.dumps({"ts": 0.0, "payload": []}), encoding="utf-8")
+        calls = []
+        res = tl.refresh_new_tournaments(
+            http_get=self._http(calls, ["tennis_atp_x"]))
+        assert res["fetched"] == 0 and res["requests"] == 0
+        assert res["skipped"] == 1
+        assert not any("/odds" in u for u in calls)
+
+    def test_elenco_chiavi_memoizzato(self, monkeypatch):
+        """L'endpoint e' gratis ma non si martella: la memo evita il ripetersi."""
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        keys = ["tennis_atp_x"]
+        calls = []
+        http = self._http(calls, keys)
+        tl.active_tennis_keys_cached(http_get=http)
+        tl.active_tennis_keys_cached(http_get=http)
+        assert sum(1 for u in calls if u.endswith("/sports")) == 1
+
+    def test_memo_scade_dopo_la_finestra(self, monkeypatch):
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        calls = []
+        http = self._http(calls, ["tennis_atp_x"])
+        tl.active_tennis_keys_cached(http_get=http, now=1000.0)
+        tl.active_tennis_keys_cached(
+            http_get=http, now=1000.0 + tl.NEW_KEYS_CHECK_S + 1)
+        assert sum(1 for u in calls if u.endswith("/sports")) == 2
+
+    def test_budget_esaurito_non_spende(self, monkeypatch):
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        monkeypatch.setattr(tl, "REQ_BUDGET_DAY", 0)
+        calls = []
+        res = tl.refresh_new_tournaments(
+            http_get=self._http(calls, ["tennis_wta_wuhan_open"]))
+        assert res["fetched"] == 0
+        assert not any("/odds" in u for u in calls)
+
+    def test_corsia_spenta_non_spende(self, monkeypatch):
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        monkeypatch.setenv("TENNIS_LANE", "0")
+        calls = []
+        res = tl.refresh_new_tournaments(
+            http_get=self._http(calls, ["tennis_wta_wuhan_open"]))
+        assert res["fetched"] == 0 and res["error"]
+        assert calls == []
+
+    def test_endpoint_chiavi_giu_e_fail_safe(self, monkeypatch):
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+
+        def http(url, params=None, timeout=None):
+            return FakeResp(500, [])
+        res = tl.refresh_new_tournaments(http_get=http)
+        assert res["fetched"] == 0
+        assert "error" in res and res["error"]
+
+    def test_solo_new_non_tocca_le_scadute(self, monkeypatch):
+        """Controprova: `refresh_oracle` NORMALE invece le riscarica."""
+        monkeypatch.setenv("ODDS_API_KEY", "fake/offline")
+        folder = tl.oracle_cache_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "toa_tennis_atp_x.json").write_text(
+            json.dumps({"ts": 0.0, "payload": []}), encoding="utf-8")
+        calls = []
+        res = tl.refresh_oracle(http_get=self._http(calls, ["tennis_atp_x"]))
+        assert res["fetched"] == 1
+        assert res["new"] == []
+
+    def test_job_registrato_nel_bot(self):
+        """Tripwire: senza il job a pochi minuti il fix non girerebbe affatto."""
+        src = open("bot.py", encoding="utf-8").read()
+        assert "async def tennis_oracle_job" in src
+        assert "tennis_lane.refresh_new_tournaments" in src
+        assert "TENNIS_ORACLE_CHECK_MIN" in src
+
+    def test_env_dichiarate_nella_iac(self):
+        iac = open(".railway/railway.ts", encoding="utf-8").read()
+        assert "TENNIS_ORACLE_CHECK_MIN: preserve()" in iac
+        assert "TENNIS_NEW_KEYS_CHECK_S: preserve()" in iac
+
+
+# ---------------------------------------------------------------------------
 # 6bis. TELEMETRIA CREDITI del refresh oracolo (06/10/2026)
 # ---------------------------------------------------------------------------
 
