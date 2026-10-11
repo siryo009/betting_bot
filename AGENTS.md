@@ -10354,3 +10354,126 @@ CORRETTE**: il bot eccedeva davvero il tetto perche' dimensionava sull'equity
 gonfiata; non vengono "assolte" (il tetto per-ordine non e' negoziabile, c'e'
 un test che lo difende anche sulle righe pre-direttiva) — e' il fix a
 impedirne di nuove.
+
+### Task H — oracolo h2h on-demand: i pick 1X2 non muoiono piu' con `no_oracle` (11/10/2026)
+
+**DIAGNOSI (misure reali sul container, non ipotesi).** La rotazione quote delle
+leghe e' a **7 giorni** (`SPORTS_INTERVAL_DAYS`) mentre la cache h2h e'
+considerata fresca solo **24h** (`CACHE_MAX_AGE_H`): per **~5 giorni su 7** la
+partita e' in cache ma **SCADUTA**, e il gate top-down rispondeva il generico
+`no_oracle`, indistinguibile da "Pinnacle non copre". Misura del 10/10:
+`toa_soccer_brazil_campeonato.json` **62,5h** (4 eventi, 4 con Pinnacle),
+`toa_soccer_denmark_superliga.json` **46,5h** (6 eventi, 6 con Pinnacle) — il
+dato c'era, era vecchio. Aggravante di attribuzione: `SPORTS_INTERVAL_DAYS` ha
+come chiavi i **nomi-lega** (`"Superliga Danimarca": 7`), non le sport key,
+quindi un lookup per sport key non trova nulla.
+
+**SOLUZIONE (opzione c scelta dal proprietario): fetch on-demand h2h.**
+- `pinnacle_oracle.h2h_oracle_reason(home, away, *, cache_dir=None,
+  sport_key=None, now=None)`: motivo GRANULARE con `recoverable` —
+  `OK` / `STALE_CACHE` (cache oltre il tetto) / `NO_CACHE` (nessuna cache della
+  lega) sono **recuperabili**; `MISSING_MARKET` (partita assente o Pinnacle
+  senza i 3 esiti) / `NOT_IN_CACHE` (cache della lega fresca ma partita
+  assente) / `UNKNOWN` **no**. Ritorna `code`/`recoverable`/`detail`/`age_h`.
+- `odds_api.fetch_h2h_odds(sport, frm, to, ttl_s=None)`: **1 credito**
+  (`markets=h2h`), con budget DEDICATO `ORACLE_H2H_BUDGET_DAY` (**2** =
+  2 crediti/giorno), tetto `ORACLE_H2H_MAX_CALLS_PER_LEAGUE` (1), dedup
+  `ORACLE_H2H_DEDUP_S` (120s), stato **persistito sul volume**
+  (`ORACLE_H2H_BUDGET_STATE`, default `DATA_DIR/decision/oracle_h2h_budget.json`)
+  e `by_league` per lega. Un **cache-HIT non consuma budget**.
+  `oracle_h2h_refusal(sport)` rifiuta PRIMA dell'HTTP (hard-stop crediti,
+  budget, tetto per lega) e **NON legge `ORACLE_ENABLED`**: e' l'interruttore
+  dell'oracolo a LINEA, non di questo percorso (due interruttori, due costi).
+- `line_oracle.fetch_h2h_for_pick(pick)` + `auto_bet._h2h_skip_reason(pick)` +
+  ramo 1X2 di `auto_bet._top_down_eval`: il gate **paga solo** se il pick e'
+  nella finestra esecutiva e il motivo e' `recoverable`. Il verdetto espone
+  `reason` granulare + `detail` + `action` + `refusal`, e la telemetria
+  (`oracle_skips`) registra l'**azione** del fetch (`fetched`/
+  `outside_window`/`refused`/`not_recoverable`/`error`).
+- `credit_diagnose.oracle_budget()` espone `budget_h2h` e il report stampa la
+  riga `🎯 oracolo h2h: X/Y chiamate usate oggi ... ~Z crediti`.
+
+**SEPARAZIONE DEI PERCORSI (il punto architetturale).**
+
+| percorso | esito | costo | budget | interruttore |
+|---|---|---|---|---|
+| 1X2 (h2h) | `1`/`X`/`2` | **1 credito** | `ORACLE_H2H_BUDGET_DAY` 2 | attivo sempre (il gate paga on-demand) |
+| OU/AH (linea) | `Over 2.5`, `Home -0.75` | **3 crediti** | `ORACLE_BUDGET_DAY` 1 | `ORACLE_ENABLED` |
+
+I due budget NON si parlano: saturare il percorso a linea non blocca quello
+h2h e viceversa. Entrambi hanno un tetto per lega (1) e stato proprio sul
+volume. **IaC**: `ORACLE_H2H_BUDGET_DAY`, `ORACLE_H2H_MAX_CALLS_PER_LEAGUE`,
+`ORACLE_H2H_BUDGET_STATE`, `ORACLE_H2H_DEDUP_S` dichiarate `preserve()` in
+`.railway/railway.ts`; `railway config plan` = **already up to date**.
+
+**TEST.** `test_top_down.py` (**57 verdi**): `TestDiagnosiH2h` (7: OK/
+STALE_CACHE/NO_CACHE/NOT_IN_CACHE/MISSING_MARKET/limite con `sport_key`/nomi
+non interpretabili), `TestH2hSkipReason` (2), `TestFetchH2hDalGate` (3: fuori
+finestra NON paga, in finestra paga, caso Brasileirao end-to-end) e
+`test_no_oracle_fail_closed` aggiornato (`no_oracle/NO_CACHE`).
+`test_line_oracle.py` (**166 verdi**): `TestFetchH2hOdds` (8),
+`TestFetchH2hForPick` (7) e `test_1x2_ha_la_diagnosi_granulare`.
+`verify_guardrails.py` **A–H tutti bloccano** (exit 0). Commit **`4eedd1d`**
+(9 file, +1075/-47), deploy Railway SUCCESS, regione ams.
+
+**VERIFICA IN PRODUZIONE (11/10/2026, sul container dopo il deploy).**
+Moduli presenti (`h2h_oracle_reason`, `fetch_h2h_odds`, `oracle_h2h_refusal`,
+`_h2h_skip_reason`); **budget h2h `0/2`** (`used 0`, `credits_per_call 1`,
+`exhausted false`) e **budget a linea `0/1`** (3 cr) → nessuna spesa;
+`oracle_h2h_budget.json` **non ancora creato** (si scrive alla prima fetch) e
+**0 chiamate `source=oracle_h2h`** in `credit_calls.jsonl`. Diagnosi su dati
+reali: `h2h_oracle_reason('Brondby','Lyngby')` → **`STALE_CACHE`, age 47,9h,
+recoverable true**. Il nuovo motivo granulare **e' gia' visibile** negli scarti
+dei 2 giorni (`no_oracle/STALE_CACHE` 1, `no_oracle/NO_CACHE` 1) ma **entrambi
+FUORI finestra** → nessun pagamento: e' il comportamento voluto (il gate paga
+solo in T-180..T-2).
+⚠️ **Nota di configurazione trovata nella stessa verifica**: su Railway
+`ORACLE_ENABLED=1` con `ORACLE_BUDGET_DAY=1` (il percorso a LINEA e' riarmato,
+max 3 cr/giorno) — i rifiuti `ORACLE_ENABLED=0` che si leggono negli scarti sono
+del processo PRECEDENTE (fino al 10/10 22:59 UTC; il container attuale e'
+ripartito alle 03:14 UTC con l'env a 1). Con entrambi i budget saturi il costo
+oracolo massimo e' **5 cr/giorno** (3+2).
+
+### Fill rate degli ordini reali e RESTING GTC: prima misura dopo il fix (11/10/2026)
+
+Misura richiesta a chiusura del Task H (log agent Railway + ledger, sola
+lettura).
+
+**IL PERCORSO RESTING NON E' MAI STATO USATO.** `resting_orders.summary()`:
+`total 0`, `by_status {}`, `open 0`, `open_stake 0.0`; il registro
+`data/execution/resting_orders.json` **non esiste** sul volume; nel ledger
+`bets` **0 righe `RESTING_FILLED`** su 33 bet live. Cioe': da quando il
+parcheggio GTC e' in produzione (commit `cf71e24`, 10/10 01:23 UTC) **nessun
+pick ha avuto bisogno del fallback** — tutti hanno trovato controparte
+all'istante con l'IOC. Il percorso resta armato e pronto (tripwire + 81 test),
+non "dimenticato".
+
+**FILL RATE REALE (log `POST /orders-v3` + righe `bets` per giorno).**
+
+| giorno | POST `/orders-v3` | bet live create | fill rate |
+|---|---|---|---|
+| 10/05 | 12 | 2 | 16,7% |
+| 10/06 | 1 | 1 | 100% |
+| 10/07 | 70 | 6 | 8,6% |
+| 10/08 | **120** | 4 | **3,3%** |
+| 10/09 | 22 | 6 | 27,3% |
+| **10/10** | **6** | **6** | **100%** |
+
+Totale finestra 10/05 → 10/10: **231 POST, 25 fill (10,8%)**, 0 POST dal
+10/10 11:11 UTC in poi (ultimo ordine: bet #33). Il **10/10** e' il primo
+giorno interamente dopo il fix del troncamento della quota di libro
+(`4fbab93`, 09/10 23:48 UTC) e del parcheggio GTC: **6 POST → 6
+`FULLY_FILLED`, zero `CANCELLED`**, contro i 64-89 `CANCELLED /
+NO_LIQUIDITY` dei due giorni precedenti. ⚠️ Il fill rate per ATTEMPO
+sottostima il fenomeno reale quando il bot **ritenta ogni 60s** lo stesso pick
+fino alla chiusura della finestra (il 10/07 la stessa bet e' stata ripostata
+~20 volte prima di riempirsi): il numero da leggere e' per PICK, non per POST.
+
+**P/L live cumulato (ledger).** 33 bet live, **19 vinte (+28,28) / 14 perse
+(−21,00)** → **netto +7,28 USDC**; stake totale 67,86. Tutte `FULLY_FILLED`.
+
+⚠️ **Limite del dato 10/08-10/10**: quelle righe di log arrivano dal flusso
+multilinea a livello `info` e il campo `message` porta solo la prima riga
+(`... | raw:`), quindi per quei giorni lo stato dell'ordine NON e' leggibile
+dal log e la contabilita' va presa dal ledger (che registra solo i
+riempimenti, fail-closed).
