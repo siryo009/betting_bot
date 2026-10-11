@@ -10477,3 +10477,97 @@ multilinea a livello `info` e il campo `message` porta solo la prima riga
 (`... | raw:`), quindi per quei giorni lo stato dell'ordine NON e' leggibile
 dal log e la contabilita' va presa dal ledger (che registra solo i
 riempimenti, fail-closed).
+
+### Burn crediti: la sorgente `oracle` mescola TRE percorsi con costi diversi (11/10/2026)
+
+**Sintomo**: `credit_budget_status()` → `remaining 233`, reset 01/11 (**20
+giorni**), sostenibile **11,7/giorno**, ritmo misurato **17,0/giorno**
+(finestra 46,5h, 17 campioni) → **esaurimento 2026-10-24**, otto giorni prima
+del reset, `alert: true`.
+
+**⚠️ LA PRIMA CAUSA DELL'ERRORE DI LETTURA E' L'ETICHETTA.** `credit_diagnose`
+attribuisce i consumi a `rotation` / `oracle` / `settlement`, ma dietro
+`source="oracle"` convivono **tre percorsi con costi diversi**:
+
+| percorso | `markets` | costo/chiamata |
+|---|---|---|
+| oracolo a **LINEA** (OU/AH) | `h2h,totals,spreads` | **3 cr** |
+| oracolo **TENNIS** | `h2h` con `sport` = `tennis_*` | 1 cr |
+| oracolo **H2H** (1X2, Task H) | `h2h` con `source="oracle_h2h"` | 1 cr |
+| rotation | `h2h` su `soccer_*` | 1 cr |
+| settlement | `/scores` | 2 cr |
+
+Senza lo split, ~66 crediti di linea e ~17 di tennis finivano nella stessa
+voce. La riclassificazione si fa su `credit_calls.jsonl` con
+`source`+`markets`+`sport` (schema riga: `ts`, `ts_epoch`, `source`,
+`endpoint`, `sport`, `markets`, `credits`, `credits_source`, `remaining`,
+`status`).
+
+**COMPOSIZIONE REALE NELLA FINESTRA DEL RATE (10/09 04:00 → 10/11 02:27) —**
+**24 chiamate / 34 crediti = 17/giorno**:
+
+| percorso | chiamate | crediti | per giorno |
+|---|---|---|---|
+| oracle **TENNIS** (1 cr) | 9 | 9 | ~4,5 |
+| **rotation** (1 cr) | 8 | 8 | ~4,0 |
+| **settlement** (2 cr/chiam.) | 4 | 8 | ~4,0 |
+| oracle **LINEA** (3 cr) | 3 | 9 | ~4,5 → **in regime 3,0** |
+| | | **34** | **17,0** |
+
+I 6 cr di linea sono il **10/09 prima delle 15:00** (quando `ORACLE_ENABLED` e'
+passato a 0); il 10/10 ha pagato **1 chiamata** di regime. Quindi il 17/g e'
+fatto da **tennis + rotation + settlement**, col percorso a linea spento per
+quasi tutta la finestra: **non e' "ORACLE_ENABLED riarmato" a spiegarlo**.
+
+**Storia 7 giorni (83 chiamate / 128 cr)** — qui il linea e' la voce dominante
+*storica*: linea **22 ch / 66 cr** (il **10/05 da solo: 13 ch / 39 cr** =
+burst **Argentina Primera**, lega **probation** pagabile a 3 cr), rotation
+38/34, tennis 17/17, settlement 6/11. E' la coda **pre-fix**, non il ritmo
+attuale.
+
+**NON-CAUSE VERIFICATE (per non inseguire i sospetti sbagliati)**:
+- **oracolo h2h (Task H): 0 chiamate, 0,0 cr** — `oracle_h2h_budget.json`
+  **non esiste** e il budget e' 0/2: la leva e' armata ma **mai esercitata**
+  (nessun pick 1X2 in finestra con cache scaduta da quando e' viva);
+- **settlement: `estimated_credits: 0`** — l'unica lega con righe aperte e'
+  `ATP - Shanghai` (**non mappata** a `SPORTS_MAP`) → il pianificatore non
+  interroga nulla; il suo ~4/g dipende da quali leghe hanno puntate aperte;
+- **linea: 0 ordini OU/AH in tutta l'era** — la griglia SX (passi di 0,5) non
+  interseca la linea main/quarter di Pinnacle (confermato anche dal dry-run
+  dell'11/10: 6 crediti spesi, 0 pick sbloccati).
+
+**TETTO DI REGIME ≈ 19 cr/giorno contro 11,7 sostenibili**: linea 3
+(`ORACLE_BUDGET_DAY=1`) + h2h 2 + tennis ~6 (TTL 12h × tornei attivi) +
+rotation ~4 + settlement ~4. Il deficit e' **strutturale**: anche col linea
+spento resta ~16/giorno.
+
+**TAGLIO APPLICATO (11/10/2026, env Railway — nessuna modifica di codice)**:
+
+| env | prima | dopo | risparmio | costo |
+|---|---|---|---|---|
+| `TENNIS_ORACLE_TTL_MIN` | 720 (12h) | **1080 (18h)** | **−1,2 cr/g** | via di mezzo: dimezza i refresh senza arrivare al tetto assoluto 24h che scarterebbe pick tennis in finestra (l'unica corsia che ordina) |
+| `ORACLE_ENABLED` | 1 (linea) | **0** | **−3 cr/g** | ordini OU/AH persi ≈ **0** (0 in tutta l'era); l'1X2 usa il percorso h2h **separato**, che resta armato |
+
+**Leve NON applicate**: `ORACLE_PAID_TIERS=core` (toglierebbe `probation`:
+Argentina Primera/MLS) diventa **inerte** col linea spento — resta a una env di
+distanza se si riaccende il linea; `ORACLE_BUDGET_DAY` e
+`ORACLE_H2H_BUDGET_DAY` **non toccati** (l'h2h e' la leva che sblocca i pick
+1X2).
+
+⚠️ **Entrambe le env sono lette all'IMPORT** (`odds_api.ORACLE_ENABLED`):
+applicarle richiede un **redeploy**, non basta il set della variabile. Per
+rimisurare: `railway variables --service betting_bot --set ORACLE_ENABLED=1`
++ redeploy.
+
+**DEPLOY E VERIFICA (11/10/2026)**: deployment **`ad3355f9` SUCCESS**; sul
+container (`/proc/1/environ` + import): `ORACLE_ENABLED='0'` /
+`odds_api.ORACLE_ENABLED=False`, `TENNIS_ORACLE_TTL_MIN='1080'` /
+`tennis_lane.ORACLE_TTL_MIN=1080.0`; `window_label` = `T-180..T-2`; crediti
+**229**, sostenibile 11,4/g, ritmo 16,3/g (finestra 47,1h), esaurimento previsto
+**2026-10-25** (un giorno piu' tardi).
+
+⚠️ **LIMITE NOTO DELLO STRUMENTO**: `credit_diagnose.py` mostra ancora
+`oracle` aggregato e **non distingue** linea (3 cr) / tennis (1 cr) / h2h
+(1 cr) — lo split si fa solo riclassificando `credit_calls.jsonl` a mano
+(`source`+`markets`+`sport`). Aggiungere lo split al tool e' il prossimo passo
+naturale se questa lettura servira' di nuovo.
