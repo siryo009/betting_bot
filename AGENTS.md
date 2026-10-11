@@ -10571,3 +10571,48 @@ container (`/proc/1/environ` + import): `ORACLE_ENABLED='0'` /
 (1 cr) — lo split si fa solo riclassificando `credit_calls.jsonl` a mano
 (`source`+`markets`+`sport`). Aggiungere lo split al tool e' il prossimo passo
 naturale se questa lettura servira' di nuovo.
+
+#### Il gate h2h e' stato esercitato in produzione per la prima volta (11/10/2026)
+
+**Errore di metodo da NON ripetere (mio, non del codice).**
+`fetch_h2h_for_pick(pick)` **non** applica la guardia `outside_window`: la
+policy vive nel CHIAMANTE (`auto_bet._ondemand_fetch`, che rifiuta se il pick
+e' fuori dalla finestra di fetch) e il gate la espone come `action`
+(`outside_window`). Chiamandola a mano su un pick a 9,7h dal kickoff ho
+**pagato 2 crediti** (229 -> 227) fuori dalla policy. Non e' un difetto — e'
+il contratto "esecutore sottile, policy nel motore" — ma **`fetch_h2h_for_pick`
+non va invocata fuori finestra**: usare il gate
+(`_top_down_eval(..., fetch_missing=True)`), che non spende.
+
+**Effetto utile**: le cache h2h di **Brasileirao** e **Superliga Danimarca**
+sono state rinfrescate, quindi `h2h_oracle_reason` passa da `NO_CACHE`/
+`STALE_CACHE` (48,1h) a **`OK`** e il **percorso h2h gira end-to-end in
+produzione** (prima non era mai stato esercitato: budget 0/2, 0 chiamate
+`source=oracle_h2h`). La freschezza per l'h2h e' il tetto **24h**
+(`CACHE_MAX_AGE_H`), **non** il TTL dinamico 30'/5'/2' del percorso a linea:
+la cache di stamattina copre i pick di tutta la giornata.
+
+**PRIMO VERDETTO DEL GATE (le due partite reali, cache fresca, 0 crediti)**:
+
+| pick | p_true (Pinnacle, Shin) | quota SX | **EV** | soglia | esito |
+|---|---|---|---|---|---|
+| Palmeiras–Corinthians (`1`) | 0,5873 (`shin_z` 0,0387) | 1,6877 | **−0,88%** | 1,5% (core 1X2) | rifiutato |
+| Brøndby–Lyngby (`1`) | 0,5604 (`shin_z` 0,0359) | 1,7897 | **+0,29%** | 1,5% (core 1X2) | rifiutato |
+
+⚠️ **Il gate dice l'opposto del modello statistico**: le stesse righe hanno nel
+ledger `market_edge` **+10pp** e **+14pp** (Poisson/blend), ma l'oracolo sharp
+dà EV ~0. E' la "overconfidence" gia' documentata: il gate top-down **non
+sbaglia**, e' il motivo per cui esiste (dal 25/09 il prezzo lo giudica
+Pinnacle, non il modello di gol). **0 ordini oggi da questi pick — corretto.**
+
+⚠️ **Prossimo collo di bottiglia misurato**: il tetto `ORACLE_H2H_BUDGET_DAY=2`
+con `max_calls_per_league=1` copre **2 leghe/giorno**. Oggi bastava (2 pick, 2
+leghe); con 4+ pick in 4+ leghe solo 2 sarebbero valutabili. Da decidere quando
+si avra' la misura di quanti pick 1X2 arrivano al giorno — non alzato ora
+(nessuna evidenza, e il margine crediti e' di ~1 cr/giorno).
+
+**Nota**: con una sola fonte sharp il consenso ritorna
+`fallback: 'consensus_disabled'` / `n_sources: 1` (Pinnacle secca = comportamento
+storico): non e' un errore, ma la telemetria del consenso multi-oracolo su
+Brasileirao/Danimarca **non si popola** (Betfair/Matchbook assenti da quelle
+cache).
