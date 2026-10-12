@@ -11097,3 +11097,76 @@ end-to-end corsia ordini, fail-closed su lega assente) e +`TestTierAPagamentoBlo
 (`blocked` ammesso, `all` espande ai tre tier, default invariato, nomi ignoti
 scartati). Tripwire: con il torneo spento l'apertura NON deve accendere nulla
 (una lega vietata non si apre per un env sbagliato).
+
+### 🔴 SCOPERTA DECISIVA: il torneo conta SOLO i mercati NFL/NCAAF (12/10/2026)
+
+**Il torneo non e' "tutte le corsie": e' un torneo di FOOTBALL AMERICANO.**
+Descrizione ufficiale letta dall'API SX (`tournament_leaderboard.find_tournament`):
+
+> *"Gridiron Gauntlet is a RETURN betting tournament, wins will increase your
+> standing, losses will have no impact. **Covering all NFL and NCAA football
+> markets**, with a $7,777 prize pool shared among the top 30 finishers."*
+
+Confermato dai metadati: `allLeagues: false`, `leagueIds: []`, `type: RETURN`,
+`memberCount 104`, `startDate 2026-10-08T13:00Z`, **`endDate 2026-10-20T13:00Z`**.
+La nostra riga: `{username: Siryo, rank 102, result 0.00, trades 1}`.
+
+**CONSEGUENZA OPERATIVA**: tutto il volume su calcio 1X2/OU/AH, tennis ed
+eSports **non vale un punto** in classifica. L'apertura delle leghe `blocked`
+(sezione precedente) resta corretta per la CASSA, ma **per la Top 30 non sposta
+nulla**: i +193.45 punti si prendono SOLO con ordini NFL/NCAAF.
+⚠️ Il grosso del palinsesto football USA viene listato da SX **vicino al
+kickoff**: a 5 giorni dalle partite la corsia produce 1 solo candidato; il
+volume vero arriva su **sab 17/10 (NCAAF)** e **dom 18/10 (NFL)** — e la
+classifica si decide in quelle 48 ore (il torneo chiude il 20/10 13:00Z).
+
+**Parametri alzati su decisione del proprietario (12/10/2026)** — due env sono
+lette all'**IMPORT** (servono un redeploy), due a **RUNTIME**:
+
+| env | prima | dopo | letta a | perche' |
+|---|---|---|---|---|
+| `OPEN_EXPOSURE_CAP_PCT` | 0.40 | **0.70** | import (`auto_bet`) | il recinto 40% di 41.83 = 16.73 limitava a ~3 ordini da 5.00; al 70% = **29.28** (~3 ordini da 8.00) |
+| `TOURNAMENT_MAX_STAKE_USDC` | 5.00 | **8.00** | runtime (`tournament.max_order_stake`) | ogni vincita vale ~15-16 di ritorno invece di 9.5 |
+| `TOURNAMENT_BUDGET_USDC` | 20 | **30** | runtime (`tournament.budget`) | il tetto dichiarato segue lo stake piu' alto |
+| `GRIDIRON_REQ_BUDGET_DAY` | 4 | **8** | import (`gridiron_lane`) | 2 refresh/giorno per sport nel weekend decisivo invece di 1 (costo max +4 cr/giorno) |
+
+⚠️ **Il vincolo che morde per primo resta il recinto**: al 70% di 41.83 = 29.28,
+mentre il budget torneo e' 30 — con stake 8.00 entrano ~3 ordini contemporanei.
+`order_watch.cap_pct()` legge la STESSA costante (`OPEN_EXPOSURE_CAP_PCT`),
+quindi l'audit resta allineato senza modifiche.
+
+**Conto dell'aritmetica (onesto, misurato il 12/10)**: ~4 ondate di partite/giorno
+su 17-18/10, ~3 ordini contemporanei, stake 8.00 a quota media 1.9 -> ogni
+vincita vale ~15. Dalle ~24-30 occasioni dei due giorni servono **~13 vittorie**
+per i +193.45 (contro ~20 con lo stake 5.00): e' la ragione dell'aumento.
+
+**Il PRIMO TRADE del torneo e' gia' stato piazzato — ed era NFL.** La bet #41
+(`sx-L19431533`, 11/10 20:04 UTC, `1` @1.6771, stake 2.50, persa) ha
+`market_id 0x51726aa0…`, e `markets/find` (lettura pubblica, 0 crediti)
+restituisce **Seattle Seahawks vs San Francisco 49ers, `type 226`, `leagueLabel
+NFL`, 32-29** → il nostro esito `1` era la casa. E' **il `Trade: 1` della
+classifica** (RETURN 0.00: una perdita non toglie punti ma non ne aggiunge).
+Quindi la corsia gridiron ha **gia' ordinato end-to-end** (discovery → oracolo →
+gate EV → ordine reale): il problema non e' la catena, e' il VOLUME di partite
+che SX lista.
+
+**⚠️ `tournament.deployed()` conta l'esposizione aperta di TUTTE le corsie**
+(delega ad `auto_bet._open_live_snapshot`, l'unico punto del progetto che sa
+cos'e' il capitale immobilizzato): le bet TENNIS aperte (3.94 il 12/10) mangiano
+budget del torneo **senza valere un punto** — quel giorno `left` era 26.06 su 30
+invece di 30. Non e' un difetto (il tetto e' di cassa, non di punteggio), ma nel
+weekend decisivo va ricordato: con cap 8.00 sono ~3 ordini per ciclo, e il pool
+si ricicla solo quando le partite finiscono e vengono saldate.
+
+**Crediti (controllo del 12/10, 03:30 UTC)**: h2h **0/4**, linea **0/1** e
+gridiron **0/8** oggi — entrambi i percorsi dentro i limiti. Burn reale:
+**18 cr/24h** e **34 cr/48h** (settlement 8/12, rotation 4/8, tennis
+oracle 4/7, oracle_h2h 2, football USA 2, linea 0/3 residui del 10/10) su
+**211 residui** e 11.1/giorno sostenibili -> `exhaustion_date 2026-10-22`
+(il watchdog lo conferma nel log, `alert True`). **L'esaurimento cade DOPO la
+fine del torneo (20/10 13:00Z)** e i 211 crediti coprono la settimana decisiva
+(stimati ~151 di consumo fino al 20/10, ~60 residui): **nessun taglio applicato
+il 12/10 su decisione del proprietario**, per non ridurre il volume proprio nei
+giorni che contano. Tagli da valutare dal 20-21/10 (a classifica decisa):
+`TENNIS_ORACLE_TTL_MIN`, `GRIDIRON_ORACLE_TTL_MIN`, `SPORTS_INTERVAL_DAYS`,
+`SETTLEMENT_HEAL_INTERVAL_HOURS`.
