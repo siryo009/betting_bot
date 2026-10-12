@@ -11522,3 +11522,31 @@ tennis_lane, esports_lane) + 300 (closing_line, significance, decision_pipeline,
 decision_feed, value_filter, risk_guards, liquidity_monitor) — **tutti verdi**;
 **`verify_guardrails.py`: A-H TUTTI BLOCCANO** (exit 0); `compileall` OK, 0
 marker di conflitto.
+
+#### Esito del deploy del rush finale (13/10/2026, notte)
+
+Commit **`4967d12`** pushato su `main` (via `GIT_ASKPASS` dal vault) -> deploy
+Railway **`3b1b3b54`** con container ripartito alle **23:44:13 UTC**, health
+**200**. Verifica IN PRODUZIONE (container AMS, non dedotta):
+
+| modulo | stato misurato |
+|---|---|
+| `rush_final` | import OK, `enabled True`, finestra **17-20/10 valida**, `reason before_window` (mancano 7,01 giorni), `active False` |
+| `clv_tracker` | **52 trade scansionati**, 26 pendenti, 19 chiusi; campioni con `closing_source pinnacle_t0` e CLV calcolato (es. tennis 1.3468 -> 1.31) |
+| `resting_orders` | `enabled True`, `max_open 5`, TTL 720', **0 ordini** (mai esercitato, come prima) |
+| `tournament` | cap per ordine **8.00**, budget **35.00** |
+| job | `clv_tracker_job` (6h) e `resting_orders_job` (300s, che include il **ricircolo** rush) **registrati** in `bot.main`; il rush NON ha un job proprio: agisce dentro il giro dei resting e nel giro puntate |
+
+**Wallet e recinto al controllo**: equity **50.3046** (disponibile 24.7246 +
+in gioco 25.58 su 7 ordini), cap 70% = **35.2132**, liberi **9.6332**,
+utilizzo **72,6% del cap** (dentro il tetto). Il `status()` del rush riporta
+**3 ordini stantii (9,57 USDC)**: e' la STIMA del capitale fermo usata per
+calcolare la pressione di ricircolo — la cancellazione reale agira' solo
+DENTRO la finestra e solo su ordini **RESTING** (fuori finestra
+`clear_stale_resting` esce con `reason before_window`, zero rete e zero azioni:
+verificato nel codice e dai test).
+
+⚠️ **Da sapere**: fuori dalla finestra il modulo e' inerte per costruzione
+(`precheck` -> `before_window`), quindi il comportamento di produzione di oggi
+e' identico a ieri; le leve del rush (TTL resting 45', boost in finestra,
+ricircolo) si accendono da sole il **17/10 00:00 UTC**.
