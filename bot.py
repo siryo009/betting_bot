@@ -478,6 +478,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/weeklyreset` – azzera il circuit breaker settimanale (admin)\n"
         "`/settlement [on|off]` – pausa settlement automatico (admin)\n"
         "`/sxscan` – scan segnali SX Bet ora (admin)\n"
+        "`/torneo` – classifica del torneo SX Bet (posizione, gap, tempo)\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
         "`/backtest` – calibrazione EV atteso vs ROI realizzato\n"
@@ -1595,6 +1596,23 @@ async def cmd_ordini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         logger.error("cmd_ordini: %s", e)
         await update.message.reply_text(f"❌ Errore verifica ordini: {e}")
+
+
+async def cmd_torneo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/torneo — classifica del torneo SX Bet (12/10/2026).
+
+    Lettura PUBBLICA e GRATUITA (API SX, zero crediti the-odds-api, zero
+    ordini): posizione, punteggio RETURN, distanza dalla zona premi e tempo
+    rimasto. `use_cache=False` perche' e' un comando manuale: chi lo digita
+    vuole il dato di adesso, non il memo di 5 minuti.
+    """
+    try:
+        import tournament_leaderboard as tbl
+        snap = tbl.snapshot(use_cache=False)
+        await update.message.reply_text(tbl.format_report(snap))
+    except Exception as e:
+        logger.error("cmd_torneo: %s", e)
+        await update.message.reply_text(f"❌ Errore classifica torneo: {e}")
 
 
 def format_bet_verdicts(settlements: list) -> str:
@@ -2993,6 +3011,52 @@ async def gridiron_lane_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error("gridiron_lane_job: scan (%s)", e)
 
 
+async def tournament_board_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """Classifica del torneo SX Bet (12/10/2026): "tieni aggiornato
+    l'andamento della classifica sul bot".
+
+    Lettura PUBBLICA e GRATUITA (zero crediti the-odds-api, zero chiavi, zero
+    ordini): `GET /tournaments/ongoing` -> `GET /tournaments/<id>`. Il testo
+    viene SEMPRE loggato (telemetria continua); la notifica a admin+iscritti
+    ha un anti-spam a slot orari (`TOURNAMENT_BOARD_NOTIFY_HOURS`, default 12h
+    = 2 avvisi al giorno) sulla chiave `T_BOARD`, perche' il job gira anche
+    ogni 6h e una notifica identica a ogni giro sarebbe rumore.
+
+    `TOURNAMENT_BOARD=0` spegne tutto (fail-safe: un errore di rete diventa un
+    blocco dichiarato, mai un'eccezione al job).
+    """
+    try:
+        import tournament_leaderboard as tbl
+    except Exception as e:                                   # pragma: no cover
+        logger.error("tournament_board_job: modulo non disponibile (%s)", e)
+        return
+    if not tbl.board_enabled():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        snap = await loop.run_in_executor(_scan_executor, tbl.snapshot)
+    except RuntimeError:                       # chiamata fuori dal loop
+        snap = tbl.snapshot()
+    except Exception as e:
+        logger.error("tournament_board_job: lettura (%s)", e)
+        return
+    text = tbl.format_report(snap)
+    logger.info("tournament_board_job: %s", text.replace("\n", " | "))
+    if not snap.get("ok") or context is None:
+        return
+    try:
+        from datetime import timezone as _tz
+        slot_h = max(1, int(tbl.notify_min_hours()))
+        now = datetime.now(_tz.utc)
+        slot = f"{now.strftime('%Y-%m-%d')}:{now.hour // slot_h}"
+        if is_notified("T_BOARD", slot):
+            return
+        mark_notified("T_BOARD", slot)
+        await _send_report_to_recipients(context, text)
+    except Exception as e:
+        logger.warning("tournament_board_job: notifica non inviata (%s)", e)
+
+
 async def tennis_oracle_job(context: ContextTypes.DEFAULT_TYPE):
     """Tornei tennis NUOVI (11/10/2026): prezzati entro pochi minuti.
 
@@ -3469,6 +3533,8 @@ def main() -> None:
     application.add_handler(CommandHandler("autobet", cmd_autobet))
     application.add_handler(CommandHandler("hedge", cmd_hedge))
     application.add_handler(CommandHandler("ordini", cmd_ordini))
+    application.add_handler(CommandHandler("torneo", cmd_torneo))
+    application.add_handler(CommandHandler("classifica", cmd_torneo))
     application.add_handler(CommandHandler("t60reset", cmd_t60reset))
     application.add_handler(CommandHandler("stopreset", cmd_stopreset))
     application.add_handler(CommandHandler("weeklyreset", cmd_weeklyreset))
@@ -3580,6 +3646,17 @@ def main() -> None:
         _grid_min = max(60, int(os.getenv("GRIDIRON_JOB_INTERVAL_MIN", "180")))
         job_queue.run_repeating(gridiron_lane_job, interval=_grid_min * 60,
                                 first=420,
+                                job_kwargs={"max_instances": 1})
+        # Classifica del torneo SX Bet (12/10/2026): "tieni aggiornato
+        # l'andamento della classifica sul bot". Lettura PUBBLICA e gratuita
+        # (zero crediti the-odds-api), quindi l'intervallo non costa nulla:
+        # 6h di default. La notifica e' anti-spam a slot orari
+        # (`TOURNAMENT_BOARD_NOTIFY_HOURS`, 2 avvisi/giorno).
+        # `TOURNAMENT_BOARD=0` spegne il lettore.
+        _board_min = max(30, int(os.getenv("TOURNAMENT_BOARD_INTERVAL_MIN",
+                                           "360")))
+        job_queue.run_repeating(tournament_board_job,
+                                interval=_board_min * 60, first=480,
                                 job_kwargs={"max_instances": 1})
         # Tornei NUOVI (11/10/2026): l'elenco delle chiavi attive e' GRATUITO,
         # quindi si controlla ogni pochi minuti (default 10') e si paga 1

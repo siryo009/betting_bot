@@ -107,7 +107,14 @@ DEFAULT_SPORTS: Tuple[str, ...] = ("americanfootball_nfl",
                                    "americanfootball_ncaaf")
 
 #: Finestra del palinsesto (le partite NFL/NCAA si giocano in giorni definiti).
-HOURS_AHEAD = float(os.getenv("GRIDIRON_HOURS_AHEAD", "48"))
+#: 168h = 7 giorni (12/10/2026, direttiva del proprietario): con le 48h
+#: originali il giro vedeva 4-5 dei 55 mercati football USA residui del torneo
+#: Gridiron Gauntlet. La finestra piu' larga NON costa crediti (l'oracolo si
+#: paga per LEGA: NFL + NCAAF, 1 credito a fetch, indipendente dalla finestra)
+#: e allarga gli eventi valutati — il collo di bottiglia del torneo E' la
+#: mancanza di segnali +EV, non un gate. Misura del 12/10: 56 mercati in
+#: finestra, discovery+order book 9.9s (memo `DISCOVERY_TTL_S` = 300s).
+HOURS_AHEAD = float(os.getenv("GRIDIRON_HOURS_AHEAD", "168"))
 MAX_MARKETS = int(os.getenv("GRIDIRON_MAX_MARKETS", "400"))
 
 #: Soglia EV: UNA definizione per tutta la pipeline (`value_filter.EV_MIN`).
@@ -154,6 +161,8 @@ REQ_BUDGET_DAY = int(os.getenv("GRIDIRON_REQ_BUDGET_DAY", "4"))
 #: TTL della DISCOVERY SX (order book). Il giro ordini gira ogni 60s: senza memo
 #: sarebbero centinaia di richieste/ora sull'API pubblica per un prezzo usato
 #: SOLO dal gate EV (il prezzo d'ordine viene riletto vivo al momento dell'ordine).
+#: Con la finestra a 7 giorni il discovery legge ~56 order book: la memo tiene
+#: il costo a un giro ogni TTL (misurato: 9.9s per giro, il memo ~0s).
 DISCOVERY_TTL_S = float(os.getenv("GRIDIRON_DISCOVERY_TTL_S", "300"))
 
 #: Radice delle API della the-odds-api (separabile per i test).

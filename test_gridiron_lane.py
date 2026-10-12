@@ -223,7 +223,7 @@ class TestDiscovery:
         assert prov.calls[0]["type"] == "226"
 
     def test_fuori_finestra_scartato(self):
-        # partita fra 10 giorni (oltre HOURS_AHEAD 48h)
+        # partita fra 10 giorni (oltre la finestra HOURS_AHEAD, 168h)
         m = _market("0xBBB", HOME, AWAY, kickoff=_kickoff(240))
         prov = FakeSx([m], {"0xBBB": _book()})
         assert gl.discover(provider=prov) == []

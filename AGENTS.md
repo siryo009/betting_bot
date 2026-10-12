@@ -10787,3 +10787,141 @@ staking resta inerte finche' non lo si attiva).
 budget proprio `GRIDIRON_REQ_BUDGET_DAY=4` (4 crediti/giorno al massimo) —
 separato da quelli dell'oracolo a linea e h2h del calcio. Nessuna spesa in
 discovery (lettura pubblica SX).
+
+### Classifica del torneo DENTRO il bot + finestra football USA a 7 giorni (12/10/2026)
+
+Direttiva del proprietario: *"massimizziamo il lavoro per il torneo, tieni
+aggiornato l'andamento della classifica sul bot"*. Il lavoro si divide in due
+meta': (a) portare la **classifica** dentro il bot, (b) **massimizzare** cio'
+che il torneo puo' rendere. La (a) e' codice nuovo; la (b) e' stato prima
+MISURATO e poi deciso dal proprietario con `ask_user`.
+
+**1) IL LETTORE DI CLASSIFICA (`tournament_leaderboard.py`, NUOVO).**
+Sola lettura, **zero crediti the-odds-api, zero chiavi, zero ordini**, fail-safe
+totale (`snapshot()` non solleva mai: un errore di rete e' un blocco con
+`ok=False` ed `error` dichiarato).
+
+⚠️ **DUE TRAPPOLE MISURATE SUL CAMPO (non ipotesi)**:
+1. **SX Bet scarta le richieste senza `User-Agent`** (con l'UA di default di
+   `requests` la risposta non arriva): l'header va SEMPRE inviato
+   (`SX_TOURNAMENT_UA`, default `Mozilla/5.0`).
+2. **`/tournaments` e `/user/tournaments` NON sono usabili**: il primo risponde
+   `401 BAD_AUTH`, il secondo `400 "address must be a valid address"` (serve la
+   chiave API). La classifica si legge SOLO da `/tournaments/<id>`, e l'id si
+   scopre da `/tournaments/ongoing` (`{"data":{"tournaments":[...]}}`).
+   `/tournaments/{id}/detail` e `/stats/leaderboards` -> 404.
+
+Catena: `find_tournament()` (ongoing -> upcoming, match per **sottostringa**
+case-insensitive perche' l'etichetta SX e' decorata: `🏈 $7,777 Gridiron
+Gauntlet 🏈`) -> `fetch_leaderboard()` -> `normalize_rows()` (i campi reali
+sono `username/rank/totalResult/totalTradeCount/prize`, mai reinterpretati) ->
+`find_row()` (la nostra riga: `None` distingue "non in classifica" da
+"posizione zero") -> `cutoff_row()` (l'ultima riga premiata) -> `gap` /
+`in_prizes` / `days_left`. `_days_left` rifiuta le date **senza fuso**
+(lezione del 15/09: un istante ambiguo non si indovina). Memo `_CACHE`
+(`TOURNAMENT_BOARD_TTL_S` 300s) perche' il comando non martelli l'API pubblica;
+`--no-cache`/`use_cache=False` per il dato di adesso.
+
+**2) CABLAGGIO NEL BOT.**
+- `bot.tournament_board_job`: esegue `snapshot()` in executor, **logga SEMPRE**
+  (telemetria continua) e notifica admin+iscritti solo se `ok`, con anti-spam a
+  **slot orari** (`slot = "YYYY-MM-DD:h//NOTIFY_HOURS"`, chiave `T_BOARD`, default
+  `TOURNAMENT_BOARD_NOTIFY_HOURS=12` = 2 avvisi/giorno). Il job gira anche ogni
+  6h: senza l'anti-spam sarebbe rumore.
+- Comando admin/utente **`/torneo`** (+ alias **`/classifica`**), `use_cache=False`
+  (chi lo digita vuole il dato di adesso) + riga in `/help`.
+- Registrazione job: `run_repeating(tournament_board_job, interval=TOURNAMENT_BOARD_INTERVAL_MIN*60
+  (default 360, min 30), first=480, max_instances=1)`.
+- `conftest.py`: `_tbl.reset_cache()` prima/dopo ogni test e **`TOURNAMENT_BOARD=0`**
+  fuori da `test_tournament_leaderboard` (senza, un test che tocca il bot
+  farebbe una chiamata di rete vera).
+- **IaC** (`.railway/railway.ts`, blocco torneo, `preserve()`): `TOURNAMENT_BOARD`,
+  `TOURNAMENT_BOARD_INTERVAL_MIN`, `TOURNAMENT_BOARD_NOTIFY_HOURS`,
+  `TOURNAMENT_BOARD_TTL_S`, `TOURNAMENT_BOARD_TIMEOUT_S`, `TOURNAMENT_USERNAME`,
+  `TOURNAMENT_TOP_RANKS`, `SX_TOURNAMENT_API_BASE`, `SX_TOURNAMENT_UA`.
+- **Test**: `test_tournament_leaderboard.py` **75 verdi, TUTTI OFFLINE**
+  (`http_get` iniettato, date SEMPRE relative a `now`): config, HTTP (401/errore
+  rete/JSON rotto), estrazione payload tollerante, normalizzazione, taglio top-30,
+  snapshot (memo/no-cache/lettore spento/torneo non trovato/classifica vuota/
+  utente assente/`days_left` con e senza fuso), report, cablaggio (job, comando,
+  handler, anti-spam, intervallo, help, IaC, **ogni env letta E dichiarata**),
+  tripwire (nessuna scrittura/ordine nel sorgente, import leggero in subprocess).
+- **Prova live end-to-end** (rete reale, 12/10): il report ha prodotto
+  `🏆 CLASSIFICA — 🏈 $7,777 Gridiron Gauntlet 🏈 | Posizione: #101 / 103`.
+
+**3) LA MISURA CHE CONTA (12/10/2026, live).**
+
+| grandezza | valore |
+|---|---|
+| torneo | id `bf0929d23dc4`, `status ACTIVE`, **type RETURN**, `memberCount 103` |
+| finestra | start `2026-10-08T13:00Z`, **end `2026-10-20T13:00Z`** (⚠️ la nota dell'11/10 diceva 06:00: il dato vero e' 13:00Z) |
+| **noi** | username **`Siryo`**: rank **101/103**, `totalResult` **0.00**, **1 trade**, prize 0 |
+| taglio top-30 | rank 30 `Farkinel` **191.278157** -> **serve +191.28** |
+| leader | `thadog90` `21729.13` (138 trade) |
+| tempo rimasto | **8.49 giorni** |
+
+Il nostro unico trade e' la bet **#41** (NFL Seattle–San Francisco, esito `1`,
+1.6771, stake 2.5, `esito_finale lost`): in formato **RETURN le perdite NON
+tolgono punti**, quindi `result 0` con 1 trade e' coerente. **La leva per
+scalare e' VINCERE, non giocare di piu'** — e il report lo dichiara sempre,
+perche' un lettore che interpreta `result` come P/L prende una decisione
+sbagliata.
+
+**4) PERIMETRO E AGGRESSIONE — DECISIONI DEL PROPRIETARIO (`ask_user`).**
+Misura che ha aperto la domanda: `tournament.covers()` filtra il **`mercato`**
+del pick (`pick["mercato"]`), NON la corsia o la lega; con
+`TOURNAMENT_CLASSES` vuoto l'incremento **1.5x si applica a TUTTE le corsie**
+(tennis, calcio, eSports compresi). La descrizione ufficiale del torneo dice
+pero' **"Covering all NFL and NCAA football markets"**: fuori da li' i punti
+non arrivano, quindi l'aggressione fuori perimetro aggiunge **solo varianza su
+denaro reale**.
+- **Perimetro: TUTTE LE CORSIE (confermato)** — scelta esplicita e consapevole,
+  non una dimenticanza. Nessuna modifica a `tournament.py`.
+- **Aggressione: resta 1.5x** — l'opzione "2.5x" era etichettata *"solo se
+  perimetro ristretto"* e il perimetro ristretto NON e' stato scelto: applicarla
+  sarebbe stato un allargamento silenzioso di una soglia di rischio. Resta una
+  env (`TOURNAMENT_AGGRESSION`), modificabile **senza redeploy**.
+- Nota: il **CFL** entra dalla corsia football USA (misurato: 1 mercato) ma non
+  e' NFL/NCAA.
+
+**5) FINESTRA FOOTBALL USA 48h -> 168h** (env su Railway **e** default di codice:
+zero drift). Ogni partita di football USA si gioca in giorni definiti, quindi il
+palinsesto si vede **tutto in anticipo**:
+- misura del palinsesto residuo (9 giorni, dato pubblico SX): **55 mercati** —
+  39 NCAAF, 15 NFL, 1 CFL. Con la finestra a 48h il giro ne vedeva **4-5**;
+- **costo crediti INVARIATO**: l'oracolo si paga **per lega** (NFL + NCAAF, 1
+  credito a fetch, `GRIDIRON_REQ_BUDGET_DAY=4`, **0 usate** al momento della
+  misura) e una fetch copre l'intera finestra della lega. Allargare la finestra
+  non aggiunge chiamate.
+- **costo in letture pubbliche misurato**: `discover()` legge l'order book di
+  ~56 mercati -> **9.9s per giro**, poi memorizzato (`GRIDIRON_DISCOVERY_TTL_S`
+  300s). Con le 48h era ~1s. Il memo tiene il costo a un giro ogni 5 minuti.
+- ⚠️ **Limite reale, da non confondere con un effetto della finestra**: l'oracolo
+  ha prezzi Pinnacle solo **1-3 giorni avanti** e la copertura **NCAAF e'
+  parziale** (misurato il 10/10: 15/59 eventi con Pinnacle, contro 5/5 NFL).
+  La finestra allarga la SCANSIONE, non garantisce piu' candidati: il collo di
+  bottiglia del torneo resta la **mancanza di segnali +EV** (0 su 4 eventi
+  valutati il 12/10, con EV negativi o nulli su SX vs Pinnacle).
+
+**6) MISURE DI CONTORNO (sola lettura, container).**
+- **RESTING mai esercitato**: `resting_orders.summary()` = `total 0`, registro
+  `data/execution/resting_orders.json` **assente**, **0 righe `RESTING_FILLED`**
+  in `bets` -> **tutti** gli ordini si riempiono con IOC. Il percorso GTC e'
+  armato e testato, **non dimenticato**: nessun pick ha avuto bisogno del
+  fallback.
+- **P/L live per giorno** (tutte `FULLY_FILLED`, mode live): 05/10 3 bet +1.00 |
+  06/10 1 −1.00 | 07/10 6 −1.03 | 08/10 4 +3.04 | 09/10 6 +0.28 | 10/10 6 +9.60 |
+  11/10 8 +1.36.
+- **Salute capitale**: equity **41.829** (= `sizing_equity`), nessuno stop
+  (daily/weekly `stopped false`), `aggressive_live_active True`, ticket 1.00,
+  `window_label T-180..T-2`.
+- **⚠️ CREDITI IN ALERT**: residui **211**, sostenibile **11.1/giorno** (reset
+  01/11), ritmo misurato **19.8/giorno**, **esaurimento previsto 2026-10-22**,
+  `alert True`. Consumo 24h = 19 cr (settlement 8, rotation 4, oracle tennis 3,
+  oracle football USA 2, oracle_h2h 2). `ORACLE_ENABLED False`.
+- **`regions=eu` PER L'ORACOLO US** (da non riscoprire): `regions=us` **non**
+  contiene Pinnacle (solo betmgm/draftkings/fanduel/bovada) mentre `regions=eu`
+  da' **Pinnacle 5/5 eventi NFL** e 15/59 NCAAF, a **1 credito/chiamata**.
+
+**7) STATO**: deploy automatico col push; verifica post-deploy (job che logga la
+classifica, `/torneo` che risponde, `hours_ahead 168` sul container).

@@ -354,6 +354,23 @@ export default defineRailway(() => {
       TOURNAMENT_MAX_STAKE_USDC: preserve(),
       TOURNAMENT_AGGRESSION: preserve(),
       TOURNAMENT_CLASSES: preserve(),
+      // CLASSIFICA del torneo nel bot (12/10/2026,
+      // `tournament_leaderboard.py`): "tieni aggiornato l'andamento della
+      // classifica". Lettura PUBBLICA e GRATUITA (zero crediti the-odds-api,
+      // zero chiavi, zero ordini) da `api.sx.bet`, che pero' SCARTA le
+      // richieste senza `User-Agent` (da qui l'env dedicata).
+      // `TOURNAMENT_USERNAME` e' il nome in classifica, `TOURNAMENT_TOP_RANKS`
+      // l'ultima posizione premiata (30) e `TOURNAMENT_BOARD_NOTIFY_HOURS`
+      // l'anti-spam delle notifiche (12h = 2 avvisi/giorno).
+      TOURNAMENT_BOARD: preserve(),
+      TOURNAMENT_BOARD_INTERVAL_MIN: preserve(),
+      TOURNAMENT_BOARD_NOTIFY_HOURS: preserve(),
+      TOURNAMENT_BOARD_TTL_S: preserve(),
+      TOURNAMENT_BOARD_TIMEOUT_S: preserve(),
+      TOURNAMENT_USERNAME: preserve(),
+      TOURNAMENT_TOP_RANKS: preserve(),
+      SX_TOURNAMENT_API_BASE: preserve(),
+      SX_TOURNAMENT_UA: preserve(),
       TEST_NOTIFY_KEY: preserve(),
       TOP_DOWN_EV: preserve(),
       TOP_DOWN_MARGIN: preserve(),

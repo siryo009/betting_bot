@@ -241,6 +241,16 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # fonte: il file dedicato lo riaccende esplicitamente.
     if "test_tournament" not in request.node.nodeid:
         monkeypatch.setenv("TOURNAMENT_MODE", "0")
+    # CLASSIFICA del torneo (12/10/2026, `tournament_leaderboard.py`): il memo
+    # dello snapshot e' a livello di MODULO e sopravviverebbe fra i test dello
+    # stesso processo (una classifica finta resterebbe servita ai test
+    # successivi). Si azzera prima e dopo, e il lettore e' SPENTO fuori dal
+    # file dedicato — la sua lettura e' una chiamata di RETE verso `api.sx.bet`
+    # e nessun altro test deve poterla fare per sbaglio.
+    import tournament_leaderboard as _tbl
+    _tbl.reset_cache()
+    if "test_tournament_leaderboard" not in request.node.nodeid:
+        monkeypatch.setenv("TOURNAMENT_BOARD", "0")
     # Motore quantitativo TENNIS (03/10/2026, `tennis_quant.py`): il ledger ELO
     # vive nel ledger SQLite PRINCIPALE e la telemetria in un JSONL. In test
     # entrambi vanno nella tmp: senza isolamento un `run_cycle()` scriverebbe
@@ -310,6 +320,7 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     yield
     _ld.reset_cache()
     _oracle_skips.reset_dedup()
+    _tbl.reset_cache()
 
 
 def _free_enclosure(bankroll: float, new_stake: float = 0.0) -> dict:
