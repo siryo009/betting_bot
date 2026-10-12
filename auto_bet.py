@@ -4391,8 +4391,9 @@ def run_today_bets(stake_eur: float | None = None,
                         pick["match_id"])
             continue
 
-        # --- STRATEGIA T-60 (17/09): la decisione esecutiva viene presa SOLO
-        # nella finestra T-60..T-50 minuti prima del fischio d'inizio. Fuori
+        # --- FINESTRA ESECUTIVA (17/09, allargata il 12/10): la decisione
+        # viene presa SOLO dentro la finestra dichiarata da `window_label()`
+        # (oggi T-720..T-2). Fuori
         # finestra il palinsesto resta SCANSIONATO e classificato (il ledger
         # e la catena shadow misurano tutto), ma nessun ordine parte: e' il
         # controllo del timing richiesto dal proprietario.
@@ -4932,9 +4933,12 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
                             "scartato (fail-closed)", trade.match_id, trade.esito)
                 continue
             if T60_EXECUTION_ONLY and t60_window(kickoff) != "within":
+                # L'etichetta e' DERIVATA (window_label): un testo hardcoded
+                # "T-60" mentirebbe da quando la banda e' T-720..T-2.
                 logger.info("auto_bet: trade chief %s (%s) fuori finestra "
-                            "T-60 (%s): solo scansione",
-                            trade.match_id, trade.esito, t60_window(kickoff))
+                            "%s (%s): solo scansione",
+                            trade.match_id, trade.esito, window_label(),
+                            t60_window(kickoff))
                 continue
             if not get_optimal_timing(kickoff.isoformat())["optimal"]:
                 logger.info("auto_bet: trade chief %s (%s) timing non "
