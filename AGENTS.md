@@ -11232,3 +11232,90 @@ diversi) -> file **44 verdi**; lotti verdi: `test_auto_bet` +
 (`FULLY_FILLED` nei log + riga in `bets` con `status='RESTING_FILLED'` o fill
 diretto) e che `_live_fill` riceva il flag (log attesi: nessun
 `mercato non trovato` sull'evento gridiron).
+
+### 🔴 Falso EV +29% su un AH NFL: il ripiego sul punto falsificava il VERSO (12/10/2026)
+
+**Sintomo**: con i tipi a linea abilitati (`GRIDIRON_TYPES=226,342,28`) la corsia
+produceva **1 pick su 175 eventi** — un AH NFL con `EV +29.00%`, `strong_value`,
+`line None`:
+`Tampa Bay Buccaneers vs Pittsburgh Steelers | AH | Home -2.5 | market_id
+0x97f3…dd735 | quota 2.4096 | p_true 0.5354`.
+
+**Causa radice (misurata sul payload reale, non dedotta)**:
+`pinnacle_oracle.spreads_odds_of` aveva un ripiego che, quando il match per NOME
+falliva, assegnava i lati dal **SOLO `point`**. Pinnacle prezza **solo la linea
+main** (`name='Pittsburgh Steelers' point=-2.5 price=1.82`,
+`name='Tampa Bay Buccaneers' point=2.5 price=2.08`) mentre SX quota **anche lo
+specchio** ("Tampa Bay Buccaneers **-2.5**"): chiesto `home_line=-2.5` il match
+per nome falliva **correttamente** (Tampa ha +2.5), ma il ripiego prendeva
+l'outcome con `point == -2.5` — cioe' **Pittsburgh** — e lo etichettava `"Home"`.
+La p_true di *Pittsburgh -2.5* (0.535) finiva accoppiata al prezzo SX di
+*Tampa -2.5* (2.41) -> **finto EV +29%** su un mercato che l'oracolo NON prezza.
+Prova incrociata: `po.oracle_lines(..., market_type="AH")` -> `{2.5}` (solo la
+main), e `line_true_probs(-2.5)` restituiva erroneamente
+`{'Away': 0.5354, 'Home': 0.4646}`.
+
+**Perche' contava**: un ordine reale a EV +29% su un edge inesistente, nel
+weekend decisivo del torneo, con stake 8.00 (il cap torneo) — la classe di bug
+che costa denaro vero senza alcun allarme.
+
+**Fix 1 (`pinnacle_oracle.spreads_odds_of`)**: nuovo flag **`names_usable`**
+(True se QUALCHE nome di esito e' riconducibile a casa o trasferta); il ripiego
+sul punto scatta **solo se `not names_usable`** — con i nomi leggibili un
+disallineamento di linea e' un'**informazione** (l'ordine delle squadre e'
+leggibile), quindi il verdetto e' fail-closed. Il ripiego resta la difesa per le
+forme di payload senza nomi. Docstring estesa col caso reale e la data.
+
+**Fix 2 (`gridiron_lane._build_pick`)**: il pick porta ora `"line"` (prima
+assente -> `_live_fill` riceveva `line None` e un pick a linea era
+indistinguibile da un moneyline in log, telemetria e report).
+
+**Test**: `test_line_oracle.py` +`test_spreads_linea_specchio_con_nomi_none` e
+nuova classe **`TestLineaSpecchioDelVerso`** (4: estrattore sullo specchio ->
+None, `oracle_lines == {2.5}`, `line_true_probs(-2.5) is None` con
+`probs["Home"] < probs["Away"]` e `Home ≈ 0.4667` alla linea VERA, diagnosi
+`LINE_MISMATCH` non-recoverable); `test_gridiron_lane.py`
++`test_linea_specchio_non_produce_pick` (SX quota lo specchio a 2.41 -> `picks ==
+[]`) e +`test_linea_main_resta_valutata` (controprova: la linea prezzata resta
+giudicata e `picks[0]["line"] == 2.5`). Il ripiego continua a essere esercitato
+dal test esistente `test_spreads_senza_nomi_decide_la_linea_speculare` (payload
+senza nomi -> `names_usable` False).
+
+**Verifiche**: **237 verdi** (`test_line_oracle` + `test_gridiron_lane`) + lotti
+verdi (`test_auto_bet`, `test_auto_bet_live`, `test_capital_enclosure`,
+`test_top_down`, `test_multi_market`, `test_decision_pipeline`,
+`test_decision_limits`) + **`verify_guardrails.py` A-H tutti bloccano** (exit 0).
+0 marker di conflitto, `compileall` OK, file temporanei dei probe rimossi.
+
+**Deploy e verifica in PRODUZIONE** (commit `cec3183`, deployment `0cd3e005`
+**SUCCESS**, health 200) — misurato sul container, non dedotto:
+```
+'names_usable' in inspect.getsource(po.spreads_odds_of)  -> True
+gl.picks()                                              -> 0   (il falso AH sparito)
+po.line_true_probs('Tampa Bay Buccaneers','Pittsburgh Steelers',
+                   market_type='AH', line=-2.5)          -> None
+```
+
+**Env della corsia gridiron (readback del 12/10)**: `GRIDIRON_TYPES=226,342,28`,
+`GRIDIRON_REQ_BUDGET_DAY=8`, `GRIDIRON_CREDIT_BUDGET_DAY=8`,
+`ORACLE_ENABLED=1`, `ORACLE_BUDGET_DAY=1` (`config plan`: already up to date).
+
+**Fetch oracolo gridiron verificato sul container**: `{keys 2, fetched 2,
+markets "h2h,totals,spreads", files_written 4, requests_today 4, credits_today 6,
+credit_budget 8, credits_per_call 3, remaining 196}` con cache fresche **h2h 2 +
+linea 2**: il percorso a **doppia cache** (`toa_*` per il moneyline, `toao_*` per
+il percorso a linea) funziona end-to-end a costo di UNA sola chiamata pagata.
+
+**Stato crediti the-odds-api (12/10/2026)**: la chiave in produzione (len 32,
+sha12 **`6de9e6433715`**) vede `remaining 196` / `used 304` — verifica a costo
+ZERO su `/v4/sports` (200, 79 sport). I **500 crediti** annunciati dal
+proprietario appartengono quindi a una **chiave DIVERSA, non ancora impostata**:
+finche' non arriva su `betting_bot`, in produzione valgono i 196 residui.
+
+**Da decidere quando i 500 crediti saranno attivi** (leve per il weekend
+decisivo, tutte env): `GRIDIRON_CREDIT_BUDGET_DAY` (8 = 2 fetch/giorno su 2
+leghe; con TTL 720' servono 4 fetch/giorno per una copertura continua ->
+**12 crediti**), `GRIDIRON_ORACLE_TTL_MIN` (720 -> 120-180' per rinfrescare le
+linee prima delle ondate di partite), `ORACLE_H2H_BUDGET_DAY` (4 -> piu' leghe
+1X2/giorno, ma vale 0 punti torneo), `ORACLE_ENABLED` (il percorso a LINEA
+calcistico: 3 cr/giorno misurati con **0 ordini in tutta l'era**).
