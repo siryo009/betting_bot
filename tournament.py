@@ -2,9 +2,9 @@
 
 PERCHE' ESISTE (direttiva del proprietario, 11/10/2026)
 -------------------------------------------------------
-SX Bet sponsorizza tornei a periodo (es. **Gridiron Gauntlet**, 08/10 06:00 ->
-20/10 06:00: 58 partecipanti, **$7.777 divisi fra i top 30**) con una regola
-precisa, verificata sul sito ufficiale:
+SX Bet sponsorizza tornei a periodo (es. **Gridiron Gauntlet**, 08/10 13:00 ->
+20/10 13:00 UTC: ~103 partecipanti, **$7.777 divisi fra i top 30**) con una
+regola precisa, verificata sul sito ufficiale:
 
     "wins increase your standing, losses will have no impact"
     "RETURN betting tournament"
@@ -31,15 +31,20 @@ esplicito e una soglia di sicurezza sull'equity reale.
 LE TRE PROTEZIONI (tutte fail-closed)
 -------------------------------------
 1. **BUDGET**: l'esposizione APERTA totale (bet `mode='live'` non ancora
-   saldate) non puo' superare `TOURNAMENT_BUDGET_USDC` (default **10.0**). Il
+   saldate) non puo' superare `TOURNAMENT_BUDGET_USDC` (default **20.0** dal
+   12/10/2026, era 10.0; con 41.83 USDC di equity il recinto 40% = 16.73 e'
+   comunque il tetto vero). Il
    vincolo e' sull'esposizione *corrente*, non giornaliera: chiuso un match, il
    capitale si libera da solo (stessa logica del recinto 40%).
 2. **SOGLIA DI SICUREZZA**: sotto `TOURNAMENT_SAFETY_FLOOR_USDC` (default
    **20.0**) di equity il torneo si mette in pausa: si continua a giocare col
    percorso standard, non con l'incremento del torneo.
-3. **CAP PER ORDINE**: `TOURNAMENT_MAX_STAKE_USDC` (default **2.50**) — tetto
-   assoluto per singola puntata in modalita' torneo (con ~30 USDC di equity e'
-   ~8%: sopra il cap 12% del Kelly ma sotto qualunque soglia di rovina).
+3. **CAP PER ORDINE**: `TOURNAMENT_MAX_STAKE_USDC` (default **5.00** dal
+   12/10/2026, era 2.50) — tetto assoluto per singola puntata in modalita'
+   torneo. In un formato RETURN i punti sono i ritorni LORDI, quindi crescono
+   con lo stake: il cap e' il parametro che decide la corsa al taglio
+   (misurato il 12/10: col cap 2.50 servivano ~39 vincite per i 193 punti del
+   taglio, con 5.00 ~19).
 
 I guardrail di portafoglio (recinto 40%, correlazione 30%, CB2, stop-loss
 giornaliero/settimanale) restano quelli del giro: questo modulo sta **sopra**
@@ -47,9 +52,9 @@ il percorso di sizing e **sotto** i cap di portafoglio.
 
 Env (tutte dichiarate `preserve()` in `.railway/railway.ts`):
     TOURNAMENT_MODE            "0" (spento; "1" attiva)
-    TOURNAMENT_BUDGET_USDC     "10.0"
+    TOURNAMENT_BUDGET_USDC     "20.0"
     TOURNAMENT_SAFETY_FLOOR_USDC "20.0"
-    TOURNAMENT_MAX_STAKE_USDC  "2.50"
+    TOURNAMENT_MAX_STAKE_USDC  "5.00"
     TOURNAMENT_AGGRESSION      "1.5"  (moltiplicatore, >= 1.0)
     TOURNAMENT_CLASSES         ""     (CSV di `mercato`; vuoto = tutte le corsie)
 
@@ -100,7 +105,7 @@ def active() -> bool:
 
 
 def budget() -> float:
-    return _num_env("TOURNAMENT_BUDGET_USDC", 10.0, minimum=0.0)
+    return _num_env("TOURNAMENT_BUDGET_USDC", 20.0, minimum=0.0)
 
 
 def safety_floor() -> float:
@@ -108,7 +113,7 @@ def safety_floor() -> float:
 
 
 def max_order_stake() -> float:
-    return _num_env("TOURNAMENT_MAX_STAKE_USDC", 2.50, minimum=0.0)
+    return _num_env("TOURNAMENT_MAX_STAKE_USDC", 5.00, minimum=0.0)
 
 
 def aggression() -> float:

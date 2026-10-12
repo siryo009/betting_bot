@@ -8,8 +8,9 @@ Il proprietario ha chiesto TASSATIVAMENTE, prima di qualunque dispatch reale:
    REGISTRATO sul ledger SQLite (mai verso il provider);
 4. CB4 — filtro liquidità/order book prima dell'invio.
 
-Piu' la finestra esecutiva (T-60..T-50 il 17/09, **T-180..T-2** dal
-04/10/2026): fuori finestra SOLO scansione, nessun ordine.
+Piu' la finestra esecutiva (T-60..T-50 il 17/09, **T-180..T-2** dal 04/10),
+**T-720..T-2** dal 12/10/2026 (sprint del torneo): fuori finestra SOLO
+scansione, nessun ordine.
 
 Tutti i test sono OFFLINE: DB SQLite temporaneo, wallet/provider finti,
 nessuna rete, nessun ordine reale.
@@ -349,20 +350,25 @@ class TestCB4Liquidita:
 
 
 class TestFinestraT60:
-    """Strategia **T-180..T-2**: decisione esecutiva da 3 ore a 2 minuti.
+    """Strategia **T-720..T-2**: decisione esecutiva da 12 ore a 2 minuti.
 
-    Direttiva 04/10/2026 (era T-60..T-5, e T-50/T-15 prima): la banda si
-    allarga per catturare le variazioni di quota delle formazioni ufficiali e
-    i volumi dei sindacati quantitativi, e si chiude a 2 minuti per non avere
-    zone d'ombra. Il test asserisce la politica NUOVA per intero: un ulteriore
+    Direttiva 12/10/2026 (era T-180..T-2 dal 04/10, e T-60..T-5 prima): la
+    banda si allarga per moltiplicare i TENTATIVI per pick (il giro gira ogni
+    60s) a costo crediti ZERO — le letture SX sono pubbliche — e si chiude a 2
+    minuti per non avere zone d'ombra. Il test asserisce la politica NUOVA per
+    intero: un ulteriore
     spostamento deve rompere qui.
     """
 
     def test_classificazione_finestra(self):
         now = datetime.now(timezone.utc)
-        assert auto_bet.t60_window(now + timedelta(minutes=200)) == "before"
-        assert auto_bet.t60_window(now + timedelta(minutes=175)) == "within"
-        assert auto_bet.t60_window(now + timedelta(minutes=120)) == "within"
+        # I bordi si DERIVANO dalla costante di produzione: un altro
+        # spostamento della banda (com'e' successo il 12/10) non puo' rendere
+        # il test verde per il motivo sbagliato.
+        ap = auto_bet.T60_WINDOW_MIN_MIN
+        assert auto_bet.t60_window(now + timedelta(minutes=ap + 30)) == "before"
+        assert auto_bet.t60_window(now + timedelta(minutes=ap - 5)) == "within"
+        assert auto_bet.t60_window(now + timedelta(minutes=200)) == "within"
         assert auto_bet.t60_window(now + timedelta(minutes=55)) == "within"
         assert auto_bet.t60_window(now + timedelta(minutes=30)) == "within"
         assert auto_bet.t60_window(now + timedelta(minutes=10)) == "within"
@@ -376,9 +382,12 @@ class TestFinestraT60:
         assert auto_bet.t60_window(now - timedelta(minutes=5)) == "missed"
         assert auto_bet.t60_window(None) == "unknown"
 
-    def test_apertura_a_T180(self):
-        """L'apertura e' **T-180** (3 ore): fuori, solo scansione."""
-        assert auto_bet.T60_WINDOW_MIN_MIN == 180.0
+    def test_apertura_a_T720(self):
+        """L'apertura e' **T-720** (12 ore dal 12/10/2026, era T-180).
+
+        Sprint del torneo: 4x i tentativi per pick a costo crediti zero.
+        """
+        assert auto_bet.T60_WINDOW_MIN_MIN == 720.0
 
     def test_chiusura_allineata_al_pavimento_assoluto(self):
         """Le due guardie COINCIDONO a **T-2** (direttiva 04/10/2026).
@@ -397,9 +406,11 @@ class TestFinestraT60:
         calls = []
         monkeypatch.setattr(auto_bet, "_live_fill",
                             lambda *a, **k: calls.append(a) or None)
+        # Oltre l'apertura (derivata dalla costante: 720' -> 780'):
         _seed_validated_decision(mid="early",
                                  kickoff=datetime.now(timezone.utc)
-                                 + timedelta(hours=4))
+                                 + timedelta(
+                                     minutes=auto_bet.T60_WINDOW_MIN_MIN + 60))
         # +1 minuto e' SOTTO la chiusura (T-2 dal 04/10, era T-5): fail-closed.
         _seed_validated_decision(mid="late",
                                  kickoff=datetime.now(timezone.utc)
@@ -410,8 +421,8 @@ class TestFinestraT60:
     def test_dispatch_in_finestra_ordina(self, temp_db, monkeypatch):
         _live_mode(monkeypatch)
         # +20: dentro la banda di OGNI politica (T-60..T-5 il 03/10,
-        # T-180..T-2 dal 04/10): il caso che il cablaggio deve esercitare.
-        # E' il caso che il test del cablaggio deve esercitare.
+        # T-180..T-2 dal 04/10, T-720..T-2 dal 12/10): il caso che il
+        # cablaggio deve esercitare.
         _seed_validated_decision(mid="ok",
                                  kickoff=datetime.now(timezone.utc)
                                  + timedelta(minutes=20))
@@ -478,9 +489,11 @@ class TestFinestraT60:
                                                         monkeypatch):
         """Con T60_EXECUTION_ONLY il giro normale non ordina fuori finestra."""
         _live_mode(monkeypatch)
-        # Segnale value a 3h dal kickoff: scansionato, NON ordinato.
+        # Segnale value OLTRE l'apertura della finestra (13h con T-720):
+        # scansionato, NON ordinato. L'offset e' derivato dalla costante.
         start = (datetime.now(timezone.utc)
-                 + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+                 + timedelta(minutes=auto_bet.T60_WINDOW_MIN_MIN + 60)
+                 ).isoformat().replace("+00:00", "Z")
         tracker.save_match("scan1", "Premier League", "Arsenal", "Chelsea",
                            start)
         tracker.save_analysis("scan1", 1.7, 1.1, 0.52, 0.27, 0.21, 0.58,

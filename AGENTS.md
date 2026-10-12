@@ -10963,3 +10963,81 @@ corsia ha prodotto il suo primo segnale +EV sul palinsesto NFL/NCAA:
 Railway **e** allineata come default di codice (zero drift: se l'env sparisse,
 resterebbe 168). Tutte le env del lettore classifica sono in `preserve()`
 (`railway config plan` = *already up to date*, **0 to destroy**).
+
+### Sprint torneo "Gridiron Gauntlet": banda T-720..T-2, cap 5.00, budget 20 (12/10/2026)
+
+**Direttiva del proprietario (scadenza 20/10, Top 30 obbligatoria)**: massimizzare
+il VOLUME e le VINCITE su tutte le corsie, senza frenare l'operativita' con
+attese eccessive; ogni ordine che rispetta i parametri di valore dell'oracolo e
+le soglie di cassa viene inviato. Il formato del torneo e' **RETURN-based**
+("wins increase your standing, losses will have no impact"): contano solo i
+ritorni LORDI, quindi **lo stake e' il moltiplicatore dei punti** e i cap sono
+il parametro che decide la corsa al taglio, non le soglie EV.
+
+**Misura che ha mosso i parametri (sola lettura sul container).** Al 12/10 il
+torneo aveva **~103-104 partecipanti** e il taglio Top-30 era
+`#30 Amoros 193.450098` con **2 trade**. Lettura strategica decisiva: chi sta al
+taglio ci e' arrivato con **grossi tagli singoli**, non col volume — quindi
+contano lo STAKE e il ritorno per singola vincita. Tabella dei ritorni necessari
+per i 193 punti del taglio (quota media 2.0): cap **2.50 -> ~39 vincite**,
+**5.00 -> ~19**, 8.00 -> ~12, 16.73 (limite recinto 40%) -> ~6. Con **8.46
+giorni** residui, il cap 2.50 era strutturalmente insufficiente.
+
+**1) FINESTRA ESECUTIVA T-180..T-2 -> T-720..T-2 (`auto_bet.py`).**
+`T60_WINDOW_MIN_MIN` default **720** (env `T60_WINDOW_MIN_MIN`, letta
+all'IMPORT -> serve redeploy); `T60_WINDOW_MAX_MIN` resta **derivato** da
+`MIN_MINUTES_TO_START` (=2, chiusura fail-closed). Perche': il giro gira ogni
+**60s** e la banda larga **moltiplica i TENTATIVI per pick** senza alcun costo
+di crediti (le letture SX sono pubbliche) e **senza indebolire la disciplina sul
+prezzo** — il floor EV di `_live_fill` riempie SOLO alla quota del segnale o
+meglio. Docstring e commenti aggiornati in 5 punti; `window_label()` resta
+DERIVATA (nessuna etichetta hardcoded).
+
+**2) CAP PER ORDINE 2.50 -> 5.00 e BUDGET ESPOSIZIONE 10 -> 20 (`tournament.py`).**
+`max_order_stake()` default **5.00**, `budget()` default **20.0** (entrambi
+override-abili da env). La `safety_floor()` resta **20.0** di equity e
+l'`aggression()` resta **1.5x** (scelta esplicita del proprietario: l'aumento a
+2.5x era condizionato a un perimetro ristretto che NON e' stato scelto).
+⚠️ Con equity **41.83 USDC** il recinto 40% vale **16.73**: il budget 20 e' il
+tetto "dichiarato", ma il vincolo che morde per primo resta il **recinto 40%**.
+
+**3) PERIMETRO: TUTTE LE CORSIE.** `TOURNAMENT_CLASSES` resta vuoto ->
+`covers()` risponde True per ogni `mercato`. Scelta esplicita del proprietario
+(nessuna modifica al codice del perimetro).
+
+**4) Verifiche e stato operativo (container, sola lettura).** Wallet
+`{available 41.829, exposure 0.0, equity 41.829}`, `sizing_equity = 41.829`,
+cap 40% = **16.73**. Board corsie pre-modifica: 1X2 1 pick (Malmo-Kalmar `1`
+@1.7937), multi 0, tennis 1 (ATP Shanghai `2` @2.5), **gridiron 1**
+(`sx-L20489227` NCAAF `1` @1.5355), esports 0. `TOURNAMENT_MODE=1`, nessuno
+stop attivo, `aggressive_live_active True`, ticket 1.0.
+⚠️ **Crediti in ALERT**: `remaining 211`, reset fra 19 giorni (**11.1/giorno
+sostenibili**) contro un **rate misurato 19.8/giorno** -> `exhaustion_date
+2026-10-22`, **prima del reset**. Qualunque aumento di volume va misurato
+contro questo limite (l'oracolo football USA ha un tetto proprio di 4
+crediti/giorno, oggi 0 usati).
+
+**5) Test aggiornati DI PROPOSITO** (una soglia cambiata senza test e' un
+cambiamento silenzioso): `test_t60_breakers.TestFinestraT60` con i bordi
+**DERIVATI** da `auto_bet.T60_WINDOW_MIN_MIN` (`ap+30` = before, `ap-5` =
+within), `test_apertura_a_T720` (assert `== 720.0`), seed del dispatch a
+`T60_WINDOW_MIN_MIN + 60` minuti, test "fuori finestra" a offset derivato;
+`test_tournament` (20.0/5.00, `test_cap_per_ordine` 4.0x1.5=6.0 -> 5.00,
+`test_cap_configurabile` con cap 2 su base 2.0, `test_acceso_alza_gli_stake`
+attende 3.0, report `2.00/20.00`); `verify_guardrails.py` scenario G1 con seed
+a `T60_WINDOW_MIN_MIN/60 + 1.0` ore e intestazione T-720..T-2.
+
+**6) Esito delle verifiche.** `test_t60_breakers` + `test_tournament` verdi;
+regressioni verdi su `test_auto_bet*` (3 file), `test_exposure_gate`,
+`test_capital_enclosure`, `test_order_watch`, `test_oracle_skips`,
+`test_line_oracle`, `test_top_down`, `test_aggressive_kelly`,
+`test_gridiron_lane`, `test_tournament_leaderboard`, `test_resting_orders`,
+`test_flow_measure`, `test_bot`, `test_secret_hygiene`, `test_risk_guards`,
+`test_favourites_only`; **`verify_guardrails.py` A-H TUTTI BLOCCANO (exit 0)**
+(scenario C: stake Kelly 3.64 col cap 4.03; H: 3 ordini aperti 12.09/13.42 e 0
+inviati al provider). 0 marker di conflitto.
+
+**7) Env da impostare su Railway** (lette all'IMPORT -> richiedono redeploy;
+tutte gia' in `preserve()` di `.railway/railway.ts`, `config plan` = 0 to
+destroy): `T60_WINDOW_MIN_MIN=720`, `TOURNAMENT_MAX_STAKE_USDC=5.00`,
+`TOURNAMENT_BUDGET_USDC=20`.

@@ -62,7 +62,8 @@ BET_STAKE_DEFAULT_EUR = 5.0
 #: MAI (un ordine a partita imminente rischia di arrivare su un mercato gia'
 #: chiuso o su un prezzo non piu' rappresentativo).
 #: 04/10/2026 (direttiva del proprietario): 5 -> **2**, in COPPIA con
-#: `T60_WINDOW_MAX_MIN` (finestra T-180..T-2). Le due guardie DEVONO restare
+#: `T60_WINDOW_MAX_MIN` (finestra **T-720..T-2** dal 12/10/2026, era
+#: T-180..T-2). Le due guardie DEVONO restare
 #: allineate: se la chiusura della finestra scende sotto questo pavimento
 #: l'esecuzione tenta ordini che l'altra guardia salta comunque (lavoro
 #: sprecato, log contraddittori); se sale sopra, l'ultima parte della banda e'
@@ -219,16 +220,21 @@ STAKE_CAP_HARD = os.getenv("STAKE_CAP_HARD", "1").strip().lower() \
 # finestra la strategia NON ordina: i segnali vengono scansionati e
 # classificati dai giri normali (che restano ogni 60s), la decisione
 # esecutiva arriva alla T-60.
-T60_WINDOW_MIN_MIN = float(os.getenv("T60_WINDOW_MIN_MIN", "180"))   # apertura (minuti al kickoff)
+# APERTURA (minuti al kickoff): **180 -> 720** il 12/10/2026 (sprint del
+# torneo "Gridiron Gauntlet") su decisione del proprietario: la banda
+# esecutiva passa da 3 a 12 ore per moltiplicare i TENTATIVI per pick (il
+# giro gira ogni 60s) senza alcun costo di crediti — le letture SX sono
+# pubbliche — e senza indebolire la disciplina sul prezzo: il floor EV di
+# `_live_fill` riempie SOLO alla quota del segnale o meglio.
+T60_WINDOW_MIN_MIN = float(os.getenv("T60_WINDOW_MIN_MIN", "720"))   # apertura (minuti al kickoff)
 # CHIUSURA (minuti al kickoff): **2** dal 04/10/2026 (era 5, 15 prima del
-# 30/09). Direttiva del proprietario: la banda esecutiva e' **T-180..T-2** —
-# da 3 ore a 2 minuti dal fischio — per catturare le formazioni ufficiali e i
-# volumi dei sindacati quantitativi, senza zone d'ombra negli ultimi minuti.
-#   T60_WINDOW_MIN_MIN = 180  ->  T60_WINDOW_MAX_MIN = 2
+# 30/09). La banda esecutiva e' **T-720..T-2** (da 12 ore a 2 minuti dal
+# fischio), senza zone d'ombra negli ultimi minuti.
+#   T60_WINDOW_MIN_MIN = 720  ->  T60_WINDOW_MAX_MIN = 2
 # La chiusura e' DERIVATA da `MIN_MINUTES_TO_START` (unica sorgente): le due
 # guardie devono coincidere, altrimenti o si tenta l'ultima fascia.
 # ⚠️ Le env sono l'unico modo di tararla in produzione senza redeploy
-# (Railway: T60_WINDOW_MIN_MIN=180, T60_WINDOW_MAX_MIN=2).
+# (Railway: T60_WINDOW_MIN_MIN=720, T60_WINDOW_MAX_MIN=2).
 T60_WINDOW_MAX_MIN = float(os.getenv("T60_WINDOW_MAX_MIN",
                                      str(MIN_MINUTES_TO_START)))   # chiusura (fail-closed: oltre, non si ordina)
 # CB1 — TETTO PER ORDINE: NESSUN calcolo dinamico (Kelly incluso) puo'
@@ -269,7 +275,7 @@ T60_EXECUTION_ONLY = os.getenv("T60_EXECUTION_ONLY", "1").strip().lower() \
 # pre-match su cui si sarebbe ordinato non esiste piu'. La finestra esecutiva
 # (`t60_window`) lo scarta gia' quando e' attiva, ma quella e' una guardia
 # CONFIGURABILE (`T60_EXECUTION_ONLY=0` la spegne per diagnostica) e dipende
-# dalla banda T-180..T-2: questa e' la regola INDIPENDENTE, non negoziabile —
+# dalla banda T-720..T-2: questa e' la regola INDIPENDENTE, non negoziabile —
 # oltre PREMATCH_MAX_AGE_H ore dal kickoff il pick esce dal board a
 # prescindere da qualunque interruttore, PRIMA del gate oracolo, del
 # harvesting e dell'esecuzione. (Le corsie eSports/tennis pagano la loro
@@ -291,10 +297,10 @@ def _mins_label(value: float) -> str:
 def window_label() -> str:
     """Etichetta della finestra esecutiva, DERIVATA dalle costanti di produzione.
 
-    Non e' un testo fisso: dopo lo spostamento a **T-180..T-2** (04/10/2026)
-    un'etichetta hardcoded "T-60" sarebbe rimasta a mentire nei log e nel
-    messaggio di avvio del bot (stessa classe di bug dei testi stantii del
-    13/09). Formato: "T-180..T-2".
+    Non e' un testo fisso: dopo lo spostamento a **T-720..T-2** (12/10/2026,
+    era T-180..T-2 dal 04/10) un'etichetta hardcoded sarebbe rimasta a
+    mentire nei log e nel messaggio di avvio del bot (stessa classe di bug
+    dei testi stantii del 13/09). Formato: "T-720..T-2".
     """
     return (f"T-{_mins_label(T60_WINDOW_MIN_MIN)}.."
             f"T-{_mins_label(T60_WINDOW_MAX_MIN)}")
@@ -336,9 +342,12 @@ DRY_RUN = os.getenv("AUTO_BET_DRY_RUN", "0").strip().lower() \
 def t60_window(kickoff: "datetime | None") -> str:
     """Posizione di un kickoff rispetto alla finestra esecutiva.
 
-    Politica dal 04/10/2026: **T-180..T-2** (da 3 ore a 2 minuti dal fischio),
-    per catturare le formazioni ufficiali e i volumi dei sindacati. Ritorna:
-    "before" (kickoff oltre T-180: non ancora), "within" (nella banda:
+    Politica dal 12/10/2026: **T-720..T-2** (da 12 ore a 2 minuti dal
+    fischio): la banda larga moltiplica i TENTATIVI per pick (il giro gira
+    ogni 60s) a costo crediti ZERO (letture SX pubbliche), senza indebolire
+    la disciplina sul prezzo (il floor EV riempie solo alla quota del
+    segnale o meglio). Ritorna:
+    "before" (kickoff oltre T-720: non ancora), "within" (nella banda:
     finestra esecutiva), "missed" (sotto T-2: non si ordina, fail-closed),
     "unknown" (kickoff non parsabile: non si ordina).
     """

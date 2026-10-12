@@ -76,9 +76,12 @@ class TestConfig:
         assert tn.active() is True
 
     def test_valori_di_default(self):
-        assert tn.budget() == 10.0
+        # Budget 20 / cap 5.00 dal 12/10/2026 (sprint del torneo: in un
+        # formato RETURN i punti sono i ritorni LORDI, quindi il cap per
+        # ordine e' il parametro che decide la corsa al taglio).
+        assert tn.budget() == 20.0
         assert tn.safety_floor() == 20.0
-        assert tn.max_order_stake() == 2.50
+        assert tn.max_order_stake() == 5.00
         assert tn.aggression() == 1.5
 
     def test_aggressione_mai_sotto_uno(self, monkeypatch):
@@ -205,9 +208,9 @@ class TestStakeFor:
 
     def test_cap_per_ordine(self, monkeypatch):
         monkeypatch.setenv("TOURNAMENT_MODE", "1")
-        # 2.0 x 1.5 = 3.0 -> cap per ordine 2.50
-        res = tn.stake_for(2.0, pick={"mercato": "1X2"}, capital=30.0)
-        assert res["stake"] == pytest.approx(2.50)
+        # 4.0 x 1.5 = 6.0 -> cap per ordine 5.00 (default dal 12/10/2026)
+        res = tn.stake_for(4.0, pick={"mercato": "1X2"}, capital=30.0)
+        assert res["stake"] == pytest.approx(5.00)
 
     def test_cap_dal_residuo_di_budget(self, monkeypatch):
         monkeypatch.setenv("TOURNAMENT_MODE", "1")
@@ -219,9 +222,9 @@ class TestStakeFor:
 
     def test_cap_configurabile(self, monkeypatch):
         monkeypatch.setenv("TOURNAMENT_MODE", "1")
-        monkeypatch.setenv("TOURNAMENT_MAX_STAKE_USDC", "5")
+        monkeypatch.setenv("TOURNAMENT_MAX_STAKE_USDC", "2")
         res = tn.stake_for(2.0, pick={"mercato": "1X2"}, capital=30.0)
-        assert res["stake"] == pytest.approx(3.0)      # cap 5 non morde
+        assert res["stake"] == pytest.approx(2.0)      # cap 2 morde il 3.0
 
     def test_mai_riduce(self, monkeypatch):
         # anche con aggressione 1.0 il risultato non scende sotto la base
@@ -252,7 +255,7 @@ class TestReport:
         monkeypatch.delenv("TOURNAMENT_MODE", raising=False)
         s = tn.status()
         assert s["active"] is False
-        assert s["budget"] == 10.0
+        assert s["budget"] == 20.0
         assert "SPENTO" in tn.format_report(s)
 
     def test_report_attivo(self, monkeypatch):
@@ -261,7 +264,7 @@ class TestReport:
         monkeypatch.setattr(auto_bet, "_open_live_snapshot", lambda: (2.0, 1))
         text = tn.format_report(tn.status())
         assert "ATTIVO" in text
-        assert "2.00/10.00" in text
+        assert "2.00/20.00" in text
         assert "x1.50" in text
         assert "tutte le corsie" in text
 
@@ -295,7 +298,7 @@ class TestCablaggio:
         kept, info = auto_bet._apply_tournament(self._cands(), bankroll=30.0)
         assert info["enabled"] is True
         assert info["raised"] == 2
-        assert all(c["stake"] == pytest.approx(2.50) for c in kept)  # cap
+        assert all(c["stake"] == pytest.approx(3.0) for c in kept)   # x1.5
 
     def test_bloccati_rimossi(self, monkeypatch):
         import auto_bet

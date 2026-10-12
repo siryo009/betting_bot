@@ -22,7 +22,7 @@ Scenari:
                                   (lega) restano
   E. Liquidita' SX             -> book sottile: ordine rifiutato (no slippage)
   F. Lega STRATEGY_LEAGUES     -> campionati non vincenti mai candidati
-  G. Circuit breakers T-60     -> finestra esecutiva T-180..T-2 (04/10/2026),
+  G. Circuit breakers T-60     -> finestra esecutiva T-720..T-2 (12/10/2026),
                                   CB1 cap per ordine, CB2 kill switch
                                   patrimoniale (soglia da env)
   H. Recinto esposizione       -> 8 ordini aperti (40% impegnato): l'Advisor
@@ -554,29 +554,34 @@ def main() -> int:
     auto_bet._execution_mode = lambda allow_sim=True: "sim"
 
     # G1 — FINESTRA ESECUTIVA: il giro ordina SOLO dentro la banda.
-    # Politica dal 04/10/2026: **T-180..T-2**. Due accorgimenti NECESSARI:
-    # (a) il kickoff del seed sta a **+5h** (non +3h): a +3h esatti si cadrebbe
-    #     SUL bordo di apertura T-180 e la diagnostica misurerebbe i
-    #     microsecondi invece del guardrail;
-    # (b) si PULISCE il ledger prima: con la banda allargata da T-60 a T-180 le
-    #     righe residue degli scenari A-F (+3h) sono diventate ordinabili, e
-    #     misurare "0 ordini" su un palinsesto ereditato non e' misurare il
-    #     guardrail (osservato eseguendo la diagnostica: 2 ordini residui,
-    #     scenario G rosso senza che nulla fosse rotto).
+    # Politica dal 12/10/2026: **T-720..T-2** (era T-180..T-2 dal 04/10). Due
+    # accorgimenti NECESSARI:
+    # (a) il kickoff del seed sta a **+13h** (non +5h): la banda arriva a 12
+    #     ore, quindi un seed a +5h sarebbe DENTRO la finestra e la diagnostica
+    #     misurerebbe gli ordini invece del guardrail. L'offset e' DERIVATO
+    #     dalla costante di produzione, cosi' un altro spostamento della banda
+    #     non puo' rendere il test verde per il motivo sbagliato;
+    # (b) si PULISCE il ledger prima: le righe residue degli scenari A-F restano
+    #     ordinabili dentro la banda larga, e misurare "0 ordini" su un
+    #     palinsesto ereditato non e' misurare il guardrail (osservato
+    #     eseguendo la diagnostica: 2 ordini residui, scenario G rosso senza
+    #     che nulla fosse rotto).
     _conn_clean = tracker._get_conn()
     _conn_clean.execute("DELETE FROM bets")
     _conn_clean.execute("DELETE FROM predictions")
     _conn_clean.execute("DELETE FROM matches")
     _conn_clean.commit()
     _conn_clean.close()
-    _seed("t60-nofin", "Osasuna", 1.65, 0.58, 0.07, hours=5.0)
+    _seed("t60-nofin", "Osasuna", 1.65, 0.58, 0.07,
+          hours=auto_bet.T60_WINDOW_MIN_MIN / 60.0 + 1.0)
     auto_bet.T60_EXECUTION_ONLY = True
     mark = len(_RECORDS)
     fuori = auto_bet.run_today_bets(stake_eur=1.0)
     _print_logs(mark)
     ok_g1 = fuori == []
-    print(f"  {GREEN if ok_g1 else RED}→ kickoff a +5h con T-60 attivo "
-          f"(banda T-180..T-2): ordini {len(fuori)} "
+    print(f"  {GREEN if ok_g1 else RED}→ kickoff a "
+          f"+{auto_bet.T60_WINDOW_MIN_MIN / 60.0 + 1.0:.0f}h con T-60 attivo "
+          f"(banda {auto_bet.window_label()}): ordini {len(fuori)} "
           f"(atteso 0: solo scansione){RESET}")
     # Controprova: la stessa riga ordina se la finestra esecutiva e' spenta.
     auto_bet.T60_EXECUTION_ONLY = False
