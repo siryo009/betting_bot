@@ -188,10 +188,27 @@ class TestConfig:
         assert gl.SX_SPORT_ID == "8"
         assert gl.DEFAULT_TYPES == ("226",)            # moneyline (no linea)
 
-    def test_ev_min_dal_modulo_di_produzione(self):
+    def test_ev_min_dal_modulo_di_produzione(self, monkeypatch):
+        monkeypatch.delenv("GRIDIRON_EV_MIN", raising=False)
         import value_filter as vf
         assert gl.ev_min() == pytest.approx(vf.EV_MIN)
         assert gl.ev_min() > 0
+
+    def test_ev_min_override_della_corsia(self, monkeypatch):
+        """La soglia del torneo e' una env DELLA CORSIA: abbassarla non
+        tocca la soglia globale di `value_filter`."""
+        monkeypatch.setenv("GRIDIRON_EV_MIN", "0.015")
+        assert gl.ev_min() == pytest.approx(0.015)
+        import value_filter as vf
+        assert vf.EV_MIN != pytest.approx(0.015)
+
+    def test_ev_min_env_impossibile_ricade_sul_default(self, monkeypatch):
+        """Una soglia non si spegne con un env sbagliato: valori non numerici,
+        <= 0 o > 1 ricadono sul default di produzione."""
+        import value_filter as vf
+        for bad in ("abc", "0", "-0.5", "2.5", ""):
+            monkeypatch.setenv("GRIDIRON_EV_MIN", bad)
+            assert gl.ev_min() == pytest.approx(vf.EV_MIN), bad
 
     def test_fascia_quota_fail_closed(self, monkeypatch):
         assert gl.in_odds_band(1.30) is True

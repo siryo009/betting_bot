@@ -128,14 +128,31 @@ DEFAULT_SPORTS: Tuple[str, ...] = ("americanfootball_nfl",
 HOURS_AHEAD = float(os.getenv("GRIDIRON_HOURS_AHEAD", "168"))
 MAX_MARKETS = int(os.getenv("GRIDIRON_MAX_MARKETS", "400"))
 
-#: Soglia EV: UNA definizione per tutta la pipeline (`value_filter.EV_MIN`).
-#: Un default copiato qui sarebbe un secondo standard di valore in casa.
+#: Soglia EV della corsia football USA.
+#:
+#: Default = UNA definizione per tutta la pipeline (`value_filter.EV_MIN`):
+#: un default copiato qui sarebbe un secondo standard di valore in casa.
+#: `GRIDIRON_EV_MIN` (env, dichiarata in IaC) e' l'OVERRIDE esplicito della
+#: corsia: nel torneo RETURN contano solo le vincite lorde (le perdite non
+#: tolgono punti), quindi l'universo giocabile va allargato dove l'edge e'
+#: reale ma sotto la soglia di cassa — misurato il 12/10: su 250 eventi NFL/
+#: NCAAF il miglior EV era +2,28%, appena sotto il 2,5% globale, con 0 pick
+#: ordinabili. Valori impossibili (<= 0, > 1 o non numerici) RICADONO sul
+#: default: una soglia non si spegne con un env sbagliato.
 def ev_min() -> float:
+    raw = (os.getenv("GRIDIRON_EV_MIN") or "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if 0.0 < v <= 1.0:
+                return v
+        except (TypeError, ValueError):
+            pass
     try:
         from value_filter import EV_MIN as _EV
         return float(_EV)
     except Exception:                                          # pragma: no cover
-        return float(os.getenv("GRIDIRON_EV_MIN", "0.025"))
+        return 0.025
 
 
 #: Fascia quota della corsia. Piu' larga della calcistica: su un moneyline NFL
