@@ -11312,10 +11312,21 @@ ZERO su `/v4/sports` (200, 79 sport). I **500 crediti** annunciati dal
 proprietario appartengono quindi a una **chiave DIVERSA, non ancora impostata**:
 finche' non arriva su `betting_bot`, in produzione valgono i 196 residui.
 
-**Da decidere quando i 500 crediti saranno attivi** (leve per il weekend
-decisivo, tutte env): `GRIDIRON_CREDIT_BUDGET_DAY` (8 = 2 fetch/giorno su 2
-leghe; con TTL 720' servono 4 fetch/giorno per una copertura continua ->
-**12 crediti**), `GRIDIRON_ORACLE_TTL_MIN` (720 -> 120-180' per rinfrescare le
-linee prima delle ondate di partite), `ORACLE_H2H_BUDGET_DAY` (4 -> piu' leghe
-1X2/giorno, ma vale 0 punti torneo), `ORACLE_ENABLED` (il percorso a LINEA
-calcistico: 3 cr/giorno misurati con **0 ordini in tutta l'era**).
+**PIANO APPROVATO dal proprietario (12/10/2026) per quando la chiave con i 500
+crediti sara' su `betting_bot`** — allocazione **BILANCIATA**, tutte env (nessuna
+modifica di codice), da applicare nell'ordine qui sotto:
+1. `GRIDIRON_CREDIT_BUDGET_DAY` **8 -> 24** (8 fetch/giorno: 3 cr x 2 leghe) e
+   `GRIDIRON_ORACLE_TTL_MIN` **720 -> 150'** — i due vanno INSIEME: con la TTL a
+   12h un budget piu' alto non viene speso (le cache fresche sono saltate), e con
+   la TTL corta senza budget la copertura si interrompe a meta' giornata.
+2. `ORACLE_H2H_BUDGET_DAY` **4 -> 10** (piu' leghe 1X2/giorno valutate; vale 0
+   punti torneo ma alimenta le vittorie di cassa).
+3. `TENNIS_ORACLE_TTL_MIN` **1080 -> 720'** (oracolo tennis piu' fresco: e' la
+   corsia che ha prodotto gli ordini reali).
+4. Ripristino parziale della rotazione calcio (`SPORTS_INTERVAL_DAYS`) e della
+   verifica periodica del settlement, se il burn rimane sotto il sostenibile.
+5. `ORACLE_ENABLED` (percorso a LINEA calcistico): 3 cr/giorno misurati con **0
+   ordini in tutta l'era** -> spento = crediti liberati per il football USA.
+**Fallback approvato se i 500 NON arrivano entro il 13/10**: non si tocca nulla
+(i 196 coprono fino al 20/10 con margine minimo; nessun taglio e nessun aumento
+di spesa prima del weekend decisivo).
