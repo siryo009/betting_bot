@@ -11330,3 +11330,71 @@ modifica di codice), da applicare nell'ordine qui sotto:
 **Fallback approvato se i 500 NON arrivano entro il 13/10**: non si tocca nulla
 (i 196 coprono fino al 20/10 con margine minimo; nessun taglio e nessun aumento
 di spesa prima del weekend decisivo).
+
+### Sprint torneo 12/10 (notte): soglia EV gridiron a 1,5% + budget torneo allineato al recinto
+
+**Direttiva del proprietario**: Top 30 obbligatoria entro il 20/10; il bot deve
+piazzare ordini reali in autonomia senza fermarsi su falsi vincoli di cassa.
+
+**1) IL COLLO DI BOTTIGLIA ERA LA SOGLIA EV DELLA CORSIA (misurato).** Il gate EV
+della corsia football USA usava `value_filter.EV_MIN` (2,5%) — corretto come
+default ma non negoziabile per un torneo RETURN (contano solo le vincite lorde,
+le perdite non tolgono punti). Misura su **250 eventi NFL/NCAAF** in finestra
+168h: **87 candidati con EV>0**, ma il **migliore era +2,28%** (4 sopra 1,5%,
+81 fra 0 e 1%) -> **0 pick** a 2,5%.
+
+**Fix (`gridiron_lane.ev_min`, commit `06e0b01`)**: `GRIDIRON_EV_MIN` (env,
+**già** dichiarata `preserve()` in IaC) è l'override **esplicito della corsia**;
+senza env il default resta `value_filter.EV_MIN` (una sola definizione di valore
+in casa), e valori impossibili (`<= 0`, `> 1`, non numerici) **ricadono sul
+default** — una soglia non si spegne con un env sbagliato. La soglia è letta a
+RUNTIME (nessun redeploy per cambiarla), ma il set di una variabile richiede
+comunque un riavvio del processo per entrare nell'env.
+**Esito misurato sul container: `ev_min 0.015` -> 5 pick (erano 0)** — 1 NFL
+(Rams-Bills, già a ordine) + 4 NCAAF del weekend 17-18/10.
+
+**2) BUDGET TORNEO ALLINEATO AL RECINTO (`TOURNAMENT_BUDGET_USDC` 30 -> 35).**
+`tournament.deployed()` conta l'esposizione aperta di **TUTTE** le corsie (per
+design: delega a `auto_bet._open_live_snapshot`): con 23,21 USDC aperti — di cui
+~18 di **tennis che non vale un punto** — il budget 30 lasciava solo **6,79** al
+torneo, cioè **meno di un ordine** da 6,04. Il cambio porta `left` a **11,79**.
+**È a rischio ZERO**: il vincolo HARD resta il recinto
+(`OPEN_EXPOSURE_CAP_PCT=0.70` -> 35,21 con equity 50,30), che il budget torneo
+non può scavalcare — allinearlo cambia solo QUALE dei due cap morde per primo.
+
+**3) STATO OPERATIVO MISURATO SUL CONTAINER (13/10, 22:41 UTC).**
+Deploy `06e0b01` -> `c261625e` SUCCESS, poi `eb901d28` SUCCESS (redeploy per il
+budget). Health **200**, `overdue_orphans 0`, 0 ERROR/Traceback.
+- wallet: **equity 50,3046** (27,09 liberi + **23,21 in gioco**, 6 ordini aperti
+  tutti `FULLY_FILLED`); recinto 70% = **35,21** (liberi 12,00);
+  `order_ceiling` = **6,04** (12% di 50,30), ticket 1,00;
+- torneo: budget **35**, deployed 23,21, **left 11,79**, max stake 8,00,
+  aggressione 1,5x, sicurezza 20,00;
+- nessun blocco: `DRY_RUN False`, kill-switch `live`, daily/weekly stop non
+  armati, finestra **T-720..T-2**, tutte le corsie attive (gridiron, tennis,
+  1X2 con `ORACLE_PAID_TIERS=core,probation,blocked`, multi OU/AH);
+- **crediti 488** residui (la chiave con i 500 è arrivata: `sustainable 25,7/g`,
+  alert spento, reset fra 19 giorni); oracolo h2h 1/10, oracolo a linea 1/1
+  (3 cr) — profilo ampiamente dentro il budget;
+- **classifica**: `Siryo` **#104/110**, `result 0,00`, **1 trade**; taglio #30 =
+  **237,217121** (BBV, 40 trade); **gap +237,22**, **7,6 giorni** residui.
+
+**4) DEDUP CROSS-CORSIA CONFERMATA IN PRODUZIONE**: il log del ciclo recita
+`pick duplicato cross-corsia sx-L19431545 (1) — tengo la versione con identita'
+di mercato (corsia) al posto di quella del ledger`. La bet NFL Rams-Bills è già
+a ledger (`1` @1,6161, stake **4,71**, `FULLY_FILLED`): è il `Trade: 1` della
+classifica. **0 ordini nuovi nel giro perché ogni pick in finestra è già a
+ordine** e i 4 NCAAF sono `before` (aprono a T-720, il 17/10 ~05:30 UTC).
+
+**5) ARITMETICA ONESTA DEL GAP (da non nascondere).** Con equity **50,30** e
+recinto 70% (35,21) il capitale simultaneo è ~3-5 ordini da ~6 USDC; il gap è
+**237 punti**, cioè **237 USDC di ritorni lordi**. Servono ~32 vincite da 7,5
+(quota media 1,5, stake 5) oppure ~16 da 15 (quota 2,5). È raggiungibile SOLO
+se il capitale **ricircola** (i settlement liberano l'esposizione) e solo con
+**volume massimo su sab 17 e dom 18** — non con un ordine in più oggi. Il
+leverage residuo non è la soglia (appena abbassata) né i gate, ma:
+(a) quanti pick NFL/NCAAF produce il palinsesto **nel giorno partita** (SX lista
+il grosso vicino al kickoff), (b) la **velocità del ricircolo** (settlement
+SX-native, ogni 15', gratis), (c) un eventuale aumento del **cap per ordine**
+(`KELLY_MAX_STAKE_PCT` 12% -> oltre), che è una **decisione di rischio** e non
+è stata applicata.
