@@ -438,3 +438,14 @@ class TestTierAPagamentoBlocked:
         da quella dichiarata."""
         monkeypatch.setenv("ORACLE_PAID_TIERS", "blocked,boh")
         assert value_filter.oracle_paid_tiers() == frozenset({"blocked"})
+
+    def test_lega_vuota_non_paga_anche_con_blocked_ammesso(self, monkeypatch):
+        """`league_tier("")` risponde `blocked`: col tier `blocked` ammesso una
+        lega SENZA nome finirebbe nello stesso bucket delle leghe aperte dal
+        torneo. Il gate di spesa deve restare fail-closed come `league_allowed`
+        (una fetch pagata su una lega ignota non si puo' giustificare)."""
+        monkeypatch.setenv("ORACLE_PAID_TIERS", "all")
+        assert value_filter.is_paid_oracle_league("") is False
+        assert value_filter.is_paid_oracle_league("   ") is False
+        # controprova: una lega vera `blocked` paga normalmente
+        assert value_filter.is_paid_oracle_league(BANNED) is True

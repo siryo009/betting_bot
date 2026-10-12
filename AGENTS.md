@@ -11077,6 +11077,12 @@ invariato): includere le probation e le blocked e' una decisione, non un
 default silenzioso. **La spesa NON cresce oltre il tetto**: `ORACLE_H2H_BUDGET_DAY`
 (4) e `ORACLE_H2H_MAX_CALLS_PER_LEAGUE` (1) limitano comunque le chiamate —
 cambia solo DOVE vengono allocate (4 leghe/giorno fra le 8 candidate).
+⚠️ **Trovato in verifica post-deploy e chiuso**: `league_tier("")` risponde
+`blocked`, quindi col tier `blocked` ammesso una lega SENZA nome finiva nello
+stesso bucket delle leghe aperte e `is_paid_oracle_league("")` passava da
+False a **True** (una fetch pagata su una lega ignota). Ora
+`is_paid_oracle_league` e' **fail-closed sulla lega vuota**, con il controllo
+PRIMA del tier — stessa regola di `league_allowed`.
 
 **3) Env (lette a RUNTIME, nessun redeploy per attivarle).**
 `TOURNAMENT_OPEN_LEAGUES=1` e `ORACLE_PAID_TIERS=core,probation,blocked`

@@ -493,7 +493,15 @@ def is_paid_oracle_league(league: str = "") -> bool:
     scheduler `line_oracle._league_plan`, cosi' i due percorsi che spendono
     non possono divergere su CHI paga. Una lega non giocabile (blocked) non e'
     in nessun tier ammesso -> False.
+
+    FAIL-CLOSED sulla lega VUOTA, e il controllo va fatto PRIMA del tier:
+    `league_tier("")` risponde `blocked`, quindi col tier `blocked` ammesso
+    (12/10/2026) una lega senza nome finirebbe nello stesso bucket delle leghe
+    aperte dal torneo. Senza sapere cosa si sta giocando NON si paga una
+    fetch (stessa regola di `league_allowed`).
     """
+    if not canonical_league(league):
+        return False
     return league_tier(league) in oracle_paid_tiers()
 
 
