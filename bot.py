@@ -2996,10 +2996,17 @@ async def gridiron_lane_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         refreshed = await loop.run_in_executor(_scan_executor,
                                                gridiron_lane.refresh_oracle)
+        # Crediti E richieste: con i tipi a linea la singola fetch costa 3
+        # crediti (non 1), quindi il solo contatore delle richieste non dice
+        # quanto si e' speso (punto 3 del monitoraggio crediti).
         logger.info("gridiron_lane_job: oracolo — leghe %s, scaricate %s, "
-                    "richieste oggi %s/%s", refreshed.get("keys"),
-                    refreshed.get("fetched"), refreshed.get("requests_today"),
-                    gridiron_lane.REQ_BUDGET_DAY)
+                    "richieste oggi %s/%s, crediti oggi %s/%s (%s cr/fetch)",
+                    refreshed.get("keys"), refreshed.get("fetched"),
+                    refreshed.get("requests_today"),
+                    gridiron_lane.REQ_BUDGET_DAY,
+                    refreshed.get("credits_today"),
+                    gridiron_lane.CREDIT_BUDGET_DAY,
+                    refreshed.get("credits_per_call"))
     except Exception as e:
         logger.error("gridiron_lane_job: refresh oracolo (%s)", e)
     try:

@@ -118,6 +118,29 @@ def _oracle_payload(home=HOME, away=AWAY, *, p1=1.66, p2=2.34,
     }]
 
 
+def _oracle_line_payload(market="totals", *, line, home=HOME, away=AWAY,
+                         p1=1.90, p2=1.95, book="pinnacle"):
+    """Payload the-odds-api con un mercato A LINEA (`totals` o `spreads`).
+
+    Ricorda la forma REALE (verificata il 30/09): il campo `point` sta
+    sull'OUTCOME, non sull'oggetto mercato — un payload col punto a livello
+    mercato farebbe scartare tutte le linee.
+    """
+    if market == "totals":
+        outs = [{"name": "Over", "point": line, "price": p1},
+                {"name": "Under", "point": line, "price": p2}]
+    else:
+        outs = [{"name": home, "point": line, "price": p1},
+                {"name": away, "point": -line, "price": p2}]
+    return [{
+        "home_team": home, "away_team": away,
+        "bookmakers": [{
+            "key": book, "title": book.capitalize(),
+            "markets": [{"key": market, "outcomes": outs}],
+        }],
+    }]
+
+
 def _write_cache(payload, *, ts=None, name="toa_americanfootball_nfl.json"):
     folder = Path(__import__("os").environ["GRIDIRON_ORACLE_CACHE"])
     folder.mkdir(parents=True, exist_ok=True)
@@ -197,6 +220,49 @@ class TestConfig:
         monkeypatch.delenv("GRIDIRON_SPORTS")
         assert gl._sports() == gl.DEFAULT_SPORTS
 
+    def test_tipi_a_linea_e_stringa_markets(self, monkeypatch):
+        """Il costo dell'oracolo dipende dai TIPI: 1 credito o 3.
+
+        Col solo moneyline basta `h2h`; con un tipo a linea (spread/totali)
+        servono anche `totals`/`spreads` — e' la spesa che il 07/10 aveva
+        portato a spegnere il percorso a linea del CALCIO. Qui la corsia
+        dichiara la propria, cosi' il budget non si scopre a runtime.
+        """
+        monkeypatch.delenv("GRIDIRON_TYPES", raising=False)
+        assert gl.uses_line_oracle() is False
+        assert gl.oracle_markets() == "h2h"                  # 1 credito
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,28")
+        assert gl.uses_line_oracle() is True
+        assert gl.oracle_markets() == "h2h,totals,spreads"   # 3 crediti
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,342")
+        assert gl.uses_line_oracle() is True
+        assert gl.oracle_markets() == "h2h,totals,spreads"
+        monkeypatch.setenv("GRIDIRON_TYPES", "226")
+        assert gl.uses_line_oracle() is False
+
+    def test_cache_paths_per_i_due_percorsi(self, monkeypatch):
+        """Il fetch deve scrivere DUE cache: i due percorsi leggono prefissi
+        diversi (`toa_*` il moneyline, `toao_*` il percorso a linea) e la glob
+        `toa_*` NON aggancia `toao_*`."""
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,28")
+        names = {p.name for p in gl.cache_paths("americanfootball_nfl")}
+        assert names == {"toa_americanfootball_nfl.json",
+                         "toao_americanfootball_nfl.json"}
+        monkeypatch.setenv("GRIDIRON_TYPES", "226")
+        names = {p.name for p in gl.cache_paths("americanfootball_nfl")}
+        assert names == {"toa_americanfootball_nfl.json"}
+
+    def test_oracle_key_for(self):
+        """Etichetta di ledger -> chiave dell'oracolo (mai fuzzy)."""
+        assert gl._oracle_key_for("Over 49.5") == "Over"
+        assert gl._oracle_key_for("Under 49.5") == "Under"
+        assert gl._oracle_key_for("Home -2.5") == "Home"
+        assert gl._oracle_key_for("Away +2.5") == "Away"
+        # il moneyline ha un percorso dedicato ('1'/'2'): qui non si mappa
+        assert gl._oracle_key_for("1") is None
+        assert gl._oracle_key_for(None) is None
+        assert gl._oracle_key_for("qualcosa") is None
+
 
 # ---------------------------------------------------------------------------
 # 2. DISCOVERY (sportId 8, type 226)
@@ -221,6 +287,33 @@ class TestDiscovery:
         # e' CHIAMATA con sportIds=8 (il football USA, non il calcio)
         assert prov.calls and prov.calls[0]["sportIds"] == "8"
         assert prov.calls[0]["type"] == "226"
+
+    def test_discovery_tipi_a_linea(self, monkeypatch):
+        """Con `GRIDIRON_TYPES=226,342,28` i tre tipi sono nativi del
+        contratto 2.0 (ML_OT / AH_OT / OU_OT) e portano la LINEA + le
+        etichette di ledger che il settlement legge senza codice nuovo."""
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,342,28")
+        ko = _kickoff(6)
+        ms = [
+            _market("0xM1", HOME, AWAY, kickoff=ko, mtype="226"),
+            _market("0xM2", HOME, AWAY, kickoff=ko, mtype="342", line=2.5,
+                    o1=f"{HOME} +2.5", o2=f"{AWAY} -2.5"),
+            _market("0xM3", HOME, AWAY, kickoff=ko, mtype="28", line=49.5,
+                    o1="Over 49.5", o2="Under 49.5"),
+        ]
+        prov = FakeSx(ms, {m["marketHash"]: _book(1.85, 2.20) for m in ms})
+        evs = {e["sx_type"]: e for e in gl.discover(provider=prov)}
+        assert set(evs) == {"226", "342", "28"}
+        assert evs["226"]["market_type"] == "ML_OT"
+        assert evs["226"]["line"] is None
+        assert evs["342"]["market_type"] == "AH_OT"
+        assert evs["342"]["line"] == 2.5
+        assert evs["28"]["market_type"] == "OU_OT"
+        assert evs["28"]["line"] == 49.5
+        assert {s["key"]: s["label"] for s in evs["342"]["sides"]} == \
+            {"1": "Home +2.5", "2": "Away -2.5"}
+        assert {s["key"]: s["label"] for s in evs["28"]["sides"]} == \
+            {"1": "Over 49.5", "2": "Under 49.5"}
 
     def test_fuori_finestra_scartato(self):
         # partita fra 10 giorni (oltre la finestra HOURS_AHEAD, 168h)
@@ -327,9 +420,11 @@ class TestPicks:
         prov = FakeSx([m], {"0x333": _book(4.0, 2.20)})
         assert gl.picks(provider=prov) == []
 
-    def test_solo_moneyline(self, monkeypatch):
-        # Con i tipi a LINEA abilitati, `picks` deve comunque valutare solo il
-        # moneyline (l'oracolo a 2 esiti non copre uno spread).
+    def test_tipo_a_linea_senza_oracolo_a_linea(self, monkeypatch):
+        """Un tipo a LINEA passa dal percorso a linea: senza una cache
+        `totals`/`spreads` (qui c'e' solo l'h2h) l'oracolo e' fail-closed e
+        non nasce nessun pick. Il percorso con la cache giusta e' in
+        `TestPicksLinea`."""
         monkeypatch.setenv("GRIDIRON_TYPES", "226,342")
         _write_cache(_oracle_payload())
         ko = _kickoff(6)
@@ -342,6 +437,90 @@ class TestPicks:
         monkeypatch.setenv("GRIDIRON_LANE", "0")
         assert gl.picks(provider=FakeSx([])) == []
         assert gl.discover(provider=FakeSx([])) == []
+
+
+class TestPicksLinea:
+    """SPREAD (342) e TOTALI (28): il percorso che allarga il torneo.
+
+    Il torneo Gridiron conta SOLO NFL/NCAAF, e i mercati a linea ne fanno
+    parte come il moneyline: su SX hanno piu' eventi e piu' liquidita'.
+    L'oracolo (`totals`/`spreads` di Pinnacle) e' l'unico giudice del prezzo:
+    senza la sua p_true non si produce nulla (fail-closed).
+    """
+
+    def test_pick_ou_con_oracolo_a_linea(self, monkeypatch):
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,28")
+        # il percorso a LINEA legge la cache `toao_*` (quella del moneyline e'
+        # `toa_*`): e' la cartella che il fetch scrive quando le linee servono.
+        _write_cache(_oracle_line_payload("totals", line=49.5,
+                                          p1=1.90, p2=1.95),
+                     name="toao_americanfootball_nfl.json")
+        ko = _kickoff(6)
+        m = _market("0xOK", HOME, AWAY, kickoff=ko, mtype="28", line=49.5,
+                    o1="Over 49.5", o2="Under 49.5")
+        # SX paga l'Over 2.10 contro una quota equa sharp ~1.94 -> +EV
+        prov = FakeSx([m], {"0xOK": _book(2.10, 1.80)})
+        picks = gl.picks(provider=prov)
+        assert picks, "atteso il pick OU"
+        p = picks[0]
+        assert p["mercato"] == "OU"
+        assert p["esito_key"] == "Over 49.5"
+        assert p["esito_raw"] == "Over 49.5"
+        assert p["market_id"] == "0xOK" and p["selection_id"] == 1
+        assert p[gl.PICK_FLAG] is True
+        assert p["best_ev"] > gl.ev_min()
+        assert gl.in_odds_band(p["quota"])
+
+    def test_pick_ah_con_oracolo_a_linea(self, monkeypatch):
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,342")
+        _write_cache(_oracle_line_payload("spreads", line=2.5,
+                                          p1=1.90, p2=1.95),
+                     name="toao_americanfootball_nfl.json")
+        ko = _kickoff(6)
+        m = _market("0xAH", HOME, AWAY, kickoff=ko, mtype="342", line=2.5,
+                    o1=f"{HOME} +2.5", o2=f"{AWAY} -2.5")
+        prov = FakeSx([m], {"0xAH": _book(2.10, 1.80)})
+        picks = gl.picks(provider=prov)
+        assert picks, "atteso il pick AH"
+        p = picks[0]
+        assert p["mercato"] == "AH"
+        assert p["esito_key"] == "Home +2.5"
+        assert p["market_id"] == "0xAH" and p["selection_id"] == 1
+        assert p["best_ev"] > gl.ev_min()
+
+    def test_linea_non_prezzata_fail_closed(self, monkeypatch):
+        """Pinnacle prezza 49.5, SX quota 47.5: nessun verdetto su una linea
+        che l'oracolo non copre (mai un EV calcolato con la linea sbagliata)."""
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,28")
+        _write_cache(_oracle_line_payload("totals", line=49.5),
+                     name="toao_americanfootball_nfl.json")
+        ko = _kickoff(6)
+        m = _market("0xLM", HOME, AWAY, kickoff=ko, mtype="28", line=47.5,
+                    o1="Over 47.5", o2="Under 47.5")
+        prov = FakeSx([m], {"0xLM": _book(2.10, 1.80)})
+        assert gl.picks(provider=prov) == []
+
+    def test_nessuna_cache_a_linea_fail_closed(self, monkeypatch):
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,28")
+        ko = _kickoff(6)
+        m = _market("0xNC", HOME, AWAY, kickoff=ko, mtype="28", line=49.5,
+                    o1="Over 49.5", o2="Under 49.5")
+        prov = FakeSx([m], {"0xNC": _book(2.10, 1.80)})
+        assert gl.picks(provider=prov) == []
+
+    def test_tipi_disabilitati_non_valutati(self, monkeypatch):
+        """Con `GRIDIRON_TYPES=226` un mercato a linea non entra in gioco:
+        e' cio' che tiene il costo a 1 credito quando non serve di piu'."""
+        monkeypatch.setenv("GRIDIRON_TYPES", "226")
+        # Cache a LINEA scritta di proposito: senza, il test passerebbe per
+        # l'assenza del dato e non proverebbe il filtro sul TIPO.
+        _write_cache(_oracle_line_payload("totals", line=49.5),
+                     name="toao_americanfootball_nfl.json")
+        ko = _kickoff(6)
+        m = _market("0xOFF", HOME, AWAY, kickoff=ko, mtype="28", line=49.5,
+                    o1="Over 49.5", o2="Under 49.5")
+        prov = FakeSx([m], {"0xOFF": _book(2.10, 1.80)})
+        assert gl.picks(provider=prov) == []
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +581,48 @@ class TestRefreshOracle:
         # football USA (con regions=us Pinnacle ha 0 eventi).
         assert all(p.get("regions") == "eu" for p in seen)
         assert all(p.get("markets") == "h2h" for p in seen)
+
+    def test_markets_include_le_linee_coi_tipi_a_linea(self, monkeypatch):
+        """Con un tipo a linea abilitato la fetch paga `h2h,totals,spreads`
+        (3 crediti): il costo e' DICHIARATO dalla corsia, non scoperto a
+        runtime — ed e' il motivo per cui il tetto di spesa e' anche in
+        CREDITI (`TestBudgetCrediti`), non solo in richieste."""
+        seen = []
+
+        def fake_get(url, params=None, timeout=None):
+            seen.append(dict(params or {}))
+            return FakeResp(200, _oracle_payload(),
+                            {"x-requests-remaining": "400"})
+
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,28")
+        monkeypatch.setenv("ODDS_API_KEY", "fake-key")
+        res = gl.refresh_oracle(http_get=fake_get)
+        assert res["markets"] == "h2h,totals,spreads"
+        assert seen and all(p.get("markets") == "h2h,totals,spreads"
+                            for p in seen)
+
+    def test_scrittura_su_entrambe_le_cache_coi_tipi_a_linea(self, monkeypatch):
+        """BUG dell'11/10: un fetch con le linee scriveva SOLO `toa_*`, quindi
+        il percorso a linea (`toao_*`) restava cieco e non nasceva nessun pick
+        spread/totali — pur avendo pagato i 3 crediti. Ora si scrivono
+        ENTRAMBE le copie dallo stesso payload (costo invariato)."""
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,28")
+        monkeypatch.setenv("GRIDIRON_SPORTS", "americanfootball_nfl")
+        monkeypatch.setenv("ODDS_API_KEY", "fake-key")
+
+        def fake_get(url, params=None, timeout=None):
+            return FakeResp(200, _oracle_payload(),
+                            {"x-requests-remaining": "400"})
+
+        res = gl.refresh_oracle(http_get=fake_get)
+        assert res["fetched"] == 1
+        assert res["files_written"] == 2
+        folder = Path(__import__("os").environ["GRIDIRON_ORACLE_CACHE"])
+        assert (folder / "toa_americanfootball_nfl.json").exists()
+        assert (folder / "toao_americanfootball_nfl.json").exists()
+        # e la seconda volta non si spende: entrambe le copie sono fresche
+        res2 = gl.refresh_oracle(http_get=fake_get)
+        assert res2["fetched"] == 0 and res2["skipped"] == 1
 
     def test_cache_fresca_non_spende(self, monkeypatch):
         _write_cache(_oracle_payload())              # nfl (fresca)
@@ -473,6 +694,98 @@ class TestRefreshOracle:
         res = gl.refresh_oracle(http_get=fake_get)
         assert res["fetched"] == 0
         assert res["error"]
+
+
+class TestBudgetCrediti:
+    """Tetto di SPESA in crediti: con i tipi a linea la singola fetch costa
+    3 crediti, quindi il solo tetto in richieste porterebbe la spesa
+    giornaliera da 8 a 24 crediti senza che nessuno lo decida."""
+
+    def test_crediti_per_fetch_dipende_dai_mercati(self, monkeypatch):
+        monkeypatch.setenv("GRIDIRON_TYPES", "226")
+        assert gl.credits_per_call() == 1
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,342,28")
+        assert gl.credits_per_call() == 3
+
+    def test_il_tetto_in_crediti_morde_prima_delle_richieste(self, monkeypatch):
+        """Con 3 leghe e 6 crediti di budget partono DUE fetch (6 crediti):
+        la terza costerebbe 9 e viene rifiutata — anche se le richieste
+        (8) non sono esaurite."""
+        monkeypatch.setattr(gl, "REQ_BUDGET_DAY", 8)
+        monkeypatch.setattr(gl, "CREDIT_BUDGET_DAY", 6)
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,28")
+        monkeypatch.setenv("GRIDIRON_SPORTS", "americanfootball_nfl,"
+                                              "americanfootball_ncaaf,"
+                                              "americanfootball_cfl")
+        monkeypatch.setenv("ODDS_API_KEY", "fake-key")
+        calls = []
+
+        def fake_get(url, params=None, timeout=None):
+            calls.append(url)
+            return FakeResp(200, _oracle_payload(), {})
+
+        res = gl.refresh_oracle(http_get=fake_get)
+        assert res["fetched"] == 2
+        assert len(calls) == 2
+        assert res["credits_today"] == 6
+        assert res["credits_per_call"] == 3
+        assert res["credit_budget"] == 6
+
+    def test_solo_moneyline_mantiene_la_spesa_di_prima(self, monkeypatch):
+        """Col solo type 226 il budget in crediti (8) coincide col tetto in
+        richieste (8): nessun cambiamento per quella configurazione."""
+        monkeypatch.setattr(gl, "REQ_BUDGET_DAY", 8)
+        monkeypatch.setattr(gl, "CREDIT_BUDGET_DAY", 8)
+        monkeypatch.setenv("GRIDIRON_TYPES", "226")
+        monkeypatch.setenv("GRIDIRON_SPORTS", "americanfootball_nfl,"
+                                              "americanfootball_ncaaf")
+        monkeypatch.setenv("ODDS_API_KEY", "fake-key")
+
+        def fake_get(url, params=None, timeout=None):
+            return FakeResp(200, _oracle_payload(), {})
+
+        res = gl.refresh_oracle(http_get=fake_get)
+        assert res["fetched"] == 2
+        assert res["credits_today"] == 2
+
+    def test_lo_stato_registra_i_crediti_spesi(self, monkeypatch):
+        monkeypatch.setenv("GRIDIRON_TYPES", "226,28")
+        monkeypatch.setenv("GRIDIRON_SPORTS", "americanfootball_nfl")
+        monkeypatch.setenv("ODDS_API_KEY", "fake-key")
+
+        def fake_get(url, params=None, timeout=None):
+            return FakeResp(200, _oracle_payload(), {})
+
+        gl.refresh_oracle(http_get=fake_get)
+        data = json.loads(gl.state_path().read_text(encoding="utf-8"))
+        assert data["credits"] == 3 and data["requests"] == 1
+        # secondo giro: cache fresca, nessuna spesa aggiuntiva
+        res2 = gl.refresh_oracle(http_get=fake_get)
+        assert res2["credits_today"] == 3
+
+    def test_i_crediti_si_azzerano_col_giorno(self, monkeypatch, tmp_path):
+        path = tmp_path / "stato.json"
+        path.write_text(json.dumps({"day": "2020-01-01", "requests": 4,
+                                    "credits": 12}), encoding="utf-8")
+        monkeypatch.setattr(gl, "state_path", lambda: path)
+        state, healthy = gl._load_state()
+        state = gl._roll_day(state)
+        assert state["credits"] == 0 and state["requests"] == 0
+        assert healthy is True
+
+    def test_un_file_vecchio_senza_crediti_non_rompe(self, monkeypatch,
+                                                     tmp_path):
+        """Stato scritto da un deploy precedente: nessun campo `credits`."""
+        path = tmp_path / "stato.json"
+        path.write_text(json.dumps({"day": gl._now().strftime("%Y-%m-%d"),
+                                    "requests": 1}), encoding="utf-8")
+        monkeypatch.setattr(gl, "state_path", lambda: path)
+        state, healthy = gl._load_state()
+        assert healthy is True
+        assert gl.budget_left(state, healthy=healthy) is True
+
+    def test_budget_illeso_illegibile_non_spende(self):
+        assert gl.budget_left({}, healthy=False) is False
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +866,8 @@ class TestTripwire:
                      "GRIDIRON_EV_MIN", "GRIDIRON_ODDS_MIN",
                      "GRIDIRON_ODDS_MAX", "GRIDIRON_MIN_INV_SUM",
                      "GRIDIRON_MAX_INV_SUM", "GRIDIRON_ORACLE_TTL_MIN",
-                     "GRIDIRON_REQ_BUDGET_DAY", "GRIDIRON_ORACLE_CACHE",
+                     "GRIDIRON_REQ_BUDGET_DAY",
+                     "GRIDIRON_CREDIT_BUDGET_DAY", "GRIDIRON_ORACLE_CACHE",
                      "GRIDIRON_LANE_STATE", "GRIDIRON_DISCOVERY_TTL_S",
                      "GRIDIRON_JOB_INTERVAL_MIN", "GRIDIRON_ODDS_BASE"):
             assert name in iac, f"env non dichiarata nella IaC: {name}"
@@ -629,3 +943,80 @@ class TestDedupCorsie:
         due = {**self.LANE_PICK, "esito_key": "2"}
         out = ab.dedup_lanes([self.LANE_PICK, due])
         assert len(out) == 2
+
+
+class TestLiveFillGridiron:
+    """`_live_fill` usa l'identita' di mercato GIA' nel pick, anche a LINEA.
+
+    La struttura football e' a due esiti con le chiavi 1/2 del book: il pick
+    porta `market_id` + `selection_id`, quindi non si ri-risolve nulla (il
+    catalogo 1X2 e' il calcio). Il bersaglio `order_target` e' la convenzione
+    del CALCIO: su un pick gridiron a linea non deve nemmeno essere consultato,
+    altrimenti una label non interpretata dai parser calcistici scarterebbe un
+    pick che ha un'identita' di mercato valida (fail-closed sul percorso
+    sbagliato).
+    """
+
+    def _pick(self, **kw):
+        base = {
+            "match_id": "sx-ev-0xAH", "home": HOME, "away": AWAY,
+            "mercato": "AH", "esito_key": "Home +2.5",
+            "esito_raw": "Home +2.5", "team": "Home +2.5",
+            "quota": 2.10, "price": 2.10,
+            "market_id": "0xAH", "selection_id": 1, "line": 2.5,
+            "commence": (datetime.now(timezone.utc)
+                         + timedelta(hours=3)).isoformat(),
+            gl.PICK_FLAG: True,
+        }
+        base.update(kw)
+        return base
+
+    class _Prov:
+        name = "sxbet"
+
+        def __init__(self, best=None, order=None):
+            self.best = best
+            self.order = order
+            self.place_calls = []
+
+        def best_back_price(self, market_id, selection_id):
+            return self.best
+
+        def place_limit_order(self, market_id, selection_id, side, price,
+                              size, persistence="LAPSE"):
+            self.place_calls.append((market_id, selection_id, side, price,
+                                     size))
+            return self.order
+
+    def _engine(self, monkeypatch, prov):
+        import execution_engine as ee
+        engine = type("_Eng", (), {"provider": prov})()
+        monkeypatch.setattr(ee, "ExecutionEngine", lambda *a, **k: engine)
+        return ee
+
+    def test_pick_ah_a_linea_usa_l_identita_del_pick(self, monkeypatch):
+        import auto_bet as ab
+        import multi_market
+        # il parser CALCISTICO fallirebbe: se venisse consultato, il pick
+        # sarebbe scartato pur avendo un market_id/selection_id validi.
+        monkeypatch.setattr(multi_market, "order_target", lambda pick: None)
+        ee = self._engine(monkeypatch, None)
+        order = ee.OrderResult(True, "0x9", "FULLY_FILLED", 2.10, 2.12,
+                               1.0, 8.0)
+        prov = self._Prov(best=None, order=order)
+        self._engine(monkeypatch, prov)
+        res = ab._live_fill(self._pick(), stake=1.0, floor=2.10)
+        assert res is not None and res["ok"] is True
+        # l'ordine e' andato sul mercato DEL PICK, non su uno ri-risolto
+        assert prov.place_calls == [("0xAH", 1, "BACK", 2.10, 1.0)]
+        assert res["market_id"] == "0xAH" and res["selection_id"] == 1
+
+    def test_pick_gridiron_senza_identita_fail_closed(self, monkeypatch):
+        """Senza `market_id`/`selection_id` NON si indovina il mercato."""
+        import auto_bet as ab
+        prov = self._Prov(best=None)
+        self._engine(monkeypatch, prov)
+        res = ab._live_fill(self._pick(market_id="", selection_id=None),
+                            stake=1.0, floor=2.10)
+        assert res is None
+        assert prov.place_calls == []

@@ -97,10 +97,21 @@ logger = logging.getLogger(__name__)
 SX_SPORT_ID = os.getenv("GRIDIRON_SX_SPORT_ID", "8")
 
 #: Tipi SX da leggere. Il default e' il SOLO moneyline (226): e' quello che
-#: l'oracolo `h2h` copre a 1 credito e che Pinnacle pubblica davvero. Aggiungere
-#: "342"/"28" e' possibile da env, ma quei mercati richiedono l'oracolo a LINEA
-#: (`h2h,totals,spreads`, 3 crediti a fetch) — oggi `ORACLE_ENABLED=0`.
+#: l'oracolo `h2h` copre a 1 credito. Aggiungere "342" (spread) e "28"
+#: (totali) via `GRIDIRON_TYPES=226,342,28` allarga la corsia ai mercati a
+#: LINEA — che sono ANCHE loro mercati del torneo Gridiron (solo NFL/NCAAF
+#: fanno RETURN) e hanno piu' eventi e piu' liquidita' del solo moneyline.
+#: Con almeno un tipo a linea abilitato la fetch dell'oracolo passa a
+#: `h2h,totals,spreads` (3 crediti invece di 1) — vedi `oracle_markets()`.
 DEFAULT_TYPES: Tuple[str, ...] = ("226",)
+
+#: Tipi SX a LINEA (spread/totali): coperti dall'oracolo `totals`/`spreads`.
+LINE_TYPES: Tuple[str, ...] = ("342", "28")
+
+#: Mercato canonico del LEDGER per tipo SX: sono le convenzioni che il
+#: settlement (`tracker._prediction_outcome`) legge senza una riga di codice
+#: nuovo (`1`/`2`, `Home ±x`, `Over x`).
+_TYPE_MARKET = {"226": "1X2", "342": "AH", "28": "OU"}
 
 #: Chiavi the-odds-api del football USA (verificate active su /v4/sports).
 DEFAULT_SPORTS: Tuple[str, ...] = ("americanfootball_nfl",
@@ -158,6 +169,17 @@ MAX_INV_SUM = float(os.getenv("GRIDIRON_MAX_INV_SUM", "1.08"))
 ORACLE_TTL_MIN = float(os.getenv("GRIDIRON_ORACLE_TTL_MIN", "720"))
 REQ_BUDGET_DAY = int(os.getenv("GRIDIRON_REQ_BUDGET_DAY", "4"))
 
+#: Budget giornaliero in CREDITI (non richieste). Secondo freno, non un
+#: doppione: the-odds-api addebita `markets x regions`, quindi abilitare i
+#: tipi a linea (`342`/`28`) porta la singola fetch da 1 a **3 crediti**. Con
+#: il solo tetto in richieste (8) il tetto di spesa passerebbe in silenzio da
+#: 8 a **24 crediti/giorno**, contro ~10,6/giorno sostenibili: qui il tetto di
+#: spesa e' dichiarato in crediti e resta quello. Default 8 = il tetto in
+#: richieste col solo moneyline (nessun cambiamento per quella
+#: configurazione); coi tipi a linea vale **2 fetch/leghe al giorno** (NFL +
+#: NCAAF, 6 crediti).
+CREDIT_BUDGET_DAY = int(os.getenv("GRIDIRON_CREDIT_BUDGET_DAY", "8"))
+
 #: TTL della DISCOVERY SX (order book). Il giro ordini gira ogni 60s: senza memo
 #: sarebbero centinaia di richieste/ora sull'API pubblica per un prezzo usato
 #: SOLO dal gate EV (il prezzo d'ordine viene riletto vivo al momento dell'ordine).
@@ -213,6 +235,47 @@ def _sports() -> Tuple[str, ...]:
     return tuple(p.strip() for p in str(raw).split(",") if p.strip())
 
 
+def uses_line_oracle() -> bool:
+    """True se fra i tipi abilitati c'e' un mercato A LINEA (spread/totali).
+
+    Decide la stringa `markets` della fetch dell'oracolo: `h2h` (1 credito)
+    quando basta il moneyline, `h2h,totals,spreads` (3 crediti) quando servono
+    le linee. UNA sola definizione, letta anche dal report e dalla fetch.
+    """
+    return any(str(t) in LINE_TYPES for t in _types())
+
+
+def oracle_markets() -> str:
+    """Stringa `markets` della fetch oracolo (una sola definizione del costo)."""
+    if not uses_line_oracle():
+        return "h2h"
+    try:
+        import odds_api as _oa
+        return str(_oa.ORACLE_MARKETS_LIST)
+    except Exception:                                          # pragma: no cover
+        return "h2h,totals,spreads"
+
+
+def _oracle_key_for(label: Any) -> Optional[str]:
+    """Lato del ledger ('Home -2.5', 'Over 49.5') -> chiave dell'oracolo.
+
+    Il verso e' quello di `pinnacle_oracle.line_true_probs` per i mercati a
+    linea (`Home`/`Away` per l'AH, `Over`/`Under` per i totali) e quello di
+    `_oracle` per il moneyline ('1'/'2', gestito dal percorso dedicato).
+    Mai fuzzy: un'etichetta non riconosciuta NON e' mappata.
+    """
+    t = str(label or "").strip().lower()
+    if t.startswith("over"):
+        return "Over"
+    if t.startswith("under"):
+        return "Under"
+    if t.startswith("home"):
+        return "Home"
+    if t.startswith("away"):
+        return "Away"
+    return None
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -241,12 +304,44 @@ def state_path() -> Path:
     return oracle_cache_dir() / "gridiron_lane" / "state.json"
 
 
+def _line_cache_prefix() -> str:
+    """Prefisso delle cache dell'oracolo a LINEA (`odds_api.ORACLE_CACHE_PREFIX`).
+
+    Import pigro col fallback al letterale: la costante deve restare GEMELLA
+    di quella di `odds_api`, altrimenti il percorso a linea non trova i file
+    che questa corsia scrive (bug scoperto scrivendo i test dell'11/10).
+    """
+    try:
+        import odds_api as _oa
+        return str(getattr(_oa, "ORACLE_CACHE_PREFIX", "toao_"))
+    except Exception:                                          # pragma: no cover
+        return "toao_"
+
+
+def cache_paths(key: str) -> List[Path]:
+    """I file di cache da scrivere (e verificare) per una lega.
+
+    ⚠️ DUE file, perche' i due percorsi dell'oracolo leggono prefissi DIVERSI:
+    `pinnacle_oracle.load_oracle` (moneyline) scorre `toa_*.json`, mentre il
+    percorso a LINEA (`_oracle_fixture_status`) scorre `toao_*.json`. La glob
+    `toa_*` NON aggancia `toao_*`, quindi scrivere un solo file lascerebbe
+    cieco l'altro percorso. Un fetch di `h2h,totals,spreads` porta ENTRAMBI i
+    mercati nello stesso payload: si scrivono entrambe le copie a costo ZERO
+    (una sola chiamata pagata) e nessun percorso resta senza dati.
+    """
+    folder = oracle_cache_dir()
+    paths = [folder / f"toa_{key}.json"]
+    if uses_line_oracle():
+        paths.append(folder / f"{_line_cache_prefix()}{key}.json")
+    return paths
+
+
 # ---------------------------------------------------------------------------
 # Stato (budget giornaliero) — scrittura atomica, lettura fail-safe
 # ---------------------------------------------------------------------------
 
 def _empty_state() -> dict:
-    return {"day": _now().strftime("%Y-%m-%d"), "requests": 0}
+    return {"day": _now().strftime("%Y-%m-%d"), "requests": 0, "credits": 0}
 
 
 def _load_state() -> Tuple[dict, bool]:
@@ -281,14 +376,37 @@ def _roll_day(state: dict) -> dict:
     if str(state.get("day") or "") != today:
         state["day"] = today
         state["requests"] = 0
+        state["credits"] = 0
     return state
 
 
+def credits_per_call() -> int:
+    """Crediti consumati da UNA fetch di questa corsia (1 o 3).
+
+    Derivato dalla stringa `markets` (`oracle_markets`), cioe' dall'UNICA
+    definizione del costo: qualunque futura aggiunta di mercato alza il
+    contatore senza toccare il budget, che resta in crediti.
+    """
+    return max(1, len([m for m in str(oracle_markets()).split(",") if m.strip()]))
+
+
 def budget_left(state: dict, *, healthy: bool = True) -> bool:
-    """True se si puo' ancora spendere una richiesta oggi."""
+    """True se si puo' ancora spendere una fetch oggi.
+
+    DUE freni, entrambi necessari: le richieste (`REQ_BUDGET_DAY`) e i
+    CREDITI (`CREDIT_BUDGET_DAY`). Col solo primo, abilitare i tipi a linea
+    triplicherebbe la spesa giornaliera senza che nessuno lo decida.
+    """
     if not healthy:
         return False
     if int(state.get("requests") or 0) >= int(REQ_BUDGET_DAY):
+        return False
+    if int(state.get("credits") or 0) + credits_per_call() \
+            > int(CREDIT_BUDGET_DAY):
+        logger.info("gridiron_lane: budget crediti esaurito "
+                    "(%d/%d, questa fetch ne costa %d) — nessuna richiesta",
+                    int(state.get("credits") or 0), CREDIT_BUDGET_DAY,
+                    credits_per_call())
         return False
     try:
         import odds_api
@@ -328,7 +446,10 @@ def refresh_oracle(*, http_get: Any = None) -> dict:
     ricreativi e `load_oracle` darebbe l'oracolo assente.
     """
     out: dict = {"keys": 0, "fetched": 0, "skipped": 0, "requests": 0,
-                 "remaining": None, "error": None, "cached": [], "sports": []}
+                 "remaining": None, "error": None, "cached": [], "sports": [],
+                 "markets": oracle_markets(), "files_written": 0,
+                 "credits_today": 0, "credits_per_call": credits_per_call(),
+                 "credit_budget": int(CREDIT_BUDGET_DAY)}
     if not enabled():
         out["error"] = "corsia spenta (GRIDIRON_LANE=0)"
         return out
@@ -348,8 +469,11 @@ def refresh_oracle(*, http_get: Any = None) -> dict:
         return out
     changed = False
     for key in sports:
-        path = folder / f"toa_{key}.json"
-        if _cache_is_fresh(path):
+        paths = cache_paths(key)
+        # Fresca solo se TUTTE le cache che i percorsi leggono lo sono: se
+        # manca la copia a linea il percorso a linea resterebbe cieco e la
+        # corsia non produrrebbe i pick spread/totali.
+        if all(_cache_is_fresh(p) for p in paths):
             out["skipped"] += 1
             out["cached"].append(key)
             continue
@@ -362,7 +486,8 @@ def refresh_oracle(*, http_get: Any = None) -> dict:
         try:
             r = http_get(f"{ODDS_BASE}/sports/{key}/odds",
                          params={"apiKey": api_key, "regions": "eu",
-                                 "markets": "h2h", "oddsFormat": "decimal"},
+                                 "markets": out["markets"],
+                                 "oddsFormat": "decimal"},
                          timeout=25)
             status = getattr(r, "status_code", 0)
             if status != 200:
@@ -376,10 +501,15 @@ def refresh_oracle(*, http_get: Any = None) -> dict:
                      else None,
                      "remaining_ts": time.time(), "source": PICK_FLAG}
             folder.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(entry), encoding="utf-8")
-            os.replace(tmp, path)
+            for path in paths:
+                tmp = path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(entry), encoding="utf-8")
+                os.replace(tmp, path)
+            out["files_written"] = int(out.get("files_written") or 0) \
+                + len(paths)
             state["requests"] = int(state.get("requests") or 0) + 1
+            state["credits"] = int(state.get("credits") or 0) \
+                + credits_per_call()
             out["fetched"] += 1
             out["requests"] += 1
             out["cached"].append(key)
@@ -393,6 +523,9 @@ def refresh_oracle(*, http_get: Any = None) -> dict:
     if changed or not healthy:
         _save_state(state)
     out["requests_today"] = int(state.get("requests") or 0)
+    out["credits_today"] = int(state.get("credits") or 0)
+    out["credits_per_call"] = credits_per_call()
+    out["credit_budget"] = int(CREDIT_BUDGET_DAY)
     return out
 
 
@@ -582,81 +715,160 @@ def _oracle(home: str, away: str) -> Optional[dict]:
 def picks(*, provider: Any = None) -> List[dict]:
     """Candidati football USA +EV, pronti per il percorso ordini.
 
-    L'oracolo e' fail-closed: un match senza Pinnacle de-vigato a 2 esiti NON
-    produce candidati. L'EV e' calcolato sul MONEYLINE (il mercato a 2 esiti che
-    l'oracolo `h2h` copre a 1 credito); gli eventuali spread/totali con linea
-    restano fuori finche' l'oracolo a linea non e' attivo.
+    DUE percorsi, stessa soglia EV (`value_filter.EV_MIN`, mai copiata):
 
-    Il pick porta `market_id` + `selection_id` (l'ordine NON deve ri-risolvere
-    il mercato: la struttura football e' a due esiti con chiavi 1/2), il flag
-    `gridiron_lane` e gli esiti di ledger che il settlement sa leggere.
+    - **moneyline (type 226)**: oracolo `h2h` a 2 esiti (`_oracle`);
+    - **spread/totali (type 342/28)**: oracolo A LINEA (`totals`/`spreads`),
+      abilitabili con `GRIDIRON_TYPES=226,342,28`. Sono mercati del torneo
+      Gridiron come il moneyline (il torneo conta SOLO NFL/NCAAF) e ne hanno
+      piu' eventi e piu' liquidita'.
+
+    L'oracolo e' fail-closed: senza la probabilita' fair de-vigata NON si
+    produce un candidato. Il pick porta `market_id` + `selection_id` (l'ordine
+    NON deve ri-risolvere il mercato: la struttura football e' a due esiti con
+    chiavi 1/2), il flag `gridiron_lane` e gli esiti di ledger che il
+    settlement sa leggere (`1`/`2`, `Home ±x`, `Over x`).
     """
     if not enabled():
         return []
-    out: List[dict] = []
     threshold = ev_min()
+    out: List[dict] = []
     try:
-        import pinnacle_oracle as po
         for ev in discover(provider=provider):
-            # Solo i mercati testa-a-testa senza linea: l'oracolo a 2 esiti
-            # copre il moneyline, non uno spread (che vive in `spreads`).
-            if ev.get("sx_type") != "226":
-                continue
-            probs = _oracle(ev["home"], ev["away"])
-            if not probs:
-                logger.debug("gridiron_lane: oracolo assente per %s vs %s "
-                             "(fail-closed)", ev["home"], ev["away"])
-                continue
-            prices = {s["key"]: float(s["price"]) for s in ev["sides"]}
-            labels = {s["key"]: s["label"] for s in ev["sides"]}
-            for row in po.value_candidates(probs, prices, ev_min=threshold):
-                side = next((s for s in ev["sides"]
-                             if s["key"] == row["esito"]), None)
-                if side is None:
-                    continue
-                price = float(row["price"])
-                if not in_odds_band(price):
-                    logger.info(
-                        "gridiron_lane: skip %s vs %s -> %s @ %.2f (fuori "
-                        "fascia quota %.2f-%.2f)", ev["home"], ev["away"],
-                        labels.get(row["esito"]), price, ODDS_MIN, ODDS_MAX)
-                    continue
-                p_true = float(row["prob"])
-                m_prob = None
-                try:
-                    fair = po.true_probabilities(prices, min_outcomes=2)
-                    if fair:
-                        m_prob = fair.get(row["esito"])
-                except Exception:
-                    m_prob = None
-                edge = (p_true - float(m_prob)) if m_prob else None
-                out.append({
-                    "match_id": f"sx-{ev['event_id']}",
-                    "home": ev["home"], "away": ev["away"],
-                    "commence": ev["kickoff"].isoformat(),
-                    "league": ev.get("league_label") or "",
-                    "mercato": "1X2", "esito_key": row["esito"],
-                    "esito_raw": labels.get(row["esito"]),
-                    "team": labels.get(row["esito"]),
-                    "quota": price, "price": price,
-                    "market_id": ev["market_id"],
-                    "selection_id": int(row["esito"]),
-                    "p_true": p_true, "true_odd": row["true_odd"],
-                    "best_ev": float(row["ev"]),
-                    "market_prob": m_prob, "market_edge": edge,
-                    "depth_usdc": side.get("depth"),
-                    "inv_sum": ev.get("inv_sum"),
-                    "status": _tier(float(row["ev"]), edge),
-                    PICK_FLAG: True,
-                })
-                logger.info("gridiron_lane: %s vs %s -> %s @ %.2f EV %+.2f%% "
-                            "(p_fair %.3f, quota equa %.3f)",
-                            ev["home"], ev["away"], labels.get(row["esito"]),
-                            price, float(row["ev"]) * 100.0, p_true,
-                            row["true_odd"])
+            type_id = str(ev.get("sx_type") or "")
+            if type_id == "226":
+                out.extend(_moneyline_picks(ev, threshold))
+            elif type_id in LINE_TYPES:
+                out.extend(_line_picks(ev, threshold))
     except Exception as exc:
         logger.warning("gridiron_lane: corsia non disponibile (%s)", exc)
         return []
+    return out
+
+
+def _build_pick(ev: dict, side: dict, row: dict, mercato: str,
+                esito_raw: Any, sx_prices: Dict[str, float],
+                po: Any) -> Optional[dict]:
+    """Riga `value_candidates` -> pick del percorso ordini (o None se fuori fascia).
+
+    UNICA costruzione del pick per i due percorsi (moneyline e a linea): cosi'
+    i campi che il resto della pipeline legge (`mercato`, `esito_key`,
+    `market_id`, `selection_id`, `p_true`, `market_edge`, flag) non possono
+    divergere fra le due classi di mercato.
+    """
+    price = float(row["price"])
+    if not in_odds_band(price):
+        logger.info("gridiron_lane: skip %s vs %s -> %s @ %.2f (fuori fascia "
+                    "quota %.2f-%.2f)", ev["home"], ev["away"], esito_raw,
+                    price, ODDS_MIN, ODDS_MAX)
+        return None
+    p_true = float(row["prob"])
+    # Edge = scostamento fra lo SHARP e la probabilita' implicita del book SX
+    # (de-vig a 2 esiti dei prezzi SX) — stessa definizione del moneyline.
+    m_prob = None
+    try:
+        fair = po.true_probabilities(sx_prices, min_outcomes=2)
+        if fair:
+            m_prob = fair.get(str(row["esito"]))
+    except Exception:
+        m_prob = None
+    edge = (p_true - float(m_prob)) if m_prob else None
+    logger.info("gridiron_lane: %s vs %s -> %s (%s) @ %.2f EV %+.2f%% "
+                "(p_fair %.3f, quota equa %.3f)",
+                ev["home"], ev["away"], esito_raw, mercato, price,
+                float(row["ev"]) * 100.0, p_true, row["true_odd"])
+    return {
+        "match_id": f"sx-{ev['event_id']}",
+        "home": ev["home"], "away": ev["away"],
+        "commence": ev["kickoff"].isoformat(),
+        "league": ev.get("league_label") or "",
+        "mercato": mercato, "esito_key": str(esito_raw),
+        "esito_raw": esito_raw,
+        "team": esito_raw,
+        "quota": price, "price": price,
+        "market_id": ev["market_id"],
+        "selection_id": int(side["key"]),
+        "p_true": p_true, "true_odd": row["true_odd"],
+        "best_ev": float(row["ev"]),
+        "market_prob": m_prob, "market_edge": edge,
+        "depth_usdc": side.get("depth"),
+        "inv_sum": ev.get("inv_sum"),
+        "status": _tier(float(row["ev"]), edge),
+        PICK_FLAG: True,
+    }
+
+
+def _moneyline_picks(ev: dict, threshold: float) -> List[dict]:
+    """Candidati +EV sul MONEYLINE (type 226, oracolo `h2h` a 2 esiti)."""
+    import pinnacle_oracle as po
+    probs = _oracle(ev["home"], ev["away"])
+    if not probs:
+        logger.debug("gridiron_lane: oracolo assente per %s vs %s "
+                     "(fail-closed)", ev["home"], ev["away"])
+        return []
+    prices = {s["key"]: float(s["price"]) for s in ev["sides"]}
+    labels = {s["key"]: s["label"] for s in ev["sides"]}
+    out: List[dict] = []
+    for row in po.value_candidates(probs, prices, ev_min=threshold):
+        side = next((s for s in ev["sides"] if s["key"] == row["esito"]),
+                    None)
+        if side is None:
+            continue
+        pick = _build_pick(ev, side, row, "1X2", labels.get(row["esito"]),
+                           prices, po)
+        if pick is not None:
+            out.append(pick)
+    return out
+
+
+def _line_picks(ev: dict, threshold: float) -> List[dict]:
+    """Candidati +EV su SPREAD (342) o TOTALI (28) — oracolo A LINEA.
+
+    La p_true arriva da `pinnacle_oracle.line_true_probs` (de-vig a 2 esiti del
+    mercato a LINEA, con TTL dinamico sul tempo al kickoff); l'edge e' lo
+    scostamento fra lo sharp e la probabilita' implicita del book SX
+    (`true_probabilities` sui prezzi SX) — LA STESSA definizione del moneyline,
+    nessuna formula nuova qui.
+
+    Fail-closed: se anche un solo lato non e' mappabile all'oracolo, o se
+    Pinnacle non prezza ENTRAMBI i lati a quella linea, non si produce nulla
+    (mai un verdetto su una linea che l'oracolo non copre).
+    """
+    import pinnacle_oracle as po
+    type_id = str(ev.get("sx_type") or "")
+    market = _TYPE_MARKET.get(type_id)
+    if market not in ("AH", "OU"):
+        return []
+    sx_prices: Dict[str, float] = {}
+    side_of: Dict[str, dict] = {}
+    for side in ev["sides"]:
+        key = _oracle_key_for(side.get("label"))
+        if key is None:
+            return []
+        sx_prices[key] = float(side["price"])
+        side_of[key] = side
+    try:
+        probs = po.line_true_probs(
+            ev["home"], ev["away"], market_type=market,
+            line=float(ev["line"]), cache_dir=oracle_cache_dir(),
+            kickoff=ev.get("kickoff"))
+    except Exception as exc:
+        logger.debug("gridiron_lane: oracolo a linea non disponibile (%s)", exc)
+        return []
+    if not probs:
+        logger.debug("gridiron_lane: oracolo a linea assente per %s vs %s "
+                     "(@ %s linea %s, fail-closed)",
+                     ev["home"], ev["away"], market, ev.get("line"))
+        return []
+    out: List[dict] = []
+    for row in po.value_candidates(probs, sx_prices, ev_min=threshold):
+        side = side_of.get(str(row["esito"]))
+        if side is None:
+            continue
+        pick = _build_pick(ev, side, row, market, side.get("label"),
+                           sx_prices, po)
+        if pick is not None:
+            out.append(pick)
     return out
 
 
@@ -726,13 +938,19 @@ def summary() -> dict:
                  "ev_min": ev_min(), "hours_ahead": HOURS_AHEAD,
                  "odds_min": ODDS_MIN, "odds_max": ODDS_MAX,
                  "oracle_ttl_min": ORACLE_TTL_MIN,
+                 "oracle_markets": oracle_markets(),
+                 "uses_line_types": uses_line_oracle(),
                  "request_budget": REQ_BUDGET_DAY,
-                 "requests_today": 0, "keys_cached": 0,
+                 "credit_budget": int(CREDIT_BUDGET_DAY),
+                 "credits_per_call": credits_per_call(),
+                 "requests_today": 0, "credits_today": 0, "keys_cached": 0,
+                 "line_keys_cached": 0,
                  "events": 0, "candidates": 0}
     try:
         state, healthy = _load_state()
         state = _roll_day(state)
         out["requests_today"] = int(state.get("requests") or 0)
+        out["credits_today"] = int(state.get("credits") or 0)
     except Exception:
         healthy = False
     out["budget_state_healthy"] = bool(healthy)
@@ -740,6 +958,11 @@ def summary() -> dict:
         folder = oracle_cache_dir()
         out["keys_cached"] = sum(
             1 for p in folder.glob("toa_americanfootball_*.json")
+            if _cache_is_fresh(p))
+        # Copie lette dal percorso a LINEA (`toao_*`): senza, i pick
+        # spread/totali resterebbero ciechi pur avendo il moneyline fresco.
+        out["line_keys_cached"] = sum(
+            1 for p in folder.glob(f"{_line_cache_prefix()}americanfootball_*.json")
             if _cache_is_fresh(p))
     except Exception:
         pass
@@ -758,9 +981,16 @@ def format_report(block: Optional[dict] = None) -> str:
                  f"{float(s.get('ev_min') or 0) * 100:.1f}%")
     lines.append(f"  • fascia quota {s.get('odds_min')}-{s.get('odds_max')} | "
                  f"finestra {s.get('hours_ahead')}h")
-    lines.append(f"  • oracolo: cache fresche {s.get('keys_cached')} leghe "
-                 f"(TTL {s.get('oracle_ttl_min')} min) | richieste oggi "
-                 f"{s.get('requests_today')}/{s.get('request_budget')}")
+    markets = str(s.get("oracle_markets") or "h2h")
+    costo = 3 if "totals" in markets else 1
+    lines.append(f"  • oracolo: {markets} (~{costo} crediti/lega) | cache "
+                 f"fresche {s.get('keys_cached')} h2h / "
+                 f"{s.get('line_keys_cached')} a linea "
+                 f"(TTL {s.get('oracle_ttl_min')} min)")
+    lines.append(f"  • richieste oggi {s.get('requests_today')}/"
+                 f"{s.get('request_budget')} | crediti oggi "
+                 f"{s.get('credits_today')}/{s.get('credit_budget')} "
+                 f"({s.get('credits_per_call')} cr/fetch)")
     if not s.get("budget_state_healthy"):
         lines.append("  ⚠️ stato del budget illeggibile: nessuna richiesta "
                      "finche' non torna leggibile")

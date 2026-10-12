@@ -336,6 +336,10 @@ export default defineRailway(() => {
       GRIDIRON_MAX_INV_SUM: preserve(),
       GRIDIRON_ORACLE_TTL_MIN: preserve(),
       GRIDIRON_REQ_BUDGET_DAY: preserve(),
+      // Tetto di SPESA in crediti (non richieste): coi tipi a linea
+      // (342/28) una fetch costa 3 crediti invece di 1, quindi il solo
+      // GRIDIRON_REQ_BUDGET_DAY porterebbe il tetto da 8 a 24 cr/giorno.
+      GRIDIRON_CREDIT_BUDGET_DAY: preserve(),
       GRIDIRON_ORACLE_CACHE: preserve(),
       GRIDIRON_LANE_STATE: preserve(),
       GRIDIRON_DISCOVERY_TTL_S: preserve(),

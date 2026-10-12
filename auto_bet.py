@@ -3726,9 +3726,15 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
         mkt = {"market_id": mid_t, "selection_id": int(sel_t),
                "event_name": f"{pick.get('home')} vs {pick.get('away')}",
                "label": str(pick.get("esito_raw") or pick.get("team") or ""),
-               "market_type": "ML", "line": None, "provider": "sxbet"}
+               "market_type": str(pick.get("mercato") or "ML").upper(),
+               "line": pick.get("line"), "provider": "sxbet"}
     target = None
-    if not is_tennis and str(pick.get("mercato") or "").upper() in ("OU", "AH"):
+    # (11/10/2026) Il bersaglio di `order_target` e' la convenzione del CALCIO.
+    # Sui pick gridiron/tennis l'identita' di mercato e' GIA' nel pick (mkt non
+    # e' None), quindi calcolarlo non serve — e potrebbe SCARTARE il pick se la
+    # label non fosse interpretata dai parser calcistici pur avendo un
+    # market_id/selection_id validi (fail-closed sul percorso sbagliato).
+    if mkt is None and str(pick.get("mercato") or "").upper() in ("OU", "AH"):
         try:
             from multi_market import order_target
             target = order_target(pick)
