@@ -508,6 +508,51 @@ class TestPicksLinea:
         prov = FakeSx([m], {"0xNC": _book(2.10, 1.80)})
         assert gl.picks(provider=prov) == []
 
+    def test_linea_specchio_non_produce_pick(self, monkeypatch):
+        """Regressione del bug REALE del 12/10/2026 (EV +29% falso, NFL).
+
+        Caso riscontrato in produzione su Tampa Bay Buccaneers vs Pittsburgh
+        Steelers: Pinnacle prezza la sola linea MAIN — la squadra di casa
+        `point` **+2.5** (underdog), la trasferta **-2.5** — mentre SX quota
+        ANCHE lo specchio ("Tampa Bay Buccaneers -2.5" @ 2.41). Il ripiego sul
+        punto assegnava la p_true di *Pittsburgh -2.5* (0.535) al prezzo SX di
+        *Tampa -2.5* → un `strong_value` con EV +29% su un mercato che
+        l'oracolo NON prezza. Con i nomi leggibili il verdetto deve essere
+        fail-closed: nessun pick.
+        """
+        monkeypatch.setenv("GRIDIRON_TYPES", "342")
+        # Linea main di Pinnacle: casa +2.5, trasferta -2.5 (forma reale).
+        _write_cache(_oracle_line_payload("spreads", line=2.5,
+                                          p1=2.08, p2=1.82),
+                     name="toao_americanfootball_nfl.json")
+        ko = _kickoff(6)
+        # SX quota lo SPECCHIO (linea -2.5) con prezzi che sembrano +EV.
+        m = _market("0xMIR", HOME, AWAY, kickoff=ko, mtype="342", line=-2.5,
+                    o1=f"{HOME} -2.5", o2=f"{AWAY} +2.5")
+        prov = FakeSx([m], {"0xMIR": _book(2.41, 1.52)})
+        assert gl.picks(provider=prov) == []
+
+    def test_linea_main_resta_valutata(self, monkeypatch):
+        """Controprova: la linea che Pinnacle PREZZA resta giudicata.
+
+        Il fix non spegne il percorso a linea — elimina solo il verdetto sul
+        verso sbagliato. Stessa partita, mercato alla linea 2.5 (casa +2.5):
+        SX paga l'esito di casa 2.30 contro una quota equa sharp ~2.15 -> +EV.
+        """
+        monkeypatch.setenv("GRIDIRON_TYPES", "342")
+        _write_cache(_oracle_line_payload("spreads", line=2.5,
+                                          p1=2.08, p2=1.82),
+                     name="toao_americanfootball_nfl.json")
+        ko = _kickoff(6)
+        m = _market("0xMAIN", HOME, AWAY, kickoff=ko, mtype="342", line=2.5,
+                    o1=f"{HOME} +2.5", o2=f"{AWAY} -2.5")
+        prov = FakeSx([m], {"0xMAIN": _book(2.30, 1.70)})
+        picks = gl.picks(provider=prov)
+        assert picks, "la linea main deve restare valutata"
+        assert picks[0]["esito_key"] == "Home +2.5"
+        # La linea del pick e' finalmente leggibile (prima era None).
+        assert picks[0]["line"] == 2.5
+
     def test_tipi_disabilitati_non_valutati(self, monkeypatch):
         """Con `GRIDIRON_TYPES=226` un mercato a linea non entra in gioco:
         e' cio' che tiene il costo a 1 credito quando non serve di piu'."""

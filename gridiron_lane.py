@@ -784,6 +784,10 @@ def _build_pick(ev: dict, side: dict, row: dict, mercato: str,
         "league": ev.get("league_label") or "",
         "mercato": mercato, "esito_key": str(esito_raw),
         "esito_raw": esito_raw,
+        # Linea del mercato (None sul moneyline): serve alla telemetria e
+        # all'identita' del pick — senza, un pick a linea era indistinguibile
+        # da un moneyline nei log e nei report (12/10/2026).
+        "line": ev.get("line"),
         "team": esito_raw,
         "quota": price, "price": price,
         "market_id": ev["market_id"],

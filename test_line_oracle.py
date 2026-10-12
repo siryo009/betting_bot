@@ -638,11 +638,82 @@ class TestEstrattoriLinea:
             {"price": 1.9, "point": 0.0}, {"price": 1.9, "point": 0.0}]
         assert po.spreads_odds_of(bm, "Inter", "Cagliari", 0.0) is None
 
+    def test_spreads_linea_specchio_con_nomi_none(self):
+        """Il ripiego sul punto NON scatta se i nomi sono leggibili (12/10).
+
+        Pinnacle prezza solo la linea main: chiedere lo SPECCHIO (Inter con
+        +0.75 quando il suo `point` e' -0.75) deve dare None, non il prezzo di
+        Cagliari etichettato come "Home".
+        """
+        bm = _match_with_lines()["bookmakers"][0]
+        assert po.spreads_odds_of(bm, "Inter", "Cagliari", 0.75) is None
+        # Controprova: la linea VERA resta estratta correttamente.
+        assert po.spreads_odds_of(bm, "Inter", "Cagliari", -0.75) == \
+            {"Home": 1.85, "Away": 2.00}
+
     def test_line_probabilities_due_esiti(self):
         probs = po.line_probabilities({"Over": 2.0, "Under": 2.0})
         assert probs["Over"] == pytest.approx(0.5, abs=1e-9)
         assert probs["Under"] == pytest.approx(0.5, abs=1e-9)
         assert probs["overround"] == pytest.approx(1.0, abs=1e-9)
+
+
+class TestLineaSpecchioDelVerso:
+    """Regressione del bug REALE del 12/10/2026 (NFL, EV +29% falso).
+
+    Pinnacle prezza la sola linea MAIN — Tampa Bay Buccaneers `point` **+2.5**,
+    Pittsburgh Steelers **-2.5** — mentre SX quota anche lo specchio ("Tampa
+    Bay Buccaneers -2.5"). Il ripiego sul punto assegnava l'outcome con
+    `point == -2.5` (Pittsburgh) a "Home", accoppiando la p_true di *Pittsburgh
+    -2.5* al prezzo SX di *Tampa -2.5*: un finto EV +29% `strong_value` su un
+    mercato che l'oracolo non copre.
+    """
+
+    HOME = "Tampa Bay Buccaneers"
+    AWAY = "Pittsburgh Steelers"
+
+    def _match(self):
+        return {"id": "nfl1", "sport_key": "americanfootball_nfl",
+                "home_team": self.HOME, "away_team": self.AWAY,
+                "commence_time": "2026-10-18T17:00:00Z",
+                "bookmakers": [{"key": "pinnacle", "title": "Pinnacle",
+                                "markets": [{"key": "spreads", "outcomes": [
+                                    {"name": self.AWAY, "point": -2.5,
+                                     "price": 1.82},
+                                    {"name": self.HOME, "point": 2.5,
+                                     "price": 2.08}]}]}]}
+
+    def test_estrattore_linea_specchio_none(self):
+        bm = self._match()["bookmakers"][0]
+        # Lo specchio (-2.5 per la casa) NON e' prezzato da Pinnacle.
+        assert po.spreads_odds_of(bm, self.HOME, self.AWAY, -2.5) is None
+        # La linea main resta estratta col verso giusto.
+        assert po.spreads_odds_of(bm, self.HOME, self.AWAY, 2.5) == \
+            {"Home": 2.08, "Away": 1.82}
+
+    def test_oracle_lines_solo_la_main(self, tmp_path):
+        _write_oracle_cache(tmp_path, "americanfootball_nfl", [self._match()])
+        assert po.oracle_lines(self.HOME, self.AWAY, market_type="AH",
+                               cache_dir=tmp_path) == {2.5}
+
+    def test_line_true_probs_specchio_none(self, tmp_path):
+        _write_oracle_cache(tmp_path, "americanfootball_nfl", [self._match()])
+        assert po.line_true_probs(self.HOME, self.AWAY, market_type="AH",
+                                  line=-2.5, cache_dir=tmp_path) is None
+        probs = po.line_true_probs(self.HOME, self.AWAY, market_type="AH",
+                                   line=2.5, cache_dir=tmp_path)
+        assert probs is not None
+        # La casa e' l'underdog a +2.5: probabilita' PIU' BASSA del favorito.
+        assert probs["Home"] < probs["Away"]
+        assert probs["Home"] == pytest.approx(0.4667, abs=3e-3)
+
+    def test_diagnosi_granulare_line_mismatch(self, tmp_path):
+        """Il motivo dichiarato e' LINE_MISMATCH, non un mercato mancante."""
+        _write_oracle_cache(tmp_path, "americanfootball_nfl", [self._match()])
+        why = po.line_oracle_reason(self.HOME, self.AWAY, market_type="AH",
+                                    line=-2.5, cache_dir=tmp_path)
+        assert why["code"] == "LINE_MISMATCH"
+        assert why["recoverable"] is False
 
 
 class TestLineTrueProbs:

@@ -354,14 +354,30 @@ def spreads_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
     la STESSA convenzione di `multi_market.sx_line_of_esito`/`order_target`.
     Nel payload the-odds-api gli esiti spreads sono identificati da NOME
     SQUADRA + `point` SULL'OUTCOME (il mercato non porta il punto — forma
-    verificata su dati reali, 30/09): l'esito di casa ha `point =
-    home_line` e nome della squadra di casa, il trasferta `point =
-    -home_line`. Matching: nome
-    (case-fold, con ripiego su contenimento per le varianti) + linea; se i
-    nomi non combaciano MA le due linee sono speculari e DISTINTE, decide
-    il punto (difesa per forme di payload diverse). Fail-closed su ENTRAMBI
+    verificata su dati reali, 30/09): il `point` e' l'handicap DELLA SQUADRA
+    NOMINATA, quindi l'esito di casa ha `point = home_line` e il trasferta
+    `point = -home_line`. Matching: nome
+    (case-fold, con ripiego su contenimento per le varianti) + linea; il
+    ripiego sul SOLO punto (linee speculari e DISTINTE) scatta **solo se
+    NESSUN nome di esito e' riconducibile alle due squadre** — la difesa per
+    le forme di payload senza nomi utilizzabili. Fail-closed su ENTRAMBI
     i lati con prezzi > 1.0; a linea 0 le linee coincidono e decide SOLO il
     nome (mai un lato assegnato a caso).
+
+    ⚠️ PERCHE' IL RIPIEGO E' CONDIZIONATO (bug reale del 12/10/2026).
+    Quando i nomi SONO utilizzabili il ripiego produceva un verdetto sul
+    VERSO sbagliato: su una partita reale (Tampa Bay Buccaneers -
+    Pittsburgh Steelers) Pinnacle prezza solo la linea main (Tampa **+2.5**, il
+    suo `point`; Pittsburgh **-2.5**), mentre SX quota anche lo specchio
+    ("Tampa Bay Buccaneers **-2.5**"). Chiesto il lato casa a `-2.5` il match
+    per nome falliva CORRETTAMENTE (Tampa ha +2.5), ma il ripiego prendeva
+    l'outcome con `point == -2.5` — cioe' **Pittsburgh** — e lo assegnava a
+    `"Home"`: la probabilita' di *Pittsburgh -2.5* (0.535) finiva accoppiata
+    al prezzo SX di *Tampa -2.5* (2.41) e produceva un finto **EV +29%**
+    (`strong_value`), su un mercato che l'oracolo NON prezza. Con i nomi
+    utilizzabili il ripiego non deve decidere nulla: l'ordine delle squadre e'
+    l'handicap sono leggibili, e un disallineamento e' un'informazione
+    (fail-closed), non un indizio.
     """
     if not isinstance(bookmaker, dict):
         return None
@@ -374,6 +390,9 @@ def spreads_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
     out: Dict[str, float] = {}
     fallback_home: Optional[float] = None
     fallback_away: Optional[float] = None
+    # I nomi degli esiti riconducono a una delle due squadre? Se si', il verso
+    # e' leggibile e il ripiego sul punto NON deve decidere (12/10/2026).
+    names_usable = False
     for mkt in bookmaker.get("markets") or []:
         if not isinstance(mkt, dict) or mkt.get("key") != "spreads":
             continue
@@ -390,6 +409,8 @@ def spreads_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
             name = _cf(o.get("name"))
             name_home = name == h or (h in name) or (name in h)
             name_away = name == a or (a in name) or (name in a)
+            if name and (name_home or name_away):
+                names_usable = True
             if name_home and abs(point - line) <= 1e-6:
                 out["Home"] = price
             elif name_away and abs(point + line) <= 1e-6:
@@ -402,7 +423,10 @@ def spreads_odds_of(bookmaker: Dict[str, Any], home: str, away: str,
                     fallback_home = price
                 if abs(point + line) <= 1e-6 and fallback_away is None:
                     fallback_away = price
-    if "Home" not in out and fallback_home is not None \
+    # Il ripiego decide SOLO quando i nomi non hanno potuto dire nulla: con i
+    # nomi leggibili un disallineamento di linea e' un'informazione, non un
+    # indizio da colmare (bug del verso, 12/10/2026).
+    if not names_usable and "Home" not in out and fallback_home is not None \
             and fallback_away is not None:
         out["Home"] = fallback_home
         out["Away"] = fallback_away
