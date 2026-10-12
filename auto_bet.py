@@ -199,6 +199,65 @@ MIN_STAKE_EUR = float(os.getenv("MIN_STAKE_EUR", "1.0"))
 # in `test_gridiron_lane.py`).
 GRIDIRON_FLAG = "gridiron_lane"
 
+#: Mercati con IDENTITA' DI MERCATO PROPRIA nel pick (`market_id`/`selection_id`
+#: gia' risolti dalla corsia che li ha prodotti). Il dedup cross-corsia deve
+#: PREFERIRE questa versione a quella equivalente letta dal ledger, che porta lo
+#: stesso `match_id` ma NON l'identita' del mercato: senza la preferenza la
+#: riga di telemetria (1X2, senza flag) vince per ordine di lista e il pick
+#: ricco viene scartato come "duplicato" — l'ordine non parte mai (bug colto
+#: in produzione il 12/10 sul pick NFL Rams-Bills del torneo Gridiron).
+OWN_MARKET_MARKETS = ("ML", "TENNIS")
+
+
+def lane_specific(pick: dict) -> bool:
+    """True se il pick porta l'identita' del PROPRIO mercato (o il flag corsia).
+
+    Sono i pick che non si possono ri-risolvere col catalogo 1X2: football USA
+    (`GRIDIRON_FLAG`), eSports (`ML`) e tennis (`TENNIS`). Questi devono
+    sopravvivere al dedup cross-corsia: la versione letta dal ledger sullo
+    stesso evento non sa quale mercato comprare.
+    """
+    if pick.get(GRIDIRON_FLAG):
+        return True
+    if str(pick.get("mercato") or "").upper() in OWN_MARKET_MARKETS:
+        return True
+    return bool(str(pick.get("market_id") or "").strip())
+
+
+def dedup_lanes(board: list[dict]) -> list[dict]:
+    """Dedup cross-corsia per `(match_id, esito)`, con preferenza di specificita'.
+
+    La stessa riga puo' arrivare da due corsie (la corsia specifica e la
+    telemetria del ledger): in quel caso vince la versione che porta l'identita'
+    del PROPRIO mercato (`lane_specific`), perche' quella del ledger non sa
+    quale mercato comprare e fallirebbe la risoluzione a valle.
+
+    Estrazione PURA della regola che viveva inline in `run_today_bets`: cosi' e'
+    testabile senza orchestrare un giro puntate completo (bug del 12/10 sul
+    pick NFL del torneo Gridiron: la versione del ledger scartava quella della
+    corsia e l'ordine non partiva mai).
+    """
+    seen: dict[tuple, int] = {}
+    out: list[dict] = []
+    for pick in board:
+        key = (pick.get("match_id"), pick.get("esito_key"))
+        if key in seen:
+            idx = seen[key]
+            if lane_specific(pick) and not lane_specific(out[idx]):
+                logger.info("auto_bet: pick duplicato cross-corsia %s (%s) — "
+                            "tengo la versione con identita' di mercato "
+                            "(corsia) al posto di quella del ledger",
+                            pick.get("match_id"), pick.get("esito_key"))
+                out[idx] = pick
+            else:
+                logger.debug("auto_bet: pick duplicato cross-corsia %s (%s), "
+                             "salto", pick.get("match_id"),
+                             pick.get("esito_key"))
+            continue
+        seen[key] = len(out)
+        out.append(pick)
+    return out
+
 # CAP SEVERO OBBLIGATORIO (11/09/2026): il cap per singola bet (1% value/
 # moderate, 2% strong_value) NON puo' MAI essere superato dal floor
 # dell'exchange. Con STAKE_CAP_HARD attivo (default) una bet il cui stake
@@ -4104,18 +4163,15 @@ def run_today_bets(stake_eur: float | None = None,
     # ledger (bet_exists_open) NON vede ancora l'ordine della prima: senza
     # questo filtro l'evento verrebbe ordinato DUE volte sul provider prima
     # che la riga `bets` esista (bug colto dal test live: 2 ordini su 1
-    # evento). Vince la PRIMA occorrenza (ordine corsie: storico prima).
-    _seen_pick: set[tuple] = set()
-    _deduped: list[dict] = []
-    for pick in board:
-        _pk = (pick.get("match_id"), pick.get("esito_key"))
-        if _pk in _seen_pick:
-            logger.debug("auto_bet: pick duplicato cross-corsia %s (%s), "
-                         "salto", pick.get("match_id"), pick.get("esito_key"))
-            continue
-        _seen_pick.add(_pk)
-        _deduped.append(pick)
-    board = _deduped
+    # evento).
+    # ⚠️ La PRIMA occorrenza vince SOLO a parita' di specificita': se il
+    # duplicato porta l'identita' del PROPRIO mercato (`lane_specific`: football
+    # USA con flag, eSports `ML`, tennis `TENNIS`, o `market_id` presente)
+    # sostituisce la versione letta dal ledger. Senza questa preferenza la
+    # riga di telemetria 1X2 (che non sa quale mercato comprare) vinceva e il
+    # pick ricco veniva scartato: e' il bug del 12/10 sul pick NFL del torneo,
+    # che restava "fuori finestra"/"duplicato" senza mai arrivare all'ordine.
+    board = dedup_lanes(board)
 
     # --- MULTI-MARKET HARVESTING (05/10/2026, direttiva del proprietario) ---
     # UNA fetch a pagamento per lega PRIMA del ciclo di valutazione: il
@@ -4377,6 +4433,7 @@ def run_today_bets(stake_eur: float | None = None,
     # totale, tetto per-ordine, recinto d'esposizione aperta, liquidita' e
     # ledger in `_live_fill`. Nessun canale di denaro parallelo.
     if mode == "live":
+        _covered = {(c.get("match_id"), c.get("esito_key")) for c in candidates}
         for chief_cand in _chief_live_candidates(bankroll=_bankroll):
             if bet_exists_open(chief_cand["match_id"],
                                chief_cand["esito_key"]):
@@ -4385,7 +4442,20 @@ def run_today_bets(stake_eur: float | None = None,
                             chief_cand["match_id"],
                             chief_cand["esito_key"])
                 continue
+            # DEDUP CORSE (12/10/2026): il piano chief non porta l'identita' di
+            # mercato delle corsie speciali (gridiron/tennis/eSports) e sullo
+            # stesso evento fallirebbe la risoluzione del mercato. Se la corsia
+            # specifica ha gia' prodotto quel (match_id, esito), il piano chief
+            # e' un DOPPIONE: senza questo filtro lo stesso evento poteva
+            # partire due volte nella stessa tornata (la riga `bets` non esiste
+            # ancora e `bet_exists_open` non vede nulla).
+            if (chief_cand["match_id"], chief_cand["esito_key"]) in _covered:
+                logger.info("auto_bet: piano chief %s (%s) gia' in coda dalla "
+                            "corsia specifica, scartato (dedup corse)",
+                            chief_cand["match_id"], chief_cand["esito_key"])
+                continue
             candidates.append(chief_cand)
+            _covered.add((chief_cand["match_id"], chief_cand["esito_key"]))
 
     # --- GATE DI MERCATO: refresh forzato del gateway (SX primaria) e verifica
     # --- PRIMA di qualunque ordine. Blocco fail-closed: senza un feed fresco,

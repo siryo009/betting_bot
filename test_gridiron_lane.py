@@ -561,3 +561,71 @@ class TestTripwire:
     def test_flag_allineato_con_auto_bet(self):
         import auto_bet
         assert auto_bet.GRIDIRON_FLAG == gl.PICK_FLAG
+
+
+class TestDedupCorsie:
+    """Il dedup cross-corsia deve preferire la versione con identita' di mercato.
+
+    Bug del 12/10/2026 (torneo Gridiron): la telemetria del ledger scrive una
+    riga 1X2 con lo STESSO `match_id` (`sx-<eventId>`) del pick della corsia ma
+    SENZA `market_id`/flag. Il dedup teneva la PRIMA (quella del ledger) e la
+    corsia perdeva il pick: l'ordine NFL non partiva mai (finiva in
+    `top_down SKIP [no_oracle]` o in `mercato non trovato` sulla corsia chief).
+    """
+
+    LEDGER_PICK = {
+        "match_id": "sx-L19431545", "esito_key": "1", "mercato": "1X2",
+        "home": "Los Angeles Rams", "away": "Buffalo Bills",
+        "quota": 1.6194, "status": "value",
+    }
+
+    LANE_PICK = {
+        **LEDGER_PICK, "market_id": "0x426bdd259e83", "selection_id": 1,
+        gl.PICK_FLAG: True, "esito_raw": "1", "team": "1",
+    }
+
+    def test_lane_specific_riconosce_le_corsie(self):
+        import auto_bet as ab
+        assert ab.lane_specific(self.LANE_PICK) is True
+        assert ab.lane_specific(self.LEDGER_PICK) is False
+        # eSports (ML) e tennis (TENNIS) senza il flag ma col mercato proprio
+        assert ab.lane_specific({"mercato": "ML", "team": "X"}) is True
+        assert ab.lane_specific({"mercato": "TENNIS"}) is True
+        # un mercato_id presente e' di per se' identita' di mercato
+        assert ab.lane_specific({"mercato": "1X2",
+                                 "market_id": "0xabc"}) is True
+        # leninario (nessuna identita') non e' lane-specific
+        assert ab.lane_specific({"mercato": "1X2"}) is False
+
+    def test_la_corsia_vince_sul_ledger_anche_se_arriva_dopo(self):
+        import auto_bet as ab
+        out = ab.dedup_lanes([self.LEDGER_PICK, self.LANE_PICK])
+        assert len(out) == 1
+        assert out[0].get(ab.GRIDIRON_FLAG) is True
+        assert out[0]["market_id"] == "0x426bdd259e83"
+
+    def test_ledger_prima_non_vince(self):
+        """Ordine REALE in `run_today_bets`: `_today_value_picks()` precede
+        `_gridiron_picks()` -> e' esattamente il caso che rompeva il torneo."""
+        import auto_bet as ab
+        out = ab.dedup_lanes([self.LEDGER_PICK, self.LANE_PICK])
+        assert len(out) == 1
+        assert ab.lane_specific(out[0]) is True
+
+    def test_a_parita_di_specificita_vince_la_prima(self):
+        import auto_bet as ab
+        out = ab.dedup_lanes([self.LEDGER_PICK, dict(self.LEDGER_PICK)])
+        assert len(out) == 1
+        assert out[0] is self.LEDGER_PICK
+
+    def test_eventi_diversi_restano_entrambi(self):
+        import auto_bet as ab
+        altro = {**self.LEDGER_PICK, "match_id": "sx-L999"}
+        out = ab.dedup_lanes([self.LEDGER_PICK, altro, self.LANE_PICK])
+        assert len(out) == 2
+
+    def test_esiti_diversi_restano_entrambi(self):
+        import auto_bet as ab
+        due = {**self.LANE_PICK, "esito_key": "2"}
+        out = ab.dedup_lanes([self.LANE_PICK, due])
+        assert len(out) == 2

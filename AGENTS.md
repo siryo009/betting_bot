@@ -11170,3 +11170,65 @@ il 12/10 su decisione del proprietario**, per non ridurre il volume proprio nei
 giorni che contano. Tagli da valutare dal 20-21/10 (a classifica decisa):
 `TENNIS_ORACLE_TTL_MIN`, `GRIDIRON_ORACLE_TTL_MIN`, `SPORTS_INTERVAL_DAYS`,
 `SETTLEMENT_HEAL_INTERVAL_HOURS`.
+
+### 🔴 BUG BLOCCANTE DEL TORNEO TROVATO E FIXATO (12/10/2026): il dedup cross-corsia scartava il pick della corsia
+
+**Sintomo**: il pick NFL **Rams-Bills** (`sx-L19431545`, `1` @1.6194, EV **+3.32%**,
+depth 24678 USDC) era **in finestra** (`within`, T-622'), lo stake veniva
+regolarmente alzato dal layer torneo (`TORNEO 3.36 -> 5.04 USDC`) e la corsia
+**non ordinava mai**: ogni ciclo di 60s finiva in
+`auto_bet: mercato non trovato/ambiguo su sxbet per Los Angeles Rams vs
+Buffalo Bills (1), salto` -> `nessuna puntata (live)`.
+
+**Causa radice (misurata sui valori reali, non dedotta)**: la **telemetria**
+della corsia gridiron (`scan()`) scrive nel ledger `predictions` una riga
+`mercato='1X2'` con lo **stesso** `match_id` del pick (`sx-<eventId>`) ma
+**senza `market_id` ne' flag**. Il board viene costruito come
+`_today_value_picks() + _multi_market_picks()` e **solo dopo** `+ _gridiron_picks()`;
+il dedup cross-corsia teneva la **PRIMA** occorrenza -> vinceva la riga del
+ledger (povera) e il pick ricco della corsia (**con flag + `market_id`**) veniva
+scartato come "duplicato".
+
+Prova diretta sul container:
+```
+_gridiron_picks(): 1  -> flag=True, mercato=1X2, mid=0x426bdd259e83, sel=1
+_today_value_picks(): [('sx-L20273333','1X2'), ('sx-L19431545','1X2')]   <- stessa partita, SENZA identita' di mercato
+_chief_live_candidates(): sx-L19431545 | mercato 1X2 | flag None | stake 3.36  <- anche la catena chief, senza flag
+```
+Due conseguenze distinte, entrambe bloccanti:
+1. **corsia storica**: la versione del ledger (senza flag) NON e' esentata dal
+   gate top-down 1X2 -> `no_oracle/MISSING_MARKET` (Pinnacle non ha il 1X2 a tre
+   esiti su un moneyline NFL) -> skip;
+2. **corsia chief** (`CHIEF_EXECUTION=live`): il piano non porta
+   `market_id`/flag -> `resolve_match_market` (catalogo 1X2 calcistico) -> `None`
+   -> **"mercato non trovato"**. Era questo il messaggio nel log, non la corsia
+   storica.
+
+**Fix (`auto_bet.py`)**:
+- nuova **`lane_specific(pick)`** = il pick porta l'identita' del PROPRIO mercato
+  (flag `gridiron_lane`, oppure `mercato` in `("ML","TENNIS")`, oppure un
+  `market_id` non vuoto);
+- nuovo **`dedup_lanes(board)`** (estratto in funzione PURA, testabile): a parita'
+  di `(match_id, esito)` vince la versione `lane_specific`; se anche la prima lo
+  e' vince la prima (invariato);
+- **dedup corse anche per la catena chief**: `_covered` = i `(match_id, esito)`
+  gia' in coda -> un piano chief sullo stesso evento viene scartato (prima
+  poteva partire DUE volte nella stessa tornata: la riga `bets` non esiste ancora
+  e `bet_exists_open` non vede nulla).
+
+**Effetto atteso**: il pick gridiron arriva all'ordine con il **proprio**
+`market_id`/`selection_id` (chiavi 1/2) e la sua esenzione dal gate 1X2, mentre
+la catena chief smette di duplicare gli eventi delle corsie specifiche.
+
+**Test**: `test_gridiron_lane.py` nuova classe `TestDedupCorsie` (6 test, offline:
+riconoscimento dei tipi di corsia, corsia che vince anche arrivando DOPO il
+ledger — l'ordine reale del board, parita' di specificita', eventi ed esiti
+diversi) -> file **44 verdi**; lotti verdi: `test_auto_bet` +
+`test_auto_bet_live` + `test_capital_enclosure` (157), `test_t60_breakers` +
+`test_exposure_gate` + `test_order_watch` + `test_tennis_lane` +
+`test_esports_lane` (245). `verify_guardrails.py`: **A-H tutti bloccano**.
+
+**Da misurare dopo il deploy**: che il pick NFL/NCAAF produca un ordine reale
+(`FULLY_FILLED` nei log + riga in `bets` con `status='RESTING_FILLED'` o fill
+diretto) e che `_live_fill` riceva il flag (log attesi: nessun
+`mercato non trovato` sull'evento gridiron).
