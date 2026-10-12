@@ -479,6 +479,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/settlement [on|off]` – pausa settlement automatico (admin)\n"
         "`/sxscan` – scan segnali SX Bet ora (admin)\n"
         "`/torneo` – classifica del torneo SX Bet (posizione, gap, tempo)\n"
+        "`/rush` – stato del rush finale del torneo (admin)\n"
+        "`/clv [giorni]` – tracker CLV: quota d'acquisto vs closing line (admin)\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
         "`/backtest` – calibrazione EV atteso vs ROI realizzato\n"
@@ -2421,6 +2423,95 @@ async def cmd_t60reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "a ogni giro).", parse_mode="Markdown")
 
 
+async def cmd_rush(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/rush (solo admin): stato del RUSH FINALE del torneo (17-20/10).
+
+    Sola LETTURA di proposito: l'interruttore e i parametri del rush vivono in
+    env lette a RUNTIME, quindi si accende/spegne dalla dashboard Railway senza
+    redeploy — e non esiste un comando Telegram che possa armare una
+    accelerazione di stake per errore. Qui si vede cosa farebbe ORA: finestra,
+    tempo residuo, budget residuo, pressione di ricircolo e il tetto per ordine.
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text("⛔ Comando riservato agli admin.")
+        return
+    try:
+        import rush_final
+    except Exception as e:                                    # pragma: no cover
+        await update.message.reply_text(f"⚠️ Modulo rush non disponibile: {e}")
+        return
+    try:
+        rep = rush_final.report()
+    except Exception as e:                                    # pragma: no cover
+        logger.error("cmd_rush: %s", e)
+        await update.message.reply_text(f"⚠️ Stato rush non leggibile: {e}")
+        return
+    logger.info("cmd_rush: %s", rush_final.format_report(rep))
+    text = "<pre>" + rush_final.format_report(rep) + "</pre>"
+    hours = rep.get("hours_left")
+    if rep.get("ok") and hours is not None:
+        text += (f"\n⏳ Tempo residuo: <b>{hours:.1f}h</b> "
+                 f"({float(rep.get('days_left') or 0):.2f} giorni)")
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def cmd_clv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/clv [giorni] [segnali] (solo admin): tracker del CLV (closing line value).
+
+    Confronta la quota d'ACQUISTO reale dei trade eseguiti con la closing line
+    di Pinnacle / SX Bet: e' la misura che non dipende dalla varianza dei
+    risultati (un P/L su 20 puntate non dice nulla; un CLV battuto in modo
+    sistematico e' l'evidenza standard di edge).
+
+    - `/clv`            -> tutto lo storico dei trade live;
+    - `/clv 7`          -> solo gli ultimi 7 giorni;
+    - `/clv 7 segnali`  -> misura anche i segnali mai giocati (popolazione a
+                           parte: misura il MODELLO, non gli ordini).
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text("⛔ Comando riservato agli admin.")
+        return
+    days = None
+    include_signals = False
+    for token in (context.args or []):
+        low = str(token).strip().lower()
+        if low in ("segnali", "signals", "modello"):
+            include_signals = True
+            continue
+        try:
+            days = float(low)
+        except (TypeError, ValueError):
+            await update.message.reply_text(
+                "Uso: `/clv [giorni] [segnali]` (es. `/clv 7 segnali`)",
+                parse_mode="Markdown")
+            return
+    try:
+        import clv_tracker
+    except Exception as e:                                    # pragma: no cover
+        await update.message.reply_text(f"⚠️ Tracker non disponibile: {e}")
+        return
+    try:
+        rep = clv_tracker.report(days=days, include_signals=include_signals)
+    except Exception as e:                                    # pragma: no cover
+        logger.error("cmd_clv: %s", e)
+        await update.message.reply_text(f"⚠️ CLV non calcolabile: {e}")
+        return
+    # Il report completo finisce nei log (Telegram tronca i messaggi lunghi).
+    logger.info("cmd_clv (days=%s, signals=%s):\n%s", days, include_signals,
+                clv_tracker.format_report(rep, limit=20))
+    text = clv_tracker.format_report(rep, limit=5)
+    if len(text) > 3500:                                      # pragma: no cover
+        text = text[:3500] + "\n… (report completo nei log)"
+    # Testo PURO, senza parse_mode: il report contiene nomi squadra/giocatore e
+    # le stesse etichette della CLI — il parser Markdown legacy di Telegram
+    # fallisce su un `_` o un `*` non bilanciato dentro un nome, e un report di
+    # misura non deve rompersi per un carattere. La versione formattata resta
+    # nei log (sopra).
+    await update.message.reply_text(text)
+
+
 async def cmd_stopreset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/stopreset [stato] (solo admin): azzera lo stop-loss GIORNALIERO.
 
@@ -2900,6 +2991,83 @@ async def closing_line_job(context: ContextTypes.DEFAULT_TYPE = None):
                     "finestra (salti: %s)", got.get("captured"),
                     got.get("checked"), got.get("skipped") or "nessuno")
 
+    # --- second meta' della STESSA misura (13/10/2026): la chiusura di SX Bet.
+    # Pinnacle copre il calcio 1X2 ma non e' la venue su cui eseguiamo gli
+    # altri mercati (tennis, eSports, football USA): li' la closing line che
+    # conta e' quella di SX, letta dal book PUBBLICO via market_id/selection_id
+    # dell'ordine (nessuna mappatura per nome, zero crediti).
+    # `clv_tracker` non sovrascrive una chiusura gia' catturata: Pinnacle, che
+    # gira per primo in questo job, resta la fonte preferita dove esiste.
+    if os.getenv("CLV_SX_CAPTURE", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return
+    try:
+        import clv_tracker
+        got_sx = await loop.run_in_executor(
+            None, clv_tracker.capture_sx_closing)
+    except Exception as exc:
+        logger.debug("closing_line_job: cattura SX non eseguita (%s)", exc)
+        return
+    if got_sx.get("captured") or got_sx.get("skipped"):
+        logger.info("closing_line_job: chiusura SX %s catturate su %s in "
+                    "finestra (salti: %s)", got_sx.get("captured"),
+                    got_sx.get("checked"), got_sx.get("skipped") or "nessuno")
+
+
+async def clv_tracker_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """TRACKER AUTOMATICO del CLV (13/10/2026): registra la serie nel tempo.
+
+    Perche' un job e non solo il comando: il CLV e' una SERIE. Un report letto
+    a mano una volta dice poco; la stessa misura letta ogni 6h costruisce la
+    storia che serve per decidere (e per accorgersi se il "beat" si sta
+    erodendo). Il job logga SEMPRE il report (anche a campione vuoto: il numero
+    che cresce e' l'informazione) e notifica solo gli admin, mai gli iscritti —
+    e' telemetria di ingegneria, non un segnale di gioco — con anti-spam
+    giornaliero e solo quando esiste almeno un campione misurabile.
+
+    Costo: **zero crediti** (legge il ledger locale; la cattura delle closing
+    line vive in `closing_line_job`). Fail-safe: un errore non ferma nulla.
+    """
+    if os.getenv("CLV_TRACKER_ENABLED", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return
+    try:
+        import clv_tracker
+    except Exception as e:                                    # pragma: no cover
+        logger.debug("clv_tracker_job: modulo non disponibile (%s)", e)
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        rep = await loop.run_in_executor(
+            None, lambda: clv_tracker.report(days=30))
+    except Exception as e:                                    # pragma: no cover
+        logger.warning("clv_tracker_job: lettura fallita (%s)", e)
+        return
+    metrics = rep.get("metrics") or {}
+    n = metrics.get("n") or 0
+    # Il log e' la serie storica: sempre, anche senza campioni.
+    logger.info("clv_tracker_job: %s | pendenti %s | esclusi %s",
+                " ".join(clv_tracker.format_report(rep, limit=0).splitlines()[:3]),
+                rep.get("pending"), rep.get("excluded") or "nessuno")
+    if n <= 0:
+        return
+    try:
+        from tracker import is_notified, mark_notified
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if is_notified("CLV_TRACKER", today):
+            return
+    except Exception as e:                                    # pragma: no cover
+        logger.debug("clv_tracker_job: anti-spam non leggibile (%s)", e)
+        today = None
+    text = clv_tracker.format_report(rep, limit=3)
+    try:
+        for chat_id in _admin_chat_ids():
+            await context.bot.send_message(chat_id=chat_id, text=text)
+        if today:
+            mark_notified("CLV_TRACKER", today)
+    except Exception as e:                                    # pragma: no cover
+        logger.warning("clv_tracker_job: notifica non inviata (%s)", e)
+
 
 async def market_shadow_job(context: ContextTypes.DEFAULT_TYPE):
     """Telemetria OMbra sui mercati SX NON calcistici (01/10/2026).
@@ -3222,6 +3390,22 @@ async def resting_orders_job(context: ContextTypes.DEFAULT_TYPE = None):
         logger.debug("resting_orders_job: registro non leggibile (%s)", e)
         return
     loop = asyncio.get_running_loop()
+    # --- RICIRCOLO del RUSH FINALE (13/10/2026): nella finestra 17-20/10 gli
+    # ordini RESTING che non hanno trovato controparte entro il TTL (45')
+    # vengono RITIRATI, cosi' il capitale torna disponibile per il match
+    # successivo invece di restare parcheggiato. Fuori finestra `rush_final`
+    # non fa nulla (motivo dichiarato) e il giro e' identico a prima.
+    # L'esito della cancellazione lo decide comunque `reconcile` qui sotto:
+    # un ordine riempito all'ultimo istante non viene mai perso.
+    try:
+        import rush_final
+        cleared = await loop.run_in_executor(None, rush_final.clear_stale_resting)
+        if cleared.get("cancel_requested"):
+            logger.info("resting_orders_job: rush finale — %s/%s ordini "
+                        "ritirati per ricircolo", cleared.get("cancel_ok"),
+                        cleared.get("cancel_requested"))
+    except Exception as e:                        # pragma: no cover
+        logger.debug("resting_orders_job: rush finale non applicato (%s)", e)
     try:
         res = await loop.run_in_executor(None, ro.run_cycle)
     except Exception as e:                        # pragma: no cover
@@ -3542,6 +3726,8 @@ def main() -> None:
     application.add_handler(CommandHandler("ordini", cmd_ordini))
     application.add_handler(CommandHandler("torneo", cmd_torneo))
     application.add_handler(CommandHandler("classifica", cmd_torneo))
+    application.add_handler(CommandHandler("rush", cmd_rush))
+    application.add_handler(CommandHandler("clv", cmd_clv))
     application.add_handler(CommandHandler("t60reset", cmd_t60reset))
     application.add_handler(CommandHandler("stopreset", cmd_stopreset))
     application.add_handler(CommandHandler("weeklyreset", cmd_weeklyreset))
@@ -3758,6 +3944,13 @@ def main() -> None:
         # il book degli ordini e cancella, non chiede quote. Se non c'e'
         # nessun ordine parcheggiato esce subito senza toccare la rete.
         job_queue.run_repeating(resting_orders_job, interval=300, first=240,
+                                job_kwargs={"max_instances": 1})
+        # TRACKER AUTOMATICO del CLV (13/10/2026): ogni 6h registra nel log la
+        # serie quota d'acquisto vs closing line (sola lettura del ledger, zero
+        # crediti, zero ordini) e notifica gli admin 1 volta/giorno quando c'e'
+        # almeno un campione. La CATTURA delle chiusure vive in closing_line_job
+        # (Pinnacle a T-0 + il lato SX). `CLV_TRACKER_ENABLED=0` spegne il job.
+        job_queue.run_repeating(clv_tracker_job, interval=6 * 3600, first=1200,
                                 job_kwargs={"max_instances": 1})
         # Flusso dell'order book SX (26/09): ogni 6h legge il registro degli
         # ingressi di liquidita' e allerta SOLO se ce ne sono nelle ultime

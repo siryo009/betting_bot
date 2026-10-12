@@ -98,11 +98,24 @@ def enabled() -> bool:
 
 
 def config() -> Dict[str, Any]:
-    """Parametri efficaci (env a runtime)."""
+    """Parametri efficaci (env a runtime).
+
+    Il TTL puo' essere ACCORCIATO da `rush_final` durante la finestra finale
+    del torneo (17-20/10): un ordine che non trova controparte in 45' viene
+    ritirato e il capitale torna disponibile per il match successivo — il
+    ricircolo e' la leva, non il numero di tentativi. L'hook e' fail-safe e
+    fuori finestra ritorna il valore di sempre (comportamento invariato).
+    """
+    ttl = _num_env("RESTING_TTL_MIN", 720.0, minimum=1.0)
+    try:
+        import rush_final
+        ttl = float(rush_final.override_resting_ttl(ttl))
+    except Exception as exc:                                  # pragma: no cover
+        logger.debug("resting_orders: hook rush non disponibile (%s)", exc)
     return {
         "enabled": enabled(),
         "max_open": int(_num_env("RESTING_MAX_OPEN", 5.0, minimum=1.0)),
-        "ttl_min": _num_env("RESTING_TTL_MIN", 720.0, minimum=1.0),
+        "ttl_min": ttl,
         "cancel_before_min": _num_env("RESTING_CANCEL_BEFORE_MIN", 2.0,
                                       minimum=0.0),
         "expiry_margin_s": _num_env("RESTING_EXPIRY_MARGIN_S", 600.0,

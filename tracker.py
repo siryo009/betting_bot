@@ -106,6 +106,7 @@ def _get_conn():
         signal_quota REAL, closing_quota REAL, updated_at TEXT,
         pinnacle_quota REAL,
         closing_odds REAL,
+        closing_source TEXT,
         PRIMARY KEY (match_id, esito))''')
     clv_cols = [r[1] for r in c.execute("PRAGMA table_info(clv_history)")]
     if "pinnacle_quota" not in clv_cols:
@@ -117,6 +118,13 @@ def _get_conn():
         # `closing_quota` resta invece la chiusura del miglior bookmaker
         # (convenzione storica di `save_clv`).
         c.execute("ALTER TABLE clv_history ADD COLUMN closing_odds REAL")
+    if "closing_source" not in clv_cols:
+        # Provenienza del valore in `closing_odds` (13/10/2026): la quota di
+        # chiusura puo' arrivare da Pinnacle (`pinnacle_t0`, catturata da
+        # `closing_line.py`) oppure da SX Bet (`sx`, catturata da
+        # `clv_tracker.capture_sx_closing`). Senza la fonte il CLV non e'
+        # verificabile: due chiusure di venue diverse non sono confrontabili.
+        c.execute("ALTER TABLE clv_history ADD COLUMN closing_source TEXT")
     c.execute('''CREATE TABLE IF NOT EXISTS cassa (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         data TEXT, partita TEXT, esito TEXT, quota REAL,
@@ -2469,7 +2477,7 @@ def mark_notified(match_id, date_str):
     conn.commit(); conn.close()
 
 def save_clv(match_id, esito, quota, signal_started=False, pinnacle_quota=None,
-             closing_odds=None):
+             closing_odds=None, closing_source=None):
     """Registra un campione CLV per una coppia match+esito.
 
     - Prima analisi del match (signal_started=True): la quota corrente diventa la
@@ -2481,29 +2489,35 @@ def save_clv(match_id, esito, quota, signal_started=False, pinnacle_quota=None,
     - closing_odds (opz., 04/10/2026): quota FINALE di Pinnacle a T-0, scritta
       dalla routine `closing_line.py`. E' il riferimento del "beat the market"
       per ogni ordine (`closing_line.beat_pct`).
+    - closing_source (opz., 13/10/2026): PROVENIENZA di `closing_odds`
+      (`pinnacle_t0` da `closing_line`, `sx` da `clv_tracker.capture_sx_closing`).
+      Senza la fonte il CLV non e' verificabile: chiusure di venue diverse non
+      si confrontano fra loro.
     """
     conn = _get_conn(); c = conn.cursor()
     now = datetime.now().isoformat()
     pin = pinnacle_quota if pinnacle_quota and pinnacle_quota > 0 else None
     close = closing_odds if closing_odds and closing_odds > 0 else None
+    src = str(closing_source).strip() if closing_source else None
     c.execute("SELECT signal_quota, closing_quota, pinnacle_quota, closing_odds "
               "FROM clv_history WHERE match_id=? AND esito=?", (match_id, esito))
     row = c.fetchone()
     if row is None or signal_started:
         c.execute("INSERT OR REPLACE INTO clv_history "
                   "(match_id, esito, signal_quota, closing_quota, "
-                  " pinnacle_quota, closing_odds, updated_at) "
-                  "VALUES (?,?,?,?,?,?,?)",
-                  (match_id, esito, quota, quota, pin, close, now))
+                  " pinnacle_quota, closing_odds, closing_source, updated_at) "
+                  "VALUES (?,?,?,?,?,?,?,?)",
+                  (match_id, esito, quota, quota, pin, close, src, now))
     else:
         # COALESCE sui valori opzionali: una scrittura senza `closing_odds`
         # NON cancella quella gia' catturata a T-0 (la routine gira una volta
         # sola, mentre `fixture_engine` aggiorna la chiusura a ogni analisi).
         c.execute("UPDATE clv_history SET closing_quota=?, updated_at=?, "
                   "pinnacle_quota=COALESCE(?, pinnacle_quota), "
-                  "closing_odds=COALESCE(?, closing_odds) "
+                  "closing_odds=COALESCE(?, closing_odds), "
+                  "closing_source=COALESCE(?, closing_source) "
                   "WHERE match_id=? AND esito=?",
-                  (quota, now, pin, close, match_id, esito))
+                  (quota, now, pin, close, src, match_id, esito))
     conn.commit(); conn.close()
 
 def clear_old_matches():

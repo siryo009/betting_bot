@@ -365,6 +365,37 @@ export default defineRailway(() => {
       // formato RETURN le perdite non tolgono punti. Spegnerla e' una sola
       // variabile: senza la seconda chiave il gate di lega resta com'e'.
       TOURNAMENT_OPEN_LEAGUES: preserve(),
+      // RUSH FINALE del torneo (13/10/2026, `rush_final.py`): finestra
+      // 17-20/10 in cui il sizing viene accelerato e il capitale RICIRCOLATO
+      // in fretta (TTL degli ordini RESTING accorciato + ritiro degli ordini
+      // che non trovano controparte). TUTTE lette a RUNTIME: si accende,
+      // si spegne e si tara senza redeploy — e il 21/10 il modulo si spegne
+      // da solo perche' la finestra e' passata (`RUSH_FINAL` ON di default,
+      // INERTE fuori finestra). Il tetto resta `min(cap rush, cap torneo,
+      // budget residuo, spazio del recinto)`: un `config apply` non deve
+      // distruggere ne' la finestra ne' i cap decisi a mano.
+      RUSH_FINAL: preserve(),
+      RUSH_START: preserve(),
+      RUSH_END: preserve(),
+      RUSH_BUDGET_USDC: preserve(),
+      RUSH_MAX_STAKE_USDC: preserve(),
+      RUSH_AGGRESSION: preserve(),
+      RUSH_CLASSES: preserve(),
+      RUSH_RECYCLE_WINDOW_MIN: preserve(),
+      RUSH_RECYCLE_BOOST: preserve(),
+      RUSH_RESTING_TTL_MIN: preserve(),
+      RUSH_CLEAR_RESTING: preserve(),
+      RUSH_CLEAR_RESTING_AFTER_MIN: preserve(),
+      // TRACKER AUTOMATICO del CLV (13/10/2026, `clv_tracker.py`): misura la
+      // quota d'ACQUISTO dei trade contro la closing line (Pinnacle / SX Bet).
+      // `clv_tracker_job` gira ogni 6h (sola lettura del ledger, zero
+      // crediti) e `CLV_SX_CAPTURE` accende la cattura della chiusura SX a
+      // T-0 dentro `closing_line_job`. La FINESTRA di cattura resta quella di
+      // `closing_line` (T-10..T+5): le env qui sotto possono solo stringerla.
+      CLV_TRACKER_ENABLED: preserve(),
+      CLV_SX_CAPTURE: preserve(),
+      CLV_SX_PRE_MIN: preserve(),
+      CLV_SX_POST_MIN: preserve(),
       // CLASSIFICA del torneo nel bot (12/10/2026,
       // `tournament_leaderboard.py`): "tieni aggiornato l'andamento della
       // classifica". Lettura PUBBLICA e GRATUITA (zero crediti the-odds-api,

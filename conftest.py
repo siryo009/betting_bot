@@ -317,6 +317,20 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     monkeypatch.setenv("RESTING_STATE", str(tmp_path / "resting_orders.json"))
     if "test_resting_orders" not in request.node.nodeid:
         monkeypatch.setenv("RESTING_ORDERS", "0")
+    # RUSH FINALE del torneo (13/10/2026, `rush_final.py`): l'interruttore e'
+    # ON di default e la finestra (17-20/10) e' una DATA DI CALENDARIO — senza
+    # isolamento, dal 17/10 in avanti ogni test che passa da `run_today_bets` o
+    # da `resting_orders.config()` entrerebbe nel rush e cambierebbe lo stake
+    # atteso (e leggerebbe il wallet per davvero). Spento alla fonte: il file
+    # dedicato (`test_rush_final`) lo riaccende con una finestra esplicita.
+    if "test_rush_final" not in request.node.nodeid:
+        monkeypatch.setenv("RUSH_FINAL", "0")
+    # TRACKER del CLV (13/10/2026, `clv_tracker.py`): la cattura SX legge
+    # l'order book (RETE) e il job gira da `closing_line_job`. Nei test che non
+    # lo esercitano entrambi sono spenti — nessuna rete per sbaglio.
+    if "test_clv_tracker" not in request.node.nodeid:
+        monkeypatch.setenv("CLV_SX_CAPTURE", "0")
+        monkeypatch.setenv("CLV_TRACKER_ENABLED", "0")
     yield
     _ld.reset_cache()
     _oracle_skips.reset_dedup()

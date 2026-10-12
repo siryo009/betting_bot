@@ -34,8 +34,8 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "beat_pct", "candidates", "capture_closing_lines", "format_report",
-    "post_minutes", "pre_minutes", "report", "sharp_closing",
+    "SOURCE_PINNACLE", "beat_pct", "candidates", "capture_closing_lines",
+    "format_report", "post_minutes", "pre_minutes", "report", "sharp_closing",
 ]
 
 #: Motivi machine-readable di un salto (mai prosa, mai un silenzio):
@@ -44,6 +44,12 @@ __all__ = [
 #: `read_error`/`write_error` (lettura o scrittura fallita).
 SKIP_REASONS = ("no_sharp_cache", "unsupported_market", "already_captured",
                 "read_error", "write_error")
+
+#: Provenienza del valore scritto in `clv_history.closing_odds` (13/10/2026):
+#: questa routine cattura il lato PINNACLE della closing line. L'altro lato
+#: (`SOURCE_SX`) lo cattura `clv_tracker.capture_sx_closing`: la fonte viaggia
+#: col campione, altrimenti due chiusure di venue diverse non si confrontano.
+SOURCE_PINNACLE = "pinnacle_t0"
 
 #: Finestra di cattura rispetto al kickoff (minuti): si parte `PRE` minuti
 #: prima e si tollera fino a `POST` minuti dopo (la routine gira ogni pochi
@@ -304,10 +310,12 @@ def capture_closing_lines(*, conn=None, now: Optional[datetime] = None) -> dict:
                     # dall'ordine (non c'e' un'analisi a monte da cui leggerla).
                     save_clv(row["match_id"], row["esito"], row["price"],
                              signal_started=True, pinnacle_quota=closing,
-                             closing_odds=closing)
+                             closing_odds=closing,
+                             closing_source=SOURCE_PINNACLE)
                 else:
                     save_clv(row["match_id"], row["esito"], row["price"],
-                             pinnacle_quota=closing, closing_odds=closing)
+                             pinnacle_quota=closing, closing_odds=closing,
+                             closing_source=SOURCE_PINNACLE)
             except Exception as exc:
                 logger.debug("closing_line: scrittura fallita (%s)", exc)
                 reason = "write_error"

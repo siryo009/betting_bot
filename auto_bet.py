@@ -1883,6 +1883,36 @@ def _open_live_snapshot() -> tuple[float, int]:
     return stake, count
 
 
+def _open_live_rows() -> list[dict]:
+    """Righe RAW delle puntate LIVE ancora aperte (per il RICIRCOLO).
+
+    Serve a misurare quanto capitale e' FERMO da ore (`rush_final`): uno stake
+    che aspetta da 3 ore e' capitale che non gira, ed e' il vincolo vero quando
+    il tetto del recinto non e' saturo. Legge la STESSA tabella e la STESSA
+    condizione di `_open_live_snapshot` (`esito_finale IS NULL AND mode='live'`)
+    — una seconda definizione di "cosa e' aperto" divergerebbe.
+
+    Fail-open: su errore ritorna lista vuota (una telemetria rotta non deve
+    fermare il giro puntate ne' far credere che ci sia ricircolo da fare).
+    """
+    try:
+        from tracker import _get_conn
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT match_id, esito, stake, price, created_at FROM bets "
+            "WHERE esito_finale IS NULL AND mode = 'live'").fetchall()
+        conn.close()
+    except Exception as e:
+        logger.warning("auto_bet: lettura righe aperte fallita: %s", e)
+        return []
+    out: list[dict] = []
+    for r in rows:
+        out.append({"match_id": r[0], "esito": r[1],
+                    "stake": float(r[2] or 0.0),
+                    "price": float(r[3] or 0.0), "created_at": r[4]})
+    return out
+
+
 def _open_live_exposure() -> float:
     """Stake REALE attualmente in gioco (puntate live non ancora saldate)."""
     return _open_live_snapshot()[0]
@@ -2381,6 +2411,75 @@ def _apply_tournament(candidates: list[dict], *,
                     getattr(tournament, "LABEL", "torneo"), info["raised"],
                     info["blocked"], left)
     return kept, info
+
+
+def _apply_rush(candidates: list[dict], *,
+                bankroll: float | None = None) -> tuple[list[dict], dict]:
+    """RUSH FINALE (13/10/2026): accelerazione di stake + ricircolo rapido.
+
+    Gira DOPO `_apply_tournament` (l'ordine non e' arbitrario: il rush e'
+    l'ULTIMO layer prima della FASE 3, cosi' il recinto d'esposizione vede lo
+    stake definitivo) e PRIMA dei cap di portafoglio della FASE 2 — che
+    restano l'ultima parola e possono ridurre o scartare.
+
+    Tre garanzie, tutte strutturali:
+    - **non crea ordini**: agisce solo su pick gia' proposti da una corsia e
+      passati dai gate (il rush non ha una discovery propria);
+    - **non allarga il recinto**: il tetto e' `min(cap rush, cap torneo,
+      budget residuo, spazio del recinto)` — ognuno dei quattro puo' solo
+      restringere;
+    - **fail-closed sull'incertezza**: senza equity leggibile il modulo NON si
+      applica e lo stake resta quello dei gate.
+
+    Fuori finestra (prima del 17/10 o dopo il 20/10) la lista torna INVARIATA.
+    """
+    info: dict = {"enabled": False, "raised": 0, "blocked": 0,
+                  "reason": "", "window": None}
+    try:
+        import rush_final
+    except Exception as exc:
+        logger.debug("auto_bet: rush finale non disponibile (%s)", exc)
+        return candidates, info
+    # Gate a COSTO ZERO prima di qualunque lettura del capitale: il giro gira
+    # ogni 60s e fuori finestra (tutto l'anno tranne pochi giorni) non si deve
+    # pagare una lettura del wallet per rispondere "il rush non c'e'".
+    try:
+        chk = rush_final.precheck()
+    except Exception as exc:                                  # pragma: no cover
+        logger.debug("auto_bet: precheck rush non disponibile (%s)", exc)
+        return candidates, info
+    if not chk.get("active"):
+        info["reason"] = chk.get("reason") or "off"
+        return candidates, info
+    try:
+        rep = rush_final.report()
+    except Exception as exc:                                  # pragma: no cover
+        logger.debug("auto_bet: stato rush non leggibile (%s)", exc)
+        return candidates, info
+    if not rep.get("ok"):
+        # In finestra ma bloccato (wallet illeggibile, recinto pieno, budget
+        # ignoto): e' una condizione che va VISTA, non nascosta a DEBUG.
+        logger.warning("auto_bet: rush finale in finestra ma NON applicato "
+                       "(%s)", rep.get("reason"))
+        info["reason"] = rep.get("reason") or "off"
+        return candidates, info
+    info["enabled"] = True
+    info["window"] = (rep.get("window") or {}).get("end")
+    raised = rush_final.apply(candidates, rep=rep, bankroll=bankroll)
+    for cand in raised:
+        if cand.get(rush_final.RUSH_FLAG):
+            info["raised"] += 1
+    info["blocked"] = sum(
+        1 for c in raised if isinstance(c, dict)
+        and (c.get("rush_info") or {}).get("blocked"))
+    info["reason"] = "rush_final"
+    logger.info("auto_bet: RUSH FINALE attivo (fino a %s) — %d stake "
+                "accelerati, %d bloccati (budget residuo %.2f USDC, "
+                "pressione ricircolo %.0f%%)",
+                str(info["window"])[:16], info["raised"], info["blocked"],
+                float((rep.get("budget") or {}).get("left") or 0.0),
+                100.0 * float((rep.get("recycle") or {}).get("pressure") or 0.0))
+    return raised, info
 
 
 def chief_execution_enabled() -> bool:
@@ -4603,6 +4702,14 @@ def run_today_bets(stake_eur: float | None = None,
         # soglia di sicurezza sull'equity; un pick bloccato dal torneo viene
         # scartato. A OFF (default) la lista e' invariata.
         candidates, _tour = _apply_tournament(candidates, bankroll=_bankroll)
+
+        # --- RUSH FINALE (13/10/2026): ultimo layer di sizing prima della
+        # FASE 3, attivo SOLO nella finestra 17-20/10 (env). Accelerazione di
+        # stake + boost di ricircolo, sempre entro il recinto (il tetto e'
+        # `min(cap rush, cap torneo, budget residuo, spazio del recinto)`);
+        # fuori finestra la lista e' INVARIATA. I cap di portafoglio della
+        # FASE 2 restano l'ultima parola.
+        candidates, _rush = _apply_rush(candidates, bankroll=_bankroll)
 
     # --- FASE 3: esegui e registra (LIVE via execution_engine oppure SIM) ---
     from tracker import save_bet

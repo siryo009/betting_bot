@@ -11398,3 +11398,127 @@ il grosso vicino al kickoff), (b) la **velocità del ricircolo** (settlement
 SX-native, ogni 15', gratis), (c) un eventuale aumento del **cap per ordine**
 (`KELLY_MAX_STAKE_PCT` 12% -> oltre), che è una **decisione di rischio** e non
 è stata applicata.
+
+### Cantiere 13/10/2026 — TRACKER del CLV (`clv_tracker.py`) + RUSH FINALE del torneo (`rush_final.py`)
+
+Direttiva del proprietario: (1) misurare matematicamente se il modello batte il
+mercato con il **CLV** (quota d'acquisto effettiva vs closing line di
+Pinnacle / SX Bet), indipendentemente dalla varianza dei risultati; (2) un
+modulo di **override "rush finale"** per il 17-20/10 con accelerazione del
+volume e **ricircolo rapido del capitale**, mantenendo intatti guardrail e
+recinto. Entrambi i cantieri: **moduli nuovi + test offline**, nessuna modifica
+alle soglie di strategia congelate.
+
+**1) `clv_tracker.py` (NUOVO, 56 test verdi) — misura, non decide.**
+Connette tre pezzi che esistevano e non si parlavano: la **quota d'acquisto**
+(`bets.price` delle puntate `mode='live'`: il ledger registra i RIEMPIMENTI, non
+le intenzioni), la **closing line** (`clv_history.closing_odds` con la sua
+FONTE) e la **statistica** (`significance.py`: media, IC95, p-value, edge minimo
+distinguibile — nessuna formula ricopiata, `MIN_SAMPLES` = 30 come da progetto).
+- **Sorgenti della chiusura in PRIORITA' dichiarata** (`CLOSING_SOURCES`):
+  `closing_odds` -> `pinnacle_t0` (scritta da `closing_line.py`, lato sharp),
+  `pinnacle_quota` -> `pinnacle_cache`, `closing_quota` -> `bookmaker`. L'altro
+  lato lo scrive `capture_sx_closing` con `closing_source='sx'`. **La fonte
+  viaggia col campione** (`by_source`): due chiusure di venue diverse non si
+  confrontano, e un CLV senza fonte non e' verificabile.
+- **Due popolazioni separate, mai sommate**: `trade` (ordini eseguiti — la
+  direttiva) e `signal` (`--include-signals`: misura del MODELLO, non degli
+  ordini). Un segnale mai giocato non e' un trade.
+- **Rifiuti CONTATI, non fatti sparire**: `EXCLUDED` (`bad_price`,
+  `bad_closing`, `outcome_uncanonical`, `not_live`) contro `PENDING`
+  (`no_closing`, `echo_signal`: la chiusura arrivera' ai prossimi T-0).
+  L'eco (chiusura == quota d'acquisto) e' un ARTEfatto, non un CLV 0.
+- **Nuova colonna `clv_history.closing_source`** (ALTER idempotente in
+  `tracker._get_conn`) + `save_clv(..., closing_source=)`; `closing_line.py`
+  scrive `SOURCE_PINNACLE`. Senza la colonna, un campione Pinnacle e uno SX
+  sarebbero indistinguibili.
+- **`capture_sx_closing`** (l'unica scrittura del modulo, opt-in
+  `CLV_SX_CAPTURE`): legge l'order book PUBBLICO di SX entro la finestra di
+  chiusura (`CLV_SX_PRE_MIN`/`POST_MIN`) e passa da `tracker.save_clv` — non
+  sovrascrive una chiusura gia' catturata (lato Pinnacle piu' autorevole).
+- **Wiring**: comando admin **`/clv [giorni] [segnali]`**, job
+  `clv_tracker_job` (6h, `first=1200`) che logga SEMPRE e notifica solo con
+  campione sufficiente, cattura SX dentro `closing_line_job`, CLI
+  `venv/bin/python clv_tracker.py [--json] [--days N] [--include-signals]
+  [--capture-sx]`.
+- **STATUS machine-readable**: `beating` / `lagging` / `flat` / `insufficient` /
+  `unavailable`. Sotto 30 campioni NON conclude nulla (un CLV positivo su 8
+  righe e' rumore: e' la lezione del 22/09 e del 25/09).
+- Confini (tripwire): sola lettura in analisi (un `UPDATE` sulla connessione
+  `mode=ro` deve essere RIFIUTATO), nessun ordine, nessuna soglia di strategia,
+  `import clv_tracker` non carica `auto_bet`/`bot`.
+
+**2) `rush_final.py` (NUOVO, 81 test verdi) — override per la finestra finale.**
+Tre garanzie strutturali, tutte verificate dai test:
+- **non crea ordini**: il rush agisce SOLO su pick gia' proposti dalle corsie e
+  passati dai gate (nessuna discovery propria, nessuna soglia di strategia);
+- **non allarga il recinto**: il tetto e' `min(cap rush, cap torneo, budget
+  residuo, spazio del recinto)` — ognuno dei quattro puo' solo RESTRINGERE, e il
+  cap del torneo continua a valere anche in modalita' rush;
+- **fail-closed sull'incertezza**: equity/budget illeggibili -> il rush NON si
+  applica (lo stake resta quello dei gate) e il motivo e' dichiarato.
+
+Stake = `base x RUSH_AGGRESSION (1.25) x (1 + (boost-1) x pressione_ricircolo)`,
+poi il tetto. La **pressione di ricircolo** e' MISURATA (mai inventata):
+`max(capitale fermo da > RUSH_RECYCLE_WINDOW_MIN / totale impegnato,
+saturazione del recinto)`; il capitale fermo viene dalle righe live aperte
+(`auto_bet._open_live_rows`, nuova: stessa tabella e stessa condizione di
+`_open_live_snapshot`). Se il risultato scende sotto il minimo ordine il pick
+viene **bloccato** (`below_min_after_cap`), mai arrotondato per farlo passare.
+
+**Ricircolo (la leva vera, non il volume di tentativi)**: durante il rush il TTL
+degli ordini RESTING scende a **45'** (hook `override_resting_ttl` chiamato da
+`resting_orders.config()`) e `clear_stale_resting` **CHIEDE** la cancellazione
+degli ordini fermi da oltre `RUSH_CLEAR_RESTING_AFTER_MIN` (30') marcando
+`cancel_attempted`/`cancel_ok`/`cancel_reason='rush_recycle'`; l'esito lo decide
+comunque `reconcile` (un ordine riempito all'ultimo istante non si perde mai).
+Un ordine RESTING non e' una puntata: non tocca il ledger `bets`.
+
+**Gate a COSTO ZERO (`precheck`)**: finestra + interruttore si risolvono PRIMA
+di leggere il wallet (l'entry point e' caldo: `_apply_rush` gira ogni 60s e
+`resting_orders.config()` a ogni lettura dello stato). Fuori finestra (tutto
+l'anno tranne pochi giorni) non si paga NESSUNA lettura di rete — e `apply()`
+applica la stessa disciplina anche quando il chiamante non passa `rep`.
+
+**Interruttori e parametri** (tutti a RUNTIME, `preserve()` in
+`.railway/railway.ts`): `RUSH_FINAL` (ON di default: **inerte fuori finestra**,
+il 21/10 si spegne da solo), `RUSH_START`/`RUSH_END` (default 2026-10-17/20),
+`RUSH_BUDGET_USDC` (0 = solo il recinto), `RUSH_MAX_STAKE_USDC` (8.00),
+`RUSH_AGGRESSION` (1.25, mai < 1), `RUSH_CLASSES` (vuoto = tutte le corsie),
+`RUSH_RECYCLE_WINDOW_MIN` (180), `RUSH_RECYCLE_BOOST` (1.15),
+`RUSH_RESTING_TTL_MIN` (45), `RUSH_CLEAR_RESTING` (ON),
+`RUSH_CLEAR_RESTING_AFTER_MIN` (30).
+
+**Wiring**: `auto_bet._apply_rush` gira DOPO `_apply_tournament` e PRIMA dei cap
+di portafoglio della FASE 2 (che restano l'ultima parola: possono ridurre o
+scartare) — l'ordine non e' arbitrario, cosi' il recinto della FASE 3 vede lo
+stake definitivo; `bot.cmd_rush` (`/rush`, admin, sola lettura) e il ricircolo
+dentro `resting_orders_job`.
+
+**3) TRE DIFETTI REALI trovati dai test (tutti corretti prima del rilascio).**
+1. `stake_for` costruiva il dict di ritorno con `float(stake or 0.0)` FUORI dal
+   `try`: uno stake ostile (`"abc"`) sollevava prima della guardia, mentre la
+   docstring promette "non solleva mai". Ora la conversione e' dentro la
+   protezione e l'input illeggibile lascia lo stake a 0.0.
+2. `apply` scriveva `rush_info` SOLO sui pick accelerati: `auto_bet._apply_rush`
+   conta i bloccati da li', quindi il log del giro avrebbe detto sempre "0
+   bloccati" mentre i pick venivano fermati dal tetto. Ora il verdetto viene
+   scritto in entrambi i rami.
+3. L'interruttore non era autorevole a valle: `RUSH_FINAL=0` con un `rep`
+   iniettato applicava comunque l'accelerazione. Ora `stake_for` controlla
+   `enabled()` come prima cosa (difesa in profondita', come il gate leghe
+   riapplicato in `_today_value_picks`).
+
+**4) Isolamento nei test**: `conftest.py` spegne `RUSH_FINAL` per tutti i file
+tranne `test_rush_final` e `CLV_TRACKER_ENABLED`/`CLV_SX_CAPTURE` per tutti
+tranne `test_clv_tracker` (senza, dal 17/10 ogni test che passa da
+`run_today_bets` o da `resting_orders.config()` entrerebbe nella finestra e
+leggerebbe il wallet per davvero).
+
+**5) Verifiche**: 81 (`test_rush_final`) + 56 (`test_clv_tracker`) + 311
+(resting/capital_enclosure/exposure_gate/order_watch) + 320 (auto_bet x2, t60,
+tournament, gridiron) + 233 (bot, secret_hygiene, railway_drift,
+tennis_lane, esports_lane) + 300 (closing_line, significance, decision_pipeline,
+decision_feed, value_filter, risk_guards, liquidity_monitor) — **tutti verdi**;
+**`verify_guardrails.py`: A-H TUTTI BLOCCANO** (exit 0); `compileall` OK, 0
+marker di conflitto.
