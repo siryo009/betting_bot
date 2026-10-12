@@ -10923,5 +10923,43 @@ palinsesto si vede **tutto in anticipo**:
   contiene Pinnacle (solo betmgm/draftkings/fanduel/bovada) mentre `regions=eu`
   da' **Pinnacle 5/5 eventi NFL** e 15/59 NCAAF, a **1 credito/chiamata**.
 
-**7) STATO**: deploy automatico col push; verifica post-deploy (job che logga la
-classifica, `/torneo` che risponde, `hours_ahead 168` sul container).
+**7) DEPLOY E VERIFICA IN PRODUZIONE (12/10/2026).** Commit **`f68f93b`** (8 file,
++1309/-2) -> deploy **`c8751ba6` SUCCESS**, region ams, health **200**. Verificato
+SUL CONTAINER (non dedotto):
+- `gridiron_lane.HOURS_AHEAD` = **168.0** e **53-56 mercati** in finestra (erano
+  4-5 con le 48h);
+- il lettore gira in produzione: `snapshot(use_cache=False)` -> `ok True`,
+  `#102 / 104`, taglio **193.45**, **8.47 giorni** residui;
+- **il job ha girato e loggato da solo**: `01:46:56 - bot - INFO -
+  tournament_board_job: 🏆 CLASSIFICA — ... #102 / 104 ... Taglio top 30:
+  193.45 (#30 Amoros) ... 8.47 giorni ... Leader: thadog90 21729.13` (e la
+  notifica a admin+iscritti e' partita al primo slot).
+
+**8) IL PRIMO CANDIDATO DEL TORNEO DOPO LA FINESTRA LARGA.** Alle 01:46 la
+corsia ha prodotto il suo primo segnale +EV sul palinsesto NFL/NCAA:
+
+    gridiron_lane: Louisiana Ragin' Cajuns vs Troy Trojans -> 1 @ 1.52 EV +2.58%
+    (p_fair 0.674, quota equa 1.483)
+
+⚠️ **tre cose da sapere, tutte verificate**:
+1. **kickoff `2026-10-17T21:00Z`** -> la finestra esecutiva T-180..T-2 apre alle
+   **18:00Z del 17/10** (~5.7 giorni dopo il segnale). Fino ad allora il pick
+   resta "solo scansione" (log: `fuori finestra T-180..T-2 (before)`): il
+   segnale **non e' perso**, e' in attesa dell'apertura della finestra.
+2. **la corsia football USA NON passa dal gate leghe**: `_gridiron_picks` applica
+   il solo gate della FASCIA QUOTA (difesa in profondita', fail-closed). Il gate
+   di lega vive in `_today_value_picks` (1X2) e in `_top_down_picks` — quindi
+   un pick NCAAF **non** viene rifiutato perche' "NCAAF non e' in
+   `STRATEGY_LEAGUES`". Se un giorno servisse escluderlo, va aggiunto li'.
+3. **costo crediti INVARIATO**: il refresh dell'oracolo ha loggato
+   `leghe 2, scaricate 0, richieste oggi 0/4` (cache fresca, zero spesa) e
+   allargare la finestra non aggiunge chiamate. Crediti al controllo:
+   **211 residui**, sostenibile **11.1/giorno**, ritmo misurato **19.8/giorno**,
+   reset fra 19 giorni -> **esaurimento previsto ~22/10, prima del reset**: il
+   margine per aumentare ALTRO volume non c'e' (l'oracolo football USA ha
+   comunque un tetto proprio di 4 crediti/giorno, oggi **0 usati**).
+
+**9) NOTA DI CONFIGURAZIONE.** `GRIDIRON_HOURS_AHEAD=168` e' impostata su
+Railway **e** allineata come default di codice (zero drift: se l'env sparisse,
+resterebbe 168). Tutte le env del lettore classifica sono in `preserve()`
+(`railway config plan` = *already up to date*, **0 to destroy**).
