@@ -307,11 +307,58 @@ def league_tier(league: str = "") -> str:
     return "blocked"
 
 
+def tournament_all_leagues() -> bool:
+    """True se la CORSIA TORNEO apre anche le leghe `blocked` (12/10/2026).
+
+    PERCHE' ESISTE (sprint "Gridiron Gauntlet", direttiva del proprietario del
+    12/10): il torneo SX e' in formato **RETURN** ("wins increase your standing,
+    losses will have no impact"), quindi i punti sono i ritorni LORDI e una
+    scommessa persa NON toglie punti. Il gate di lega protegge il ROI della
+    CASSA (leghe con ROI storico negativo), non il punteggio: nel torneo quella
+    protezione non serve, mentre il numero di candidati e' esattamente cio' che
+    decide la classifica.
+
+    Doppia chiave, entrambe OBBLIGATORIE e lette a RUNTIME (nessun redeploy per
+    spegnere, nessun residuo dopo il torneo):
+      - `TOURNAMENT_MODE=1`  -> siamo nella modalita' torneo;
+      - `TOURNAMENT_OPEN_LEAGUES=1` -> l'apertura e' stata decisa esplicitamente.
+    Fail-closed: qualunque valore assente/non riconosciuto mantiene il gate di
+    lega com'e' (una lega vietata non si apre per un env sbagliato).
+
+    Cosa NON cambia quando e' attivo: la strategia applicata resta il FALLBACK
+    SEVERO (`DEFAULT_LEAGUE_STRATEGY`: edge minimo piu' alto, kelly 0.5x, cap
+    0.5%), la fascia quota 1.30-1.80 e il gate EV/oracolo. L'apertura allarga
+    l'UNIVERSO delle partite valutabili, non le soglie che proteggono la cassa.
+    """
+    def _on(name: str) -> bool:
+        try:
+            raw = os.getenv(name)
+        except Exception:                                    # pragma: no cover
+            return False
+        return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+    try:
+        return _on("TOURNAMENT_MODE") and _on("TOURNAMENT_OPEN_LEAGUES")
+    except Exception:                                        # pragma: no cover
+        return False
+
+
 def league_allowed(league: str = "") -> bool:
-    """True se la lega e' giocabile: core (ROI positivo) o probation (tier-2)."""
+    """True se la lega e' giocabile: core (ROI positivo) o probation (tier-2).
+
+    Con la CORSIA TORNEO aperta (`tournament_all_leagues()`) sono ammesse anche
+    le leghe `blocked`, che ricevono il fallback severo di strategia: nel
+    formato RETURN le perdite non tolgono punti, quindi l'universo si allarga
+    mentre il gate EV/oracolo resta il filtro sulla cassa.
+    ⚠️ La lega VUOTA resta rifiutata anche col torneo aperto: senza sapere cosa
+    si sta giocando non si ordina (fail-closed, stessa regola di `auto_bet`).
+    """
     league = canonical_league(league)
-    return bool(league and (league in STRATEGY_LEAGUES
-                            or league in PROBATION_LEAGUES))
+    if not league:
+        return False
+    if league in STRATEGY_LEAGUES or league in PROBATION_LEAGUES:
+        return True
+    return tournament_all_leagues()
 
 
 def is_core_league(league: str = "") -> bool:
@@ -400,7 +447,12 @@ def ev_min(league: str = "", market: str | None = None) -> float:
 # Default `core` (comportamento invariato): includere le probation e' una
 # decisione, non un default silenzioso.
 ORACLE_PAID_TIERS_DEFAULT = "core"
-_VALID_TIERS = ("core", "probation")
+# `blocked` (12/10/2026, sprint torneo): con la corsia torneo aperta le leghe
+# fuori whitelist sono GIOCABILI (`tournament_all_leagues`) e senza il tier
+# `blocked` resterebbero `tier_not_paid` -> `no_oracle` -> zero ordini. La
+# spesa NON cresce oltre il tetto: `ORACLE_H2H_BUDGET_DAY` e il tetto per lega
+# limitano comunque il numero di chiamate, cambia solo DOVE vengono allocate.
+_VALID_TIERS = ("core", "probation", "blocked")
 
 
 def oracle_paid_tiers() -> frozenset:
@@ -418,6 +470,12 @@ def oracle_paid_tiers() -> frozenset:
     for bit in str(raw).split(","):
         name = bit.strip().lower()
         if not name:
+            continue
+        if name == "all":
+            # Scorciatoia dichiarata: `all` = tutti i tier ammessi al progetto
+            # (core + probation + blocked). Un modo esplicito di dire "paga
+            # tutto" senza elencare i tre nomi separatamente.
+            out.update(_VALID_TIERS)
             continue
         if name in _VALID_TIERS:
             out.add(name)

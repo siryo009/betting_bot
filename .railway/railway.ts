@@ -354,6 +354,13 @@ export default defineRailway(() => {
       TOURNAMENT_MAX_STAKE_USDC: preserve(),
       TOURNAMENT_AGGRESSION: preserve(),
       TOURNAMENT_CLASSES: preserve(),
+      // Apertura delle leghe fuori whitelist alla SOLA corsia torneo
+      // (12/10/2026, `value_filter.tournament_all_leagues()`): con la doppia
+      // chiave `TOURNAMENT_MODE=1` + `TOURNAMENT_OPEN_LEAGUES=1` le leghe
+      // `blocked` tornano giocabili (fallback severo di strategia) perche' nel
+      // formato RETURN le perdite non tolgono punti. Spegnerla e' una sola
+      // variabile: senza la seconda chiave il gate di lega resta com'e'.
+      TOURNAMENT_OPEN_LEAGUES: preserve(),
       // CLASSIFICA del torneo nel bot (12/10/2026,
       // `tournament_leaderboard.py`): "tieni aggiornato l'andamento della
       // classifica". Lettura PUBBLICA e GRATUITA (zero crediti the-odds-api,

@@ -11041,3 +11041,53 @@ inviati al provider). 0 marker di conflitto.
 tutte gia' in `preserve()` di `.railway/railway.ts`, `config plan` = 0 to
 destroy): `T60_WINDOW_MIN_MIN=720`, `TOURNAMENT_MAX_STAKE_USDC=5.00`,
 `TOURNAMENT_BUDGET_USDC=20`.
+
+### Corsia torneo: apertura delle leghe `blocked` (12/10/2026)
+
+**Diagnosi che ha motivato l'intervento (misurata, non dedotta).** Con la banda
+T-720..T-2 e il cap 5.00 attivi, il collo di bottiglia residuo era il **gate di
+lega**: sulle 8 leghe con pick 1X2 aperti nelle 24h solo **3** erano pagabili
+(`ORACLE_PAID_TIERS=core,probation`): Premier League (`core`), Allsvenskan e
+Superliga Danimarca (`probation`). Le altre **5 sono `blocked`** — Serie A,
+Veikkausliiga, Chile Primera, Division Profesional, Brazil Serie B — e in un
+formato RETURN (le perdite non tolgono punti) il gate di lega protegge il ROI
+della CASSA, non il punteggio del torneo.
+
+**1) `value_filter.tournament_all_leagues()` (nuova).** Doppia chiave
+OBBLIGATORIA, letta a RUNTIME (spegnere non richiede redeploy, e dopo il torneo
+non resta alcun residuo):
+  - `TOURNAMENT_MODE=1` -> siamo nella modalita' torneo;
+  - `TOURNAMENT_OPEN_LEAGUES=1` -> l'apertura e' stata decisa esplicitamente.
+Fail-closed: qualunque valore assente/non riconosciuto (`1/true/yes/on` sono i
+soli valori veri) mantiene il gate di lega com'e'. `league_allowed()` ora
+ritorna `tournament_all_leagues()` per le leghe fuori whitelist; **la lega
+VUOTA resta comunque rifiutata** (senza sapere cosa si gioca non si ordina).
+Cosa NON cambia quando e' attiva: la strategia resta il **fallback severo**
+(`DEFAULT_LEAGUE_STRATEGY`: edge 2pp, kelly 0.5x, cap 0.5%), la fascia quota
+1.30-1.80 e il gate EV/oracolo — si allarga l'UNIVERSO delle partite
+valutabili, non le soglie che proteggono la cassa.
+
+**2) `ORACLE_PAID_TIERS` accetta `blocked` (e la scorciatoia `all`).**
+`_VALID_TIERS = ("core", "probation", "blocked")`; la parola `all` espande a
+tutti e tre. **Perche' era necessario**: con la corsia torneo aperta le leghe
+fuori whitelist sono GIOCABILI, ma senza il tier `blocked` resterebbero
+`tier_not_paid` -> `no_oracle` -> **zero ordini** (il gate pagherebbe la fetch
+solo per leghe che non ammette). Il default resta `core` (comportamento
+invariato): includere le probation e le blocked e' una decisione, non un
+default silenzioso. **La spesa NON cresce oltre il tetto**: `ORACLE_H2H_BUDGET_DAY`
+(4) e `ORACLE_H2H_MAX_CALLS_PER_LEAGUE` (1) limitano comunque le chiamate —
+cambia solo DOVE vengono allocate (4 leghe/giorno fra le 8 candidate).
+
+**3) Env (lette a RUNTIME, nessun redeploy per attivarle).**
+`TOURNAMENT_OPEN_LEAGUES=1` e `ORACLE_PAID_TIERS=core,probation,blocked`
+(o `all`). `TOURNAMENT_OPEN_LEAGUES` dichiarata `preserve()` in
+`.railway/railway.ts` accanto alle altre `TOURNAMENT_*`; `ORACLE_PAID_TIERS`
+era gia' in `preserve()`. `railway config plan` = **0 to destroy**.
+
+**4) Test.** `test_league_gate.py` +`TestCorsiaTorneoApreLeLeghe` (default
+chiuso, servono ENTRAMBE le chiavi, valori ambigui non aprono, valori veri
+aprono, lega vuota vietata, strategia = fallback severo, `is_sane` chiuso/aperto,
+end-to-end corsia ordini, fail-closed su lega assente) e +`TestTierAPagamentoBlocked`
+(`blocked` ammesso, `all` espande ai tre tier, default invariato, nomi ignoti
+scartati). Tripwire: con il torneo spento l'apertura NON deve accendere nulla
+(una lega vietata non si apre per un env sbagliato).

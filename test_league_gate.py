@@ -313,3 +313,128 @@ class TestNomiDelleLegheAmmesse:
         assert value_filter.canonical_league("Lega Fantasma") == "Lega Fantasma"
         assert value_filter.canonical_league("") == ""
         assert value_filter.league_tier("Lega Fantasma") == "blocked"
+
+
+class TestCorsiaTorneoApreLeLeghe:
+    """Sprint "Gridiron Gauntlet" (12/10/2026): il formato RETURN non toglie
+    punti alle scommesse perse, quindi il gate di lega (che protegge il ROI
+    della CASSA, non il punteggio) si apre alla corsia torneo. Doppia chiave
+    obbligatoria, letta a runtime, fail-closed su qualunque valore ambiguo."""
+
+    def test_default_chiuso(self, monkeypatch):
+        monkeypatch.delenv("TOURNAMENT_MODE", raising=False)
+        monkeypatch.delenv("TOURNAMENT_OPEN_LEAGUES", raising=False)
+        assert value_filter.tournament_all_leagues() is False
+        assert not value_filter.league_allowed(BANNED)
+
+    def test_serve_entrambe_le_chiavi(self, monkeypatch):
+        """Solo MODE o solo OPEN_LEAGUES NON aprono nulla: l'apertura e' una
+        decisione esplicita, non un effetto collaterale della modalita'."""
+        monkeypatch.setenv("TOURNAMENT_MODE", "1")
+        monkeypatch.delenv("TOURNAMENT_OPEN_LEAGUES", raising=False)
+        assert value_filter.tournament_all_leagues() is False
+        monkeypatch.delenv("TOURNAMENT_MODE", raising=False)
+        monkeypatch.setenv("TOURNAMENT_OPEN_LEAGUES", "1")
+        assert value_filter.tournament_all_leagues() is False
+        monkeypatch.setenv("TOURNAMENT_MODE", "1")
+        assert value_filter.tournament_all_leagues() is True
+        assert value_filter.league_allowed(BANNED) is True
+
+    @pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "  ", "si", "2"])
+    def test_valori_ambigui_non_aprono(self, monkeypatch, raw):
+        monkeypatch.setenv("TOURNAMENT_MODE", "1")
+        monkeypatch.setenv("TOURNAMENT_OPEN_LEAGUES", raw)
+        assert value_filter.tournament_all_leagues() is False
+        assert not value_filter.league_allowed(BANNED)
+
+    @pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", "on"])
+    def test_valori_veri_aprono(self, monkeypatch, raw):
+        monkeypatch.setenv("TOURNAMENT_MODE", "1")
+        monkeypatch.setenv("TOURNAMENT_OPEN_LEAGUES", raw)
+        assert value_filter.tournament_all_leagues() is True
+
+    def test_lega_vuota_resta_vietata(self, monkeypatch):
+        """Fail-closed anche col torneo aperto: senza sapere cosa si gioca non
+        si ordina (stessa regola di `auto_bet`)."""
+        monkeypatch.setenv("TOURNAMENT_MODE", "1")
+        monkeypatch.setenv("TOURNAMENT_OPEN_LEAGUES", "1")
+        assert value_filter.league_allowed("") is False
+
+    def test_strategia_resta_il_fallback_severo(self, monkeypatch):
+        """L'apertura allarga l'UNIVERSO, non le soglie: sulle leghe vietate
+        resta `DEFAULT_LEAGUE_STRATEGY` (edge minimo alto, kelly 0.5x, cap
+        0.5%), non i parametri generosi del core."""
+        monkeypatch.setenv("TOURNAMENT_MODE", "1")
+        monkeypatch.setenv("TOURNAMENT_OPEN_LEAGUES", "1")
+        s = value_filter.get_league_strategy(BANNED)
+        assert s == value_filter.DEFAULT_LEAGUE_STRATEGY
+        core = value_filter.get_league_strategy(ALLOWED)
+        assert s["max_stake"] <= core["max_stake"]
+        # e il tier resta dichiarato `blocked`: la telemetria non mente
+        assert value_filter.league_tier(BANNED) == "blocked"
+
+    def test_is_sane_vietata_a_torneo_chiuso(self):
+        """A torneo chiuso il rifiuto per lega resta quello di sempre."""
+        ok, why = value_filter.is_sane(0.60, 1.60, 0.05, 0.55,
+                                       league=BANNED, market="1X2")
+        assert ok is False
+        assert "esclusa" in why
+
+    def test_is_sane_vietata_a_torneo_aperto(self, monkeypatch):
+        """Col torneo aperto la stessa riga passa il gate di lega (edge +5pp,
+        EV +5%): il filtro che resta e' quello di valore, non quello di lega."""
+        monkeypatch.setenv("TOURNAMENT_MODE", "1")
+        monkeypatch.setenv("TOURNAMENT_OPEN_LEAGUES", "1")
+        ok, why = value_filter.is_sane(0.60, 1.60, 0.05, 0.55,
+                                       league=BANNED, market="1X2")
+        assert ok is True, why
+
+    def test_corsia_ordini_apre_la_lega_vietata(self, temp_db, monkeypatch):
+        """End-to-end sulla corsia che piazza: a torneo aperto il candidato di
+        una lega vietata diventa ordinabile; a torneo chiuso NO (controprova)."""
+        _seed("m-banned", BANNED)
+        assert "m-banned" not in _picks()          # default: escluso
+        monkeypatch.setenv("TOURNAMENT_MODE", "1")
+        monkeypatch.setenv("TOURNAMENT_OPEN_LEAGUES", "1")
+        assert "m-banned" in _picks()              # torneo: ammesso
+
+    def test_corsia_ordini_resta_fail_closed_sulla_lega_assente(
+            self, temp_db, monkeypatch):
+        """Il fix del 17/09 (lega assente = nessun ordine) NON viene scavalcato
+        dall'apertura del torneo."""
+        monkeypatch.setenv("TOURNAMENT_MODE", "1")
+        monkeypatch.setenv("TOURNAMENT_OPEN_LEAGUES", "1")
+        start = (datetime.now(timezone.utc) + timedelta(hours=3)) \
+            .isoformat().replace("+00:00", "Z")
+        tracker.save_match("m-noleague", "", "Osasuna", "Getafe", start)
+        tracker.save_prediction("m-noleague", "1X2", "Osasuna", 1.65, 0.52, 0.08,
+                                market_prob=0.60, market_edge=0.07,
+                                status="value")
+        assert "m-noleague" not in _picks()
+
+
+class TestTierAPagamentoBlocked:
+    """`ORACLE_PAID_TIERS` con `blocked`/`all` (12/10/2026): senza il tier
+    `blocked` le leghe aperte dal torneo resterebbero `tier_not_paid` ->
+    `no_oracle` -> zero ordini (l'apertura sarebbe inerte)."""
+
+    def test_blocked_ammesso(self, monkeypatch):
+        monkeypatch.setenv("ORACLE_PAID_TIERS", "core,probation,blocked")
+        assert "blocked" in value_filter.oracle_paid_tiers()
+        assert value_filter.is_paid_oracle_league(BANNED) is True
+
+    def test_all_espande_a_tutti_i_tier(self, monkeypatch):
+        monkeypatch.setenv("ORACLE_PAID_TIERS", "all")
+        assert value_filter.oracle_paid_tiers() == frozenset(
+            {"core", "probation", "blocked"})
+
+    def test_default_non_cambia(self, monkeypatch):
+        monkeypatch.delenv("ORACLE_PAID_TIERS", raising=False)
+        assert value_filter.oracle_paid_tiers() == frozenset({"core"})
+        assert value_filter.is_paid_oracle_league(BANNED) is False
+
+    def test_nomi_ignoti_scartati_senza_aprire(self, monkeypatch):
+        """Meta' di un valore sbagliato non deve accendere una spesa diversa
+        da quella dichiarata."""
+        monkeypatch.setenv("ORACLE_PAID_TIERS", "blocked,boh")
+        assert value_filter.oracle_paid_tiers() == frozenset({"blocked"})
