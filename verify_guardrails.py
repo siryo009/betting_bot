@@ -25,8 +25,10 @@ Scenari:
   G. Circuit breakers T-60     -> finestra esecutiva T-720..T-2 (12/10/2026),
                                   CB1 cap per ordine, CB2 kill switch
                                   patrimoniale (soglia da env)
-  H. Recinto esposizione       -> 8 ordini aperti (40% impegnato): l'Advisor
-                                  respinge i nuovi piani, il giro non ordina
+  H. Recinto esposizione       -> il recinto SATURO (percentuale da
+                                  `auto_bet.OPEN_EXPOSURE_CAP_PCT`, 50% dal
+                                  13/10/2026): l'Advisor respinge i nuovi
+                                  piani, il giro non ordina
 
 Uso: venv/bin/python verify_guardrails.py
 """
@@ -85,7 +87,7 @@ os.environ.setdefault("RESTING_STATE", "/tmp/qv_resting_orders_verify.json")
 # Registro azzerato a ogni run. E' un percorso FISSO: un file lasciato da un
 # run interrotto (o da una prova manuale) entrerebbe nel calcolo del capitale
 # immobilizzato (`_open_live_snapshot` conta anche i resting aperti) e
-# altererebbe lo scenario H, che misura il 40% sui SOLI ordini del ledger.
+# altererebbe lo scenario H, che misura il recinto sui SOLI ordini del ledger.
 try:
     _stale_resting = os.environ.get("RESTING_STATE")
     if _stale_resting and os.path.exists(_stale_resting):
@@ -626,13 +628,14 @@ def main() -> int:
     ok_g = ok_g1 and ok_g2 and ok_g3 and ok_g4 and ok_g5
 
     # ------------------------------- H. RECINTO DI ESPOSIZIONE APERTA (28/09) ---
-    _head("H. RECINTO ESPOSIZIONE 40% — l'Advisor respinge i nuovi piani")
+    _head("H. RECINTO ESPOSIZIONE %.0f%% — l'Advisor respinge i nuovi piani"
+          % (auto_bet.OPEN_EXPOSURE_CAP_PCT * 100))
     from agents.advisor_agent import AdvisorAgent   # noqa: E402
     _reset_state()
     conn = tracker._get_conn()
     # Board PULITO: gli scenari precedenti hanno lasciato righe giocabili in
     # Premier League e i cap di portafoglio (correlazione 30% / esposizione
-    # 40%) ridurrebbero gli stake, mascherando il recinto che qui si misura.
+    # 50%) ridurrebbero gli stake, mascherando il recinto che qui si misura.
     conn.execute("DELETE FROM bets")
     conn.execute("DELETE FROM predictions")
     conn.execute("DELETE FROM matches")
@@ -644,8 +647,11 @@ def main() -> int:
     # bankroll (4.03 su 33.55), non piu' l'importo fisso 1.50 del 28/09.
     per_order_h = round(auto_bet.order_ceiling(equity_h), 2)
     cap_h = round(equity_h * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2)
-    # Quanti ordini entrano PRIMA di saturare il 40% (13.42): 3 x 4.03 = 12.09,
-    # il quarto porterebbe a 16.12 > 13.42 e va respinto.
+    # Quanti ordini entrano PRIMA di saturare il recinto (50% dal 13/10:
+    # 16.78 su 33.55): 4 x 4.03 = 16.12, il quinto porterebbe a 20.15 > 16.78
+    # e va respinto. Il conteggio e' DERIVATO dal cap, non scritto a mano:
+    # cambiare la percentuale non puo' far passare lo scenario per un motivo
+    # sbagliato.
     n_pieni = int(cap_h // per_order_h)
     auto_bet._execution_mode = lambda allow_sim=True: "live"
     auto_bet._live_wallet_snapshot = lambda: {
@@ -701,7 +707,8 @@ def main() -> int:
                      ("E liquidita' SX", ok_e),
                      ("F lega strategia", ok_f),
                      ("G circuit breakers T-60", ok_g),
-                     ("H recinto esposizione 40%", ok_h)):
+                     ("H recinto esposizione %.0f%%"
+                      % (auto_bet.OPEN_EXPOSURE_CAP_PCT * 100), ok_h)):
         print(f"  {GREEN + '✅' if ok else RED + '❌'} {name}{RESET}")
     print(f"\n  {BOLD}{GREEN + 'TUTTI I GUARDRAIL BLOCCANO' if all_ok else RED + 'QUALCOSA NON BLOCCA'}{RESET}\n")
     return 0 if all_ok else 1

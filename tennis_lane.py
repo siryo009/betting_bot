@@ -30,7 +30,7 @@ Cosa fa:
 2. `discover()` — match SX tennis in finestra (lettura PUBBLICA: zero chiavi,
    zero crediti, zero ordini).
 3. `picks()` — per ogni match: oracolo a 2 esiti + gate EV + **fascia quota
-   `TENNIS_ODDS_MIN`-`TENNIS_ODDS_MAX`** (1.30-2.50 dal 02/10/2026).
+   `TENNIS_ODDS_MIN`-`TENNIS_ODDS_MAX`** (1.30-2.00 dal 13/10/2026).
 4. `scan()` — registra la telemetria nel ledger (`predictions`, mercato
    `TENNIS`) con `match_id` `sx-tennis-<hash>`: il prefisso `sx-` fa si' che il
    settlement SX-native esistente (`sx_signals._results_from_sx`) la saldi
@@ -92,7 +92,13 @@ EV_MIN = float(os.getenv("TENNIS_EV_MIN", "0.025"))
 #: con punte a 17,02. Con questa banda sarebbero passati 2 ordini su 7
 #: (+0,75 e -1,50 = -0,75 netto invece di -6,75).
 ODDS_MIN = float(os.getenv("TENNIS_ODDS_MIN", "1.30"))
-ODDS_MAX = float(os.getenv("TENNIS_ODDS_MAX", "2.50"))
+# Fascia quota del tennis. 1.30-2.50 dal 02/10/2026; **stringata a
+# 1.30-2.00 il 13/10/2026** (direttiva del proprietario). Misura sul
+# ledger live: 1.30-1.80 ROI +19.9% (n=11), 1.80-2.00 +75.1% (n=7),
+# 2.00-2.50 **-15.1% (n=15)**, >2.50 -150% (n=5, gia' fuori banda). Il
+# taglio a 2.00 elimina la fascia misurata in perdita; conferma
+# indipendente della misura del 07/10 (1.30-2.00 +6.70 vs 2.00-2.60 -4.40).
+ODDS_MAX = float(os.getenv("TENNIS_ODDS_MAX", "2.00"))
 
 
 def in_odds_band(price: Any) -> bool:

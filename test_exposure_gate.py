@@ -45,8 +45,16 @@ from decision.models import KillSwitchStatus
 NOW = datetime.now(timezone.utc)
 ALLOWED_LEAGUE = "Premier League"
 EQUITY = 33.55                 # equity reale del wallet SX
-CAP = round(EQUITY * 0.40, 2)  # tetto del 40%
+CAP = round(EQUITY * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2)   # recinto
 FIXED = 1.50                   # stake fisso per ordine reale
+# Ordini che stanno DENTRO il recinto con l'equity di prova, e quanti ne
+# servono per SATURARE quello del Capo (bankroll 100). Entrambi DERIVATI dal
+# cap: cosi' cambiare la percentuale non puo' far passare un test per il
+# motivo sbagliato (lezione del 13/09 e del 28/09).
+N_PIENO = int(CAP // FIXED)
+CHIEF_BANKROLL = 100.0
+CHIEF_CAP = round(CHIEF_BANKROLL * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2)
+CHIEF_N = int(CHIEF_CAP // FIXED) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -93,17 +101,20 @@ class TestLetturaOrdiniAperti:
         assert stato["open_stake"] == 3.00 and stato["count"] == 2
         assert stato["cap"] == CAP and stato["allowed"] is True
 
-    def test_otto_ordini_pieni_il_nono_sfora(self, temp_db):
-        """Otto ordini da 1.50 (12.00 USDC) stanno sotto il tetto: il NONO
-        ordine porterebbe a 13.50 > 13.42 e viene respinto dalla proiezione."""
-        for i in range(8):
+    def test_ordini_pieni_il_successivo_sfora(self, temp_db):
+        """`N_PIENO` ordini da 1.50 riempiono il recinto: il SUCCESSIVO viene
+        respinto dalla PROIEZIONE (il tetto misura il capitale immobilizzato
+        SIMULTANEAMENTE, non il giorno). N e' derivato dal cap."""
+        for i in range(N_PIENO):
             _open_live(f"m{i}")
         agent = ExecutionAgent()
         dentro = agent.open_exposure(EQUITY, FIXED)
-        assert dentro["open_stake"] == 12.00 and dentro["count"] == 8
-        assert dentro["projected"] == 13.50
-        assert dentro["allowed"] is False          # 13.50 > 13.42
-        assert "13.50" in dentro["reason"]
+        pieno = round(N_PIENO * FIXED, 2)
+        proiettato = round((N_PIENO + 1) * FIXED, 2)
+        assert dentro["open_stake"] == pieno and dentro["count"] == N_PIENO
+        assert dentro["projected"] == proiettato
+        assert dentro["allowed"] is False          # proiezione > tetto
+        assert f"{proiettato:.2f}" in dentro["reason"]
 
     def test_solo_gli_ordini_reali_occupano_il_recinto(self, temp_db):
         """La cassa simulata non immobilizza capitale: il recinto resta libero."""
@@ -144,40 +155,41 @@ class TestGateAdvisor:
         assert gate.exposure["open_stake"] == 4.50
         assert gate.exposure["count"] == 3
 
-    def test_otto_ordini_respingono_il_nuovo_piano(self, temp_db):
-        """Otto partite attive (12.00 USDC) = nessun nuovo piano: il tetto del
-        40% misura il capitale impegnato SIMULTANEAMENTE, non il giorno."""
-        for i in range(8):
+    def test_recinto_pieno_respinge_il_nuovo_piano(self, temp_db):
+        """Recinto saturo = nessun nuovo piano: il tetto misura il capitale
+        impegnato SIMULTANEAMENTE, non il giorno."""
+        for i in range(N_PIENO):
             _open_live(f"m{i}")
         gate = self._advisor().exposure_gate(bankroll=EQUITY, stake=FIXED)
         assert gate.resolved is False and gate.override_approved is False
         assert gate.original_reason == "exposure_cap"
-        assert gate.exposure["projected"] == 13.50
+        assert gate.exposure["projected"] == round((N_PIENO + 1) * FIXED, 2)
         assert "tetto" in gate.reason_no
 
     def test_il_tetto_segue_il_capitale_aggiornato(self, temp_db):
-        """Compounding: l'otto-ordini satura il tetto con l'equity piccola, ma
-        con il capitale raddoppiato lo stesso stato e' ampiamente sotto."""
-        for i in range(8):
+        """Compounding: `N_PIENO` ordini saturano il tetto con l'equity
+        piccola, ma con il capitale raddoppiato lo stesso stato e' sotto."""
+        for i in range(N_PIENO):
             _open_live(f"m{i}")
         advisor = self._advisor()
         assert advisor.exposure_gate(bankroll=EQUITY, stake=FIXED).resolved is False
         raddoppiato = advisor.exposure_gate(bankroll=EQUITY * 2, stake=FIXED)
         assert raddoppiato.resolved is True
-        assert raddoppiato.exposure["cap"] == round(EQUITY * 2 * 0.40, 2)
+        assert raddoppiato.exposure["cap"] == round(
+            EQUITY * 2 * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2)
 
     def test_rilascio_dinamico_dopo_un_settlement(self, temp_db):
         """Chiuso un match l'esposizione scende: il ciclo successivo riparte
         senza interventi (nessuna finestra giornaliera da riarmare)."""
-        for i in range(9):
+        for i in range(N_PIENO + 1):
             _open_live(f"m{i}")
         advisor = self._advisor()
         assert advisor.exposure_gate(bankroll=EQUITY, stake=FIXED).resolved is False
         _settle("m0", "Home0", "Away0")
         _settle("m1", "Home1", "Away1")
         dopo = advisor.exposure_gate(bankroll=EQUITY, stake=FIXED)
-        assert dopo.exposure["open_stake"] == 10.50
-        assert dopo.resolved is True               # 10.50 + 1.50 <= 13.42
+        assert dopo.exposure["open_stake"] == round((N_PIENO - 1) * FIXED, 2)
+        assert dopo.resolved is True               # + 1.50 resta entro il tetto
 
     def test_lettore_rotto_fail_closed(self):
         def _boom(bankroll, new_stake=0.0):
@@ -192,7 +204,7 @@ class TestGateAdvisor:
         """Un tetto di capitale respinto resta respinto: l'Advisor non prova
         nemmeno il micro-stake (un piano ridotto occuperebbe comunque il
         recinto) e non esiste piano sostitutivo."""
-        for i in range(9):
+        for i in range(N_PIENO + 1):
             _open_live(f"open{i}")
         data, strategy, finance, advisor = _chain(conn, bankroll=EQUITY)
         market = data.process(conn=conn, now=NOW)
@@ -210,7 +222,7 @@ class TestGateAdvisor:
     def test_kill_switch_resta_la_prima_autorita(self, conn, temp_db):
         """Con il recinto pieno il kill switch non viene mascherato: l'autorita'
         umana resta la prima risposta (l'ordine e' bloccato da entrambe)."""
-        for i in range(9):
+        for i in range(N_PIENO + 1):
             _open_live(f"open{i}")
         data, strategy, _, advisor = _chain(conn, bankroll=EQUITY)
         market = data.process(conn=conn, now=NOW)
@@ -244,7 +256,7 @@ class TestGateNelCiclo:
         assert report.advisor == []          # nessun blocco da segnalare
 
     def test_al_tetto_i_piani_sono_respinti(self, conn, tmp_path, temp_db):
-        for i in range(27):                  # 40.50 USDC >= 40% di 100
+        for i in range(CHIEF_N):             # satura il recinto del Capo
             _open_live(f"open{i}")
         report = self._chief(conn, tmp_path).run_cycle(conn=conn, now=NOW)
         assert report.exposure["blocked"] is True
@@ -257,7 +269,7 @@ class TestGateNelCiclo:
         report = self._chief(conn, tmp_path).run_cycle(conn=conn, now=NOW)
         blob = report.as_json()
         assert "exposure" in blob and "advisor" in blob
-        assert blob["exposure"]["cap"] == 40.0
+        assert blob["exposure"]["cap"] == CHIEF_CAP
 
 
 # ---------------------------------------------------------------------------
@@ -268,13 +280,16 @@ class TestTripwire:
     AGENTI = ("agents/advisor_agent.py", "agents/execution_agent.py")
 
     def test_soglie_non_duplicate(self):
-        """Il tetto del 40% e lo stake fisso vivono in `auto_bet`: gli agenti
-        delegano. Una seconda copia divergerebbe in silenzio."""
+        """Il tetto del recinto e lo stake fisso vivono in `auto_bet`: gli
+        agenti delegano. Una seconda copia divergerebbe in silenzio."""
         for path in self.AGENTI + ("chief_orchestrator.py", "agents/contracts.py"):
             src = Path(path).read_text(encoding="utf-8")
             assert "OPEN_EXPOSURE_CAP_PCT" not in src, path
-            assert "0.40" not in src, path
             assert "cap_order_stake" not in src, path
+            # Nessuna percentuale di recinto scritta a mano: ne' la vecchia
+            # (0.40), ne' quella del torneo (0.70), ne' l'attuale (0.50).
+            for pct in ("0.40", "0.50", "0.70"):
+                assert pct not in src, f"{path}: {pct} copiato a mano"
 
     def test_l_execution_agent_delega_il_tetto(self):
         src = Path("agents/execution_agent.py").read_text(encoding="utf-8")

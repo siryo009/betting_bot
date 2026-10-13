@@ -1,11 +1,14 @@
-"""Verifica degli ordini REALI: stake fisso e recinto di esposizione (28/09/2026).
+"""Verifica degli ordini REALI: stake e recinto di esposizione (28/09/2026).
 
 PERCHE' ESISTE. Dal 28/09/2026 valgono due parametri di risk management:
-**stake fisso 1.50 USDC** per ogni singolo ordine reale e **recinto del 40%**
-sull'esposizione APERTA (a equity 33.55 il tetto e' 13.42 e gli ordini da 1.50
-che ci stanno dentro sono 8). Sono due invarianti sul DENARO: verificarli a
-mano una volta non serve a niente, perche' un ordine che li viola puo' arrivare
-in qualsiasi momento e nessuno se ne accorgerebbe fino al drawdown.
+lo **stake per ordine reale** (Kelly con cap dinamico, 12% del bankroll) e il
+**recinto sull'esposizione APERTA** (`auto_bet.OPEN_EXPOSURE_CAP_PCT`, 50% dal
+13/10/2026 — a equity 33.55 il tetto e' ~16.78). Le soglie NON si copiano a
+mano: si leggono dalle costanti di produzione, cosi' un ritocco non lascia
+l'audit a misurare la regola vecchia. Sono due invarianti sul DENARO:
+verificarli a mano una volta non serve a niente, perche' un ordine che li viola
+puo' arrivare in qualsiasi momento e nessuno se ne accorgerebbe fino al
+drawdown.
 
 Questo modulo e' il controllo che si RIPETE: ricostruisce dal ledger ogni
 ordine reale e verifica gli invarianti, dichiarando sempre cosa NON ha potuto
@@ -63,7 +66,7 @@ VIOLATION_LABEL = {
     VIOL_STAKE_MISMATCH: "stake diverso dal valore fisso",
     VIOL_STAKE_OVER_MAX: "stake oltre il tetto per-ordine",
     VIOL_STAKE_UNDER_TICKET: "stake sotto il ticket minimo del motore Kelly",
-    VIOL_EXPOSURE_OVER_CAP: "esposizione aperta oltre il 40%",
+    VIOL_EXPOSURE_OVER_CAP: "esposizione aperta oltre il tetto del recinto",
     VIOL_MISSING_BET_ID: "ordine riempito senza id dell'exchange",
 }
 

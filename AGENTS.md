@@ -11550,3 +11550,74 @@ verificato nel codice e dai test).
 (`precheck` -> `before_window`), quindi il comportamento di produzione di oggi
 e' identico a ieri; le leve del rush (TTL resting 45', boost in finestra,
 ricircolo) si accendono da sole il **17/10 00:00 UTC**.
+
+### Contenimento del rischio: stop settimanale riavviato, fascia quota tennis 1.30-2.00, recinto al 50% (14/10/2026)
+
+**Il contesto misurato (sola lettura, container AMS).** Il bot era fermo da un
+**secondo** blocco, diverso dal falso stop giornaliero e **reale**: il circuit
+breaker **settimanale** (`data/execution/weekly_stop.json`, drawdown rolling
+168h **17,84%** >= soglia 12%). Verificato che NON era il bug dell'escrow del
+09/10: picco **50,3046** spiegato dalla vincita #44 (saldata 12/10 19:01),
+equity **41,331**, `reconciled_equity` `applied: false / no_growth`.
+
+**Perdite di giornata (5 chiuse: 4 perse + 1 vinta, netto -8,94 USDC)**:
+`#46` 1X2 NFL (torneo) 1.6161 -4,71 | `#47` TENNIS 2.1857 -2,39 | `#48`
+TENNIS 2.1563 -2,47 | `#49` TENNIS 2.2727 -2,47 | `#51` TENNIS 1.8348
+**+3,10**. Nessuna anomalia del modello: **CLV +5,03%** (`status: beating`,
+IC95 +3,06..+6,99, 28/31 positivi), drift ok, ledger live totale **50 chiuse,
++8,28 USDC netti**. La causa delle perdite non era l'EV ma la **fascia quota
+del tennis**, misurata due volte e in due modi indipendenti.
+
+**1) STOP SETTIMANALE RIAVVIATO dal capitale attuale (41,331)**, con backup
+del file precedente. Il picco 50,3046 e' reale e dentro la finestra 168h:
+cancellare il file senza riavviare la base lo fa **riarmare entro 60s**.
+Il breaker resta ATTIVO e si riarma a -12% dalla nuova base.
+
+**2) FASCIA QUOTA TENNIS 1.30-2.50 -> 1.30-2.00** (`tennis_lane.ODDS_MAX`,
+env `TENNIS_ODDS_MAX`). Misura sul ledger live: 1.30-1.80 **+19,9% ROI**
+(n=11), 1.80-2.00 **+75,1%** (n=7), **2.00-2.50 -15,1% (n=15)**, >2.50 -150%
+(n=5). Conferma indipendente della misura del 07/10 (1.30-2.00 +6,70 vs
+2.00-2.60 -4,40). Il taglio **elimina la fascia misurata in perdita**; il
+1X2 resta a +116,8% nella sua fascia <=1.80 (n=9).
+
+**3) RECINTO DI ESPOSIZIONE APERTA 70% -> 50%**
+(`auto_bet.OPEN_EXPOSURE_CAP_PCT`). Il 70% (alzato il 12/10 per il torneo)
+lasciato aperti fino a 35 USDC su ~50 di equity: con stake da 2,4-7,5 **una
+singola perdita faceva scattare sia lo stop giornaliero (5%) sia quello
+settimanale (12%)**. Il **cap torneo resta invariato** (8,00 USDC) — scelta
+esplicita del proprietario: si riduce la varianza simultanea, non la taglia
+del singolo ordine.
+
+**Test aggiornati DI PROPOSITO** (una soglia cambiata senza test e' un
+cambiamento silenzioso) — e ora **DERIVATI dalle costanti**, cosi' un prossimo
+ritocco non puo' far passare un test per il motivo sbagliato:
+- `test_tennis_lane.TestFasciaQuota`: banda parametrizzata sulla fascia nuova
+  (2,00 dentro, 2,01 fuori), nuovo `test_fascia_200_250_esclusa_dal_13_10`
+  (+ controprova a 1,90), default dichiarato nel sorgente `2.00`.
+- `test_exposure_gate`: `CAP`/`N_PIENO`/`CHIEF_CAP`/`CHIEF_N` derivati da
+  `auto_bet.OPEN_EXPOSURE_CAP_PCT`; il tripwire degli agenti ora rifiuta
+  **0,40 / 0,50 / 0,70** scritti a mano; `test_report_serializzabile_con_
+esposizione` usa `CHIEF_CAP`.
+- `test_order_watch.TestRecinto`: helper `_cap()`/`_n_pieno()` (stessa formula
+  E stesso arrotondamento a 4 decimali di `order_watch`).
+- `test_auto_bet_live`: lo stub del recinto usa la costante reale.
+- `verify_guardrails.py`: scenario H **interamente derivato** dal cap, dicitura
+  a `%.0f%%`, commenti e docstring aggiornati.
+- Docstring allineate in `auto_bet.exposure_allows`,
+  `open_exposure_status` e `order_watch` (l'etichetta della violazione non
+dice piu' "oltre il 40%").
+
+**Env su Railway** (entrambe gia' in `preserve()` di `.railway/railway.ts`,
+`config plan` = **0 to destroy**): `OPEN_EXPOSURE_CAP_PCT` **0.70 -> 0.50**
+(l'unica che era davvero impostata), `TENNIS_ODDS_MIN=1.30` e
+`TENNIS_ODDS_MAX=2.00` (prima ai default di codice, ora esplicite per
+rendere la banda leggibile in un posto solo). Entrambe le soglie sono lette
+**all'IMPORT**: il set dell'env da solo NON basta, serve il **redeploy**.
+
+**Verifiche**: `test_tennis_lane` (100), `test_exposure_gate`,
+`test_capital_enclosure`, `test_order_watch` (37), `test_auto_bet` + `test_auto_bet_live`
++ `test_tournament` + `test_gridiron_lane` + `test_rush_final` +
+`test_weekly_stop` (tutti verdi), `test_bot` + `test_secret_hygiene` +
+`test_advisor_agent` + `test_agent_hierarchy` + `test_chief_shadow_wiring`
+(108); **`verify_guardrails.py` A-H TUTTI BLOCCANO** (exit 0, scenario H con
+cap 16,77 e proiezione 20,15 respinta); 0 marker di conflitto, `compileall` OK.

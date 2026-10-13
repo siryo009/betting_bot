@@ -73,7 +73,8 @@ def _isolate_enclosure(monkeypatch):
                         lambda bankroll, stake=0.0: {
                             "allowed": True, "blocked": False,
                             "open_stake": 0.0, "count": 0,
-                            "cap": round(max(float(bankroll or 0.0), 0.0) * 0.40, 2),
+                            "cap": round(max(float(bankroll or 0.0), 0.0)
+                                       * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2),
                             "bankroll": round(float(bankroll or 0.0), 2),
                             "pct": 0.0, "new_stake": round(float(stake or 0.0), 2),
                             "projected": round(float(stake or 0.0), 2),

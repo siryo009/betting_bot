@@ -157,28 +157,50 @@ class TestStake:
 # ---------------------------------------------------------------------------
 
 
+# Il recinto e lo stake per ordine NON si copiano a mano: si leggono dalle
+# costanti di produzione, cosi' un ritocco della percentuale non puo' far
+# passare un test per il motivo sbagliato.
+_ORDINE = 1.50
+_EQUITY_RECINTO = 33.5535
+
+
+def _cap(equity):
+    """Tetto del recinto ALLA equity data (stessa formula e stesso
+    arrotondamento di `order_watch`)."""
+    return round(equity * auto_bet.OPEN_EXPOSURE_CAP_PCT, 4)
+
+
+def _n_pieno(equity):
+    """Ordini da `_ORDINE` che stanno DENTRO il recinto a quella equity."""
+    return int(_cap(equity) // _ORDINE)
+
+
 class TestRecinto:
-    def test_otto_ordini_da_150_entrano(self, tmp_env):
-        for i in range(8):
+    def test_ordini_entro_il_recinto(self, tmp_env):
+        n = _n_pieno(_EQUITY_RECINTO)
+        for i in range(n):
             _bet(tmp_env["db"], match=f"m{i}", created=_iso(i))
-        _hist(tmp_env["hist"], [[_iso(-5), 33.5535]])
+        _hist(tmp_env["hist"], [[_iso(-5), _EQUITY_RECINTO]])
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
         assert data["verdict"] == "ok"
-        assert data["max_open"]["stake"] == pytest.approx(12.00)
-        assert data["max_open"]["count"] == 8
-        assert data["max_open"]["cap"] == pytest.approx(13.4214)
+        assert data["max_open"]["stake"] == pytest.approx(round(n * _ORDINE, 2))
+        assert data["max_open"]["count"] == n
+        assert data["max_open"]["cap"] == pytest.approx(_cap(_EQUITY_RECINTO))
         assert data["max_open"]["source"] == "sample"
 
-    def test_il_nono_ordine_sfonda_il_recinto(self, tmp_env):
-        for i in range(9):
+    def test_ordine_oltre_il_recinto_e_violazione(self, tmp_env):
+        n = _n_pieno(_EQUITY_RECINTO)
+        for i in range(n + 1):
             _bet(tmp_env["db"], match=f"m{i}", created=_iso(i))
-        _hist(tmp_env["hist"], [[_iso(-5), 33.5535]])
+        _hist(tmp_env["hist"], [[_iso(-5), _EQUITY_RECINTO]])
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
         assert data["verdict"] == "violazioni"
         over = [v for v in data["violations"]
                 if v["kind"] == order_watch.VIOL_EXPOSURE_OVER_CAP]
-        assert len(over) == 1 and over[0]["id"] == 9
-        assert "13.50" in over[0]["detail"] and "13.42" in over[0]["detail"]
+        assert len(over) == 1 and over[0]["id"] == n + 1
+        proiettato = f"{(n + 1) * _ORDINE:.2f}"
+        assert proiettato in over[0]["detail"]
+        assert f"{_cap(_EQUITY_RECINTO):.4f}" in over[0]["detail"]
 
     def test_il_settlement_libera_il_posto(self, tmp_env):
         # 8 ordini aperti, il primo si chiude, poi entra il nono: conforme.
@@ -193,13 +215,14 @@ class TestRecinto:
         assert data["max_open"]["stake"] == pytest.approx(12.00)
 
     def test_compounding_col_capitale_aggiornato(self, tmp_env):
-        # Equity 100 -> tetto 40: entrano 26 ordini da 1.50 senza violazioni.
+        # Equity 100 -> tetto = 100 x cap: il numero di ordini da 1.50 che
+        # entrano e' DERIVATO dal cap, non scritto a mano.
         _hist(tmp_env["hist"], [[_iso(-5), 100.0]])
-        for i in range(26):
+        for i in range(_n_pieno(100.0)):
             _bet(tmp_env["db"], match=f"m{i}", created=_iso(i))
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
         assert data["verdict"] == "ok"
-        assert data["max_open"]["cap"] == pytest.approx(40.0)
+        assert data["max_open"]["cap"] == pytest.approx(_cap(100.0))
 
     def test_tetto_non_verificabile_e_dichiarato(self, tmp_env, monkeypatch):
         monkeypatch.setattr(order_watch, "current_equity", lambda: None)
@@ -218,14 +241,15 @@ class TestRecinto:
         _hist(tmp_env["hist"], [[_iso(-120), 50.0], [_iso(-60), 60.0]])
         _bet(tmp_env["db"], match="m0", created=_iso(0))
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
-        assert data["max_open"]["cap"] == pytest.approx(60.0 * 0.40)
+        assert data["max_open"]["cap"] == pytest.approx(
+            60.0 * auto_bet.OPEN_EXPOSURE_CAP_PCT)
         assert data["max_open"]["source"] == "sample"
 
     def test_equity_iniettabile(self, tmp_env):
         _bet(tmp_env["db"], match="m0")
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"],
                                  equity=250.0)
-        assert data["max_open"]["cap"] == pytest.approx(100.0)
+        assert data["max_open"]["cap"] == pytest.approx(_cap(250.0))
 
 
 # ---------------------------------------------------------------------------

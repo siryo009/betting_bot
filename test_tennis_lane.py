@@ -347,8 +347,9 @@ class TestFasciaQuota:
     """
 
     @pytest.mark.parametrize("price,expected", [
-        (1.30, True), (1.85, True), (2.42, True), (2.50, True),
-        (1.29, False), (2.51, False), (4.28, False), (17.02, False),
+        (1.30, True), (1.85, True), (1.99, True), (2.00, True),
+        (1.29, False), (2.01, False), (2.42, False), (2.50, False),
+        (4.28, False), (17.02, False),
         (1.0, False), (0.0, False), (-1.0, False),
         ("1.85", True), ("17.02", False),
         (None, False), ("", False), ("abc", False),
@@ -369,13 +370,24 @@ class TestFasciaQuota:
         assert tl.picks(provider=_event_provider(2.60, 1.60)) == []
 
     def test_controllo_dentro_banda_stesso_gruppo(self, monkeypatch):
-        # Controprova: la STESSA struttura a 2.40 (inv_sum 1.0417) produce il
-        # candidato. Prova che e' la FASCIA a scartare, non l'EV o il book.
+        # Controprova: la STESSA struttura dentro banda produce il candidato.
+        # Prova che e' la FASCIA a scartare, non l'EV o il book.
+        # (1.95 sul lato con oracolo ~1.66 -> EV ~ +14%; 1.90 sull'altro lato
+        #  resta negativo, quindi il pick e' UNO solo: inv_sum 1.0391.)
         _write_cache(monkeypatch, _oracle_payload())
-        out = tl.picks(provider=_event_provider(2.40, 1.60))
-        # Tolleranza = granularita' della ladder SX: 2.40 non e' un gradino
-        # esatto (decodifica troncata), il prezzo riportato e' 2.4024.
-        assert len(out) == 1 and out[0]["quota"] == pytest.approx(2.40, abs=0.01)
+        out = tl.picks(provider=_event_provider(1.95, 1.90))
+        # Tolleranza = granularita' della ladder SX (decodifica troncata).
+        assert len(out) == 1 and out[0]["quota"] == pytest.approx(1.95, abs=0.01)
+
+    def test_fascia_200_250_esclusa_dal_13_10(self, monkeypatch):
+        """La fascia misurata in PERDITA (2.00-2.50, ROI -15.1%, n=15) non
+        produce piu' candidati: e' la motivazione del taglio del 13/10."""
+        _write_cache(monkeypatch, _oracle_payload())
+        # 2.10 sul lato con oracolo ~1.66 e' +EV forte ma fuori banda.
+        assert tl.picks(provider=_event_provider(2.10, 1.70)) == []
+        # Controprova: 1.90 appena sotto il bordo produce il pick.
+        out = tl.picks(provider=_event_provider(1.90, 1.95))
+        assert len(out) == 1 and out[0]["quota"] == pytest.approx(1.90, abs=0.01)
 
     @pytest.mark.parametrize("longshot,counterpart", [
         (2.60, 1.60), (4.28, 1.31), (17.02, 1.07),
@@ -399,7 +411,7 @@ class TestFasciaQuota:
         assert tl.picks(provider=_event_provider(1.85, 2.20)) == []
 
     def test_fascia_da_env(self):
-        # La banda si legge dall'env (default 1.30 / 2.50).
+        # La banda si legge dall'env (default 1.30 / 2.00).
         code = ("import os; os.environ['TENNIS_ODDS_MIN']='1.50'; "
                 "os.environ['TENNIS_ODDS_MAX']='3.10'; "
                 "import tennis_lane as t; print(t.ODDS_MIN, t.ODDS_MAX)")
@@ -412,7 +424,7 @@ class TestFasciaQuota:
         from pathlib import Path
         src = Path("tennis_lane.py").read_text(encoding="utf-8")
         assert 'os.getenv("TENNIS_ODDS_MIN", "1.30")' in src
-        assert 'os.getenv("TENNIS_ODDS_MAX", "2.50")' in src
+        assert 'os.getenv("TENNIS_ODDS_MAX", "2.00")' in src
 
     def test_summary_espone_la_banda(self, monkeypatch):
         _write_cache(monkeypatch, _oracle_payload())

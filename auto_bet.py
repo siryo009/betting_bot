@@ -149,7 +149,12 @@ TOTAL_EXPOSURE_CAP_PCT = 0.40  # max 40% di bankroll per il portafoglio del gior
 # DEGRADA a shadow: nessun nuovo ordine REALE, telemetria e valutazione
 # (corsia + catena) continuano a girare. Si sblocca da sola quando i
 # settlement chiudono le righe e l'esposizione torna sotto soglia.
-OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.40"))
+# 40% -> **50% dal 13/10/2026** (direttiva del proprietario: il 70% del
+# 12/10, alzato per il torneo, lasciava aperti fino a 35 USDC su ~50 di
+# equity — con stake da 2.4-7.5 una singola perdita faceva scattare sia lo
+# stop giornaliero (5%) sia quello settimanale (12%)). Il 50% dimezza la
+# varianza simultanea senza spegnere la corsia del torneo.
+OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.50"))
 # Tetto per SINGOLO ordine. **DINAMICO dal 04/10/2026** (direttiva del
 # proprietario: "sostituisci qualsiasi hard cap fisso precedente con una
 # percentuale dinamica sul bankroll"): il tetto e' `bankroll x
@@ -1924,8 +1929,9 @@ def open_exposure_status(bankroll: float) -> dict:
     Ritorna {open_stake, count, cap, blocked, pct, reason}: `blocked=True`
     quando l'esposizione aperta raggiunge la soglia — da quel momento il giro
     non piazza ordini reali ma continua a valutare e telemetrizzare (shadow).
-    `cap` e' SEMPRE `bankroll x 40%` letto fresco: con il capitale aggiornato
-    il tetto segue (compounding automatico, nessun valore congelato).
+    `cap` e' SEMPRE `bankroll x OPEN_EXPOSURE_CAP_PCT` letto fresco: con il
+    capitale aggiornato il tetto segue (compounding automatico, nessun valore
+    congelato).
     """
     bankroll = float(bankroll or 0.0)
     cap = max(bankroll, 0.0) * OPEN_EXPOSURE_CAP_PCT
@@ -1949,11 +1955,12 @@ def open_exposure_status(bankroll: float) -> dict:
 def exposure_allows(bankroll: float, new_stake: float) -> dict:
     """Il recinto accetta un NUOVO ordine di `new_stake` USDC?
 
-    Direttiva 28/09/2026: il 40% e' un tetto sul capitale immobilizzato
-    SIMULTANEO, non solo una soglia di blocco: un nuovo ordine e' ammesso solo
-    se l'esposizione PROIETTATA (aperta + nuovo stake) resta entro il cap.
-    Con equity 33.55 USDC (cap 13.42) e stake fisso 1.50 entrano 8 ordini
-    (12.00 USDC); il nono porterebbe a 13.50 > 13.42 e viene respinto.
+    Direttiva 28/09/2026: il tetto e' sul capitale immobilizzato SIMULTANEO,
+    non solo una soglia di blocco: un nuovo ordine e' ammesso solo se
+    l'esposizione PROIETTATA (aperta + nuovo stake) resta entro il cap.
+    Esempio con le soglie attuali (cap 50% dal 13/10/2026): con equity
+    33.55 USDC il tetto e' 16.77 e con stake da 1.50 entrano 11 ordini
+    (16.50 USDC); il dodicesimo porterebbe a 18.00 > 16.77 e viene respinto.
 
     E' la lettura che l'Advisor interroga a OGNI ciclo (via Execution Agent):
     un solo punto di verita' per il tetto, cosi' la corsia di denaro e il
