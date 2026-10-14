@@ -11746,3 +11746,44 @@ e `AGENTS.md` toccati dal cleanup sono coperti dai lotti già verdi.
 passato restano `past_kickoff_open`/`unplanned` (ATP Shanghai, NFL, WTA Beijing,
 WTA Wuhan: leghe non mappate → costo 0, telemetria). Non sono soldi: nessuna bet
 su quelle partite.
+
+#### Deploy del fix escrow + tetto unico per-ordine (14/10/2026, 00:41 UTC)
+
+Committati e pushati: **`434d1f5`** (fix escrow `max(ledger, escrow SX)` +
+`enforce_order_ceiling` + default cap Kelly al 5%) e **`7e57451`** (pulizia delle
+bozze + questa memoria). Deploy automatico, container ripartito **00:41 UTC**,
+`/api/health` **200**, crediti the-odds-api **444**.
+
+**Sblocco eseguito (item 1)**: rimosso dal volume il `daily_stop.json` che era un
+**falso positivo** (`{"day": "2026-10-13", "start_bankroll": 41.331, "value"
+35.54, "equity wallet -14.0%", stopped_until 2026-10-14T12:23:03Z}`). Il primo
+ciclo lo ha **ricreato come semplice riferimento di giornata**
+(`{"day": "2026-10-14", "start_bankroll": 46.7282, "stopped_until": null}`) →
+`daily_stop_status() = {stopped: False, stopped_at: None}`. `weekly_stop.json` e
+`t60_kill.json` **assenti**; `auto_bet_mode.json` assente (kill switch `live`).
+
+**Prova dal log (stream live, 00:42)**: **0 righe `STOP-LOSS`**, 0 ERROR/Traceback,
+e il motore dimensiona di nuovo — `auto_bet: Kelly aggressivo … (2): k=0.22
+p=0.637 -> stake 4.39 USDC (raw 4.39, cap 5.61 = 12.0% di 46.73, bankroll)`;
+gli altri pick sono correttamente `fuori finestra T-720..T-2 (before)`. Wallet
+`46.7282` (0 in gioco), recinto cap **23.36** (50%), 0 bet aperte,
+`resting_orders.summary()` 0, backup integrity ok, ensemble riaddestrato
+(n=1251, brier 0.1051), TLS library caricata (fix 08/10 attivo).
+
+**⚠️ `KELLY_MAX_STAKE_PCT=0.12` E' GIA' impostata** (verificato con
+`decision.stake_engine.aggressive_config()` sul container, non solo con la CLI):
+il default di **5%** introdotto in `434d1f5` **NON ha effetto in produzione**.
+Tetto per-ordine effettivo = `order_ceiling(46.73)` = **5.61 USDC**.
+Conseguenza sul torneo: `enforce_order_ceiling` (ora live) **limita a 5.61 anche
+gli ordini del torneo**, il cui cap dichiarato e' 8.00 e prima era raggiungibile.
+Per far passare 8.00 serve `KELLY_MAX_STAKE_PCT >= 0.171` (8/46.73); per
+applicare invece il contenimento al 5% serve `railway variables --service
+betting_bot --set KELLY_MAX_STAKE_PCT=0.05` (tetto 2.34). **Entrambe lette a
+RUNTIME** (`_num_env` a ogni chiamata), quindi bastano un `--set` e un redeploy.
+
+⚠️ **Strumenti**: in questa sessione l'agente dei log
+(`ssh -T get-logs@railway.new …`) risponde *"You don't have the required role
+(viewer) on this resource"* — non e' utilizzabile; `railway logs --lines N`
+restituisce solo una finestra minima (per una prova live serve catturare lo
+STREAM con `timeout Ns railway logs --service betting_bot > file`). Il container
+**non ha `ps`** (usare `/proc/1/environ` e `/proc/1/cmdline`).
