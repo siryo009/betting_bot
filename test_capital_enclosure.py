@@ -170,8 +170,8 @@ class TestFixedStake:
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
         monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.0)
         assert auto_bet.fixed_stake_active() is False
-        # Percorso Kelly: cap dinamico 12% del bankroll (qui 100 -> 12).
-        assert auto_bet.order_stake(50.0, bankroll=100.0) == 12.0
+        # Percorso Kelly: cap dinamico 5% del bankroll (qui 100 -> 5.0).
+        assert auto_bet.order_stake(50.0, bankroll=100.0) == 5.0
         assert auto_bet.order_stake(5.0, bankroll=100.0) == 5.0  # riduce, non alza
 
     def test_valore_non_numerico_non_crea_stake_casuali(self, monkeypatch):
@@ -229,13 +229,14 @@ class TestMicroStake:
         assert auto_bet.cap_order_stake(0.80) == 0.80    # non alza
 
     def test_tetto_dinamico_scala_col_bankroll(self, monkeypatch):
-        """Cap dinamico (12%): 12 USDC su bankroll 100, 3.60 su 30."""
+        """Cap dinamico (5% dal 13/10/2026, era 12%): 5.0 su bankroll 100,
+        1.50 su 30 — cioe' la fascia 2-5% chiesta dal proprietario."""
         monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.0)
         monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 0.0)
-        assert auto_bet.cap_order_stake(1000.0, bankroll=100.0) == 12.0
-        assert auto_bet.cap_order_stake(1000.0, bankroll=30.0) == 3.6
+        assert auto_bet.cap_order_stake(1000.0, bankroll=100.0) == 5.0
+        assert auto_bet.cap_order_stake(1000.0, bankroll=30.0) == 1.5
         # Vale anche per uno stake piccolo: il cap riduce, non alza.
-        assert auto_bet.cap_order_stake(2.0, bankroll=30.0) == 2.0
+        assert auto_bet.cap_order_stake(1.0, bankroll=30.0) == 1.0
 
     def test_tetto_fail_closed_su_capitale_ignoto(self, monkeypatch):
         """Senza bankroll (ne' passato ne' registrato) il tetto non e'
@@ -404,13 +405,13 @@ class TestChiefExecution:
         assert out, "il piano approvato deve produrre un candidato"
         # Dentro la corsia lo stake della Finanza NON viene toccato...
         assert out[0]["stake"] == 99.0
-        # ...e' il cap dinamico (12% di 100 = 12.00) a limitarlo prima
-        # dell'ordine, non il vecchio tetto assoluto da 1.50.
+        # ...e' il cap dinamico (5% di 100 = 5.00 dal 13/10/2026) a limitarlo
+        # prima dell'ordine, non il vecchio tetto assoluto da 1.50.
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: {
             "available": 100.0, "exposure": 0.0, "equity": 100.0})
         kept, _ = auto_bet.refresh_live_stakes(list(out))
         assert len(kept) == 1
-        assert kept[0]["stake"] == 12.00
+        assert kept[0]["stake"] == 5.00
 
     def test_candidati_chief_portano_il_flag_di_corsia(self, monkeypatch):
         """TRIPWIRE 08/10/2026: ogni pick chief DEVE dichiarare la propria

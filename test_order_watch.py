@@ -127,10 +127,11 @@ class TestStake:
         """Dal 04/10/2026 il default e' il Kelly **dinamico** (k 0.15-0.25):
         con lo stake fisso spento un importo diverso da 1.50 NON e' una
         violazione, ma il controllo NON e' sospeso — valgono il cap dinamico
-        (12%) e il ticket minimo del motore (**1.00**). Un ordine sotto il
-        ticket e' un percorso che ha aggirato il motore."""
+        (**5% dal 13/10/2026**: su equity 33.5535 sono 1.68) e il ticket minimo
+        del motore (**1.00**). Un ordine sotto il ticket e' un percorso che ha
+        aggirato il motore."""
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
-        _bet(tmp_env["db"], stake=3.00)          # entro il cap, sopra il ticket
+        _bet(tmp_env["db"], stake=1.50)          # entro il cap 1.68, sopra il ticket
         data = order_watch.audit(tmp_env["db"], history_path=tmp_env["hist"])
         assert data["fixed_active"] is False
         assert data["verdict"] == "ok"

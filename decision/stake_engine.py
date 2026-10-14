@@ -59,7 +59,13 @@ KELLY_MIN_TICKET_ENV = "KELLY_MIN_TICKET_USDC"
 #: dentro la banda da edge e confidenza della lega (`dynamic_kelly_fraction`).
 DEFAULT_KELLY_AGGRESSIVE_FRACTION = 0.25
 DEFAULT_KELLY_AGGRESSIVE_MIN_FRACTION = 0.15
-DEFAULT_KELLY_MAX_STAKE_PCT = 0.12
+#: TETTO PER ORDINE (direttiva 13/10/2026): **5% del bankroll**, era 12%.
+#: Il proprietario ha chiesto di contenere la varianza per singola scommessa
+#: (2-5%): col 12% e i layer sopra (torneo x1.5) un ordine arrivava al 17-18%
+#: dell'equity (misurato: 7,46 USDC su ~43). E' anche il tetto che
+#: `auto_bet.order_ceiling` espone e che `enforce_order_ceiling` riapplica a
+#: TUTTI i layer di sizing (torneo, rush): il Kelly non puo' essere scavalcato.
+DEFAULT_KELLY_MAX_STAKE_PCT = 0.05
 #: Ticket minimo per il MOTORE Kelly: **1.00 USDC** (direttiva 04/10/2026,
 #: punto 2). Coincide col floor operativo dell'exchange SX Bet: sotto questa
 #: soglia l'operazione viene scartata (stake 0.0). Era 2.00 nella direttiva
@@ -225,7 +231,8 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
        l'EV si normalizza sulla soglia REALE di lega+mercato, direttiva
        08/10/2026); passare `kelly_fraction` esplicito la vince (test e
        override);
-    2. cap dinamico: `bankroll x max_stake_pct` (12%) — TRONCA, mai alza;
+    2. cap dinamico: `bankroll x max_stake_pct` (5% dal 13/10/2026) — TRONCA,
+       mai alza;
     3. ticket minimo (1.00 USDC): sotto soglia lo stake e' **0.0**
        (operazione scartata) — mai un ordine piu' piccolo del ticket.
 
@@ -283,7 +290,7 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
 
     stake = out["raw_stake"]
     if stake > out["cap_usdc"]:
-        stake = out["cap_usdc"]       # TRONCA al cap: mai sopra il 12%
+        stake = out["cap_usdc"]       # TRONCA al cap: mai sopra il tetto
         out["capped"] = True
     stake = round(stake, 2)
     if stake < ticket:
@@ -377,7 +384,8 @@ def size(signal: Signal, risk: RiskDecision, *, bankroll: float,
     # carica auto_bet (tripwire); senza auto_bet la protezione resta al
     # default di env.
     if mode == "live":
-        # Dal 04/10/2026 il CB1 e' DINAMICO (12% del bankroll): il tetto
+        # Dal 04/10/2026 il CB1 e' DINAMICO (5% del bankroll dal 13/10): il
+        # tetto
         # efficace lo calcola `auto_bet.order_ceiling` (UNICO punto di
         # verita'), che legge la costante assoluta quando e' impostata e il
         # cap percentuale altrimenti. Un tetto <= 0 (bankroll ignoto) NON
@@ -396,7 +404,7 @@ def size(signal: Signal, risk: RiskDecision, *, bankroll: float,
             base.executable = False
             return base
         if stake_value > _t60_hard_cap + 1e-9:
-            base.detail = (f"CB1 hard cap {_t60_hard_cap:.2f} USDC (12% del "
+            base.detail = (f"CB1 hard cap {_t60_hard_cap:.2f} USDC (5% del "
                            f"bankroll {bankroll:.2f}): stake Kelly "
                            f"{stake_value:.2f} sovrascritto")
             stake_value = float(_t60_hard_cap)

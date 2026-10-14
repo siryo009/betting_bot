@@ -89,7 +89,7 @@ class TestCB1HardCap:
     """CB1: NESSUNO stake sopra il cap — Kelly sovrascritto, mai negoziato."""
 
     def test_t60_stake_mai_sopra_il_cap(self):
-        """CB1 dal 04/10/2026 e' DINAMICO: nessuno stake sopra il 12%.
+        """CB1 e' DINAMICO: nessuno stake sopra il cap per-ordine.
 
         Il tetto si legge dal cap reale (`order_ceiling`), mai da una
         costante scritta qui.
@@ -100,10 +100,14 @@ class TestCB1HardCap:
             assert auto_bet.t60_stake(bankroll, mode="live") <= cap + 1e-9
 
     def test_t60_stake_scala_col_bankroll(self):
-        # Cap dinamico 12%: 4.08 su 34 USDC (e' il tetto che morde: il 30%
-        # di correlazione sarebbe 10.20, il 40% di esposizione 13.60).
-        assert auto_bet.t60_stake(34.0, mode="live") == 4.08
-        assert auto_bet.t60_stake(100.0, mode="live") == 12.0
+        # Tetto per-ordine DINAMICO (5% del bankroll dal 13/10/2026): su 34
+        # USDC il cap e' 1.70, su 100 e' 5.00 — ed e' lui che morde (il 30%
+        # di correlazione e il 40% di esposizione valgono molto di piu').
+        # Il valore atteso e' DERIVATO dal cap reale, non scritto a mano:
+        # cambiare la percentuale non puo' far passare il test per caso.
+        for bankroll in (34.0, 100.0):
+            atteso = round(auto_bet.order_ceiling(bankroll), 2)
+            assert auto_bet.t60_stake(bankroll, mode="live") == atteso
 
     def test_tetto_assoluto_esplicito_vince(self, monkeypatch):
         """Un `T60_MAX_STAKE_USDC` > 0 resta un tetto assoluto (legacy)."""
@@ -131,7 +135,7 @@ class TestCB1HardCap:
         risk = risk_approve(checked=["test"])
         limits = RiskLimits.from_env()
         rec_stake = auto_bet.order_ceiling(1000.0)
-        # Kelly su bankroll 1000 con edge 15pp produrrebbe molto piu' del 12%.
+        # Kelly su bankroll 1000 con edge 15pp produrrebbe molto piu' del cap.
         from decision.stake_engine import size
         sd = size(signal, risk, bankroll=1000.0, limits=limits, mode="live")
         assert sd.stake <= rec_stake + 1e-9
@@ -218,8 +222,8 @@ class TestCB3ValidazionePydantic:
         return base
 
     def test_payload_valido_passa(self):
-        # CB1 dal 04/10 e' dinamico: il tetto efficace va passato col bankroll
-        # (con 34 USDC = 4.08; uno stake di 1.0 sta sotto).
+        # CB1 e' dinamico: il tetto efficace va passato col bankroll
+        # (con 34 USDC = 1.70; uno stake di 1.0 sta sotto).
         ok, contract, errors = auto_bet.validate_order_payload(
             self._payload(), bankroll=34.0)
         assert ok and errors == []
@@ -227,7 +231,7 @@ class TestCB3ValidazionePydantic:
 
     def test_stake_sopra_cap_scartato_non_cappato(self):
         ok, contract, errors = auto_bet.validate_order_payload(
-            self._payload(stake=5.0), bankroll=34.0)   # cap 4.08
+            self._payload(stake=5.0), bankroll=34.0)   # cap 1.70
         assert not ok and contract is None
         assert any("circuit breaker" in e for e in errors)
 
@@ -434,15 +438,17 @@ class TestFinestraT60:
                                 "price": floor, "stake": stake})
         placed = auto_bet.t60_dispatch_pending(bankroll=34.0)
         assert len(placed) == 1
-        # CB1 dinamico (12%): su bankroll 34 lo stake T-60 e' 4.08.
-        assert placed[0]["stake"] == 4.08
+        # CB1 dinamico: su bankroll 34 lo stake T-60 e' il cap per-ordine
+        # (5% = 1.70), derivato dalla fonte unica.
+        atteso = round(auto_bet.order_ceiling(34.0), 2)
+        assert placed[0]["stake"] == atteso
         assert placed[0]["mode"] == "t60-live"
         # La puntata e' sul ledger con i dati reali dell'ordine.
         conn = tracker._get_conn()
         row = conn.execute("SELECT mode, stake, bet_id FROM bets "
                            "WHERE match_id='ok'").fetchone()
         conn.close()
-        assert row == ("live", 4.08, "b1")
+        assert row == ("live", atteso, "b1")
 
     def test_senza_bet_id_non_scrive_la_riga(self, temp_db, monkeypatch):
         """Secondo punto di scrittura: senza bet_id NESSUNA riga live.

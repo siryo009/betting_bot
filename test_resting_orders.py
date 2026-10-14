@@ -765,8 +765,8 @@ class TestCapitaleImmobilizzato:
         assert stake == 2.0 and count == 1
 
     def test_recinto_vede_il_capitale_parcheggiato(self, temp_db):
-        """Con 5 resting da 2.0 (10.0 USDC) su un bankroll 20.0 il tetto del
-        40% (8.0) e' gia' sfondato: nessun ordine nuovo."""
+        """Con 5 resting da 2.0 (10.0 USDC) su un bankroll 20.0 il tetto
+        (50% dal 13/10/2026: 10.0) e' raggiunto: nessun ordine nuovo."""
         for i in range(5):
             _seed_open(order_id=f"0x{i}", stake=2.0, match_id=f"sx-L{i}")
         status = auto_bet.open_exposure_status(20.0)
@@ -777,9 +777,10 @@ class TestCapitaleImmobilizzato:
     def test_proiezione_respinge_oltre_il_tetto(self, temp_db):
         for i in range(3):
             _seed_open(order_id=f"0x{i}", stake=2.0, match_id=f"sx-L{i}")
-        # cap = 20.0 x 40% = 8.0; 6.0 aperti + 2.5 nuovo = 8.5 -> respinto
-        assert auto_bet.exposure_allows(20.0, 2.5)["allowed"] is False
-        assert auto_bet.exposure_allows(20.0, 1.5)["allowed"] is True
+        # cap = 20.0 x 50% = 10.0 (dal 13/10/2026); 6.0 aperti + 4.5 nuovo =
+        # 10.5 -> respinto; 3.0 -> 9.0 entro il tetto.
+        assert auto_bet.exposure_allows(20.0, 4.5)["allowed"] is False
+        assert auto_bet.exposure_allows(20.0, 3.0)["allowed"] is True
 
     def test_registro_illeggibile_non_apre_il_recinto(self, monkeypatch,
                                                       temp_db):

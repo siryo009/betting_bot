@@ -127,7 +127,8 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # (il floor operativo dell'exchange).
     monkeypatch.setenv("KELLY_AGGRESSIVE_FRACTION", "0.25")
     monkeypatch.setenv("KELLY_AGGRESSIVE_MIN_FRACTION", "0.15")
-    monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.12")
+    # Tetto per ordine: 5% dal 13/10/2026 (era 12%).
+    monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.05")
     monkeypatch.setenv("KELLY_MIN_TICKET_USDC", "1.00")
     # Stato del juice (Agente Analisi): sul volume in produzione, nella tmp qui.
     monkeypatch.setenv("ANALYSIS_JUICE_STATE", str(tmp_path / "juice_state.json"))
@@ -337,15 +338,19 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     _tbl.reset_cache()
 
 
-def _free_enclosure(bankroll: float, new_stake: float = 0.0) -> dict:
+def _free_enclosure(bankroll: float, new_stake: float = 0.0, **kw) -> dict:
     """Recinto LIBERO per i test: nessun ordine aperto, nessun blocco.
 
     Riproduce la forma di `auto_bet.exposure_allows` (stesse chiavi) senza
     toccare il DB: chi verifica il recinto vero usa `test_exposure_gate`.
+
+    `**kw` assorbe `open_stake=` (13/10/2026): il giro puntate passa l'escrow
+    reale letto dal wallet, ma qui il recinto e' libero per costruzione — la
+    firma deve solo accettare il parametro, senza cambiarne il verdetto.
     """
     bankroll = float(bankroll or 0.0)
     stake = max(float(new_stake or 0.0), 0.0)
-    cap = round(max(bankroll, 0.0) * 0.40, 2)
+    cap = round(max(bankroll, 0.0) * 0.50, 2)
     return {
         "allowed": True, "blocked": False, "open_stake": 0.0, "count": 0,
         "cap": cap, "bankroll": round(bankroll, 2), "pct": 0.0,

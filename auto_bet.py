@@ -158,7 +158,8 @@ OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.50"))
 # Tetto per SINGOLO ordine. **DINAMICO dal 04/10/2026** (direttiva del
 # proprietario: "sostituisci qualsiasi hard cap fisso precedente con una
 # percentuale dinamica sul bankroll"): il tetto e' `bankroll x
-# KELLY_MAX_STAKE_PCT` (12%), ricalcolato a ogni ordine — cosi' il capitale
+# KELLY_MAX_STAKE_PCT` (**5% dal 13/10/2026**, era 12%), ricalcolato a ogni
+# ordine — cosi' il capitale
 # scala col bankroll invece di essere soffocato da un importo costante.
 # La formula vive UNA volta in `decision.stake_engine.aggressive_cap_usdc`
 # (qui non si ricopia). Uno `ORDER_MAX_STAKE_USDC` esplicito > 0 RESTA un
@@ -166,8 +167,8 @@ OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.50"))
 ORDER_MAX_STAKE_USDC = float(os.getenv("ORDER_MAX_STAKE_USDC", "0.0"))
 # --- STAKE FISSO (direttiva 28/09/2026, SUPERATA il 04/10/2026) -----------
 # L'importo fisso per ordine e' DISATTIVATO di default (`0.0`): la size degli
-# ordini reali e' il Kelly aggressivo (k=0.65, cap dinamico 12%) con ticket
-# minimo 2.00 USDC. Impostando `ORDER_FIXED_STAKE_USDC` a un valore > 0 si
+# ordini reali e' il Kelly frazionario (k 0.15-0.25) col cap dinamico 5% e
+# ticket minimo 1.00 USDC. Impostando `ORDER_FIXED_STAKE_USDC` a un valore > 0 si
 # ripristina l'importo fisso (percorso legacy, con il suo tetto esplicito).
 FIXED_STAKE_USDC = float(os.getenv("ORDER_FIXED_STAKE_USDC", "0.0"))
 #: Bankroll dell'ultimo giro di DENARO: e' il capitale su cui si calcola il
@@ -305,7 +306,7 @@ T60_WINDOW_MAX_MIN = float(os.getenv("T60_WINDOW_MAX_MIN",
 # produrre uno stake sopra questo tetto: viene SORSCRITTO, mai negoziato.
 # **DINAMICO dal 04/10/2026** (direttiva del proprietario: "sostituisci
 # qualsiasi hard cap fisso con una percentuale dinamica"): con 0.0 il tetto
-# e' `bankroll x KELLY_MAX_STAKE_PCT` (12%), calcolato da `order_ceiling`
+# e' `bankroll x KELLY_MAX_STAKE_PCT` (5% dal 13/10/2026), da `order_ceiling`
 # dalla STESSA fonte del cap per-ordine della corsia normale. Un valore > 0
 # ripristina il tetto ASSOLUTO (era 1.00 USDC dal 17/09).
 T60_MAX_STAKE_USDC = float(os.getenv("T60_MAX_STAKE_USDC", "0.0"))
@@ -428,7 +429,7 @@ def t60_window(kickoff: "datetime | None") -> str:
 
 
 def order_ceiling(bankroll: float | None = None) -> float:
-    """Tetto per-ordine EFFICACE (CB1): assoluto se configurato, altrimenti 12%.
+    """Tetto per-ordine EFFICACE (CB1): assoluto se configurato, altrimenti 5%.
 
     UNICO punto di verita' del tetto per gli ordini reali: lo usano
     `t60_stake` (corsia T-60), `validate_order_payload` (CB3) e la
@@ -448,7 +449,7 @@ def order_ceiling(bankroll: float | None = None) -> float:
 
 
 def t60_stake(bankroll: float, *, mode: str = "sim") -> float:
-    """Stake T-60: CB1 con cap DINAMICO 12% del bankroll, nessun Kelly.
+    """Stake T-60: CB1 con cap DINAMICO 5% del bankroll, nessun Kelly.
 
     Il tetto della strategia T-60 (micro-allocazione) non e' piu' l'importo
     fisso 1.00 del 17/09 ma la percentuale dinamica del 04/10, dalla stessa
@@ -462,7 +463,7 @@ def t60_stake(bankroll: float, *, mode: str = "sim") -> float:
     except (TypeError, ValueError):
         bankroll = 0.0
     # CB1 DINAMICO dal 04/10/2026: il tetto non e' piu' l'importo fisso 1.00
-    # ma `bankroll x KELLY_MAX_STAKE_PCT` (12%), dalla STESSA fonte del cap
+    # ma `bankroll x KELLY_MAX_STAKE_PCT` (5%), dalla STESSA fonte del cap
     # per-ordine (`decision.stake_engine.aggressive_cap_usdc`): le due corsie
     # non possono misurare due tetti diversi. Uno `T60_MAX_STAKE_USDC`
     # esplicito > 0 resta un tetto assoluto (retro-compatibilita').
@@ -1088,7 +1089,7 @@ def validate_order_payload(payload: dict,
     errori sono machine-readable per la riga del ledger.
 
     `bankroll` (opzionale) serve al CB1 DINAMICO (04/10/2026): quando
-    `T60_MAX_STAKE_USDC` e' 0.0 il tetto e' `bankroll x 12%`, letto dal
+    `T60_MAX_STAKE_USDC` e' 0.0 il tetto e' `bankroll x 5%`, letto dal
     chiamante — senza bankroll il cap non e' calcolabile e il payload NON
     passa (fail-closed: mai un tetto ignoto su denaro reale).
     """
@@ -1923,7 +1924,8 @@ def _open_live_exposure() -> float:
     return _open_live_snapshot()[0]
 
 
-def open_exposure_status(bankroll: float) -> dict:
+def open_exposure_status(bankroll: float, *,
+                         open_stake: float | None = None) -> dict:
     """Stato del recinto d'esposizione aperta (lettura, nessuna scrittura).
 
     Ritorna {open_stake, count, cap, blocked, pct, reason}: `blocked=True`
@@ -1932,10 +1934,30 @@ def open_exposure_status(bankroll: float) -> dict:
     `cap` e' SEMPRE `bankroll x OPEN_EXPOSURE_CAP_PCT` letto fresco: con il
     capitale aggiornato il tetto segue (compounding automatico, nessun valore
     congelato).
+
+    `open_stake` esplicito (dal 13/10/2026): il giro puntate ha gia' letto
+    l'escrow REALE del wallet (`_live_wallet_snapshot`). Passandolo qui il
+    recinto misura lo STESSO capitale dell'equity — compresa la parte non
+    riempita di un ordine parziale/GTC, che il solo ledger non vede. Senza
+    questo, il recinto sottostimerebbe il capitale impegnato (e potrebbe
+    aprire piu' ordini del previsto). Il valore esplicito NON e' un modo per
+    alzare il tetto: e' un numero piu' preciso, mai piu' basso del ledger.
     """
+    explicit_open = open_stake
     bankroll = float(bankroll or 0.0)
     cap = max(bankroll, 0.0) * OPEN_EXPOSURE_CAP_PCT
     open_stake, count = _open_live_snapshot()
+    if explicit_open is not None:
+        try:
+            candidate = float(explicit_open)
+        except (TypeError, ValueError):
+            candidate = None
+        # Il valore esplicito puo' solo ALZARE la lettura del ledger (mai
+        # abbassarla): e' un'informazione in piu' (escrow reale), non un modo
+        # per liberare il recinto. Una lettura ignota (`inf`) resta ignota.
+        if (candidate is not None and open_stake != float("inf")
+                and candidate > open_stake):
+            open_stake = candidate
     blocked = open_stake >= cap
     return {
         "open_stake": open_stake,
@@ -1952,7 +1974,8 @@ def open_exposure_status(bankroll: float) -> dict:
     }
 
 
-def exposure_allows(bankroll: float, new_stake: float) -> dict:
+def exposure_allows(bankroll: float, new_stake: float, *,
+                    open_stake: float | None = None) -> dict:
     """Il recinto accetta un NUOVO ordine di `new_stake` USDC?
 
     Direttiva 28/09/2026: il tetto e' sul capitale immobilizzato SIMULTANEO,
@@ -1969,7 +1992,7 @@ def exposure_allows(bankroll: float, new_stake: float) -> dict:
     Fail-closed: una lettura impossibile (`open_stake` non finito) o un
     bankroll non positivo non autorizzano l'ordine.
     """
-    state = open_exposure_status(bankroll)
+    state = open_exposure_status(bankroll, open_stake=open_stake)
     stake = max(float(new_stake or 0.0), 0.0)
     open_stake = float(state["open_stake"])
     cap = float(state["cap"])
@@ -2008,14 +2031,14 @@ def _exposure_deny_reason(usable: bool, projected: float, cap: float,
 
 
 def aggressive_cap_pct() -> float:
-    """Cap percentuale dinamico (KELLY_MAX_STAKE_PCT, default 12%)."""
+    """Cap percentuale dinamico (KELLY_MAX_STAKE_PCT, default 5% dal 13/10)."""
     try:
         from decision.stake_engine import aggressive_config
         return float(aggressive_config()["max_stake_pct"])
     except Exception as exc:                                  # pragma: no cover
         logger.warning("auto_bet: configurazione Kelly non leggibile (%s), "
-                       "uso 0.12", exc)
-        return 0.12
+                       "uso 0.05", exc)
+        return 0.05
 
 
 def aggressive_min_ticket() -> float:
@@ -2040,11 +2063,11 @@ def set_last_bankroll(bankroll: float | None) -> None:
 
 
 def cap_order_stake(stake: float, bankroll: float | None = None) -> float:
-    """Tetto per singolo ordine: DINAMICO (12% del bankroll) dal 04/10/2026.
+    """Tetto per singolo ordine: DINAMICO (5% del bankroll) dal 13/10/2026.
 
     Riduce, non alza mai. L'importo FISSO di 1.50 del 28/09 e' stato sostituito
     dalla percentuale dinamica (direttiva del proprietario): con bankroll 100
-    il tetto e' 12.00, con 30 e' 3.60. Uno `ORDER_MAX_STAKE_USDC` esplicito > 0
+    il tetto e' 5.00, con 30 e' 1.50. Uno `ORDER_MAX_STAKE_USDC` esplicito > 0
     resta un tetto ASSOLUTO e vince sul dinamico (diagnostica/test).
 
     Fail-closed sul capitale IGNOTO: senza un bankroll (ne' passato ne'
@@ -2130,7 +2153,7 @@ def order_stake(stake: float, spendable: float = float("inf"),
     """Stake FINALE di un ordine REALE — unico punto di verita'.
 
     Percorso PRIMARIO (Kelly aggressivo, default dal 04/10/2026): lo stake
-    calcolato viene passato dal TETTO DINAMICO (12% del bankroll) e dal
+    calcolato viene passato dal TETTO DINAMICO (5% del bankroll) e dal
     vincolo di cassa. Percorso LEGACY attivo solo se `ORDER_FIXED_STAKE_USDC`
     e' impostato: li' la size e' l'importo fisso e va coperta dai fondi
     liberi (fail-closed).
@@ -2194,7 +2217,7 @@ def kelly_size_for_pick(pick: dict, *, price: float, bankroll: float,
     """Size del motore Kelly dinamico per un pick (dict pronto + log).
 
     UNICO punto di chiamata del motore (k dinamico 0.15-0.25 da EV/edge/lega,
-    cap 12%, ticket 1.00): le corsie non ricopiano ne' la formula ne' le
+    cap 5%, ticket 1.00): le corsie non ricopiano ne' la formula ne' le
     soglie. Il vincolo di CASSA (fondi liberi) resta separato dal cap
     percentuale: non si spendono soldi in escrow.
     """
@@ -2303,7 +2326,8 @@ def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
                        "ordini: nessuna puntata (fail-closed)")
         return [], info
     raw_equity = float(snap["equity"])
-    # Il cap dinamico (12%) e il ticket si misurano sul capitale GIUSTIFICATO
+    # Il cap dinamico (5% dal 13/10/2026) e il ticket si misurano sul capitale
+    # GIUSTIFICATO
     # dai settlement registrati, non sul picco gonfiato dalla finestra
     # payout/settlement (10/10/2026: tre ordini sopra il cap per-ordine).
     equity = sizing_equity(raw_equity)
@@ -2487,6 +2511,65 @@ def _apply_rush(candidates: list[dict], *,
                 float((rep.get("budget") or {}).get("left") or 0.0),
                 100.0 * float((rep.get("recycle") or {}).get("pressure") or 0.0))
     return raised, info
+
+
+def enforce_order_ceiling(candidates: list[dict], *,
+                          bankroll: float | None = None
+                          ) -> tuple[list[dict], dict]:
+    """TETTO UNICO PER-ORDINE (13/10/2026): nessun layer lo puo' sfondare.
+
+    PERCHE' ESISTE. Il Kelly rispetta `KELLY_MAX_STAKE_PCT`, ma i layer che
+    stanno SOPRA di lui (torneo x1.5, rush finale) alzano lo stake fino al
+    proprio cap: misurato in produzione il 13/10/2026, un pick tennis e' stato
+    piazzato a **7,46 USDC su ~43 di equity (17%)** — sopra ogni cap
+    percentuale del progetto. Il proprietario ha chiesto 2-5% per singola
+    scommessa.
+
+    Qui lo stake viene riportato al tetto EFFETTIVO (`order_ceiling` = 5% del
+    bankroll, dalla stessa fonte del resto del progetto) e un pick che dopo il
+    taglio non raggiunge il ticket minimo viene SCARTATO (fail-closed: mai un
+    importo diverso dal tetto per far passare un ordine).
+
+    Tetto non calcolabile (0.0, bankroll ignoto) -> NESSUN ordine: e' la
+    stessa direzione di `order_ceiling` (fail-closed sul capitale).
+    """
+    info: dict = {"cap": 0.0, "clamped": 0, "dropped": 0, "kept": 0}
+    cap = order_ceiling(bankroll)
+    info["cap"] = cap
+    if cap <= 1e-9:
+        if candidates:
+            logger.warning("auto_bet: tetto per-ordine non calcolabile "
+                           "(bankroll ignoto): nessun ordine (fail-closed)")
+        info["dropped"] = len(candidates)
+        return [], info
+    try:
+        ticket = aggressive_min_ticket()
+    except Exception:                                         # pragma: no cover
+        ticket = MIN_STAKE_EUR
+    kept: list[dict] = []
+    for cand in candidates:
+        try:
+            stake = float(cand.get("stake") or 0.0)
+        except (TypeError, ValueError):
+            stake = 0.0
+        if stake - 1e-9 > cap:
+            stake = round(cap, 2)
+            info["clamped"] += 1
+            logger.info("auto_bet: %s (%s) stake riportato al tetto 5%% del "
+                        "bankroll (%.2f USDC, equity %.2f): nessun layer puo' "
+                        "superarlo", cand.get("match_id"),
+                        cand.get("esito_key"), stake, float(bankroll or 0.0))
+        if stake + 1e-9 < ticket:
+            info["dropped"] += 1
+            logger.info("auto_bet: %s (%s) stake %.2f sotto il ticket %.2f "
+                        "dopo il tetto del 5%%: salto (fail-closed)",
+                        cand.get("match_id"), cand.get("esito_key"),
+                        stake, ticket)
+            continue
+        cand["stake"] = stake
+        info["kept"] += 1
+        kept.append(cand)
+    return kept, info
 
 
 def chief_execution_enabled() -> bool:
@@ -3565,18 +3648,23 @@ def _live_wallet_snapshot() -> "dict | None":
       valore che non si muove quando una bet passa da libera a "in gioco",
       quindi e' il riferimento per Kelly, drawdown e stop-loss.
 
-    ⚠️ L'esposizione viene dal LEDGER, non dal campo `exposure` di SX Bet.
-    Il 07/10/2026 due circuit breaker (stop-loss giornaliero -8,8% e
-    settimanale -12,0%) sono scattati su un wallet INTATTO: SX riporta le
-    posizioni RIEMPITE in `escrowedAmount` in modo INCOERENTE (misurato sul
-    container: `escrowedAmount = 0` con un ordine FULLY_FILLED da 1,31 USDC
-    aperto, e 5,60 USDC con 4,38 di stake aperto). Il `availableBalance`,
-    invece, e' gia' al netto dello stake ed e' autoritativo. Con l'esposizione
-    dal ledger l'equity cambia SOLO al settlement (mai al fill), quindi non
-    oscilla e i breaker non scattano su un artefatto.
+    STORIA DELLA SCELTA (13/10/2026). Il 07/10/2026 due circuit breaker
+    (stop-loss giornaliero -8,8% e settimanale -12,0%) sono scattati su un
+    wallet INTATTO: `escrowedAmount` di SX non era allineato alle posizioni
+    riempite. Si era quindi passati al solo LEDGER.
 
-    Il campo SX resta in `provider_exposure` per la telemetria (le differenze
-    oltre 0,5 USDC sono loggate a DEBUG, senza rumore per ciclo).
+    Ma il solo ledger SOTTOSTIMA il capitale immobilizzato quando l'ordine
+    non e' interamente riempito: la riga `bets` registra SOLO la parte
+    riempita, mentre `availableAmount` e' gia' al netto di TUTTO l'escrow.
+    Misurato il 13/10/2026: ordine da 7,35 USDC con 1,5559 riempiti →
+    escrow SX 7,35 contro ledger 1,5559; i 5,794 mancanti facevano SCENDERE
+    l'equity da 41,33 a 35,54 e hanno armato un **falso** stop-loss
+    giornaliero (-14% su un wallet intatto).
+
+    REGOLA: `exposure = max(ledger, escrow SX)`. Non si sottostima MAI il
+    capitale immobilizzato; se invece e' SX a essere indietro (campo non
+    ancora aggiornato, caso 07/10) vince il ledger, cosi' l'equity non oscilla
+    al fill. Il campo SX resta in `provider_exposure` per la telemetria.
     Se il provider non espone `exposure` E il ledger non e' leggibile la
     stima e' PRUDENTE (equity = solo disponibile): lo stop-loss puo' scattare
     un po' prima, mai dopo — resta la direzione fail-closed.
@@ -3593,7 +3681,20 @@ def _live_wallet_snapshot() -> "dict | None":
                              if raw_exposure is not None else None)
         ledger_stake, ledger_count = _open_live_snapshot()
         if ledger_stake != float("inf"):
-            exposure, source = ledger_stake, "ledger"
+            if (provider_exposure is not None
+                    and provider_exposure > ledger_stake + 0.01):
+                # Escrow SX MAGGIORE del ledger: capitale immobilizzato che
+                # il ledger non rappresenta (parte NON riempita di un ordine
+                # parziale/GTC). Va contato: senza, l'equity scende al
+                # piazzamento e i breaker scattano su un drawdown inesistente
+                # (caso reale 13/10: 5,794 USDC invisibili = -14%).
+                exposure, source = float(provider_exposure), "provider_escrow"
+                logger.debug("auto_bet: escrow SX %.2f > stake aperto dal "
+                             "ledger %.2f (%d ordini): conteggio l'escrow "
+                             "(parte non riempita di un ordine parziale/GTC)",
+                             provider_exposure, ledger_stake, ledger_count)
+            else:
+                exposure, source = ledger_stake, "ledger"
         elif provider_exposure is not None:
             exposure, source = provider_exposure, "provider"
         else:
@@ -3601,7 +3702,7 @@ def _live_wallet_snapshot() -> "dict | None":
             logger.warning("auto_bet: wallet senza campo 'exposure' e ledger "
                            "non leggibile — equity = solo disponibile "
                            "(stima PRUDENTE: lo stop-loss puo' scattare prima)")
-        if (provider_exposure is not None
+        if (provider_exposure is not None and source == "ledger"
                 and abs(provider_exposure - exposure) > 0.5):
             logger.debug("auto_bet: escrow SX %.2f != stake aperto dal ledger "
                          "%.2f (%d ordini) — uso il ledger (il campo SX non e' "
@@ -4492,8 +4593,8 @@ def run_today_bets(stake_eur: float | None = None,
         # viene saltato, a meno che il cap severo sia disattivato.
         if mode == "live" and aggressive_live_active():
             # --- KELLY AGGRESSIVO (direttiva 04/10/2026): la size dell'ordine
-            # REALE e' il Kelly frazionato k=0.65 con cap DINAMICO 12% del
-            # bankroll e ticket minimo 2.00 USDC. Sostituisce sia il Kelly del
+            # REALE e' il Kelly frazionato (k 0.15-0.25) col cap DINAMICO 5%
+            # del bankroll e ticket minimo 1.00 USDC. Sostituisce sia il Kelly del
             # modello blend sia l'importo fisso 1.50 del 28/09: il capitale
             # scala col bankroll (compounding). `kelly_size_for_pick` e' l'unico
             # punto (formula e soglie vivono in `decision.stake_engine`).
@@ -4689,7 +4790,7 @@ def run_today_bets(stake_eur: float | None = None,
         if aggressive_live_active():
             # --- FETCH DEL SALDO REALE + CAP DINAMICO (direttiva 04/10/2026) ---
             # Subito PRIMA degli ordini: una lettura pulita del bilancio USDC,
-            # poi cap dinamico (12%) e ticket minimo (2.00 USDC) sul capitale
+            # poi cap dinamico (5%) e ticket minimo (1.00 USDC) sul capitale
             # fresco — e' il compounding "all'ultimo tick". Fail-closed: senza
             # saldo leggibile non parte nessun ordine.
             candidates, _fresh = refresh_live_stakes(candidates)
@@ -4718,6 +4819,19 @@ def run_today_bets(stake_eur: float | None = None,
         # fuori finestra la lista e' INVARIATA. I cap di portafoglio della
         # FASE 2 restano l'ultima parola.
         candidates, _rush = _apply_rush(candidates, bankroll=_bankroll)
+
+        # --- TETTO UNICO PER-ORDINE (13/10/2026, direttiva proprietario):
+        # nessun layer (Kelly, torneo, rush) puo' produrre un ordine sopra il
+        # 5% del bankroll. Ultimo passo di sizing prima della FASE 3: quello
+        # che il recinto d'esposizione vede e' cio' che viene ordinato.
+        candidates, _ceiling = enforce_order_ceiling(candidates,
+                                                     bankroll=_bankroll)
+        if _ceiling.get("clamped") or _ceiling.get("dropped"):
+            logger.info("auto_bet: tetto per-ordine %.2f USDC (5%% di %.2f) — "
+                        "%d stake riportati al tetto, %d scartati sotto il "
+                        "ticket", float(_ceiling.get("cap") or 0.0),
+                        float(_bankroll or 0.0), _ceiling.get("clamped", 0),
+                        _ceiling.get("dropped", 0))
 
     # --- FASE 3: esegui e registra (LIVE via execution_engine oppure SIM) ---
     from tracker import save_bet
@@ -4761,7 +4875,8 @@ def run_today_bets(stake_eur: float | None = None,
             # farebbe superare il cap (PROIEZIONE: aperto + questo stake).
             # La lettura e' fresca per ogni candidato: piu' ordini nella
             # stessa tornata non possono sfondare il 40% sommandosi.
-            _allow = exposure_allows(_bankroll, pick_stake)
+            _allow = exposure_allows(_bankroll, pick_stake,
+                                     open_stake=_wallet_exposure)
             if _exposure_blocked or not _allow.get("allowed"):
                 open_exposure_skipped += 1
                 logger.info("auto_bet: %s (%s) sospeso dal recinto "
@@ -4914,8 +5029,8 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
             return []
         strategy = chief.strategy.process(market.signals)
         # 2b. ANALISI (steam velocity + juice) -> CERVELLO (EV dinamico +
-        # Portfolio Shield) -> FINANZA (Kelly aggressivo k=0.65, cap 12%,
-        # ticket 2.00). Direttiva 04/10/2026: la catena agenti applica lo
+        # Portfolio Shield) -> FINANZA (Kelly frazionario k 0.15-0.25, cap 5%,
+        # ticket 1.00). Direttiva 04/10/2026: la catena agenti applica lo
         # STESSO motore Kelly della corsia storica (`decision.stake_engine`),
         # quindi le due corsie non possono dimensionarsi in modo diverso.
         analysis = AnalysisAgent().process(strategy.signals)

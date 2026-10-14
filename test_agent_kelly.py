@@ -3,7 +3,7 @@
 La Finanza e' l'UNICO agente che trasforma una decisione in un importo. Qui si
 verifica che:
 
-1. usi il motore Kelly dinamico (k 0.15-0.25 da EV/edge/lega, cap 12%,
+1. usi il motore Kelly dinamico (k 0.15-0.25 da EV/edge/lega, cap 5%,
    ticket 1.00) — la stessa fonte della corsia storica
    (`decision.stake_engine`), mai una copia;
 2. rispetti il Portfolio Shield del Cervello (`block` = non eseguibile,
@@ -66,7 +66,11 @@ class TestSizeTrade:
         # k dinamico (EV 10% + lega core -> verso il massimo della banda)
         assert 0.15 <= trade.kelly_fraction <= 0.25
         full = vf.kelly_fraction(0.60, 1.66, fraction=1.0)
-        assert trade.stake == round(100.0 * full * trade.kelly_fraction, 2)
+        # Tetto per ordine 5% (13/10/2026): il Kelly pieno (8.85) viene troncato.
+        assert trade.cap_usdc == 5.0
+        assert trade.stake == min(round(100.0 * full * trade.kelly_fraction, 2),
+                                  5.0)
+        assert trade.stake == 5.0
         assert trade.min_ticket == 1.00
         assert trade.reason == "ok"
 
@@ -86,9 +90,11 @@ class TestSizeTrade:
         assert trade.reason == "shield_block"
 
     def test_shield_scale_cappa_lo_stake(self):
+        # Lo Shield deve mordere PRIMA del tetto del 5%: con shield_max_usdc
+        # uguale al cap il motivo sarebbe "ok" e il test non proverebbe nulla.
         fin = FinanceAgent(bankroll=100.0)
-        trade = fin.size_trade(_trade(shield_max_usdc=5.0))
-        assert trade.stake == 5.0 and trade.executable is True
+        trade = fin.size_trade(_trade(shield_max_usdc=2.0))
+        assert trade.stake == 2.0 and trade.executable is True
         assert trade.reason == "shield_scaled"
 
     def test_senza_probabilita_non_si_dimensiona(self):
@@ -135,8 +141,12 @@ class TestFreshBankroll:
                            balance_fn=lambda: {"equity": 200.0})
         trade = fin.size_trade(_trade())
         assert trade.bankroll == 200.0
-        # il capitale scala col capitale (compounding sul saldo fresco)
-        assert trade.stake == round(200.0 * trade.kelly_full * trade.kelly_fraction, 2)
+        # il capitale scala col capitale (compounding sul saldo fresco): il
+        # Kelly pieno raddoppia e il tetto del 5% raddoppia con lui (5 -> 10).
+        assert trade.cap_usdc == 10.0
+        assert trade.stake == min(
+            round(200.0 * trade.kelly_full * trade.kelly_fraction, 2), 10.0)
+        assert trade.stake == 10.0
 
     def test_dict_senza_equity_usa_il_disponibile(self):
         fin = FinanceAgent(bankroll=100.0,
@@ -233,7 +243,10 @@ class TestCatenaEndToEnd:
                                 if t.shield_action != "block"])
         assert s.executable == 1
         trade = s.trades[0]
-        assert trade.stake == round(100.0 * trade.kelly_full * trade.kelly_fraction, 2)
+        # Kelly pieno 10.88 troncato dal tetto per ordine del 5% (5.00).
+        assert trade.stake == min(
+            round(100.0 * trade.kelly_full * trade.kelly_fraction, 2), 5.0)
+        assert trade.stake == 5.0
         assert trade.analysis["steam_move"] is True
         assert trade.analysis["juice"] == 0.045
 

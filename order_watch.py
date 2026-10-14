@@ -1,7 +1,8 @@
 """Verifica degli ordini REALI: stake e recinto di esposizione (28/09/2026).
 
 PERCHE' ESISTE. Dal 28/09/2026 valgono due parametri di risk management:
-lo **stake per ordine reale** (Kelly con cap dinamico, 12% del bankroll) e il
+lo **stake per ordine reale** (Kelly con cap dinamico, 5% del bankroll dal
+13/10/2026) e il
 **recinto sull'esposizione APERTA** (`auto_bet.OPEN_EXPOSURE_CAP_PCT`, 50% dal
 13/10/2026 — a equity 33.55 il tetto e' ~16.78). Le soglie NON si copiano a
 mano: si leggono dalle costanti di produzione, cosi' un ritocco non lascia
@@ -102,7 +103,7 @@ def fixed_active() -> bool:
 
 def order_ceiling_active() -> bool:
     """True se il tetto per-ordine e' ASSOLUTO (`ORDER_MAX_STAKE_USDC` > 0)
-    invece che DINAMICO (12% del bankroll, direttiva 04/10/2026)."""
+    invece che DINAMICO (5% del bankroll, direttiva 04/10/2026)."""
     try:
         return float(_ab().ORDER_MAX_STAKE_USDC) > 0
     except Exception:
@@ -265,7 +266,7 @@ def audit(db_path: Optional[Any] = None, *, since: str = DIRECTIVE_SINCE,
                            "created_at": row.get("created_at")})
 
     # --- 1. stake esatto / entro il tetto, e id dell'exchange ------------
-    # Il tetto per-ordine dal 04/10/2026 puo' essere DINAMICO (12% del
+    # Il tetto per-ordine dal 04/10/2026 puo' essere DINAMICO (5% del
     # bankroll): senza un tetto assoluto il valore atteso dipende dall'equity
     # dell'ISTANTE dell'ordine, quindi lo si stima dallo storico campionato.
     ticket = min_ticket()
@@ -405,7 +406,7 @@ def format_report(data: Optional[Dict[str, Any]] = None) -> str:
     elif float(d.get('max_order_stake') or 0) > 0:
         stake_rule = f"Kelly aggressivo + tetto assoluto {d.get('max_order_stake')} USDC"
     else:
-        stake_rule = ("Kelly aggressivo (cap dinamico 12% del bankroll, "
+        stake_rule = ("Kelly frazionario (cap dinamico 5% del bankroll, "
                       "ticket minimo del motore)")
     lines = ["🛡️  VERIFICA ORDINI REALI (stake + recinto 40%)",
              f"Direttiva dal {d.get('since')} | {stake_rule} | recinto "

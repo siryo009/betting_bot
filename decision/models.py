@@ -543,7 +543,8 @@ def t60_executable(stake: float, price: float,
     Usato dal validatore d'ordine e dai tripwire: una sola fonte per la
     regola.
 
-    CB1 dal 04/10/2026 e' **DINAMICO** (12% del bankroll): il tetto efficace
+    CB1 dal 04/10/2026 e' **DINAMICO** (5% del bankroll dal 13/10/2026): il
+    tetto efficace
     lo calcola il CHIAMANTE (`auto_bet.order_ceiling`, unico punto di
     verita') e lo passa qui in `max_stake`. Se non viene passato si ricade
     sulla costante `T60_MAX_STAKE_USDC` (tetto assoluto legacy / default di

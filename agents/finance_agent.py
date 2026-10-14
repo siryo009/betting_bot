@@ -121,8 +121,8 @@ class FinanceAgent:
     # Percorso ValidatedTrade (Cervello -> Finanza): sizing finale
     # ------------------------------------------------------------------
     # La Finanza e' l'unico agente che TRASFORMA una decisione in un importo.
-    # Il motore Kelly aggressivo vive in `decision.stake_engine` (k=0.65, cap
-    # dinamico 12% del bankroll, ticket minimo 2.00): qui si compone con i
+    # Il motore Kelly vive in `decision.stake_engine` (k 0.15-0.25, cap
+    # dinamico 5% del bankroll, ticket minimo 1.00): qui si compone con i
     # vincoli che il Cervello ha gia' misurato (Portfolio Shield) e col saldo
     # reale letto AL MOMENTO. Nessuna soglia e' ricopiata: il cap e' quello
     # del motore, il ticket pure, lo spazio del shield arriva dal payload.

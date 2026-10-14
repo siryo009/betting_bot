@@ -70,7 +70,7 @@ def _isolate_enclosure(monkeypatch):
     isolati).
     """
     monkeypatch.setattr(auto_bet, "exposure_allows",
-                        lambda bankroll, stake=0.0: {
+                        lambda bankroll, stake=0.0, **kw: {
                             "allowed": True, "blocked": False,
                             "open_stake": 0.0, "count": 0,
                             "cap": round(max(float(bankroll or 0.0), 0.0)
@@ -235,13 +235,19 @@ class TestLiveBankroll:
     cassa simulata. Floor ordine 1 USDC, cap di cassa sul disponibile."""
 
     def test_bankroll_dal_wallet(self, monkeypatch, temp_db):
-        """In LIVE il bankroll del Kelly e' il valore del wallet (12.28
-        USDC nell'esempio), non la cassa."""
+        """In LIVE il bankroll del Kelly e' il valore del wallet (40.00
+        USDC nell'esempio), non la cassa.
+
+        ⚠️ Il wallet finto deve stare SOPRA ~20 USDC dal 13/10/2026: il tetto
+        per-ordine (5%) sotto quella soglia scende sotto il ticket minimo di
+        1.00 USDC e nessun ordine parte (fail-closed). Un wallet di 12.28 non
+        e' piu' uno stato in cui il sistema ordina.
+        """
         import adaptive_staking
         _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        _stub_wallet(monkeypatch, 12.28)
+        _stub_wallet(monkeypatch, 40.0)
         calls = {}
 
         def _fake(**kw):
@@ -253,8 +259,8 @@ class TestLiveBankroll:
                             lambda pick, stake, floor: _filled())
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 1
-        assert calls["bankroll"] == pytest.approx(12.28)
-        assert calls["peak_bankroll"] == pytest.approx(12.28)
+        assert calls["bankroll"] == pytest.approx(40.0)
+        assert calls["peak_bankroll"] == pytest.approx(40.0)
 
     def test_wallet_sotto_minimo_nessuna_puntata(self, monkeypatch, temp_db):
         """Wallet sotto il minimo ordine (1 USDC): fail-closed, niente righe."""
@@ -268,12 +274,17 @@ class TestLiveBankroll:
         assert tracker.get_bets() == []
 
     def _micro_stake(self, monkeypatch):
-        """Adaptive che cappa lo stake a 0.6 USDC (sotto il minimo ordine)."""
+        """Adaptive che cappa lo stake a 0.6 USDC (sotto il minimo ordine).
+
+        Wallet 40.0 (dal 13/10/2026 il tetto per-ordine e' il 5%: sotto ~20
+        USDC il tetto stesso scenderebbe sotto 1.00 e il caso in esame — stake
+        micro con il tetto NON vincolante — non sarebbe piu' misurabile).
+        """
         import adaptive_staking
         _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        _stub_wallet(monkeypatch, 12.28)
+        _stub_wallet(monkeypatch, 40.0)
         monkeypatch.setattr(
             adaptive_staking, "adaptive_stake",
             lambda **kw: {"stake": 0.6, "reason": "micro", "capped": True})
@@ -308,12 +319,18 @@ class TestLiveBankroll:
         assert sent["stake"] == 1.0
 
     def test_stake_mai_oltre_il_wallet(self, monkeypatch, temp_db):
-        """In LIVE lo stake non supera mai il saldo disponibile del wallet."""
+        """In LIVE lo stake non supera mai il saldo DISPONIBILE del wallet.
+
+        Equity 45.00 (2.00 liberi + 43.00 in gioco): il tetto per-ordine
+        arriva a 2.25, quindi e' la CASSA a mordere (2.00). Con un wallet di
+        3.00 il caso non sarebbe piu' misurabile — il tetto del 5% (0.15)
+        scenderebbe sotto il ticket e nessun ordine partirebbe.
+        """
         import adaptive_staking
         _seed_value_match(quota=1.65)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
-        _stub_wallet(monkeypatch, 3.0)
+        _stub_wallet(monkeypatch, 2.0, exposure=43.0)
         monkeypatch.setattr(
             adaptive_staking, "adaptive_stake",
             lambda **kw: {"stake": 5.0, "reason": "test"})
@@ -326,7 +343,7 @@ class TestLiveBankroll:
         monkeypatch.setattr(auto_bet, "_live_fill", _fake_fill)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 1
-        assert sent["stake"] == 3.0
+        assert sent["stake"] == 2.0
 
     def test_saldo_non_leggibile_ripiega_sulla_cassa(self, monkeypatch,
                                                      temp_db):
@@ -439,12 +456,17 @@ class TestBankrollEquity:
         assert "equity wallet" in st["reason"]
 
     def test_stake_non_oltre_i_fondi_liberi(self, monkeypatch, temp_db):
-        """L'equity (35.98) dimensiona il Kelly, ma un singolo ordine non puo'
-        spendere piu' dei fondi LIBERI (3.98 su 32.0 in gioco)."""
+        """L'equity dimensiona il Kelly, ma un singolo ordine non puo' spendere
+        piu' dei fondi LIBERI (3.98 liberi su 96.02 in gioco = equity 100.00).
+
+        Il caso e' "quasi tutto il capitale in escrow": con un'equity piu'
+        bassa il tetto per-ordine (5% dal 13/10/2026) morderebbe PRIMA della
+        cassa e il vincolo in esame non sarebbe piu' quello misurato.
+        """
         _fixed_stake(monkeypatch)
         _seed_value_match(quota=1.65)
         self._live(monkeypatch)
-        _stub_wallet(monkeypatch, 3.98, exposure=32.0)
+        _stub_wallet(monkeypatch, 3.98, exposure=96.02)
         sent = {}
         monkeypatch.setattr(auto_bet, "_live_fill",
                             lambda pick, stake, floor: sent.update(stake=stake)
@@ -489,17 +511,27 @@ class TestBankrollEquity:
         assert snap["exposure_source"] == "ledger"
         assert snap["open_orders"] == 1
 
-    def test_ignora_lescrow_gonfiato_di_sx(self, monkeypatch, temp_db):
-        """L'escrow di SX puo' anche SOVRA-stimare (misurato 5,60 USDC con
-        4,38 di stake aperto): il ledger e' la fonte di verita'."""
+    def test_escrow_piu_alto_del_ledger_viene_contato(self, monkeypatch,
+                                                      temp_db):
+        """Escrow SX MAGGIORE dello stake a registro: vince l'escrow.
+
+        REGOLA 13/10/2026 (`exposure = max(ledger, escrow)`). Il ledger
+        registra SOLO la parte RIEMPITA di un ordine mentre `availableBalance`
+        e' gia' al netto di TUTTO l'escrow: contare il solo ledger SOTTOSTIMA
+        il capitale immobilizzato e fa scendere l'equity — la stima che ha
+        armato il falso stop-loss del 13/10 (7,35 in escrow contro 1,5559 a
+        registro = -5,79 USDC letti come perdita).
+        """
         self._open_bet(1.31, "sx-a")
         self._open_bet(1.62, "sx-b")
         self._open_bet(2.21, "sx-c")
         self._engine(monkeypatch, self._Prov({"availableBalance": 25.0,
                                               "exposure": 5.6}))
         snap = auto_bet._live_wallet_snapshot()
-        assert snap["exposure"] == pytest.approx(5.14)
-        assert snap["equity"] == pytest.approx(30.14)
+        assert snap["exposure"] == pytest.approx(5.6)
+        assert snap["equity"] == pytest.approx(30.6)
+        assert snap["exposure_source"] == "provider_escrow"
+        assert snap["provider_exposure"] == pytest.approx(5.6)
 
     def test_equity_stabile_al_fill(self, monkeypatch, temp_db):
         """Il fill NON deve muovere l'equity: il disponibile scende dello
@@ -513,15 +545,46 @@ class TestBankrollEquity:
         dopo = auto_bet._live_wallet_snapshot()["equity"]
         assert prima == pytest.approx(dopo) == pytest.approx(29.14)
 
-    def test_senza_ordini_aperti_lescrow_sx_non_conta(self, monkeypatch,
+    def test_escrow_residuo_senza_righe_viene_contato(self, monkeypatch,
                                                       temp_db):
-        """Nessuna posizione aperta sul ledger -> l'escrow residuo di SX non
-        entra nell'equity (era la causa del picco gonfiato di 31,43)."""
+        """Escrow > 0 senza righe aperte: si CONTa (decisione 13/10/2026).
+
+        Il residuo non e' "denaro fantasma": `availableBalance` e' gia' al
+        netto di quell'escrow, quindi escluderlo sottostima l'equity — ed e'
+        esattamente la sottostima che ha armato due falsi stop in una
+        settimana (07/10 e 13/10). La direzione prudente per il RISCHIO resta
+        verificata a monte da `reconciled_equity`, che non lascia catturare al
+        picco una crescita non spiegata dai settlement registrati.
+        """
         self._engine(monkeypatch, self._Prov({"availableBalance": 27.83,
                                               "exposure": 2.0}))
         snap = auto_bet._live_wallet_snapshot()
-        assert snap["exposure"] == 0.0
-        assert snap["equity"] == pytest.approx(27.83)
+        assert snap["exposure"] == pytest.approx(2.0)
+        assert snap["equity"] == pytest.approx(29.83)
+        assert snap["exposure_source"] == "provider_escrow"
+
+    def test_fill_parziale_non_arma_il_falso_stop(self, monkeypatch,
+                                                 temp_db):
+        """REGRESSIONE 13/10/2026 (falso stop-loss su un wallet intatto).
+
+        Ordine da 7,35 USDC riempito solo per 1,5559 (`PARTIAL_FILL_RESTED`):
+        con il solo ledger l'equity scende da 42,01 a 36,22 (-14% su giornata
+        senza alcuna partita persa) e lo stop giornaliero resta armato 24h.
+        Con `max(ledger, escrow)` l'equity resta 42,01 e il bot continua a
+        valutare.
+        """
+        self._open_bet(1.5559, "sx-partial")
+        self._engine(monkeypatch, self._Prov({"availableBalance": 34.6643,
+                                              "exposure": 7.35}))
+        snap = auto_bet._live_wallet_snapshot()
+        assert snap["exposure"] == pytest.approx(7.35)      # escrow reale
+        assert snap["equity"] == pytest.approx(42.0143)
+        # la stessa equity NON produce un drawdown: -14% sarebbe 36,22
+        _fixed_stake(monkeypatch)
+        _seed_value_match(quota=1.65)
+        self._live(monkeypatch)
+        st = auto_bet.daily_stop_status()
+        assert st["stopped"] is False
 
     def test_fallback_sul_provider_se_il_ledger_non_e_leggibile(
             self, monkeypatch, temp_db):
@@ -582,8 +645,19 @@ class TestFlatLive:
             conn.close()
 
     def _setup_live(self, monkeypatch, wallet=12.28):
+        """Corsia FLAT (unita' da 1 USDC con cap a UNITA' INTERE).
+
+        ⚠️ In questa corsia lo stake *e'* il minimo dell'exchange e i cap sono
+        a unita' intere (`apply_flat_budget`): il tetto per-ordine del 5% del
+        bankroll (13/10/2026) la spegnerebbe su un wallet < 20 USDC. Qui il
+        tetto per-ordine e' fissato ESPLICITAMENTE a 1.00 — il valore che deve
+        poter passare tre/quattro volte — perche' l'oggetto di questi test e'
+        il budget a unita', non il tetto per-ordine (che ha i suoi test in
+        `test_aggressive_kelly` e in `verify_guardrails`).
+        """
         _fixed_stake(monkeypatch)
         monkeypatch.setattr(auto_bet, "STAKE_MODE", "flat")
+        monkeypatch.setattr(auto_bet, "T60_MAX_STAKE_USDC", 1.00)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         _stub_wallet(monkeypatch, wallet)
@@ -865,10 +939,10 @@ class TestEquityRiconciliataNelSizing:
 
     def test_il_kelly_pre_ordine_riceve_l_equity_riconciliata(self,
                                                               monkeypatch):
-        """Il cap 12% vive dentro il motore Kelly (`kelly_size_for_pick`
+        """Il cap 5% vive dentro il motore Kelly (`kelly_size_for_pick`
         -> `calculate_kelly_stake(bankroll=...)`): se il pre-ordine passasse
-        il valore grezzo il cap sarebbe quello del capitale FANTASMA (4.89 su
-        40.75) invece di quello reale (3.60 su 30.0). Qui si cattura l'argomento
+        il valore grezzo il cap sarebbe quello del capitale FANTASMA (2.04 su
+        40.75) invece di quello reale (1.50 su 30.0). Qui si cattura l'argomento
         `bankroll` del motore: e' il punto esatto in cui la correzione vale.
 
         Il vincolo di CASSA resta separato: `spendable` e' il disponibile
@@ -890,20 +964,21 @@ class TestEquityRiconciliataNelSizing:
         assert seen["spendable"] == pytest.approx(40.75)
         assert len(kept) == 1 and kept[0]["stake"] == pytest.approx(3.0)
 
-    def test_il_cap_12_percento_segue_il_bankroll_che_riceve(self):
+    def test_il_cap_5_percento_segue_il_bankroll_che_riceve(self):
         """Controprova col MOTORE VERO (chiamata diretta: nei test di questo
-        file il Kelly e' isolato dal conftest). Con un edge forte il cap 12%
-        e' VINCOLANTE, e lo stake diventa 4.89 sull'equity gonfiata contro
-        3.60 su quella riconciliata: +36% di denaro su un capitale che non
-        esiste, cioe' esattamente le violazioni misurate il 10/10."""
+        file il Kelly e' isolato dal conftest). Con un edge forte il cap 5%
+        (dal 13/10/2026; era 12%) e' VINCOLANTE, e lo stake diventa 2.04
+        sull'equity gonfiata contro 1.50 su quella riconciliata: +36% di
+        denaro su un capitale che non esiste, cioe' esattamente le violazioni
+        misurate il 10/10 (la percentuale del cap non cambia quel rapporto)."""
         from decision.stake_engine import calculate_kelly_stake
         kw = dict(ev=0.15, edge=0.08, league=ALLOWED_LEAGUE, market="1X2")
         gonfiato = calculate_kelly_stake(0.85, 1.65, 40.75, **kw)
         reale = calculate_kelly_stake(0.85, 1.65, 30.0, **kw)
-        assert gonfiato["cap_usdc"] == pytest.approx(4.89, abs=0.01)
-        assert reale["cap_usdc"] == pytest.approx(3.60, abs=0.01)
-        assert gonfiato["stake"] == pytest.approx(4.89, abs=0.01)
-        assert reale["stake"] == pytest.approx(3.60, abs=0.01)
+        assert gonfiato["cap_usdc"] == pytest.approx(2.04, abs=0.01)
+        assert reale["cap_usdc"] == pytest.approx(1.50, abs=0.01)
+        assert gonfiato["stake"] == pytest.approx(2.04, abs=0.01)
+        assert reale["stake"] == pytest.approx(1.50, abs=0.01)
 
     def test_il_giro_puntate_dimensiona_sul_valore_riconciliato(
             self, monkeypatch, temp_db):
