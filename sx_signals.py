@@ -8,7 +8,7 @@ SOLO l'API PUBBLICA SX Bet (zero chiavi, zero crediti):
 
 1. discovery: i 3 mercati binari "X vs Not X" (type 1, sportId 5) per
    partita -> si ricostruisce il 1X2 con i migliori prezzi BACK del book
-   taker (stessi snapshot letti da scan_sx_live);
+   taker (snapshot dell'order book con prospettiva del taker);
 2. coerenza e liquidita': inv_sum (somma inversi) 0.98-1.08, quote sane e
    book con profondita' sufficiente (totale, per esito e sulla leg che
    verrebbe giocata: vedi le soglie MIN_DEPTH/MIN_LEG_DEPTH/MIN_EXEC_DEPTH)
@@ -59,7 +59,7 @@ from value_filter import (compute_ev, is_sane, adjusted_probability,
 
 logger = logging.getLogger("sx_signals")
 
-# --- Soglie di coerenza/liquidita' (identiche a scan_sx_live.py) -----------
+# --- Soglie di coerenza/liquidita' (inv_sum 0.98-1.08) ---------------------
 MIN_INV_SUM, MAX_INV_SUM = 0.98, 1.08
 # FILTRO LIQUIDITA' SX (tarato l'11/09/2026, allentato del 20% il 21/09).
 # Su un exchange si scommette contro altri utenti, quindi su mercati sottili la
@@ -373,7 +373,7 @@ def _book(provider: SxBetProvider, market_id: str) -> dict:
 
 
 def _books_parallel(provider: SxBetProvider, market_ids: List[str]) -> dict:
-    """Snapshot paralleli (10 thread, come scan_sx_live)."""
+    """Snapshot paralleli (10 thread) dell'order book taker."""
     def _fetch(mid: str):
         try:
             return mid, _book(provider, mid)

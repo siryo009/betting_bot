@@ -11621,3 +11621,128 @@ rendere la banda leggibile in un posto solo). Entrambe le soglie sono lette
 `test_advisor_agent` + `test_agent_hierarchy` + `test_chief_shadow_wiring`
 (108); **`verify_guardrails.py` A-H TUTTI BLOCCANO** (exit 0, scenario H con
 cap 16,77 e proiezione 20,15 respinta); 0 marker di conflitto, `compileall` OK.
+
+### Pulizia della codebase + diagnostica di produzione (14/10/2026)
+
+**1) INVENTARIO — le quattro bozze citate nella richiesta NON ESISTEVANO.**
+Verifica con `ls` e con la ricerca su tutto il repo: `_clv_esteso.py`,
+`fix_credit_draft.py`, `integration_notes.md` e `hints.md` **non sono mai
+esistiti** (zero occorrenze in git, nello working tree e nella history). Le
+bozze reali erano altre cinque, tutte **non testate** (nessun `test_*.py` le
+copre) e non citate in `AGENTS.md`: il lavoro di "CLV esteso" e di "fix
+crediti" che si cercava era gia' dentro moduli veri e testati
+(`clv_tracker.py`, `credit_diagnose.py`, `line_oracle.py`).
+
+**2) ARCHIVIATI in `_archivio/2026-10-14-pulizia/`** (la cartella e' gia'
+`gitignore`, quindi il materiale resta leggibile in locale ed e' reversibile
+da git history):
+
+| file | prima | perche' e' stato archiviato |
+|---|---|---|
+| `refs.txt` | non tracciato | bozza di appunti "reference ties": citava 4 file **inesistenti** (`recall_bot.py`, `risk_guards.py`, `test_reliability_check.py`, `test_cap_enclosure.py`) e conteneva refusi. Il contenuto utile e' stato corretto e fuso qui sotto ("Bundle di riferimento") |
+| `patch_bot.py` | tracciato (29/08) | patcher one-shot di `bot.py` per stringhe: opera su `SERIE_A_2025_26` e su import che **non esistono piu'** dal 09/09; eseguirlo oggi corromperebbe `bot.py` |
+| `cross_check_sx.py` | tracciato (08/09) | diagnostica superata, con **API base morta** (`api-production-dffd.up.railway.app`, progetto scaduto il 26/09) e **soglie di produzione copiate e stantie** (`ODDS_MAX 30.0`, `EV_MIN 0.03`, cap 10%/25%): esattamente il "codice morto che duplica le soglie" che le regole del progetto vietano. Superato da `sx_signals`/`gate_audit`/`line_intersection` |
+| `scan_sx_live.py` | tracciato (08/09) | stessa classe: letture SX commentate in `sx_signals` ma soglie stantie proprie. I 3 commenti che lo citavano sono stati riscritti per descrivere la regola senza puntare a un file archiviato |
+| `surebet_log.jsonl` | tracciato (25/08) | residuo **mock** dell'era pre-`DATA_DIR` (`"fonte_dati": "mock"`). La versione viva la scrive `surebet_scanner.py` in `DATA_DIR/surebet_log.jsonl` (vedi `DEPLOY.md`) |
+| `quotaverace.db` | non tracciato (gitignored) | DB locale del 31/08 alla **root**: il percorso di produzione e' `data/quotaverace.db` (`DATA_DIR`) |
+
+Nessun riferimento orfano e' rimasto: dopo la pulizia l'unica occorrenza di
+`surebet_log.jsonl` e' quella legittima di `surebet_scanner.py`/`DEPLOY.md`
+(percorso dentro `DATA_DIR`) e le citazioni di `scan_sx_live` sono state
+rimosse.
+
+**3) BUNDLE DI RIFERIMENTO (fusione corretta di `refs.txt`).** Quali file si
+verificano INSIEME quando si tocca un'area (dal piu' esterno al piu' interno):
+
+| area | produzione | verifica |
+|---|---|---|
+| Torneo | `tournament.py`, `gridiron_lane.py`, `rush_final.py` | `test_tournament.py`, `test_gridiron_lane.py`, `test_rush_final.py`, `test_tournament_leaderboard.py` |
+| CLV | `clv_tracker.py`, `closing_line.py`, `market_calib.py` | `test_clv_tracker.py`, `test_clv.py`, `test_clv_vig_free.py` |
+| Ordini e recinto | `auto_bet.py`, `resting_orders.py`, `order_watch.py` | `test_order_watch.py`, `test_resting_orders.py`, `test_capital_enclosure.py`, `test_auto_bet_live.py`, `test_exposure_gate.py` |
+| Risk + decisione | `decision/`, `adaptive_staking.py` | `test_risk_guards.py`, `test_t60_breakers.py`, `test_decision_*.py` |
+| Crediti/telemetria | `credit_diagnose.py`, `oracle_skips.py`, `flow_measure.py`, `line_intersection.py` | `test_credit_diagnose.py`, `test_oracle_skips.py`, `test_flow_measure.py`, `test_line_intersection.py` |
+
+Costo dichiarato: la suite intera **non entra** nel timeout della shell (>10')
+→ si gira a lotti, e i processi figli non vanno in background.
+
+**4) DIAGNOSTICA CREDITI (produzione, container AMS, `credit_diagnose.py`).**
+`remaining` **444**, reset fra **17 giorni** (01/11), **sostenibile 26,1 cr/giorno**.
+⚠️ **Il consumo NON e' "<= 2 crediti/giorno" e nessun percorso del progetto ha
+una soglia di 2 cr/giorno**: i budget per percorso sono `ORACLE_BUDGET_DAY=1`
+(3 cr/chiamata), `ORACLE_H2H_BUDGET_DAY=10` (1 cr), `GRIDIRON_CREDIT_BUDGET_DAY=24`
+(3 cr). Misura reale per giorno (UTC): 08/10 **5**, 09/10 **20**, 10/10 **15**,
+11/10 **18**, 12/10 **28**, **13/10 44** — media 7 giorni **20,4/giorno**, ma
+**44/giorno nelle ultime 24h**, cioe' sopra il sostenibile (26,1).
+
+| percorso (24h) | chiamate | crediti |
+|---|---|---|
+| oracolo football USA (3 cr, `h2h,totals,spreads`) | 8 | **24** |
+| settlement (2 cr) | 5 | 10 |
+| rotation | 4 | 3 |
+| oracolo tennis | 3 | 3 |
+| oracolo a LINEA (3 cr) | 1 | 3 |
+| oracolo h2h | 1 | 1 |
+
+La voce dominante e' diventata l'**oracolo football USA** (torneo Gridiron): a
+44/giorno i 444 crediti finiscono in ~10 giorni, **prima** del reset.
+⚠️ **Il watchdog e' cieco in questo momento**: `credit_burn_rate` risponde
+`None` (dentro la finestra i crediti sono RISALITI per il cambio di chiave) e
+`/api/credits` ripiega sull'euristica (`estimated_daily_consumption 25`,
+`consumption_source: heuristic`), quindi **nessun alert** e' scattato il 13/10
+nonostante il ritmo reale sopra soglia.
+
+**5) STOP-LOSS GIORNALIERO ARMATO = FALSO POSITIVO (bug escrow, non deployato).**
+Il bot **non sta ordinando** e la causa e' un blocco:
+`data/execution/daily_stop.json` = `{day 2026-10-13, start_bankroll 41.331,
+value 35.54, "equity wallet -14.0%", stopped_until 2026-10-14T12:23:03Z,
+basis live_equity}` (soglia 5%). E' **esattamente** il caso documentato nel
+working tree: un ordine da 7,35 USDC con **1,5559 riempiti** (escrow SX 7,35 vs
+ledger 1,5559) fece scendere l'equity da 41,33 a 35,54 → falso -14% su wallet
+intatto. L'equity REALE oggi e' **46,73 USDC** (disponibile 46,73, in gioco 0).
+Gli altri guardrail sono a posto: `auto_bet_mode.json` **assente** (kill switch
+`live`, `provider_ready: true`), `settlement_paused.json` **assente**,
+`weekly_stop.json` **assente**, `t60_kill.json` **assente**, `DRY_RUN False`,
+`/api/health` **200** con `overdue_orphans 0`.
+
+**6) ORDINI RESTING GTC — il percorso E' STATO esercitato (una volta).**
+`bets` live: **53 righe**, 52 `FULLY_FILLED` (124,17 USDC) + **1
+`PARTIAL_FILL_RESTED` (1,56 USDC)** e **0 `RESTING_FILLED`**; 0 bet aperte.
+`resting_orders.json` e' **assente** e `summary()` riporta `total 0`: e'
+coerente, perche' il registro tiene solo gli ordini che restano APERTI — un
+riempimento parziale (`size_matched > 0`) va direttamente a ledger. Quindi la
+leva GTC ha prodotto un riempimento parziale ed e' cablata come previsto, ma
+non ha ancora un ciclo completo registrato nel registro resting.
+
+**7) LAVORO NEL WORKING TREE: pronto, NON deployato (e con un env che lo
+neutralizzerebbe).** I file modificati non committati contengono tre cose:
+**cap per-ordine 12% → 5%** (`DEFAULT_KELLY_MAX_STAKE_PCT`), **riconciliazione
+escrow** in `_live_wallet_snapshot` (`exposure = max(ledger, escrow SX)` — il
+fix del falso stop del punto 5) e **`enforce_order_ceiling`** (nessun layer
+torneo/rush puo' superare il tetto). Verificato in produzione: `cap_order_stake(100)
+= 12.0` e `hasattr(auto_bet, "enforce_order_ceiling") = False`, cioe' il codice
+nuovo **non e' sul container**. ⚠️ **`KELLY_MAX_STAKE_PCT=0.12` e' impostata
+come env su Railway**: con l'env presente il default di codice (5%) NON ha
+effetto, quindi al deploy va anche `railway variables --service betting_bot
+--set KELLY_MAX_STAKE_PCT=0.05` (o la rimozione della variabile).
+
+**Env di produzione verificate (14/10, `/proc/1/environ`)**: `AUTO_BET_MODE=live`,
+`EXECUTION_PROVIDER=sxbet`, `STAKE_CAP_HARD=0`, `OPEN_EXPOSURE_CAP_PCT=0.50`,
+`KELLY_MAX_STAKE_PCT=0.12`, `KELLY_AGGRESSIVE_FRACTION=0.25`,
+`KELLY_AGGRESSIVE_MIN_FRACTION=0.15`, `KELLY_MIN_TICKET_USDC=1.00`,
+`TENNIS_ODDS_MIN=1.30`, `TENNIS_ODDS_MAX=2.00`, `ORACLE_ENABLED=1`,
+`ORACLE_BUDGET_DAY=1`, `ORACLE_H2H_BUDGET_DAY=10`, `GRIDIRON_TYPES=226,342,28`,
+`GRIDIRON_REQ_BUDGET_DAY=8`, `GRIDIRON_CREDIT_BUDGET_DAY=24`,
+`GRIDIRON_HOURS_AHEAD=168`, `TOURNAMENT_MODE=1`, `TOURNAMENT_MAX_STAKE_USDC=8.00`,
+`TOURNAMENT_BUDGET_USDC=35`, `T60_WINDOW_MIN_MIN=720`, `T60_WINDOW_MAX_MIN=2`,
+`T60_KILL_WALLET_USDC=25`, `EV_MIN_LIQUID=0.01` (`RUSH_FINAL` e `TENNIS_EV_MIN`
+assenti → default di codice).
+
+**8) TEST dei file modificati (working tree, offline)**: **327 verdi in 4 lotti**
+(90 = aggressive_kelly+order_watch · 163 = capital_enclosure+resting_orders+
+t60_breakers · 29 = agent_kelly · 45 = auto_bet_live), 0 fallimenti; `sx_signals`
+e `AGENTS.md` toccati dal cleanup sono coperti dai lotti già verdi.
+
+**9) RILEVATO MA NON CORRETTO (richiede decisione)**: 7 previsioni con kickoff
+passato restano `past_kickoff_open`/`unplanned` (ATP Shanghai, NFL, WTA Beijing,
+WTA Wuhan: leghe non mappate → costo 0, telemetria). Non sono soldi: nessuna bet
+su quelle partite.
