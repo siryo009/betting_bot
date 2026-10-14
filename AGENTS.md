@@ -11787,3 +11787,76 @@ RUNTIME** (`_num_env` a ogni chiamata), quindi bastano un `--set` e un redeploy.
 restituisce solo una finestra minima (per una prova live serve catturare lo
 STREAM con `timeout Ns railway logs --service betting_bot > file`). Il container
 **non ha `ps`** (usare `/proc/1/environ` e `/proc/1/cmdline`).
+
+### Tetto per ordine del TORNEO: resta il tetto GLOBALE, 8.00 -> 5.60 (14/10/2026, notte)
+
+**Decisione**: il cap effettivo per ordine del torneo **NON viene portato a 8.00**:
+resta il tetto globale `order_ceiling` = `equity x KELLY_MAX_STAKE_PCT`. Su Railway
+`TOURNAMENT_MAX_STAKE_USDC` 8.00 -> **5.60**, cosi' il cap dichiarato del torneo
+coincide con il tetto realmente applicato (fine del clamp silenzioso).
+
+**Perche' 5,60 e non 5,61 (il tetto esatto e' 5,6074)**: il clamp non e' silenzioso,
+logga a INFO *"stake riportato al tetto 12% del bankroll ... nessun layer puo'
+superarlo"*. Con 5,61 il layer avrebbe chiesto **0,0026 sopra** il tetto a OGNI pick
+del torneo, producendo una riga che accusa un layer di aver sfondato il tetto per un
+semplice arrotondamento: un log che mente e' la classe di difetto corretta lo stesso
+giorno (l'etichetta del tetto derivata dal parametro reale). Arrotondando per
+DIFETTO il cap non supera mai il tetto e quella riga resta un segnale **vero**
+(scatta solo quando l'equity scende e il 12% va davvero sotto 5,60).
+
+**La misura che ha deciso** (container AMS, sola lettura, 14/10):
+
+| grandezza | valore |
+|---|---|
+| equity (`sizing_equity`) | **46,7282** USDC |
+| tetto per-ordine (`order_ceiling`) | **5,6074** (12%) |
+| stop giornaliero (5%) | **2,336** |
+| stop settimanale (12%) | **5,607** |
+| ultime 6 bet live | **5 TENNIS + 1 1X2** -> **0 punti torneo** |
+| le 2 bet aperte | **5,61 esatti** (il cap era GIA' vincolante) |
+
+**Perche' non 8.00.** `order_ceiling` e' **globale** — unica definizione, letta da
+`enforce_order_ceiling`, da CB3 (`validate_order_payload`) e da
+`decision/stake_engine.size`. Portarlo a 8.00 significa
+`KELLY_MAX_STAKE_PCT = 0,171` = **17,1% per ordine su OGNI corsia**: la stessa
+percentuale che la direttiva del 13/10 ha rifiutato («un pick tennis piazzato a
+7,46 USDC su ~43 di equity (17%) ... il proprietario ha chiesto 2-5% per singola
+scommessa») — cioe' proprio il caso per cui `enforce_order_ceiling` e' stato
+scritto. Il rialzo avrebbe alzato del **43%** gli ordini delle corsie che oggi
+ordinano davvero (tennis), che valgono **zero punti** nel torneo (che conta solo
+mercati **NFL/NCAAF**, dalla descrizione ufficiale SX).
+
+**Perche' non il rialzo "solo torneo" (scoped).** Esiste solo il tetto globale:
+per dare 8.00 *solo* ai pick NFL/NCAAF servirebbe propagare un tetto per-pick in
+5-6 punti del percorso denaro (`enforce_order_ceiling`, `_live_fill`,
+`validate_order_payload`, `t60_stake`, `decision/stake_engine.size` e l'audit
+`order_watch`, che oggi segnalerebbe `stake_over_max`). Aritmetica del torneo
+alla stessa data: gap al taglio **237,22** punti, **7,6 giorni** residui, e la
+misura del 12/10 su 250 eventi NFL/NCAAF dava 87 candidati con EV>0 e il migliore
+a **+2,28%** (poi soglia di corsia a 1,5% -> ~5 pick): servono ~21 vincite a 5,60
+(o ~16 a 8,00) su ~10-15 tentativi nel weekend decisivo -> **fuori portata con
+entrambi i valori**. Il rialzo avrebbe comprato **varianza, non punti**, su denaro
+reale. Il percorso scoped resta l'alternativa documentata sopra.
+
+**Cosa cambia operativamente: NULLA — ed e' una proprieta', non un'opinione.** Il
+tetto e' un `min(cap torneo, order_ceiling)`: con 8.00 il layer chiedeva fino a
+8.00 e veniva **clampato** a 5,61; con 5,60 chiede 5,60 ed e' entro il tetto. Il valore
+scritto nel config ora e' quello applicato — stessa sostanza della fix del log
+dello stesso giorno (l'etichetta del tetto si deriva dal parametro reale).
+
+⚠️ **Caveat dichiarato**: 5,60 e' il tetto **all'equity di oggi** (46,73 x 12% = 5,6074).
+Se l'equity cresce, il tetto globale cresce e questo valore assoluto lo limiterebbe
+dal basso: va riverificato (o riportato a 8.00 insieme al tetto) prima di
+aspettarsi ticket piu' grandi. La forma corretta a regime sarebbe esprimere il cap
+del torneo come "lo stesso tetto del progetto" invece che con un numero — modifica
+di codice, non di env.
+
+**Verifica in produzione (14/10/2026)**: deploy dopo il set env ->
+`TOURNAMENT_MAX_STAKE_USDC=5.60` / `max_order_stake() = 5.6` contro
+`order_ceiling(46.73) = 5.6074` (il layer resta ENTRO il tetto, nessun clamp
+spurio).
+
+**Ripristino (una env + redeploy)**: `TOURNAMENT_MAX_STAKE_USDC=8.00` **e**
+`KELLY_MAX_STAKE_PCT=0.171` (17,1%) per tornare a 8.00; oppure
+`KELLY_MAX_STAKE_PCT=0.05` (tetto 2,34) per applicare davvero il contenimento al
+5% chiesto il 13/10 (il default di codice e' gia' 5%, l'env 0.12 lo annulla).
