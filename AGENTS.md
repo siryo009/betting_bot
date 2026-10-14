@@ -12021,3 +12021,165 @@ chief_shadow_wiring + railway_drift_check + secret_hygiene (**106**).
 container — e' il servizio a monte, non il codice (livello del log dedicato non
 introdotto: fuori perimetro). Con questo fix l'attesa e' **una volta per ora**,
 non una per squadra per ciclo.
+
+### Roadmap quantitativa 2026: 6 moduli avanzati, Fase 1 consegnata (14/10/2026)
+
+Direttiva del proprietario: integrare 6 strategie quantitative avanzate
+(ML avanzata, line movement/sharp sentiment, inferenza bayesiana, lineup window
+execution, catene di Markov tennis, portfolio theory & copule). Prodotto
+dapprima il documento di architettura **`QUANT_MODULES.md`** (scelte di
+sequenza, misure richieste, vincoli di crediti e di rischio), poi **due Fasi 1
+implementate e misurate sui DATI REALI**, entrambe INERTI in produzione (nessun
+import dai percorsi d'ordine, nessuna scrittura, nessuna rete).
+
+**REGOLA DI SEQUENZA (perche' questo ordine)**: prima i moduli che **riducono il
+rischio sui dati che GIA' abbiamo** (M6, M1-feature), poi quelli che chiedono
+**dati che non abbiamo ancora** (M2-3-5), e per ultimo le modifiche
+all'**esecuzione** (M4). Ogni modulo si misura sulla `significance.py` (IC95 +
+edge minimo distinguibile): **a quota media 1.65, 30 chiusure distinguono solo
+un edge >= 41%** — un modulo si accetta solo se la misura e' CONCLUSIVA, non se
+il numero e' grande.
+
+**M6 — PORTFOLIO RISK / COPULE, FASE 1 (`portfolio_risk.py`, 844 righe).**
+Sola `numpy` (scipy opzionale per le copule), **zero rete, zero DB, zero
+ordini**. Copre i buchi reali gia' misurati: il cap 30% usa un **blocco di LEGA**
+(la correlazione vera sta nel **mercato**: 1 e Under 2.5 dello stesso match
+dipendono dallo stesso punteggio) e il Kelly assumeva **indipendenza**.
+- `kelly_joint()`: Kelly multi-esito con matrice di covarianza (il Kelly scalare
+  e' il caso diagonale; la quota in forma decimale -> `b = o - 1`).
+- `risk_metrics()`, `allocate()` (proporzionale / **ERC** equi-risk-contribution),
+  `build_candidates()`, copule (`gaussian` a `rho` stimato dai residui
+  latenti, `student_t` con nu fittato, correlazione a coda per il rischio
+  sistemico), `stress_test()` (scenari 1X2+xG).
+- Motivi machine-readable e **fail-closed** dove serve (matrice malformata ->
+  rifiuto, non correzione in silenzio).
+**Misura reale in produzione (container, sola lettura)**: 55 bet live chiuse ->
+**rho medio 0.48** (i bound di correlazione sono **sistematicamente accoppiati**,
+non indipendenti), **rho estremo 0.92**, **shock congiunto** che ha colpito
+**14/34** terne (41%) contro un'attesa di indipendenza di ~1.5 -> il vincolo
+vero non e' il cap 30% ma **quante posizioni si tengono in parallelo su bound
+correlati**.
+
+**M1 — FEATURE ENGINEERING AVANZATA, FASE 1 (`match_features.py`).**
+Costruisce il dataset di feature **senza xG da provider** (non disponibile
+gratis): le ricava dalla **storia dei gol** di `match_results`
+(`football_hist`), a **zero crediti e zero rete**.
+- `rolling_team_form()` (gol fatti/subiti, forma pesata per recency, **punti
+  per partita**), `rest_and_density()` (giorni di riposo, densita' di
+  calendario), `situational()` (casa/trasferta, promozione/salvezza dalla
+  posizione, derby per vicinanza di nome), `context_features()`,
+  `features_for()` (una riga per partita) e `history_feature_rows()`.
+- **Gate anti-leakage** (il difetto che falsa qualunque backtest): le feature di
+  una partita si calcolano SOLO da partite **precedenti allo stesso kickoff** —
+  e c'e' un tripwire dedicato.
+- **Scrematura a QUALITA' misurata**: `screen_features()` (Information
+  Coefficient, monotonia, copertura, collinearita') per non consegnare a
+  LightGBM 60 feature rumorose che fanno **finta di predire**.
+**Misura reale sul container (`match_results`, 17.127 partite)**: il dataset si
+costruisce, la scrematura **conclude** (nessun feature e' risultato
+degenerato) e il report dichiara campione e copertura.
+**Tre difetti di DIAGNOSTICA trovati dal run reale e corretti** (la stessa
+classe del 20/10: uno strumento che non distingue "0" da "illeggibile"):
+1. `Campione: None` -> campo non inizializzato;
+2. "una_sola_classe" su **zero righe** (confondeva "dato assente" con
+   "sbilanciamento del campione");
+3. l'epoch (float) passato a `features_for`, che si aspetta una data ISO: tutte
+   le righe risultavano "squadra sconosciuta" (fix alla radice, una sola
+   definizione del formato data).
+
+**Test**: `test_portfolio_risk.py` + `test_match_features.py` — **tutti OFFLINE**
+(ledger/match_results temporanei, nessuna rete): la connessione di sola lettura
+**RIFIUTA** una `UPDATE`, il tripwire verifica che importare i moduli NON carichi
+`auto_bet`/`bot`/`tracker`/`odds_api`. `compileall` OK, 0 marker di conflitto.
+
+### M6 Fase 2 — GATE DI DIPENDENZA (copula) IN PRODUZIONE (14/10/2026)
+
+**Direttiva del proprietario**: il gate va in **ENFORCE** (nessuna shadow), il
+moltiplicatore puo' **SOLO ridurre o azzerare** (range [0, 1]), correlazione
+bassa -> 1.0, moderata -> riduzione proporzionale, critica -> **BLOCCO
+dell'ordine** con lo scarto loggato. Nuovo modulo `copula_portfolio.py`
+(1360 righe) + `test_copula_portfolio.py` (**93 verdi, tutti OFFLINE**).
+
+**PERCHE' GIRA DOPO IL TETTO E PRIMA DELLA FASE 3** (e non subito dopo il
+Kelly): i layer che stanno sopra al Kelly (torneo x1.5, rush finale) **alzano**
+lo stake e `enforce_order_ceiling` lo riporta al tetto. La coda di portafoglio
+dipende dagli IMPORTI, quindi il gate si misura sullo stake **definitivo**;
+dopo di lui nessun layer puo' rialzare cio' che ha ridotto. **In SIM non gira**:
+la cassa simulata alimenta ML e CLV e cambiarne l'era sarebbe un effetto
+collaterale non richiesto (`test_gate_solo_nel_percorso_live`).
+
+**Cosa misura** (tre vincoli, vince il piu' severo):
+- `m_corr`: dipendenza EFFETTIVA con il portafoglio = correlazione dichiarata +
+  **coda** della t-copula (`effective_dependence`); `same_match` 0.98 -> 0.89 =
+  banda CRITICA, `same_cluster_window` 0.60, `same_cluster` 0.30,
+  `same_window` 0.12, altrimenti 0 (indipendenti);
+- `m_cluster`: cap di **CLUSTER** (lega) = `COPULA_CLUSTER_PCT` (50%) del
+  **BANKROLL**;
+- `m_tail`: budget di **CODA** = perdita al quantile q=5% <= `COPULA_DD_LEVEL`
+  (35%) del bankroll, misurato sulla **copula t** del portafoglio che include
+  il candidato;
+- sotto `COPULA_MIN_MULTIPLIER` (0.25) lo stake va a **0** (blocco) e lo scarto
+  e' loggato **uno per candidato** (motivo machine-readable); sotto il ticket
+  minimo del motore -> `blocked_below_ticket` (mai un arrotondamento).
+Il **cap di cluster e' una quota del BANKROLL, non della somma gia' puntata**:
+con la somma, un portafoglio vuoto aveva budget 0 e il primo pick veniva
+bloccato "per concentrazione di se' stesso" — un gate che non lasciava passare
+**nessun** ordine (bug trovato misurando, `test_portafoglio_vuoto_*`).
+
+**Due bug reali trovati misurando (non ipotizzati)**:
+1. **il fattore di coda era condiviso da TUTTE le unita'** (anche quelle
+   dichiarate indipendenti, d=0): la t-copula inventava una coda comune —
+   misurato, 6 unita' a rho=0 davano P(0 perdenti) **0.277** invece di
+   `0.588^6 = 0.041`. Ora la miscelazione chi-quadro e' **per componente
+   connessa** (`_components(corr)`): le unita' indipendenti non condividono il
+   fattore e le marginali restano t(nu) (uniformizzazione esatta);
+2. **il criterio di coda non si assume monotono**: su una quantile EMPIRICA
+   discreta alzare lo stake puo' **alzare** il quantile (misurato: la stessa
+   terna con 5 unita' dava 16.5 di perdita di coda, con 6 unita' 13.0). Ogni
+   punto della griglia `M_GRID` (41 punti, 0..1) viene VALUTATO e si sceglie il
+   piu' alto feasible: il moltiplicatore restituito rispetta sempre il vincolo.
+Ripulito nello stesso giro: il motivo del blocco sotto il pavimento dice
+**quale** vincolo morde (cluster / coda / correlazione) e i candidati non
+modellabili sono **contati** (`errored`, `by_reason`) invece di sparire dai
+contatori; `apply` ha una **seconda cintura** attorno a `evaluate` (la promessa
+"mai eccezioni" non dipende da quel che c'e' dentro l'altra funzione).
+
+**Dove e' collegato**: `auto_bet._apply_copula(candidates, bankroll=...)`
+(ultimo passo di sizing della corsia LIVE) + `_lam_lookup(match_id)` che legge
+`lam_h`/`lam_a` da `match_analysis` (memo `_LAM_CACHE` azzerata a ogni giro:
+la griglia va riletta); con le lambda la distribuzione del P/L e' **ESATTA**
+(griglia di punteggi Dixon-Coles via `portfolio_risk.block_pl_distribution`),
+senza lambda e' di **mercato** (2-3 punti) e la fonte e' dichiarata.
+Fail-safe: qualunque errore lascia i candidati **invariati** (fail-open
+dichiarato, stessa direzione di `apply_correlation_cap`) — un guasto di calcolo
+non e' un rischio misurato.
+
+**Env** (tutte `preserve()` in `.railway/railway.ts`, lette a RUNTIME):
+`COPULA_GUARD` (1, interruttore), `COPULA_MODE` (enforce), `COPULA_MAX_CORR`
+(0.45), `COPULA_CRITICAL_CORR` (0.80), `COPULA_DD_LEVEL` (0.35 perdita di coda
+ammessa), `COPULA_DD_QUANTILE` (0.05), `COPULA_CLUSTER_PCT` (0.50 del
+bankroll), `COPULA_MIN_MULTIPLIER` (0.25), `COPULA_MAX_DD_PROB` (misura
+informativa), `COPULA_TAIL_WEIGHT` (0.50), `COPULA_TAIL_NU` (6),
+`COPULA_SAME_MATCH_RHO` (0.98), `COPULA_SAME_LEAGUE_RHO` (0.80),
+`COPULA_SAME_WINDOW_RHO` (0.15), `COPULA_WINDOW_MIN` (da
+`auto_bet.CORRELATION_WINDOW_MIN`), `COPULA_SIMS` (2000), `COPULA_SEED` (7),
+`COPULA_VIG_HAIRCUT` (0.04, haircut sulla probabilita' di ripiego). `decision/limits.py` prende le bande **dalla loro
+fonte** (`_copula_limits()` -> `copula_portfolio.config()`), quindi il
+`config_hash` dell'audit cambia quando cambiano le bande.
+
+**Ripulizia dichiarata (stesso giro)**: `order_concentration_guard.py` e
+`sharp_clv_guard.py` (due BOZZE non collegate, senza test, con docstring che
+dichiaravano un'integrazione inesistente; la seconda **non importava
+nemmeno** — `TypeError: non-default argument 'selected_odds' follows default
+argument`) sono state spostate in `_archivio/2026-10-14-pulizia/`. La
+concentrazione e' coperta dal cap di cluster del gate copula e dal
+`apply_correlation_cap` testato; il prezzo sharp e' gia' giudicato dal gate
+top-down. Recuperabili dall'archivio se si vorra' riprenderle.
+
+**STILL NON COLLEGATI**: `portfolio_risk.py` (misura, usato dal gate copula per
+la griglia esatta) e `match_features.py` (feature builder) restano moduli di
+MISURA senza effetto sul denaro; la Fase 2 di M1 (LightGBM) **non e' installato**
+e va deciso a livello di deploy/requirements — questo e' il passo bloccante.
+Prossimo passo raccomandato: **M3 (inferenza bayesiana, `bayes_ratings.py`)**,
+che usa solo `match_results` (17k righe gia' presenti) e alimenta `rating_engine`
+senza nuove dipendenze.

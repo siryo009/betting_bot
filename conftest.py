@@ -342,10 +342,35 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     if "test_clv_tracker" not in request.node.nodeid:
         monkeypatch.setenv("CLV_SX_CAPTURE", "0")
         monkeypatch.setenv("CLV_TRACKER_ENABLED", "0")
+    # GATE DI DIPENDENZA / COPULA (14/10/2026, `copula_portfolio.py`): e' in
+    # ENFORCE nel percorso ordini e RIDUCE gli stake in base alla dipendenza
+    # (e legge le posizioni APERTE dal ledger). Nei test che misurano altro —
+    # cap, wallet, liquidita', T-60, torneo, rush — cambierebbe lo stake atteso
+    # E leggerebbe un DB che non e' il loro. Spento alla fonte; il file
+    # dedicato (`test_copula_portfolio`) lo riaccende esplicitamente.
+    if "test_copula_portfolio" not in request.node.nodeid:
+        monkeypatch.setenv("COPULA_GUARD", "0")
+    try:
+        import copula_portfolio as _cp
+        _cp.reset_config_cache()
+    except Exception:
+        pass
+    try:
+        # Memo per giro delle lambda: a livello di modulo, sopravvivere fra i
+        # test farebbe misurare la partita di un test precedente.
+        import auto_bet as _ab
+        _ab._LAM_CACHE.clear()
+    except Exception:
+        pass
     yield
     _ld.reset_cache()
     _oracle_skips.reset_dedup()
     _tbl.reset_cache()
+    try:
+        import copula_portfolio as _cp2
+        _cp2.reset_config_cache()
+    except Exception:
+        pass
 
 
 def _free_enclosure(bankroll: float, new_stake: float = 0.0, **kw) -> dict:

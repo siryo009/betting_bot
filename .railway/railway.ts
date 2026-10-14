@@ -186,6 +186,37 @@ export default defineRailway(() => {
       BRAIN_VOLATILITY_PP_MIN: preserve(),
       BRAIN_SHIELD_CAP_PCT: preserve(),
       OPEN_EXPOSURE_CAP_PCT: preserve(),
+      // GATE DI DIPENDENZA / COPULA (14/10/2026, direttiva proprietario: enforce
+      // in produzione, moltiplicatore SOLO in [0,1]). Ultimo passo di sizing
+      // prima della FASE 3: `COPULA_GUARD` (1 = attivo, 0 = spento),
+      // `COPULA_MODE` (enforce), bande di dipendenza `COPULA_MAX_CORR` (0.45) /
+      // `COPULA_CRITICAL_CORR` (0.80), peso della coda `COPULA_TAIL_WEIGHT`
+      // (0.5) e gradi di liberta' `COPULA_TAIL_NU` (6), budget di CODA
+      // `COPULA_DD_LEVEL` (0.35 = perdita di coda ammessa) e
+      // `COPULA_DD_QUANTILE` (0.05), cap di cluster per lega
+      // `COPULA_CLUSTER_PCT` (0.50 del bankroll), pavimento
+      // `COPULA_MIN_MULTIPLIER` (0.25: sotto si blocca invece di ridurre),
+      // correlazioni DICHIARATE fra partite diverse (`COPULA_SAME_LEAGUE_RHO`
+      // 0.80, `COPULA_SAME_WINDOW_RHO` 0.15, `COPULA_SAME_MATCH_RHO` 0.90),
+      // simulazione (`COPULA_SIMS` 2000, `COPULA_SEED` 7).
+      COPULA_GUARD: preserve(),
+      COPULA_MODE: preserve(),
+      COPULA_MAX_CORR: preserve(),
+      COPULA_CRITICAL_CORR: preserve(),
+      COPULA_TAIL_WEIGHT: preserve(),
+      COPULA_TAIL_NU: preserve(),
+      COPULA_DD_LEVEL: preserve(),
+      COPULA_DD_QUANTILE: preserve(),
+      COPULA_MAX_DD_PROB: preserve(),
+      COPULA_CLUSTER_PCT: preserve(),
+      COPULA_MIN_MULTIPLIER: preserve(),
+      COPULA_SAME_LEAGUE_RHO: preserve(),
+      COPULA_SAME_WINDOW_RHO: preserve(),
+      COPULA_SAME_MATCH_RHO: preserve(),
+      COPULA_WINDOW_MIN: preserve(),
+      COPULA_SIMS: preserve(),
+      COPULA_SEED: preserve(),
+      COPULA_VIG_HAIRCUT: preserve(),
       ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),
       T60_MAX_STAKE_USDC: preserve(),

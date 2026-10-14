@@ -40,3 +40,4 @@ data/tennis_lane/
 data/toa_tennis_*.json
 # Log della diagnostica dei guardrail (`verify_guardrails.py`)
 guardrails_output.log
+.aider*

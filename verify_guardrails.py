@@ -74,6 +74,13 @@ os.environ["ESPORTS_LIVE"] = "0"
 # GUARDRAIL, non l'oracolo: qui la rete non si tocca (la meccanica e' coperta da
 # `test_line_oracle.TestFetchOnDemand` con il fetch iniettato).
 os.environ["ORACLE_ONDEMAND_ENABLED"] = "0"
+# GATE DI DIPENDENZA / COPULA (14/10/2026): e' ENFORCE nel percorso ordini
+# (ultimo passo di sizing) e RIDUCE/blocca in base alla dipendenza fra pick e
+# posizioni aperte. Gli scenari A-H misurano ALTRI guardrail: con la copula
+# accesa gli stake attesi (C, H) cambierebbero e il verdetto non sarebbe piu'
+# quello che lo scenario vuole dimostrare. Spenta qui, e RIACCESA nello
+# scenario I, che e' quello che la misura.
+os.environ["COPULA_GUARD"] = "0"
 # Ordini RESTING GTC OFF (10/10/2026): quando il percorso taker non e'
 # eseguibile (`book_sottile` nella scenario E, oppure ordine non riempito)
 # `_live_fill` prova a PARCHEGGIARE il prezzo sul book, e quel percorso fa un
@@ -704,10 +711,108 @@ def main() -> int:
     auto_bet._execution_mode = lambda allow_sim=True: "sim"
     ok_h = ok_h1 and ok_h2 and ok_h3
 
+    # -------------------- I. GATE DI DIPENDENZA (COPULA) — 14/10/2026 ---------
+    _head("I. GATE DI DIPENDENZA (copula) — riduce, blocca, e non alza MAI")
+    import copula_portfolio as _cp
+    _reset_state()
+    conn = tracker._get_conn()
+    conn.execute("DELETE FROM bets")
+    conn.execute("DELETE FROM predictions")
+    conn.execute("DELETE FROM matches")
+    conn.commit()
+    conn.close()
+    # Equity 60 (non 33.55): con l'equity reale lo stake Kelly del seed e' ~1.68
+    # USDC e la riduzione proporzionale (m_corr 0.56) scende a 0.94, cioe' SOTTO
+    # il ticket minimo 1.00 -> il pick verrebbe bloccato (`blocked_below_ticket`)
+    # invece di essere ridotto: lo scenario misurerebbe il ticket, non il gate.
+    equity_i = 60.0
+    auto_bet._execution_mode = lambda allow_sim=True: "live"
+    auto_bet._live_wallet_snapshot = lambda: {
+        "available": equity_i, "exposure": 0.0, "equity": equity_i}
+    auto_bet.T60_EXECUTION_ONLY = False
+    calls_i = {"fill": 0, "stakes": []}
+
+    def _fill_i(pick, stake, floor):  # noqa: ANN001
+        calls_i["fill"] += 1
+        calls_i["stakes"].append(round(float(stake), 2))
+        return {"ok": True, "market_id": "m", "selection_id": 1,
+                "bet_id": "b", "status": "FULLY_FILLED",
+                "price": floor, "stake": stake}
+
+    auto_bet._live_fill = _fill_i
+
+    # (1) RIDUZIONE PROPORZIONALE: due pick della STESSA lega nella stessa
+    #     finestra di kickoff -> dipendenza dichiarata 0.80 (-> d 0.60, banda
+    #     moderata): il secondo NON puo' restare a stake pieno.
+    #     Esiti CANONICI ("1"/"2"): un nome squadra che non combacia con
+    #     home/away verrebbe scartato dall'adapter della catena e la misura
+    #     riguarderebbe un insieme diverso da quello su cui si ordina.
+    _seed("i-a", "1", 1.65, 0.60, 0.07, home="A", away="B", hours=5)
+    _seed("i-b", "1", 1.70, 0.58, 0.07, home="C", away="D", hours=5.2)
+    os.environ["COPULA_GUARD"] = "1"
+    _cp.reset_config_cache()
+    mark = len(_RECORDS)
+    placed_i1 = auto_bet.run_today_bets(stake_eur=5.0)
+    _print_logs(mark)
+    scaled = [c for c in placed_i1
+              if (c.get("copula") or {}).get("decision") == "scaled"]
+    max_mult = max([float((c.get("copula") or {}).get("multiplier", 1.0))
+                    for c in placed_i1] or [1.0])
+    ok_i1 = (len(scaled) >= 1 and max_mult <= 1.0
+             and all(float((c.get("copula") or {}).get("multiplier", 1.0)) <= 1.0
+                     for c in placed_i1))
+    print(f"  {GREEN if ok_i1 else RED}→ dipendenza 0.60 (stessa lega+finestra): "
+          f"{len(scaled)} pick ridotti {[round(float(c['stake']), 2) for c in scaled]}, "
+          f"moltiplicatore massimo {max_mult:.2f} (mai > 1.0){RESET}")
+
+    # (2) BLOCCO su correlazione CRITICA: una posizione APERTA sulla stessa
+    #     partita (senza griglia punteggi -> rho dichiarato 0.98 -> d 0.89)
+    #     deve far SALTARE il nuovo ordine, con lo scarto a log.
+    conn = tracker._get_conn()
+    conn.execute("DELETE FROM bets")
+    conn.execute("DELETE FROM predictions")
+    conn.execute("DELETE FROM matches")
+    conn.commit()
+    conn.close()
+    #     L'esito APERTO e' DIVERSO dal candidato: `bet_exists_open` scatta su
+    #     match_id+esito, quindi con lo stesso esito il blocco verrebbe dal
+    #     dedup e non dalla copula (la controprova (3) lo dimostra).
+    _seed("i-same", "1", 1.65, 0.60, 0.07, home="Osasuna", away="Getafe",
+          hours=5)
+    tracker.save_bet(match_id="i-same", mercato="1X2", esito="2",
+                     market_id="0xsame", selection_id=1, price=1.90,
+                     stake=1.50, mode="live", status="FULLY_FILLED",
+                     bet_id="0xopen")
+    calls_i["fill"] = 0
+    calls_i["stakes"] = []
+    mark = len(_RECORDS)
+    placed_i2 = auto_bet.run_today_bets(stake_eur=5.0)
+    _print_logs(mark)
+    ok_i2 = (placed_i2 == [] and calls_i["fill"] == 0)
+    print(f"  {GREEN if ok_i2 else RED}→ stessa partita (d 0.89 >= "
+          f"{_cp.current_config()['critical_corr']:.2f}): ordini inviati al "
+          f"provider {calls_i['fill']} (atteso 0){RESET}")
+
+    # (3) CONTROPROVA: a gate SPENTO lo stesso board arriva al provider (prova
+    #     che il blocco di (2) e' la copula, non un altro guardrail).
+    os.environ["COPULA_GUARD"] = "0"
+    _cp.reset_config_cache()
+    calls_i["fill"] = 0
+    mark = len(_RECORDS)
+    placed_i3 = auto_bet.run_today_bets(stake_eur=5.0)
+    _print_logs(mark)
+    ok_i3 = (calls_i["fill"] >= 1)
+    print(f"  {GREEN if ok_i3 else RED}→ controprova con COPULA_GUARD=0: "
+          f"{calls_i['fill']} ordini al provider (atteso >= 1){RESET}")
+    os.environ["COPULA_GUARD"] = "0"     # invariato per gli scenari precedenti
+    auto_bet.T60_EXECUTION_ONLY = True
+    auto_bet._execution_mode = lambda allow_sim=True: "sim"
+    ok_i = ok_i1 and ok_i2 and ok_i3
+
     # ------------------------------------------------------------- ESITO ------
     _head("ESITO")
     all_ok = (ok_a and ok_b and ok_c and ok_d and ok_e and ok_f and ok_g
-              and ok_h)
+              and ok_h and ok_i)
     for name, ok in (("A kill-switch OFF", ok_a),
                      ("B stop-loss 24h", ok_b),
                      ("C Kelly dinamico k 0.15-0.25 / cap 12% / ticket 1.00", ok_c),
@@ -716,7 +821,8 @@ def main() -> int:
                      ("F lega strategia", ok_f),
                      ("G circuit breakers T-60", ok_g),
                      ("H recinto esposizione %.0f%%"
-                      % (auto_bet.OPEN_EXPOSURE_CAP_PCT * 100), ok_h)):
+                      % (auto_bet.OPEN_EXPOSURE_CAP_PCT * 100), ok_h),
+                     ("I gate di dipendenza (copula)", ok_i)):
         print(f"  {GREEN + '✅' if ok else RED + '❌'} {name}{RESET}")
     print(f"\n  {BOLD}{GREEN + 'TUTTI I GUARDRAIL BLOCCANO' if all_ok else RED + 'QUALCOSA NON BLOCCA'}{RESET}\n")
     return 0 if all_ok else 1

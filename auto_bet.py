@@ -2596,6 +2596,111 @@ def enforce_order_ceiling(candidates: list[dict], *,
     return kept, info
 
 
+_LAM_CACHE: dict = {}
+
+
+def _lam_lookup(match_id) -> dict | None:
+    """Lambda (gol attesi) della partita, per la griglia punteggi della copula.
+
+    Con le lambda il modulo di dipendenza calcola la legge congiunta di una
+    partita **esattamente** (griglia Poisson + Dixon-Coles) invece di stimarla:
+    e' la stessa matematica della produzione, presa da `match_analysis`. Memo
+    per giro: il giro gira ogni 60s e piu' pick condividono la stessa partita.
+    Su errore ritorna None (l'unita' ricade sulla distribuzione di mercato).
+    """
+    key = str(match_id or "")
+    if not key:
+        return None
+    if key in _LAM_CACHE:
+        return _LAM_CACHE[key]
+    out = None
+    try:
+        from tracker import _get_conn
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT lam_h, lam_a FROM match_analysis WHERE match_id = ? "
+            "ORDER BY id DESC LIMIT 1", (key,)).fetchone()
+        conn.close()
+        if row and row[0] and row[1]:
+            out = {"lam_h": float(row[0]), "lam_a": float(row[1])}
+    except Exception as e:
+        logger.debug("auto_bet: lambda non leggibili per %s (%s)", key, e)
+        out = None
+    _LAM_CACHE[key] = out
+    return out
+
+
+def _apply_copula(candidates: list[dict], *,
+                  bankroll: float | None = None) -> tuple[list[dict], dict]:
+    """GATE DI DIPENDENZA (copula) — ultimo passo di sizing prima della FASE 3.
+
+    Direttiva del proprietario (14/10/2026): ENFORCE in produzione (nessuna
+    shadow), il moltiplicatore puo' SOLO ridurre o azzerare (range [0, 1]),
+    correlazione bassa -> 1.0, moderata -> riduzione proporzionale, critica ->
+    BLOCCO dell'ordine con lo scarto loggato.
+
+    PERCHE' QUI e non subito dopo il Kelly: i layer che stanno sopra al Kelly
+    (torneo x1.5, rush finale) ALZANO lo stake, ed `enforce_order_ceiling` lo
+    riporta al tetto. Valutare la dipendenza prima significherebbe misurarla su
+    uno stake che non e' quello ordinato: la coda di portafoglio dipende dagli
+    importi, quindi il gate gira sullo stake DEFINITIVO. Nessun layer segue
+    (solo la FASE 3), quindi nessuno puo' rialzare cio' che la copula riduce.
+
+    Cosa misura: dipendenza EFFETTIVA (correlazione + coda della t-copula) fra
+    il candidato e il portafoglio (posizioni APERTE lette dal ledger + pick gia'
+    accettati in questo giro), cap di CLUSTER per lega e budget di CODA
+    (perdita di coda a q=5% <= 35% del bankroll).
+
+    Fail-safe: qualunque errore lascia i candidati INVARIATI (fail-open
+    dichiarato, la stessa direzione di `apply_correlation_cap`): un guasto di
+    calcolo non e' un rischio misurato e non deve fermare il bot.
+    """
+    info: dict = {"enabled": False, "active": False, "kept": len(candidates),
+                  "scaled": 0, "blocked": 0, "reason": ""}
+    _LAM_CACHE.clear()          # memo per GIRO: la griglia va riletta ogni volta
+    try:
+        import copula_portfolio as _cp
+    except Exception as exc:
+        logger.debug("auto_bet: gate copula non disponibile (%s)", exc)
+        return candidates, info
+    try:
+        kept, info = _cp.apply(candidates, bankroll=float(bankroll or 0.0),
+                               lambdas_lookup=_lam_lookup)
+    except Exception as exc:                                  # pragma: no cover
+        logger.warning("auto_bet: gate copula non applicato (%s): candidati "
+                       "invariati", exc)
+        return candidates, dict(info, reason="error")
+    info["reason"] = "copula"
+    # Gli scarti per CORRELAZIONE si loggano uno per uno: sono la direttiva
+    # ("blocca l'ordine e logga lo scarto") e senza la riga per candidato il
+    # perche' resterebbe un contatore indistinguibile da un guasto.
+    for item in info.get("blocked_detail") or []:
+        logger.info("auto_bet: %s (%s) COPULA bloccato [%s]: %s (stake %.2f)",
+                    item.get("match_id"), item.get("esito"), item.get("reason"),
+                    item.get("detail") or "", float(item.get("stake_before") or 0.0))
+    for cand in kept:
+        dec = cand.get("copula") or {}
+        if dec.get("decision") == "scaled":
+            logger.info("auto_bet: %s (%s) COPULA dipendenza %.2f -> stake "
+                        "%.2f -> %.2f USDC (m_corr %.2f, cluster %.2f, coda "
+                        "%.2f) %s", cand.get("match_id"), cand.get("esito_key"),
+                        float(dec.get("dependence_max") or 0.0),
+                        float(dec.get("stake_before") or 0.0),
+                        float(dec.get("stake_after") or 0.0),
+                        float(dec.get("m_corr") or 0.0),
+                        float(dec.get("m_cluster") or 0.0),
+                        float(dec.get("m_tail") or 0.0),
+                        dec.get("detail") or "")
+    if info.get("scaled") or info.get("blocked"):
+        logger.info("auto_bet: gate copula (%s) — %d ridotti, %d bloccati, "
+                    "%d invariati | bande %.2f/%.2f",
+                    info.get("copula"), info.get("scaled", 0),
+                    info.get("blocked", 0), info.get("clear", 0),
+                    float(info.get("max_corr") or 0.0),
+                    float(info.get("critical_corr") or 0.0))
+    return kept, info
+
+
 def chief_execution_enabled() -> bool:
     """La catena piramidale puo' emettere ordini REALI in questo giro?
 
@@ -4863,6 +4968,18 @@ def run_today_bets(stake_eur: float | None = None,
                         aggressive_cap_pct() * 100.0,
                         float(_bankroll or 0.0), _ceiling.get("clamped", 0),
                         _ceiling.get("dropped", 0))
+
+        # --- GATE DI DIPENDENZA / COPULA (14/10/2026, direttiva proprietario):
+        # ENFORCE in produzione, ultimo passo di sizing prima della FASE 3. Il
+        # moltiplicatore puo' SOLO ridurre o azzerare: dipendenza bassa -> 1.0,
+        # moderata -> riduzione proporzionale, critica -> ordine BLOCCATO con lo
+        # scarto loggato. In SIM NON si applica (la cassa simulata alimenta ML e
+        # CLV: cambiarne l'era sarebbe un effetto collaterale non richiesto).
+        candidates, _cop = _apply_copula(candidates, bankroll=_bankroll)
+        if _cop.get("blocked"):
+            logger.warning("auto_bet: %d candidati bloccati dal gate di "
+                           "dipendenza (copula): nessun ordine per loro",
+                           _cop["blocked"])
 
     # --- FASE 3: esegui e registra (LIVE via execution_engine oppure SIM) ---
     from tracker import save_bet

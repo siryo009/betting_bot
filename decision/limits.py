@@ -53,6 +53,30 @@ def _apply_stake_caps_from_env(base: float, strong: float) -> tuple[float, float
             _env_float("STAKE_CAP_PCT_STRONG", strong))
 
 
+def _copula_limits() -> dict:
+    """Bande del gate di dipendenza, dalla LORO fonte (`copula_portfolio`).
+
+    Nessuna soglia copiata: se il modulo cambia i default (o l'operatore li
+    cambia da env) questi campi seguono. Se il modulo non e' importabile si
+    tengono i default dichiarati nella classe, che sono gli stessi valori —
+    la catena non si rompe e non inventa numeri.
+    """
+    try:
+        import copula_portfolio as cp
+        conf = cp.config()
+        return {
+            "copula_enabled": bool(conf.get("enabled")),
+            "copula_mode": str(conf.get("mode")),
+            "copula_max_corr": float(conf.get("max_corr")),
+            "copula_critical_corr": float(conf.get("critical_corr")),
+            "copula_dd_level": float(conf.get("dd_level")),
+            "copula_dd_quantile": float(conf.get("dd_quantile")),
+            "copula_cluster_pct": float(conf.get("cluster_pct")),
+        }
+    except Exception:
+        return {}
+
+
 class RiskLimits(BaseModel):
     """Tutte le soglie che un Risk Engine puo' applicare."""
 
@@ -91,6 +115,19 @@ class RiskLimits(BaseModel):
     # --- portafoglio ---
     total_exposure_cap_pct: float = 0.40
     correlation_cap_pct: float = 0.30
+    # --- dipendenza fra scommesse simultanee (fonte: copula_portfolio) ---
+    #: Il gate di dipendenza RIDUCE lo stake (mai lo alza) e in ENFORCE sta nel
+    #: percorso ordini: entra nei limiti perche' `config_hash` deve cambiare
+    #: quando cambiano le bande — altrimenti due decisioni prese con soglie di
+    #: correlazione diverse sembrano identiche nel log (il motivo per cui
+    #: `config_hash` esiste).
+    copula_enabled: bool = True
+    copula_mode: str = "enforce"
+    copula_max_corr: float = 0.45
+    copula_critical_corr: float = 0.80
+    copula_dd_level: float = 0.35
+    copula_dd_quantile: float = 0.05
+    copula_cluster_pct: float = 0.50
 
     @classmethod
     def from_env(cls) -> "RiskLimits":
@@ -127,6 +164,7 @@ class RiskLimits(BaseModel):
             stake_step=stake_mod.STAKE_STEP,
             total_exposure_cap_pct=_env_float("TOTAL_EXPOSURE_CAP_PCT", 0.40),
             correlation_cap_pct=_env_float("CORRELATION_CAP_PCT", 0.30),
+            **_copula_limits(),
         )
 
     # -- derivati ---------------------------------------------------------
