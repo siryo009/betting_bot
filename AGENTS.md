@@ -11970,3 +11970,54 @@ stop settimanale 12%, CB2 25 USDC, finestra T-180..T-2, floor EV
 dell'esecuzione, soglia di liquidita' SX 20/4/20 x1.6, `KELLY_MAX_STAKE_PCT`
 12% per ordine, ticket minimo 1.00 USDC. Il volume sale dove i gate
 **ammettono**, non dove un guardrail protegge.
+
+### 🔴 Fix cadenza del giro ordini: il download ClubElo era UNO PER SQUADRA (14/10/2026)
+
+**Sintomo (misurato, non dedotto)**: dopo il deploy del 14/10 il giro `auto_bet`
+girava **1 volta ogni ~3-5 minuti** con `skipped: maximum number of running
+instances` a ripetizione (14 skip in 8 minuti) al posto del ciclo da 60s. Il
+funnel lavorava (4 pick multi-mercato invece di 1, 4 pick football USA, 2 trade
+chief) ma gli **ordini venivano tentati 10-20 volte meno spesso**, cioe' il
+contrario dell'obiettivo "aumentare il volume".
+
+**Causa radice**: `live_intel.soccer_elo(team)` chiamava
+`sd.ClubElo().read_by_date()` — che e' **UN solo download di tutti i club** —
+**una volta per SQUADRA**, con cache solo per squadra. Con
+`api.clubelo.com` **giu'** (timeout, gia' noto dal 08/10) ogni squadra nuova
+pagava il ritardo pieno: **misurato 151s per la prima squadra** (5 retry
+interni di `soccerdata` x ~30s, verificato sul container con
+`time.time()` attorno a `soccer_elo("Arsenal")`). Con 4 squadre per ciclo
+(2 match x 2 squadre) fino a **~10 minuti per giro**, spesi su un provider che
+per progetto **non decide nulla** (l'intel non e' un gate).
+
+**Fix (`live_intel.py`)**:
+1. **snapshot CONDIVISO** (`_clubelo_snapshot()` + `_CLUBELO` + lock): un solo
+   download per processo/finestra di TTL, riusato da tutte le squadre;
+2. **TTL a due velocita'**, come le voci su disco: dato valido
+   `CLUBELO_TTL_H` (6h), **fallimento `_fail_ttl()` (1h)** — un guasto
+   transitorio non rende l'intel cieca per ore e uno permanente non martella
+   la fonte;
+3. **guardia di timeout** (`_network_deadline`) attorno alla lettura: la
+   libreria non ha un timeout proprio e senza guardia la chiamata resta
+   appesa (questo era anche il motivo per cui l'ERROR di scraping tornava
+   45 volte in 8 minuti nei log);
+4. `reset_clubelo_cache()` per test/diagnostica + **reset nel `conftest.py`**
+   (e' uno stato di MODULO: senza reset un test deciderebbe i successivi,
+   stessa lezione del 26/09 sulla cache di prontezza OU).
+Effetto atteso: da **un download per squadra per ciclo** a **uno per ora**,
+bounded dal timeout; il giro ordini torna alla cadenza di 60s.
+
+**Test**: `test_live_intel.TestSnapshotClubEloCondiviso` (7 nuovi, TUTTI
+offline: download condiviso fra 3 squadre = **1 chiamata**, guasto globale
+pagato **una volta sola** per 4 squadre, squadra non coperta senza nuovo
+download, guardia di timeout ATTIVA durante la lettura e ripristinata dopo,
+reset del circuito che riabilita il tentativo, TTL positivo oltre il quale si
+riprova, tripwire sul conftest) -> file **64 verdi**.
+Regressioni verdi: agent_hierarchy + advisor_agent + exposure_gate +
+chief_shadow_wiring + railway_drift_check + secret_hygiene (**106**).
+`compileall` OK, 0 marker di conflitto.
+
+⚠️ **Nota esterna**: `api.clubelo.com` risponde ancora con timeout/502 dal
+container — e' il servizio a monte, non il codice (livello del log dedicato non
+introdotto: fuori perimetro). Con questo fix l'attesa e' **una volta per ora**,
+non una per squadra per ciclo.

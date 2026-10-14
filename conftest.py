@@ -174,6 +174,16 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # test la riaccende esplicitamente, non scrive comunque sul volume).
     monkeypatch.setenv("LIVE_INTEL", "0")
     monkeypatch.setenv("LIVE_INTEL_CACHE", str(tmp_path / "intel"))
+    # Lo snapshot ClubElo (`_clubelo_snapshot`, 14/10/2026) e' uno stato di
+    # MODULO condiviso da tutte le squadre: senza reset un test che lo riempie
+    # (o che ne fa fallire il download) deciderebbe l'esito dei successivi —
+    # la stessa lezione della cache di prontezza OU (26/09).
+    try:
+        import live_intel as _li
+
+        _li.reset_clubelo_cache()
+    except Exception:
+        pass
     # Corsia eSports (30/09/2026) SPENTA e cache nella tmp: accesa di default,
     # `auto_bet` chiamerebbe la discovery pubblica di SX Bet e l'oracolo
     # OddsPapi a OGNI giro — nei test sarebbe rete reale e consumo di quota

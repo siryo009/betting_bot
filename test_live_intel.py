@@ -337,6 +337,155 @@ class TestCacheNegativa:
 
 
 # ---------------------------------------------------------------------------
+# Snapshot ClubElo CONDIVISO (14/10/2026)
+# ---------------------------------------------------------------------------
+
+class _FakeEloIndex:
+    names = ["team"]
+
+    def __init__(self, teams):
+        self._teams = list(teams)
+
+    def get_level_values(self, lv):
+        return list(self._teams)
+
+
+class _FakeSeries:
+    """Serie minima: `row["elo"].iloc[0]` -> valore."""
+
+    def __init__(self, value):
+        self.iloc = _FakeCell(value)
+
+
+class _FakeCell:
+    def __init__(self, value):
+        self._value = value
+
+    def __getitem__(self, key):
+        assert key == 0
+        return self._value
+
+
+class _FakeRow:
+    def __init__(self, value):
+        self._value = value
+
+    def __getitem__(self, key):
+        assert key == "elo"
+        return _FakeSeries(self._value)
+
+
+class _FakeEloFrame:
+    """Minima superficie di un DataFrame ClubElo usata da `soccer_elo`."""
+
+    def __init__(self, mapping):
+        self.index = _FakeEloIndex(mapping.keys())
+        self._mapping = dict(mapping)
+
+    def xs(self, team, level=None):
+        return _FakeRow(self._mapping[team])
+
+
+class TestSnapshotClubEloCondiviso:
+    """`read_by_date()` e' UN download per tutti i club, non uno per squadra.
+
+    Misura che ha motivato il fix (14/10/2026, `api.clubelo.com` giu'): 151s
+    per la PRIMA squadra (5 retry interni di `soccerdata` x ~30s) e fino a
+    ~10 minuti per ciclo con 4 squadre -> il giro ordini (60s) veniva saltato
+    a ripetizione (`maximum number of running instances`).
+    """
+
+    def _fake_soccerdata(self, monkeypatch, calls, frame=None, exc=None):
+        class _ClubElo:
+            def __init__(self, *a, **k): ...
+
+            def read_by_date(self):
+                calls.append(1)
+                if exc is not None:
+                    raise exc
+                return frame
+
+        monkeypatch.setitem(sys.modules, "soccerdata",
+                            types.SimpleNamespace(ClubElo=_ClubElo))
+        live_intel.reset_clubelo_cache()
+
+    def test_download_condiviso_fra_squadre_diverse(self, monkeypatch):
+        calls: list[int] = []
+        frame = _FakeEloFrame({"Inter": 1820.0, "Milan": 1790.0, "Juventus": 1850.0})
+        self._fake_soccerdata(monkeypatch, calls, frame=frame)
+        assert live_intel.soccer_elo("Inter") == 1820.0
+        assert live_intel.soccer_elo("Milan") == 1790.0
+        assert live_intel.soccer_elo("Juventus") == 1850.0
+        assert len(calls) == 1        # UN download per tutte e tre
+
+    def test_guasto_globale_non_si_ripaga_per_ogni_squadra(self, monkeypatch):
+        """La fonte e' UNA: un errore non costa l'attesa per ogni squadra."""
+        calls: list[int] = []
+        self._fake_soccerdata(monkeypatch, calls, exc=OSError("timeout"))
+        for team in ("Inter", "Milan", "Juventus", "Roma"):
+            assert live_intel.soccer_elo(team) is None
+        assert len(calls) == 1
+        assert "clubelo" in INTEL_ERRORS
+
+    def test_squadra_non_coperta_non_scarica_di_nuovo(self, monkeypatch):
+        calls: list[int] = []
+        frame = _FakeEloFrame({"Inter": 1820.0})
+        self._fake_soccerdata(monkeypatch, calls, frame=frame)
+        assert live_intel.soccer_elo("Inter") == 1820.0
+        assert live_intel.soccer_elo("Squadra Ignota") is None
+        # Secondo giro: dato valido in cache -> nessun download.
+        assert live_intel.soccer_elo("Squadra Ignota") is None
+        assert len(calls) == 1
+        assert "non coperta" in INTEL_ERRORS["clubelo"]
+
+    def test_guardia_di_timeout_attiva_durante_il_download(self, monkeypatch):
+        """Nessuna libreria di scraping ha un timeout proprio (5 retry da ~30s)."""
+        seen = {}
+
+        class _ClubElo:
+            def __init__(self, *a, **k): ...
+
+            def read_by_date(self):
+                seen["timeout"] = socket.getdefaulttimeout()
+                return _FakeEloFrame({"Inter": 1820.0})
+
+        prima = socket.getdefaulttimeout()
+        monkeypatch.setitem(sys.modules, "soccerdata",
+                            types.SimpleNamespace(ClubElo=_ClubElo))
+        live_intel.reset_clubelo_cache()
+        assert live_intel.soccer_elo("Inter") == 1820.0
+        assert seen["timeout"] == live_intel.DEFAULT_TIMEOUT_S
+        assert socket.getdefaulttimeout() == prima    # nessun residuo sul processo
+
+    def test_reset_snapshot_ritenta_il_download(self, monkeypatch, tmp_path):
+        """Azzerare il circuito riabilita il tentativo (diagnostica / test)."""
+        calls: list[int] = []
+        self._fake_soccerdata(monkeypatch, calls, exc=OSError("giu'"))
+        assert live_intel.soccer_elo("Inter") is None
+        assert len(calls) == 1
+        # Il circuito e' GLOBALE, la voce e' per squadra: si azzerano entrambi.
+        for path in (tmp_path / "intel").glob("elo_*.json"):
+            path.unlink()
+        live_intel.reset_clubelo_cache()
+        assert live_intel.soccer_elo("Inter") is None
+        assert len(calls) == 2
+
+    def test_dato_valido_riusato_e_ricontrollato_dopo_il_ttl(self, monkeypatch):
+        calls: list[int] = []
+        frame = _FakeEloFrame({"Inter": 1820.0})
+        self._fake_soccerdata(monkeypatch, calls, frame=frame)
+        assert live_intel.soccer_elo("Inter") == 1820.0
+        live_intel._CLUBELO["ts"] = time.time() - 7 * 3600   # oltre il TTL positivo
+        assert live_intel.soccer_elo("Inghilterra") is None    # forza un nuovo giro
+        assert len(calls) == 2
+
+    def test_conftest_resetta_lo_snapshot(self):
+        """Lo stato e' di MODULO: senza reset deciderebbe i test successivi."""
+        src = Path("conftest.py").read_text(encoding="utf-8")
+        assert "reset_clubelo_cache" in src
+
+
+# ---------------------------------------------------------------------------
 # Guardie di rete (29/09/2026): la suite non deve poter bloccare se stessa
 # ---------------------------------------------------------------------------
 

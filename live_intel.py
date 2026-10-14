@@ -41,6 +41,8 @@ import logging
 import os
 import re
 import socket
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -53,7 +55,7 @@ __all__ = [
     "MatchIntel", "NewsItem", "TeamStats", "ProviderStatus",
     "assemble_match_intel", "collect_news", "soccer_team_stats",
     "soccer_elo", "mlb_probable_pitchers", "nba_team_stats",
-    "INTEL_ERRORS", "reset_cache_dir",
+    "INTEL_ERRORS", "reset_cache_dir", "reset_clubelo_cache",
 ]
 
 
@@ -412,8 +414,65 @@ def soccer_team_stats(team: str, league: str) -> Optional[TeamStats]:
         return None
 
 
+#: Snapshot ClubElo CONDIVISO fra tutte le squadre dello stesso processo.
+#: `read_by_date()` e' UN solo download (tutti i club in una richiesta): farlo
+#: per squadra significava N download identici per ciclo. Misurato il
+#: 14/10/2026 con `api.clubelo.com` giu' (timeout): **151s per la PRIMA
+#: squadra** (5 retry interni di `soccerdata` x ~30s) e il ciclo del bot
+#: (60s) veniva saltato a ripetizione (`maximum number of running instances`).
+_CLUBELO: dict[str, Any] = {"ts": 0.0, "data": None}
+_CLUBELO_LOCK = threading.Lock()
+
+
+#: TTL dello snapshot CONDIVISO in secondi (positivo). `_fail_ttl()` vale per
+#: il fallimento: la fonte e' UNA sola, quindi un guasto non va ritentato per
+#: ogni squadra (era il costo: fino a ~10 minuti per ciclo con 4 squadre).
+CLUBELO_TTL_H = 6.0
+
+
+def reset_clubelo_cache() -> None:
+    """Svuota lo snapshot condiviso (test / diagnostica)."""
+    with _CLUBELO_LOCK:
+        _CLUBELO["ts"] = 0.0
+        _CLUBELO["data"] = None
+
+
+def _clubelo_snapshot():
+    """Snapshot ClubElo condiviso: UN download per ciclo/finestra di TTL.
+
+    Ritorna il DataFrame del rating (o ``None`` se il provider e' giu').
+    La cache e' a DUE velocita', come le voci su disco: il dato valido dura
+    `CLUBELO_TTL_H`, il fallimento solo `_fail_ttl()` — cosi' un guasto
+    transitorio non rende l'intel cieca per ore e uno permanente non martella
+    la fonte a ogni giro. Sotto la guardia `_network_deadline()`, perche'
+    nessuna libreria di scraping ha un timeout proprio (misurato: 5 retry da
+    ~30s a chiamata).
+    """
+    with _CLUBELO_LOCK:
+        age_s = time.time() - float(_CLUBELO.get("ts") or 0.0)
+        empty = _CLUBELO.get("data") is None
+        ttl_s = (_fail_ttl() if empty else CLUBELO_TTL_H) * 3600.0
+        if age_s <= ttl_s:
+            return _CLUBELO.get("data")
+        try:
+            import soccerdata as sd  # import pigro
+
+            with _network_deadline():
+                snap = sd.ClubElo().read_by_date()
+        except Exception as exc:
+            INTEL_ERRORS["clubelo"] = str(exc)[:120]
+            snap = None
+        _CLUBELO["ts"] = time.time()
+        _CLUBELO["data"] = snap
+        return snap
+
+
 def soccer_elo(team: str) -> Optional[float]:
-    """Rating ELO ClubElo (solo club europei: le grandi leghe)."""
+    """Rating ELO ClubElo (solo club europei: le grandi leghe).
+
+    Il download e' CONDIVISO (`_clubelo_snapshot`): la voce per squadra
+    (`elo|<team>`) evita solo di rileggere l'indice, non di scaricare.
+    """
     key = f"elo|{team}"
     cached = _cache_read("elo", key)
     if cached is not None:
@@ -421,18 +480,21 @@ def soccer_elo(team: str) -> Optional[float]:
         # di recente -> si rispetta la cache, senza riprovare.
         data = cached.get("data")
         return float(data) if data is not None else None
+    snap = _clubelo_snapshot()
+    if snap is None:
+        # La fonte e' giu': la voce negativa (per squadra E condivisa) evita di
+        # ripagare l'attesa per ogni altra squadra dello stesso ciclo.
+        _cache_write("elo", key, None)
+        return None
     try:
-        import soccerdata as sd  # import pigro
-
-        elo = sd.ClubElo().read_by_date()  # snapshot corrente del rating
         # Il livello d'indice della squadra e' il primo (nome 'team' se
         # presente, altrimenti posizione 0: non dipendere dal nome esatto).
-        lv = "team" if "team" in elo.index.names else 0
-        if team not in elo.index.get_level_values(lv):
+        lv = "team" if "team" in snap.index.names else 0
+        if team not in snap.index.get_level_values(lv):
             INTEL_ERRORS["clubelo"] = f"squadra non coperta: {team}"
             _cache_write("elo", key, None)
             return None
-        row = elo.xs(team, level=lv)
+        row = snap.xs(team, level=lv)
         value = float(row["elo"].iloc[0])
         _cache_write("elo", key, value)
         return value
