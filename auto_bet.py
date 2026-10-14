@@ -429,7 +429,8 @@ def t60_window(kickoff: "datetime | None") -> str:
 
 
 def order_ceiling(bankroll: float | None = None) -> float:
-    """Tetto per-ordine EFFICACE (CB1): assoluto se configurato, altrimenti 5%.
+    """Tetto per-ordine EFFICACE (CB1): assoluto se configurato, altrimenti
+    `equity x KELLY_MAX_STAKE_PCT` (12% in produzione, 5% default di codice).
 
     UNICO punto di verita' del tetto per gli ordini reali: lo usano
     `t60_stake` (corsia T-60), `validate_order_payload` (CB3) e la
@@ -2525,10 +2526,10 @@ def enforce_order_ceiling(candidates: list[dict], *,
     percentuale del progetto. Il proprietario ha chiesto 2-5% per singola
     scommessa.
 
-    Qui lo stake viene riportato al tetto EFFETTIVO (`order_ceiling` = 5% del
-    bankroll, dalla stessa fonte del resto del progetto) e un pick che dopo il
-    taglio non raggiunge il ticket minimo viene SCARTATO (fail-closed: mai un
-    importo diverso dal tetto per far passare un ordine).
+    Qui lo stake viene riportato al tetto EFFETTIVO (`order_ceiling` =
+    `equity x KELLY_MAX_STAKE_PCT`, dalla stessa fonte del resto del progetto)
+    e un pick che dopo il taglio non raggiunge il ticket minimo viene SCARTATO
+    (fail-closed: mai un importo diverso dal tetto per far passare un ordine).
 
     Tetto non calcolabile (0.0, bankroll ignoto) -> NESSUN ordine: e' la
     stessa direzione di `order_ceiling` (fail-closed sul capitale).
@@ -2536,6 +2537,11 @@ def enforce_order_ceiling(candidates: list[dict], *,
     info: dict = {"cap": 0.0, "clamped": 0, "dropped": 0, "kept": 0}
     cap = order_ceiling(bankroll)
     info["cap"] = cap
+    # L'etichetta del tetto si DERIVA dal parametro reale: i log dicevano "5%"
+    # mentre l'env `KELLY_MAX_STAKE_PCT` (12% in produzione) faceva tagliare al
+    # 12%. Un log che mente su un parametro di RISCHIO non e' estetica — e' la
+    # stessa classe dei testi stantii del 13/09.
+    cap_pct = aggressive_cap_pct()
     if cap <= 1e-9:
         if candidates:
             logger.warning("auto_bet: tetto per-ordine non calcolabile "
@@ -2555,16 +2561,17 @@ def enforce_order_ceiling(candidates: list[dict], *,
         if stake - 1e-9 > cap:
             stake = round(cap, 2)
             info["clamped"] += 1
-            logger.info("auto_bet: %s (%s) stake riportato al tetto 5%% del "
+            logger.info("auto_bet: %s (%s) stake riportato al tetto %.0f%% del "
                         "bankroll (%.2f USDC, equity %.2f): nessun layer puo' "
                         "superarlo", cand.get("match_id"),
-                        cand.get("esito_key"), stake, float(bankroll or 0.0))
+                        cand.get("esito_key"), cap_pct * 100.0, stake,
+                        float(bankroll or 0.0))
         if stake + 1e-9 < ticket:
             info["dropped"] += 1
             logger.info("auto_bet: %s (%s) stake %.2f sotto il ticket %.2f "
-                        "dopo il tetto del 5%%: salto (fail-closed)",
+                        "dopo il tetto del %.0f%%: salto (fail-closed)",
                         cand.get("match_id"), cand.get("esito_key"),
-                        stake, ticket)
+                        stake, ticket, cap_pct * 100.0)
             continue
         cand["stake"] = stake
         info["kept"] += 1
@@ -4822,14 +4829,16 @@ def run_today_bets(stake_eur: float | None = None,
 
         # --- TETTO UNICO PER-ORDINE (13/10/2026, direttiva proprietario):
         # nessun layer (Kelly, torneo, rush) puo' produrre un ordine sopra il
-        # 5% del bankroll. Ultimo passo di sizing prima della FASE 3: quello
-        # che il recinto d'esposizione vede e' cio' che viene ordinato.
+        # CAP PER-ORDINE (`KELLY_MAX_STAKE_PCT` x equity: 12% in produzione =
+        # 5.61 USDC su 46.73). Ultimo passo di sizing prima della FASE 3:
+        # quello che il recinto d'esposizione vede e' cio' che viene ordinato.
         candidates, _ceiling = enforce_order_ceiling(candidates,
                                                      bankroll=_bankroll)
         if _ceiling.get("clamped") or _ceiling.get("dropped"):
-            logger.info("auto_bet: tetto per-ordine %.2f USDC (5%% di %.2f) — "
-                        "%d stake riportati al tetto, %d scartati sotto il "
+            logger.info("auto_bet: tetto per-ordine %.2f USDC (%.1f%% di %.2f) "
+                        "— %d stake riportati al tetto, %d scartati sotto il "
                         "ticket", float(_ceiling.get("cap") or 0.0),
+                        aggressive_cap_pct() * 100.0,
                         float(_bankroll or 0.0), _ceiling.get("clamped", 0),
                         _ceiling.get("dropped", 0))
 

@@ -154,12 +154,21 @@ export default defineRailway(() => {
       // KELLY DINAMICO (04/10/2026 sera, direttiva "Ottimizzazione
       // Quantitativa" punto 2): k non piu' fisso a 0.65 ma nella BANDA
       // 0.15-0.25 scalata da EV/edge/confidenza della lega
-      // (`stake_engine.dynamic_kelly_fraction`), con cap DINAMICO 12% del
-      // bankroll e ticket minimo **1.00 USDC** del MOTORE (= floor
-      // dell'EXCHANGE SX). `KELLY_AGGRESSIVE_ENABLED=0` ripristina il percorso
-      // storico; `ORDER_FIXED_STAKE_USDC` > 0 ripristina l'importo fisso del
-      // 28/09. `KELLY_AGGRESSIVE_FRACTION` e' il MASSIMO della banda,
-      // `KELLY_AGGRESSIVE_MIN_FRACTION` il minimo.
+      // (`stake_engine.dynamic_kelly_fraction`) e ticket minimo **1.00 USDC**
+      // del MOTORE (= floor dell'EXCHANGE SX). `KELLY_AGGRESSIVE_ENABLED=0`
+      // ripristina il percorso storico; `ORDER_FIXED_STAKE_USDC` > 0
+      // ripristina l'importo fisso del 28/09. `KELLY_AGGRESSIVE_FRACTION` e'
+      // il MASSIMO della banda, `KELLY_AGGRESSIVE_MIN_FRACTION` il minimo.
+      //
+      // CAP PER-ORDINE (13/10/2026, `auto_bet.enforce_order_ceiling`): e' il
+      // tetto che NESSUN layer (Kelly, torneo x1.5, rush) puo' superare, e
+      // l'unico parametro che decide la taglia di un ordine reale. Default di
+      // CODICE 5%; l'env in produzione e' **12%** (scelta del proprietario del
+      // 14/10, che rende raggiungibile il cap dichiarato dal torneo senza
+      // superare il recinto). Con l'env presente il default NON ha effetto:
+      // `order_ceiling` = equity x questo valore (46.73 -> 5.61 USDC, 4 ordini
+      // dentro il recinto 23.36). Se la variabile sparisse il tetto tornerebbe
+      // a 2.34 (5%) **in silenzio**: per questo e' dichiarata `preserve()`.
       KELLY_AGGRESSIVE_FRACTION: preserve(),
       KELLY_AGGRESSIVE_MIN_FRACTION: preserve(),
       KELLY_MAX_STAKE_PCT: preserve(),
