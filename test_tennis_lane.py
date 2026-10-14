@@ -344,11 +344,15 @@ class TestFasciaQuota:
     Misura che l'ha motivata: 7 ordini reali piazzati dal 01/10, P/L -6,75
     USDC, ROI -75,0%, hit 1/6 — 5 delle 6 sconfitte a quota >= 2,42 con punte
     a 17,02.
+
+    Storia della banda: 1.30-2.50 (02/10) -> 1.30-2.00 (13/10) -> **1.30-2.30**
+    (14/10, direttiva "aumentare il volume": il tratto misurato in perdita era
+    2.00-2.50 con n=15, quindi il tetto si ferma a 2.30).
     """
 
     @pytest.mark.parametrize("price,expected", [
-        (1.30, True), (1.85, True), (1.99, True), (2.00, True),
-        (1.29, False), (2.01, False), (2.42, False), (2.50, False),
+        (1.30, True), (1.85, True), (2.29, True), (2.30, True),
+        (1.29, False), (2.31, False), (2.42, False), (2.50, False),
         (4.28, False), (17.02, False),
         (1.0, False), (0.0, False), (-1.0, False),
         ("1.85", True), ("17.02", False),
@@ -366,7 +370,8 @@ class TestFasciaQuota:
     def test_longshot_scartato_prima_del_pick(self, monkeypatch):
         _write_cache(monkeypatch, _oracle_payload())
         # 2.60 con l'oracolo a 1.66 e' un candidato +EV enorme (EV ~ +56%) e
-        # inv_sum 1.0096 (book coerente): senza la banda sarebbe un pick.
+        # inv_sum 1.0096 (book coerente): senza la banda sarebbe un pick. Resta
+        # fuori banda anche col tetto a 2.30 (era il testimone del 2.50).
         assert tl.picks(provider=_event_provider(2.60, 1.60)) == []
 
     def test_controllo_dentro_banda_stesso_gruppo(self, monkeypatch):
@@ -379,15 +384,23 @@ class TestFasciaQuota:
         # Tolleranza = granularita' della ladder SX (decodifica troncata).
         assert len(out) == 1 and out[0]["quota"] == pytest.approx(1.95, abs=0.01)
 
-    def test_fascia_200_250_esclusa_dal_13_10(self, monkeypatch):
-        """La fascia misurata in PERDITA (2.00-2.50, ROI -15.1%, n=15) non
-        produce piu' candidati: e' la motivazione del taglio del 13/10."""
+    def test_fascia_oltre_il_tetto_esclusa(self, monkeypatch):
+        """Il tetto della banda resta una decisione: 2.31+ non produce pick.
+
+        Il testimone del taglio del 13/10 (2.10 escluso) e' stato ribaltato
+        dalla direttiva del 14/10: 2.10 ora E' in banda, quindi il caso limite
+        si e' spostato oltre 2.30 — con la CONTROPROVA che prova che e' la
+        fascia a scartare e non l'EV.
+        """
         _write_cache(monkeypatch, _oracle_payload())
-        # 2.10 sul lato con oracolo ~1.66 e' +EV forte ma fuori banda.
-        assert tl.picks(provider=_event_provider(2.10, 1.70)) == []
-        # Controprova: 1.90 appena sotto il bordo produce il pick.
+        # 2.40 sul lato con oracolo ~1.66 e' +EV forte ma fuori banda.
+        assert tl.picks(provider=_event_provider(2.40, 1.60)) == []
+        # Controprova: 1.90 dentro banda produce il pick.
         out = tl.picks(provider=_event_provider(1.90, 1.95))
         assert len(out) == 1 and out[0]["quota"] == pytest.approx(1.90, abs=0.01)
+        # ...e 2.20 (fuori dal taglio del 13/10, dentro il tetto nuovo) pure.
+        out2 = tl.picks(provider=_event_provider(2.20, 1.70))
+        assert len(out2) == 1 and out2[0]["quota"] == pytest.approx(2.20, abs=0.01)
 
     @pytest.mark.parametrize("longshot,counterpart", [
         (2.60, 1.60), (4.28, 1.31), (17.02, 1.07),
@@ -411,7 +424,7 @@ class TestFasciaQuota:
         assert tl.picks(provider=_event_provider(1.85, 2.20)) == []
 
     def test_fascia_da_env(self):
-        # La banda si legge dall'env (default 1.30 / 2.00).
+        # La banda si legge dall'env (default 1.30 / 2.30).
         code = ("import os; os.environ['TENNIS_ODDS_MIN']='1.50'; "
                 "os.environ['TENNIS_ODDS_MAX']='3.10'; "
                 "import tennis_lane as t; print(t.ODDS_MIN, t.ODDS_MAX)")
@@ -424,7 +437,7 @@ class TestFasciaQuota:
         from pathlib import Path
         src = Path("tennis_lane.py").read_text(encoding="utf-8")
         assert 'os.getenv("TENNIS_ODDS_MIN", "1.30")' in src
-        assert 'os.getenv("TENNIS_ODDS_MAX", "2.00")' in src
+        assert 'os.getenv("TENNIS_ODDS_MAX", "2.30")' in src
 
     def test_summary_espone_la_banda(self, monkeypatch):
         _write_cache(monkeypatch, _oracle_payload())

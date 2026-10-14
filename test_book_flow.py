@@ -372,14 +372,22 @@ class TestCoperturaMultiMercato:
         assert multi_market.MAX_LINES_PER_MARKET >= 20
         assert multi_market.MAX_RAW_MARKETS >= 600
 
-    def test_gate_di_strategia_non_toccati(self):
-        """Allargare la COPERTURA non e' allentare la STRATEGIA: fascia
-        quota, edge e EV restano quelli congelati del 22/09."""
+    def test_gate_di_strategia_dichiarati(self):
+        """Le soglie di strategia di QUESTA corsia sono quelle DICHIARATE.
+
+        Il 14/10/2026 il proprietario le ha allentate (fascia 1.30-1.80 ->
+        1.20-2.00, EV 2.5% -> 1.5%, edge +2pp -> +1pp) e il tripwire e'
+        riallineato di proposito: cio' che protegge non e' il valore vecchio,
+        ma l'UGUAGLIANZA ESATTA (un ulteriore allentamento deve rompere qui e
+        passare da una decisione tracciata in AGENTS.md).
+        La LIQUIDITA' non e' stata toccata da quella direttiva e resta un
+        pavimento: e' il solo valore che deve continuare a crescere o restare.
+        """
         import multi_market
         from market_calib import MARKET_EDGE_MIN
         from value_filter import EV_MIN, ODDS_MAX, ODDS_MIN
-        assert (ODDS_MIN, ODDS_MAX) == (1.30, 1.80)
-        assert EV_MIN == pytest.approx(0.025)
-        assert MARKET_EDGE_MIN == pytest.approx(0.02)
+        assert (ODDS_MIN, ODDS_MAX) == (1.20, 2.00)
+        assert EV_MIN == pytest.approx(0.015)
+        assert MARKET_EDGE_MIN == pytest.approx(0.01)
         assert multi_market.MIN_EXEC_DEPTH_USDC >= 20.0
         assert multi_market.MIN_DEPTH_USDC >= 20.0

@@ -368,12 +368,16 @@ def main() -> int:
     _reset_state()
     auto_bet._execution_mode = lambda allow_sim=True: "sim"
     tracker.save_match("g-high", ALLOWED_LEAGUE, "Osasuna", "Getafe", _start())
-    # quota 1.90 > 1.80 (favorito troppo "lungo")
-    tracker.save_prediction("g-high", "1X2", "Osasuna", 1.90, 0.55, 0.08,
+    # quota sopra il tetto della fascia (derivata dalla costante: il 14/10 il
+    # tetto e' passato 1.80 -> 2.00 e un valore fisso avrebbe reso il seed
+    # DENTRO la fascia, facendo fallire lo scenario per il motivo sbagliato).
+    tracker.save_prediction("g-high", "1X2", "Osasuna",
+                            value_filter.ODDS_MAX + 0.10, 0.55, 0.08,
                             market_prob=0.52, market_edge=0.05, status="value")
     tracker.save_match("g-low", ALLOWED_LEAGUE, "Osasuna", "Getafe", _start())
-    # quota 1.20 < 1.30 (ritorno troppo basso)
-    tracker.save_prediction("g-low", "1X2", "Osasuna", 1.20, 0.72, 0.05,
+    # quota sotto il pavimento della fascia (stessa derivazione)
+    tracker.save_prediction("g-low", "1X2", "Osasuna",
+                            value_filter.ODDS_MIN - 0.10, 0.72, 0.05,
                             market_prob=0.75, market_edge=0.05, status="value")
     tracker.save_match("g-nfav", ALLOWED_LEAGUE, "Osasuna", "Getafe", _start())
     # quota ok ma NON e' il favorito di mercato (prob 0.30 < 0.50)
@@ -382,24 +386,28 @@ def main() -> int:
     # g-legacy: lega VIETATA (Serie A) fuori fascia — nemmeno il gate oracolo
     # della corsia top-down la candida: il gate di lega NON e' bypassato.
     tracker.save_match("g-legacy", "Serie A", "Osasuna", "Getafe", _start())
-    tracker.save_prediction("g-legacy", "1X2", "Osasuna", 1.20, 0.72, 0.05,
+    tracker.save_prediction("g-legacy", "1X2", "Osasuna",
+                            value_filter.ODDS_MIN - 0.10, 0.72, 0.05,
                             market_prob=0.75, market_edge=0.05, status="value")
     mark = len(_RECORDS)
     picks = auto_bet._today_value_picks()
     _print_logs(mark)
     ids = sorted(p["match_id"] for p in picks)
     ok_board = ids == ["g-valid"]
-    print(f"  {GREEN if ok_board else RED}→ board SIM (fascia bottom-up): {ids}  "
+    print(f"  {GREEN if ok_board else RED}→ board SIM (fascia bottom-up "
+          f"{value_filter.ODDS_MIN:.2f}-{value_filter.ODDS_MAX:.2f}): {ids}  "
           f"(atteso solo ['g-valid']){RESET}")
-    sane, reason = value_filter.is_sane(0.72, 1.20, 0.05, market_prob=0.80)
-    print(f"  {DIM}is_sane(prob .72, quota 1.20): ok={sane} → "
-          f"{reason}{RESET}")
+    sane, reason = value_filter.is_sane(0.72, value_filter.ODDS_MIN, 0.05,
+                                        market_prob=0.80)
+    print(f"  {DIM}is_sane(prob .72, quota {value_filter.ODDS_MIN:.2f}): "
+          f"ok={sane} → {reason}{RESET}")
     sane2, reason2 = value_filter.is_sane(0.80, 1.31, 0.048, market_prob=0.75)
     print(f"  {DIM}is_sane(prob .80, quota 1.31): ok={sane2} "
           f"(dentro fascia){RESET}")
     # CORSIA TOP-DOWN LIVE (25/09): il filtro di prezzo e' BYPASSATO — l'unico
     # giudice e' l'oracolo Pinnacle. Con p_true 0.92 TUTTE le quote fuori
-    # fascia (1.90, 1.70-underdog, 1.20) diventano candidati EV-positivi;
+    # fascia (sopra il tetto, sotto il pavimento, 1.70-underdog con p_true
+    # bassa) diventano candidati EV-positivi;
     # con p_true 0.20 (EV sempre negativo) NESSUNO passa: il gate oracolo
     # filtra davvero. g-legacy resta fuori per LEGA, non per quota.
     auto_bet._execution_mode = lambda allow_sim=True: "live"

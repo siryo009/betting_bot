@@ -6,7 +6,8 @@ Verifica:
 - filter_value_bets identifichi value bet con EV >= soglia e filtri di sanita';
 - threshold configurabile;
 - gestione lista vuota;
-- STRATEGIA SOLO FAVORITI (11/09): cap quota 1.80 + esito favorito di
+- STRATEGIA SOLO FAVORITI (11/09, fascia allargata a 1.20-2.00 il 14/10):
+  cap quota + esito favorito di
   mercato (prob. devigata >= 50%), con eligible_favourites come gate.
 """
 
@@ -38,7 +39,8 @@ class TestFilterValueBets:
     def odds_data(self):
         """Quote con probabilita' gia' stimate dal modello.
 
-        Solo FAVORITI NETTI (quota <= 1.80): dal 11/09/2026 qualsiasi quota
+        Solo FAVORITI NETTI (quota nella fascia 1.20-2.00 dal 14/10/2026):
+        dal 11/09/2026 qualsiasi quota
         superiore e' fuori strategia e viene scartata a monte.
         """
         return [
@@ -85,7 +87,7 @@ class TestFilterValueBets:
         assert self._has(result, "Serie A – Atalanta vs Milan", "1")
 
     def test_nessun_esito_con_quota_alta(self, odds_data):
-        """STRATEGIA SOLO FAVORITI: nessuna quota > 1.80 passa il filtro."""
+        """STRATEGIA SOLO FAVORITI: nessuna quota oltre il cap passa il filtro."""
         from value_filter import ODDS_MAX
         result = filter_value_bets(odds_data, ev_threshold=0.02)
         assert all(r["quota_decimale"] <= ODDS_MAX for r in result)
@@ -127,9 +129,12 @@ class TestStrategiaSoloFavoriti:
         """Le soglie non devono tornare indietro senza una decisione esplicita."""
         import value_filter as vf
         from market_calib import MARKET_EDGE_MIN
-        assert vf.ODDS_MAX == 1.80         # favoriti NETTI (guardrail 11/09)
-        assert vf.ODDS_MIN >= 1.30         # fascia 1.30-1.80 (esclude pantano)
-        assert MARKET_EDGE_MIN == 0.02     # edge minimo +2pp (direttiva 21/09)
+        # Direttiva 14/10/2026 ("bot piu' aggressivo"): fascia allargata a
+        # 1.20-2.00 ed edge dimezzato a +1pp. Uguaglianza ESATTA di proposito:
+        # la protezione e' la decisione tracciata in AGENTS.md, non il valore.
+        assert vf.ODDS_MAX == 2.00         # fascia allargata (14/10/2026)
+        assert vf.ODDS_MIN == 1.20         # pavimento abbassato (era 1.30)
+        assert MARKET_EDGE_MIN == 0.01     # edge minimo +1pp (direttiva 14/10)
         assert vf.FAVOURITES_ONLY is True
         assert vf.MIN_FAVOURITE_MARKET_PROB == 0.50
         # Test funzioni nuove
@@ -241,7 +246,8 @@ class TestStrategiaPerLega:
 
     def test_tier2_probation_ammessa_con_parametri_severi(self):
         """Tier-2 (21/09): leghe reali ma senza storico positivo -> ammesse
-        con strategia PIU' SEVERA del core (edge +4pp, Kelly 0.4, cap 0.5%)."""
+        con strategia PIU' SEVERA del core (edge +2pp dal 14/10/2026,
+        era +4pp; Kelly 0.4, cap 0.5%)."""
         import value_filter
         from value_filter import (league_allowed, league_tier,
                                   get_league_strategy, PROBATION_STRATEGY)
@@ -290,7 +296,9 @@ class TestStrategiaPerLega:
             assert vf.league_tier(lg) == "core", lg
             assert vf.league_allowed(lg) is True, lg
             strat = vf.get_league_strategy(lg)
-            assert strat["min_edge"] == 0.025, lg
+            # min_edge dimezzato il 14/10/2026 (era 0.025 per il percorso
+            # "core prudente" delle nazionali, 0.0125 = meta' esatta).
+            assert strat["min_edge"] == 0.0125, lg
             assert strat["kelly_mult"] == 0.8, lg
             assert strat["max_stake"] == 0.015, lg
         # Le leghe MISURATE negative non devono essersi aperte per sbaglio.
@@ -323,14 +331,20 @@ class TestStrategiaPerLega:
             assert vf.league_allowed(target), \
                 f"alias {alias!r} -> {target!r} e' una lega vietata (alias inerte)"
 
-    def test_is_sane_tier2_edge_4pp(self):
-        """In probation l'edge minimo e' +4pp: +2.5pp passa nel core, non qui."""
+    def test_is_sane_tier2_edge_meta(self):
+        """In probation l'edge minimo e' +2pp: +1.5pp passa nel core, non qui.
+
+        Direttiva 14/10/2026: core 2,5pp -> 1,25pp (nazionali) e probation
+        4pp -> 2pp. La soglia del tier resta PIU' SEVERA di quella del core
+        (l'invariante e' asserito in
+        `test_tier2_probation_ammessa_con_parametri_severi`).
+        """
         from value_filter import is_sane
-        # edge = 0.625 - 0.60 = +2.5pp
-        ok_core, _ = is_sane(0.625, 1.65, 0.031, market_prob=0.60,
-                             league="Turkey Super Lig")   # min_edge 2.5pp
-        ok_prob, reason = is_sane(0.625, 1.65, 0.031, market_prob=0.60,
-                                  league="Serie B")
+        # edge = 0.615 - 0.60 = +1.5pp
+        ok_core, _ = is_sane(0.615, 1.65, 0.031, market_prob=0.60,
+                             league="Turkey Super Lig")   # min_edge 1,25pp
+        ok_prob, reason = is_sane(0.615, 1.65, 0.031, market_prob=0.60,
+                                  league="Serie B")       # min_edge 2pp
         assert ok_core is True
         assert ok_prob is False and "non batte il mercato" in reason
         # +4.5pp passa in probation.
@@ -350,7 +364,7 @@ class TestStrategiaPerLega:
         strat = get_league_strategy("Premier League")
         assert strat["max_stake"] == 0.020
         assert strat["kelly_mult"] == 1.2
-        assert strat["min_edge"] == 0.020
+        assert strat["min_edge"] == 0.010   # dimezzato il 14/10/2026 (era 0.020)
 
     def test_unknown_league_strategy_severo(self):
         """Le leghe non in lista usano fallback severo (min_edge piu' basso)."""
@@ -358,7 +372,7 @@ class TestStrategiaPerLega:
         strat = get_league_strategy("Serie A")
         assert strat["max_stake"] == 0.005  # fallback severo
         assert strat["kelly_mult"] == 0.5
-        assert strat["min_edge"] == 0.02     # allineato alla soglia +2pp
+        assert strat["min_edge"] == 0.01     # allineato alla soglia +1pp (14/10)
 
     def test_is_sane_league_filter(self):
         """Un segnale in Serie A viene rifiutato (ROI negativo)."""
@@ -375,11 +389,19 @@ class TestStrategiaPerLega:
                               league="Premier League")
         assert ok, f"Expected ok, got: {reason}"
 
-    def test_quota_2_00_bocciata(self):
-        """Guardrail 11/09: sopra 1.80 e' fuori strategia (pantano)."""
+    def test_quota_sopra_il_cap_bocciata(self):
+        """Sopra il cap della fascia (2.00 dal 14/10/2026) e' fuori strategia.
+
+        Il caso 2.00 era il testimone del vecchio cap 1.80; col cap nuovo il
+        testimone si sposta a 2.10 e si aggiunge la CONTROPROVA (1.95 ora
+        passa): senza, il test non distinguerebbe "cap alzato" da
+        "gate della quota disattivato".
+        """
         from value_filter import is_sane
-        ok, reason = is_sane(0.57, 2.00, 0.14, market_prob=0.52, league="Premier League")
+        ok, reason = is_sane(0.57, 2.10, 0.14, market_prob=0.52, league="Premier League")
         assert not ok and "quota troppo alta" in reason
+        ok, _ = is_sane(0.55, 1.95, 0.05, market_prob=0.50, league="Premier League")
+        assert ok
 
 
 class TestOracoloAPagamento:
@@ -427,8 +449,12 @@ class TestSogliaEvPerTier:
     tier della lega, con precedenza **la piu' PERMISSIVA** (`min`, revisione
     dell'08/10/2026 dopo la prima stesura con `max`). Questi test difendono la
     regola ESATTA — comprese le due conseguenze dichiarate: il 1X2 core scende
-    a 1.5% e sui mercati liquidi vince la soglia base del mercato (1.0%) per
+    a 1.0% e sui mercati liquidi vince la soglia base del mercato (0.5%) per
     TUTTE le leghe ammesse. Un ritocco silenzioso della precedenza rompe qui.
+    ⚠️ I valori assoluti seguono la direttiva del 14/10/2026 (che li ha
+    dimezzati): cio' che questi test difendono e' la PRECEDENZA (`min`) e il
+    fatto che la soglia effettiva sia SEMPRE quella dichiarata dalle costanti,
+    non i numeri in se'.
     """
 
     def test_core_abbassa_il_1x2(self):
@@ -439,7 +465,7 @@ class TestSogliaEvPerTier:
 
     def test_core_su_mercato_liquido_usa_la_soglia_del_mercato(self):
         import value_filter as vf
-        # min(1.0%, 1.5%) -> vince la soglia BASE del mercato liquido
+        # min(0.5%, 1.0%) -> vince la soglia BASE del mercato liquido
         assert vf.ev_min_for_market("AH") == vf.EV_MIN_LIQUID
         assert vf.ev_min("Premier League", "AH") == vf.EV_MIN_LIQUID
 
@@ -460,36 +486,36 @@ class TestSogliaEvPerTier:
             for mk in ("", "1X2", "AH", "OU", "TOTALS", "ML", "TENNIS"):
                 assert vf.ev_min(lg, mk) <= vf.ev_min_for_market(mk) + 1e-12, (lg, mk)
 
-    def test_gate_core_1x2_all_1_5_percento(self):
+    def test_gate_core_1x2_all_1_percento(self):
         import value_filter as vf
-        # EV +1.7%: sotto EV_MIN (2.5%), sopra EV_MIN_CORE (1.5%) -> PASSA
+        # EV +1.2%: sotto EV_MIN (1.5%), sopra EV_MIN_CORE (1.0%) -> PASSA
         # (con la precedenza `max` veniva respinto: e' l'allargamento voluto)
-        ok, why = vf.is_sane(0.72, 1.55, 0.017, market_prob=0.65,
+        ok, why = vf.is_sane(0.72, 1.55, 0.012, market_prob=0.65,
                              league="Premier League", market="1X2",
                              favourites_only=False, market_edge_min=0.0)
         assert ok, why
-        # EV +1.2%: sotto EV_MIN_CORE -> respinto
-        no, why2 = vf.is_sane(0.71, 1.55, 0.012, market_prob=0.65,
+        # EV +0.8%: sotto EV_MIN_CORE -> respinto
+        no, why2 = vf.is_sane(0.71, 1.55, 0.008, market_prob=0.65,
                               league="Premier League", market="1X2",
                               favourites_only=False, market_edge_min=0.0)
         assert not no and "EV troppo basso" in why2, why2
 
     def test_gate_core_su_mercato_liquido_usa_la_soglia_del_mercato(self):
         import value_filter as vf
-        # AH core: la soglia e' EV_MIN_LIQUID (1.0%) -> +1.2% passa
-        ok, why = vf.is_sane(0.71, 1.55, 0.012, market_prob=0.65,
+        # AH core: la soglia e' EV_MIN_LIQUID (0.5%) -> +0.8% passa
+        ok, why = vf.is_sane(0.71, 1.55, 0.008, market_prob=0.65,
                              league="Premier League", market="AH",
                              favourites_only=False, market_edge_min=0.0)
         assert ok, why
-        # +0.8%: sotto la soglia del mercato liquido -> respinto
-        no, why2 = vf.is_sane(0.71, 1.55, 0.008, market_prob=0.65,
+        # +0.3%: sotto la soglia del mercato liquido -> respinto
+        no, why2 = vf.is_sane(0.71, 1.55, 0.003, market_prob=0.65,
                               league="Premier League", market="AH",
                               favourites_only=False, market_edge_min=0.0)
         assert not no and "EV troppo basso" in why2, why2
 
     def test_non_core_su_mercato_liquido_usa_la_soglia_base(self):
         """CONSEGUENZA DICHIARATA della revisione: le leghe non core sui
-        mercati liquidi passano da 2.5% a 1.0% (la soglia base del mercato).
+        mercati liquidi passano alla soglia base del mercato (0.5%).
         Chi vuole la prudenza precedente usa `EV_MIN_LIQUID=0.025` (env),
         senza toccare il codice."""
         import value_filter as vf
@@ -498,7 +524,8 @@ class TestSogliaEvPerTier:
                              favourites_only=False, market_edge_min=0.0)
         assert ok, why
         # ...ma il 1X2 di una lega non core resta alla soglia protettiva
-        no, why2 = vf.is_sane(0.71, 1.55, 0.02, market_prob=0.65,
+        # (`EV_MIN`, 1.5%): +1.2% NON basta piu' li'.
+        no, why2 = vf.is_sane(0.71, 1.55, 0.012, market_prob=0.65,
                               league="MLS", market="1X2",
                               favourites_only=False, market_edge_min=0.0)
         assert not no and "EV troppo basso" in why2, why2
@@ -507,6 +534,7 @@ class TestSogliaEvPerTier:
         import value_filter as vf
         # Una lega che non si sa riconoscere NON e' core: nessuna riduzione.
         assert vf.ev_min_for_tier("Lega Che Non Esiste") == vf.EV_MIN_OTHER
+        assert vf.EV_MIN_OTHER == vf.EV_MIN       # fallback = soglia unica
         assert vf.ev_min_for_tier(None) == vf.EV_MIN_OTHER
         assert vf.ev_min("Inventata", "1X2") == vf.EV_MIN
         assert vf.ev_min(None, "AH") == vf.EV_MIN_LIQUID

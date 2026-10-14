@@ -539,7 +539,8 @@ def t60_executable(stake: float, price: float,
                    max_stake: Optional[float] = None) -> bool:
     """Un contratto T-60 rispetta i circuit breakers di decreto?
 
-    CB1 (tetto per-ordine) e tetto quota (solo favoriti netti 1.30-1.80).
+    CB1 (tetto per-ordine) e tetto quota (solo favoriti netti, fascia
+    `ODDS_MIN`-`ODDS_MAX` di `value_filter`: 1.20-2.00 dal 14/10/2026).
     Usato dal validatore d'ordine e dai tripwire: una sola fonte per la
     regola.
 

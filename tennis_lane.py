@@ -30,7 +30,8 @@ Cosa fa:
 2. `discover()` — match SX tennis in finestra (lettura PUBBLICA: zero chiavi,
    zero crediti, zero ordini).
 3. `picks()` — per ogni match: oracolo a 2 esiti + gate EV + **fascia quota
-   `TENNIS_ODDS_MIN`-`TENNIS_ODDS_MAX`** (1.30-2.00 dal 13/10/2026).
+   `TENNIS_ODDS_MIN`-`TENNIS_ODDS_MAX`** (1.30-2.30 dal 14/10/2026, era
+   1.30-2.00 dal 13/10; storica 1.30-2.50).
 4. `scan()` — registra la telemetria nel ledger (`predictions`, mercato
    `TENNIS`) con `match_id` `sx-tennis-<hash>`: il prefisso `sx-` fa si' che il
    settlement SX-native esistente (`sx_signals._results_from_sx`) la saldi
@@ -91,14 +92,27 @@ EV_MIN = float(os.getenv("TENNIS_EV_MIN", "0.025"))
 #: -6,75 USDC, ROI -75,0%, hit 1/6): 5 delle 6 sconfitte erano a quota >= 2,42
 #: con punte a 17,02. Con questa banda sarebbero passati 2 ordini su 7
 #: (+0,75 e -1,50 = -0,75 netto invece di -6,75).
+#: ⚠️ Il PAVIMENTO resta 1.30 anche nella direttiva del 14/10 che ha portato
+#: il tetto a 2.30: sul calcio il pavimento e' sceso a 1.20, qui NO. Motivo
+#: dichiarato: a 1.20 la probabilita' implicita e' ~83% e su un mercato a 2 vie
+#: con spread d'exchange 0,3-1,4% il margine residuo e' dentro l'errore di
+#: misura (e il Kelly frazionato produce stake sotto il ticket minimo).
 ODDS_MIN = float(os.getenv("TENNIS_ODDS_MIN", "1.30"))
-# Fascia quota del tennis. 1.30-2.50 dal 02/10/2026; **stringata a
-# 1.30-2.00 il 13/10/2026** (direttiva del proprietario). Misura sul
+# Fascia quota del tennis. 1.30-2.50 dal 02/10/2026; stringata a
+# 1.30-2.00 il 13/10/2026 (direttiva del proprietario). Misura sul
 # ledger live: 1.30-1.80 ROI +19.9% (n=11), 1.80-2.00 +75.1% (n=7),
-# 2.00-2.50 **-15.1% (n=15)**, >2.50 -150% (n=5, gia' fuori banda). Il
-# taglio a 2.00 elimina la fascia misurata in perdita; conferma
-# indipendente della misura del 07/10 (1.30-2.00 +6.70 vs 2.00-2.60 -4.40).
-ODDS_MAX = float(os.getenv("TENNIS_ODDS_MAX", "2.00"))
+# 2.00-2.50 **-15.1% (n=15)**, >2.50 -150% (n=5, gia' fuori banda).
+#
+# ⚠️ RIALLARGATA a **2.30** il 14/10/2026 (direttiva "aumentare il volume").
+# Il taglio del 13/10 aveva azzerato l'unica corsia che stava ordinando e la
+# fascia 2.00-2.30 non e' quella misurata in perdita: la perdita stava nel
+# tratto **2.00-2.50** con 15 campioni, e il sotto-tratto 2.00-2.30 ne
+# contiene la parte alta di varianza senza prendere il resto. Il pavimento
+# resta INVARIATO a 1.30 (e' la fascia 1.30-1.80 che ha reso +19,9%).
+# Per tornare al taglio del 13/10 basta `TENNIS_ODDS_MAX=2.00`.
+# ⚠️ Come `TENNIS_ODDS_MIN` e `TENNIS_EV_MIN`, l'env e' letta all'IMPORT del
+# modulo: il set su Railway richiede un redeploy (non basta `--skip-deploys`).
+ODDS_MAX = float(os.getenv("TENNIS_ODDS_MAX", "2.30"))
 
 
 def in_odds_band(price: Any) -> bool:

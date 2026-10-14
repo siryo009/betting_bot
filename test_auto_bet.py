@@ -313,24 +313,36 @@ class TestCorrelationCap:
 
 class TestTotalExposureCap:
     """Cap di portafoglio: l'esposizione TOTALE del giorno non deve superare
-    il 40% del bankroll (varianza additiva tra pick indipendenti)."""
+    `TOTAL_EXPOSURE_CAP_PCT` del bankroll (varianza additiva tra pick
+    indipendenti).
+
+    ⚠️ Le attese sono DERIVATE dalla costante di produzione, mai scritte a
+    mano: il 14/10/2026 il cap e' passato 40% -> 60% e quattro di questi test
+    sono scaduti pur non essendoci alcuna regressione. Derivare li rende
+    sensibili al COMPORTAMENTO (che e' l'oggetto del test) e immuni al valore.
+    """
+    PCT = auto_bet.TOTAL_EXPOSURE_CAP_PCT
 
     def _cand(self, mid, stake, league="Serie A"):
         return {"match_id": mid, "league": league, "stake": stake,
                 "commence": "2026-09-03T14:00:00Z", "esito_key": "1"}
 
     def test_sotto_il_cap_nessun_taglio(self):
-        cands = [self._cand("a", 3.0), self._cand("b", 3.0)]  # 6 <= 40% di 100
+        cands = [self._cand("a", 3.0), self._cand("b", 3.0)]  # 6 <= cap di 100
         out = auto_bet.apply_total_exposure_cap(cands, bankroll=100.0)
         assert all(not c.get("total_cap") for c in out)
         assert [c["stake"] for c in out] == [3.0, 3.0]
 
     def test_sopra_il_cap_scala_proporzionalmente(self):
-        # 5*5=25 > 40% di 50=20 -> factor 0.8, ranking preservato
-        cands = [self._cand(f"m{i}", 5.0, league=f"Lega{i}") for i in range(5)]
-        out = auto_bet.apply_total_exposure_cap(cands, bankroll=50.0)
+        # 5 cands da 10 = 50 > cap di 50 -> scala proporzionale, ranking
+        # preservato (stake identici fra i due candidati di testa).
+        bankroll = 50.0
+        cap = bankroll * self.PCT
+        cands = [self._cand(f"m{i}", 10.0, league=f"Lega{i}") for i in range(5)]
+        assert 5 * 10.0 > cap      # il test misura davvero il taglio
+        out = auto_bet.apply_total_exposure_cap(cands, bankroll=bankroll)
         tot = sum(c["stake"] for c in out)
-        assert tot <= 20.0 + 0.01
+        assert tot <= cap + 0.01
         assert all(c.get("total_cap") for c in out)
         assert out[0]["stake"] == out[1]["stake"]  # proporzionale
 
@@ -341,36 +353,38 @@ class TestTotalExposureCap:
 
     def test_cap_sottrae_esposizione_gia_piazzata(self):
         """24/7: il cap totale e' RIMANENTE — conta anche le puntate gia'
-        piazzate nei giri precedenti (cap 40 - 34 = 6 >= 6: nessun taglio)."""
+        piazzate nei giri precedenti (residuo >= 6: nessun taglio)."""
         cands = [self._cand("a", 3.0), self._cand("b", 3.0)]
-        out = auto_bet.apply_total_exposure_cap(cands, bankroll=100.0,
-                                                already_placed=34.0)
+        out = auto_bet.apply_total_exposure_cap(
+            cands, bankroll=100.0, already_placed=100.0 * self.PCT - 6.0)
         assert all(not c.get("total_cap") for c in out)
         assert [c["stake"] for c in out] == [3.0, 3.0]
 
     def test_cap_esaurito_zero(self):
-        """Budget del giorno gia' esaurito (40 >= cap 40): nessun nuovo
-        ordine — gli stake vengono azzerati."""
+        """Budget del giorno gia' esaurito (already_placed >= cap): nessun
+        nuovo ordine — gli stake vengono azzerati."""
         cands = [self._cand("a", 3.0), self._cand("b", 3.0)]
-        out = auto_bet.apply_total_exposure_cap(cands, bankroll=100.0,
-                                                already_placed=40.0)
+        out = auto_bet.apply_total_exposure_cap(
+            cands, bankroll=100.0, already_placed=100.0 * self.PCT)
         assert all(c["stake"] == 0.0 for c in out)
         assert all(c.get("total_cap") for c in out)
 
     def test_cap_ridotto_dal_residuo(self):
-        """Cap residuo ridotto da quanto gia' piazzato: 25 > 20-15=5 -> factor
-        0.2, ranking preservato."""
+        """Cap residuo ridotto da quanto gia' piazzato: 25 > cap_residuo=5 ->
+        scala proporzionale, ranking preservato."""
+        bankroll = 50.0
         cands = [self._cand(f"m{i}", 5.0, league=f"Lega{i}") for i in range(5)]
-        out = auto_bet.apply_total_exposure_cap(cands, bankroll=50.0,
-                                                already_placed=15.0)
+        out = auto_bet.apply_total_exposure_cap(
+            cands, bankroll=bankroll,
+            already_placed=bankroll * self.PCT - 5.0)
         tot = sum(c["stake"] for c in out)
         assert tot <= 5.0 + 0.01
         assert all(c.get("total_cap") for c in out)
         assert out[0]["stake"] == out[1]["stake"]  # proporzionale
 
     def test_flusso_sim_applica_il_cap_totale(self, monkeypatch, temp_db):
-        """9 value in 9 leghe diverse (nessuna correlazione): stake fisso 5
-        -> totale 45 > 40% di 100 -> gli stake vengono ridotti dal cap
+        """9 value in 9 leghe diverse (nessuna correlazione): stake fisso 8
+        -> totale 72 > cap di 100 -> gli stake vengono ridotti dal cap
         esposizione totale prima del salvataggio."""
         monkeypatch.setitem(sys.modules, "adaptive_staking", None)
         # Il gate di lega e' fuori scope in QUESTO test (che isola il cap
@@ -389,11 +403,14 @@ class TestTotalExposureCap:
         conn.execute("UPDATE matches SET league = 'Lega' || rowid WHERE id LIKE 'tc%'")
         conn.commit()
         conn.close()
-        placed = auto_bet.run_today_bets(stake_eur=5.0)
+        placed = auto_bet.run_today_bets(stake_eur=8.0)
         assert len(placed) == 9
         tot = sum(p["stake"] for p in placed)
-        assert tot <= 40.0 + 0.01  # 40% di 100
-        assert all(p["stake"] > 0 for p in placed)
+        # Il cap e' rispettato a meno dell'arrotondamento al centesimo di
+        # OGNI stake (9 x 0,005): senza la tolleranza derivata il test
+        # fallirebbe per 0,02 USDC di resto.
+        assert tot <= 100.0 * self.PCT + 0.01 + 0.005 * len(placed)
+        assert all(p["stake"] > 0 for p in placed)   # ridotti, non azzerati
 
 
 class TestFlatStake:
@@ -411,7 +428,7 @@ class TestFlatStake:
 
     def test_flat_default_unit_piu_cap(self):
         # Bankroll 12.28 USDC: cap correlazione 30% = 3.68 -> max 3 unita'
-        # per blocco; cap totale 40% = 4.91 -> max 4 unita' al giorno.
+        # per blocco (vince sui cap totali, che oggi sono piu' alti).
         start = "2026-09-09T14:00:00Z"
         cands = [self._cand(f"m{i}", ev=0.30 - 0.03 * i, league="Serie A",
                             commence=start) for i in range(5)]
@@ -424,11 +441,13 @@ class TestFlatStake:
         assert len(dropped) == 2 and all(c.get("corr_cap") for c in dropped)
 
     def test_flat_esposizione_totale_unita_intere(self):
-        # 5 segni in 5 leghe diverse (nessun blocco correlato): entra il
-        # cap TOTALE 40% di 12.28 = 4.91 -> 4 unita', cade l'EV piu' basso.
+        # 5 segni in 5 leghe diverse (nessun blocco correlato): il bankroll e'
+        # scelto perche' il cap TOTALE valga ESATTAMENTE 4 unita' -> cade
+        # l'EV piu' basso. Bankroll derivato: 4 / cap_pct.
+        bankroll = 4.0 / auto_bet.TOTAL_EXPOSURE_CAP_PCT
         cands = [self._cand(f"m{i}", ev=0.30 - 0.03 * i,
                             league=f"Lega{i}") for i in range(5)]
-        out = auto_bet.apply_flat_budget(cands, bankroll=12.28)
+        out = auto_bet.apply_flat_budget(cands, bankroll=bankroll)
         placed = [c for c in out if c.get("stake", 0) > 0]
         assert len(placed) == 4
         assert all(c["stake"] == 1.0 for c in placed)
@@ -438,10 +457,12 @@ class TestFlatStake:
         assert dropped[0].get("total_cap")
 
     def test_flat_cap_residuo_sottrae_gia_piazzato(self):
-        # 12.28 -> budget 4.91; gia' piazzati 3 -> residuo 1.91 -> 1 segno
+        # bankroll scelto perche' il cap valga 4.0; gia' piazzati 3 -> residuo
+        # 1.0 -> 1 solo segno
+        bankroll = 4.0 / auto_bet.TOTAL_EXPOSURE_CAP_PCT
         cands = [self._cand(f"m{i}", ev=0.30 - 0.03 * i,
                             league=f"Lega{i}") for i in range(3)]
-        out = auto_bet.apply_flat_budget(cands, bankroll=12.28,
+        out = auto_bet.apply_flat_budget(cands, bankroll=bankroll,
                                          already_placed=3.0)
         placed = [c for c in out if c.get("stake", 0) > 0]
         assert len(placed) == 1 and placed[0]["match_id"] == "m0"

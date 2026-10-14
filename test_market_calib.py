@@ -79,8 +79,13 @@ class TestMarketEdge:
         assert market_edge(0.62, None) is None
 
     def test_beating_market_soglia(self):
+        # La soglia di riferimento e' DERIVATA dalla costante (direttiva
+        # 14/10/2026: +2pp -> +1pp), cosi' un ritocco non puo' far passare
+        # questo test per il motivo sbagliato.
+        from market_calib import MARKET_EDGE_MIN
         assert is_beating_market(0.62, 0.565) is True    # +5.5pp >= soglia
-        assert is_beating_market(0.58, 0.565) is False   # +1.5pp < soglia
+        sotto = 0.565 + MARKET_EDGE_MIN / 2
+        assert is_beating_market(sotto, 0.565) is False  # < soglia corrente
         assert is_beating_market(0.565, 0.565) is False  # zero edge
 
     def test_beating_market_senza_mercato(self):
@@ -109,9 +114,10 @@ class TestValueFilterMarketGate:
 
     def test_sane_false_senza_edge(self):
         from value_filter import is_sane
-        # EV ok (+3.7%) ma prob 61% vs mercato 60% -> +1pp, sotto soglia
-        # (favorito netto: quota 1.70, prob. di mercato 60%)
-        ok, reason = is_sane(0.61, 1.70, 0.037, market_prob=0.60)
+        # EV ok (+3.7%) ma prob 60.5% vs mercato 60% -> +0.5pp, sotto la
+        # soglia di +1pp in vigore dal 14/10/2026 (favorito netto: quota
+        # 1.70, prob. di mercato 60%).
+        ok, reason = is_sane(0.605, 1.70, 0.037, market_prob=0.60)
         assert not ok
         assert "non batte il mercato" in reason
 
@@ -127,7 +133,7 @@ class TestValueFilterMarketGate:
         # quota della strategia resta vincolante.
         ok, _ = is_sane(0.60, 1.75, 0.05)
         assert ok
-        # Il test segue il cap REALE (guardrail 11/09: ODDS_MAX=1.80):
+        # Il test segue il cap REALE (fascia 1.20-2.00 dal 14/10/2026):
         # una quota appena sopra il cap deve essere respinta.
         ok, reason = is_sane(0.55, ODDS_MAX + 0.05, 0.10)
         assert not ok and "quota troppo alta" in reason

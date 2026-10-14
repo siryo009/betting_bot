@@ -61,8 +61,8 @@ class RiskLimits(BaseModel):
     odds_max: float
     ev_min: float
     ev_max: float
-    edge_min: float            # soglia di fallback (+2pp dal 21/09)
-    edge_strong: float         # +4pp -> strong_value
+    edge_min: float            # soglia di fallback (MARKET_EDGE_MIN)
+    edge_strong: float         # soglia di strong_value (MARKET_EDGE_STRONG)
     favourites_only: bool
     min_favourite_prob: float
     # --- revisione umana ---

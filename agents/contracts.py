@@ -387,7 +387,8 @@ class AdvisorResolution(BaseModel):
     escalate_review: bool = False
     context: dict[str, Any] = Field(default_factory=dict)
     original_reason: str = ""
-    #: Stato del recinto di esposizione aperta (ordini in corso, tetto 40%).
+    #: Stato del recinto di esposizione aperta (ordini in corso; il tetto e'
+    #: letto da `auto_bet`, mai ricopiato qui).
     exposure: dict[str, Any] = Field(default_factory=dict)
 
     def as_json(self) -> dict[str, Any]:
@@ -424,7 +425,7 @@ class CycleReport(BaseModel):
     #: Consigli dell'Advisor sui blocchi (uno per segnale bloccato, se chiamato)
     advisor: list[dict[str, Any]] = Field(default_factory=list)
     #: Recinto di esposizione aperta (direttiva 28/09/2026): ordini in corso,
-    #: capitale immobilizzato e tetto del 40% ricalcolato sull'equity corrente.
+    #: capitale immobilizzato e tetto ricalcolato sull'equity corrente.
     exposure: dict[str, Any] = Field(default_factory=dict)
     #: Ordini RESTING (GTC) su SX Bet (10/10/2026): capitale parcheggiato sul
     #: book in attesa di controparte — non e' ancora una puntata, ma si impegna

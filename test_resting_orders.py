@@ -765,22 +765,32 @@ class TestCapitaleImmobilizzato:
         assert stake == 2.0 and count == 1
 
     def test_recinto_vede_il_capitale_parcheggiato(self, temp_db):
-        """Con 5 resting da 2.0 (10.0 USDC) su un bankroll 20.0 il tetto
-        (50% dal 13/10/2026: 10.0) e' raggiunto: nessun ordine nuovo."""
-        for i in range(5):
+        """8 resting da 2.0 (16.0 USDC) su un bankroll 20.0 sfondano il tetto
+        a QUALUNQUE valore ragionevole del recinto (<= 80%): nessun ordine
+        nuovo. La quantita' e' scelta sopra il cap di proposito, cosi' il test
+        non dipende dal valore corrente di `OPEN_EXPOSURE_CAP_PCT`
+        (14/10/2026: 50% -> 70%)."""
+        bankroll = 20.0
+        cap = bankroll * auto_bet.OPEN_EXPOSURE_CAP_PCT
+        for i in range(8):
             _seed_open(order_id=f"0x{i}", stake=2.0, match_id=f"sx-L{i}")
-        status = auto_bet.open_exposure_status(20.0)
-        assert status["open_stake"] == 10.0
-        assert status["count"] == 5
+        status = auto_bet.open_exposure_status(bankroll)
+        assert status["open_stake"] == 16.0
+        assert status["count"] == 8
+        assert 16.0 >= cap          # il caso in esame e' davvero oltre il tetto
         assert status["blocked"] is True
 
     def test_proiezione_respinge_oltre_il_tetto(self, temp_db):
+        bankroll, aperti = 20.0, 6.0
         for i in range(3):
             _seed_open(order_id=f"0x{i}", stake=2.0, match_id=f"sx-L{i}")
-        # cap = 20.0 x 50% = 10.0 (dal 13/10/2026); 6.0 aperti + 4.5 nuovo =
-        # 10.5 -> respinto; 3.0 -> 9.0 entro il tetto.
-        assert auto_bet.exposure_allows(20.0, 4.5)["allowed"] is False
-        assert auto_bet.exposure_allows(20.0, 3.0)["allowed"] is True
+        # Il tetto e' `bankroll x OPEN_EXPOSURE_CAP_PCT` letto fresco: la
+        # proiezione respinge cio' che sfora anche di 0,5 USDC e accetta cio'
+        # che resta dentro anche di 0,5. Derivato, cosi' il test misura la
+        # REGOLA e non il valore del momento.
+        cap = bankroll * auto_bet.OPEN_EXPOSURE_CAP_PCT
+        assert auto_bet.exposure_allows(bankroll, cap - aperti + 0.5)["allowed"] is False
+        assert auto_bet.exposure_allows(bankroll, cap - aperti - 0.5)["allowed"] is True
 
     def test_registro_illeggibile_non_apre_il_recinto(self, monkeypatch,
                                                       temp_db):

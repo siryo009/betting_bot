@@ -478,13 +478,18 @@ class TestNormalizzazioneEvDelK:
     Ora il riferimento e' `value_filter.ev_min(league, market)`.
     """
 
-    def test_core_non_piu_schiacciato_al_minimo(self):
-        ev = 0.02                  # sotto EV_MIN (2.5%), sopra EV_MIN_CORE (1.5%)
+    def test_soglia_reale_non_schiaccia_il_k_al_minimo(self):
+        # Riferimento generico (nessuna lega/mercato) = EV_MIN (1.5%) -> l'EV
+        # 0.8% non vale nulla; con lega core e mercato liquido il riferimento
+        # scende a EV_MIN_LIQUID (0.5%) -> la componente si accende. I valori
+        # assoluti seguono la direttiva del 14/10; cio' che il test difende e'
+        # che il riferimento sia la soglia REALE, non una costante generica.
+        ev = 0.008
         senza = se.dynamic_kelly_fraction(ev=ev)
         con = se.dynamic_kelly_fraction(ev=ev, league="Premier League",
-                                        market="1X2")
-        assert senza["components"]["ev"] == 0.0      # riferimento 2.5%
-        assert con["components"]["ev"] > 0.0         # riferimento reale 1.5%
+                                        market="AH")
+        assert senza["components"]["ev"] == 0.0      # riferimento EV_MIN
+        assert con["components"]["ev"] > 0.0         # riferimento 0.5%
         assert con["kelly_fraction"] > senza["kelly_fraction"]
         assert con["kelly_fraction"] <= 0.25        # la banda non si allarga
 
@@ -499,11 +504,12 @@ class TestNormalizzazioneEvDelK:
             assert alto["components"]["ev"] == 1.0, (lg, mk)
 
     def test_calculate_kelly_stake_propaga_il_mercato(self):
-        """Sui mercati liquidi la soglia scende a 1.0% anche fuori dal core:
-        senza `market` il 2% finirebbe al minimo di banda (2.5%), con `market`
-        no — e' la propagazione che il chiamante deve fare."""
-        senza = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=0.02, league="MLS")
-        con = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=0.02,
+        """Sui mercati liquidi la soglia scende a 0.5% anche fuori dal core:
+        senza `market` l'1% finirebbe al minimo di banda (riferimento 1.5%),
+        con `market` no — e' la propagazione che il chiamante deve fare.
+        """
+        senza = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=0.010, league="MLS")
+        con = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=0.010,
                                       league="MLS", market="OU")
         assert senza["kelly_fraction"] == 0.15       # soglia 2.5% -> minimo
         assert con["kelly_fraction"] > senza["kelly_fraction"]

@@ -61,7 +61,8 @@ Cosa valida il contratto e cosa NO (la separazione conta):
   fuso orario, coerenza mercato/esito (`1X2` + `over` = rifiuto), regole del
   registro (linea dove serve, vietata dove non serve, passi di 0.25),
   provenienza delle quote derivate, versione dello schema supportata. Tutto QUI.
-- **Strategia**: fascia quote 1.30-1.80, EV minimo, edge minimo, cap di stake.
+- **Strategia**: fascia quote `value_filter.ODDS_MIN`-`ODDS_MAX`, EV minimo,
+  edge minimo, cap di stake.
   Tutto nel **Risk Engine** (`decision/risk_engine.py`), che legge le soglie da
   `value_filter`/`market_calib`. Il contratto non conosce la strategia: se la
   conoscesse, ogni cambio di soglia sarebbe un cambio di schema.

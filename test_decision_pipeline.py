@@ -26,6 +26,17 @@ from decision import (
 
 KICKOFF_HOURS = 6.0
 
+# Soglie DERIVATE dalle costanti di produzione: un numero copiato nel test
+# invecchia in silenzio (lezione del 13/09/2026). Dopo l'allargamento del
+# 14/10/2026 (fascia 1.20-2.00, edge core 1pp) i valori vecchi non sono piu'
+# "fuori fascia" ne' "sotto edge": qui si calcola il PRIMO valore rifiutato.
+ODDS_BELOW = round(vf.ODDS_MIN - 0.01, 2)        # sotto la fascia
+ODDS_ABOVE = round(vf.ODDS_MAX + 0.10, 2)        # sopra la fascia
+CORE_EDGE = vf.STRATEGY_LEAGUES["Premier League"]["min_edge"]
+EDGE_BELOW = round(CORE_EDGE - 0.002, 5)         # sotto la soglia di lega core
+EV_SAFE = 0.03                                   # EV ampiamente sopra soglia
+BLEND_EDGE_CASE = round((1 + EV_SAFE) / 1.60, 5)  # EV +3% a quota 1.60
+
 
 def make_signal(*, price=1.60, market_prob=0.58, blended_prob=0.65,
                 model_prob=None, league="Premier League", outcome="1",
@@ -265,15 +276,16 @@ class TestRiskEngine:
 
     @pytest.mark.parametrize("kwargs,expected", [
         ({"league": "Serie A"}, ReasonCode.LEAGUE_NOT_ALLOWED),
-        ({"price": 1.20}, ReasonCode.ODDS_TOO_LOW),
-        ({"price": 2.10}, ReasonCode.ODDS_TOO_HIGH),
+        ({"price": ODDS_BELOW}, ReasonCode.ODDS_TOO_LOW),
+        ({"price": ODDS_ABOVE}, ReasonCode.ODDS_TOO_HIGH),
         ({"market_prob": 0.45, "blended_prob": 0.55}, ReasonCode.NOT_FAVOURITE),
         ({"price": 1.50, "market_prob": 0.58, "blended_prob": 0.585}, ReasonCode.EV_TOO_LOW),
         ({"price": 1.79, "market_prob": 0.55, "blended_prob": 0.90}, ReasonCode.EV_ANOMALOUS),
-        # EV sopra soglia (+3.2%) ma edge sotto il minimo di lega (1.5pp < 2pp):
-        # l'EV deve restare PASSATO, altrimenti il rifiuto sarebbe attribuito
-        # al gate sbagliato.
-        ({"price": 1.60, "market_prob": 0.63, "blended_prob": 0.645}, ReasonCode.EDGE_TOO_LOW),
+        # EV sopra soglia (+3%) ma edge sotto il minimo di lega core: l'EV deve
+        # restare PASSATO, altrimenti il rifiuto sarebbe attribuito al gate
+        # sbagliato (con edge core a 1pp il caso e' 0.8pp).
+        ({"price": 1.60, "blended_prob": BLEND_EDGE_CASE,
+          "market_prob": round(BLEND_EDGE_CASE - EDGE_BELOW, 5)}, ReasonCode.EDGE_TOO_LOW),
     ])
     def test_reject_col_motivo_giusto(self, limits, kwargs, expected):
         decision = risk_engine.evaluate(make_signal(**kwargs), kills=live_kills(),
@@ -329,11 +341,19 @@ class TestRiskEngine:
         assert limits.league_ev_min("MLS", "OU") == vf.EV_MIN_LIQUID
         assert limits.league_ev_min("", "") == vf.EV_MIN
 
-    def test_gate_ev_core_a_1_5_percento(self, limits):
-        """Un segnale CORE con EV +1.7% passa (con la soglia piatta 2.5% era
-        respinto); lo stesso EV su una lega non core resta respinto."""
+    def test_gate_ev_core_usa_la_soglia_effettiva(self, limits):
+        """La soglia EV della catena e' `value_filter.ev_min` (core 1.0%, altre
+        leghe 1.5%): un EV FRA le due passa in core e resta respinto altrove.
+
+        L'EV di prova si deriva dalle due soglie reali: con la soglia piatta
+        del 04/10 (2.5%) questo stesso caso veniva respinto ovunque, ed e' la
+        differenza che il test deve misurare.
+        """
+        core_min = limits.league_ev_min("Premier League", "1X2")
+        other_min = limits.league_ev_min("MLS", "1X2")
+        assert other_min > core_min, "servono due soglie diverse per il caso"
         price = 1.60
-        blended = 1.017 / price                       # EV +1.7%
+        blended = (1 + (core_min + other_min) / 2) / price
         core = risk_engine.evaluate(
             make_signal(price=price, blended_prob=blended, league="Premier League"),
             kills=live_kills(), limits=limits)

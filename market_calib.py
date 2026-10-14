@@ -34,20 +34,25 @@ from typing import Dict, List, Optional, Tuple
 
 # --- Soglie di mercato (ricerca: servono almeno 3-5 punti percentuali
 # --- di edge vs la closing line perche' il valore non sia rumore)
-# Edge minimo vs mercato (ABBASSATO il 21/09/2026 su direttiva del
-# proprietario, per aumentare il volume di pick): il modello deve stimare
-# una prob. di vittoria SUPERIORE a quella devigata dei bookmaker di almeno
-# +2pp; +4pp per "strong_value". Non si scommette mai il favorito "alla
-# cieca".
-# ⚠️ Direzione OPPOSTA alla prudenza dell'11/09 (+3pp/+5pp), che era stata
-# ripristinata il 13/09 dopo il commit "FREQUENZA boost": la soglia e' una
-# SCELTA di strategia del proprietario, non un guadagno tecnico. Il tripwire
-# `test_risk_guards.TestFasciaFavoriti` e' stato riallineato di conseguenza
-# (prima asseriva >= 0.03): la protezione e' la DECISIONE tracciata qui, non
-# un numero che si puo' cambiare in silenzio.
-MARKET_EDGE_MIN = 0.02          # +2pp vs mercato (direttiva 21/09/2026)
-MARKET_EDGE_MODERATE = 0.02     # +2pp per moderate
-MARKET_EDGE_STRONG = 0.04       # +4pp vs mercato (strong_value)
+# Edge minimo vs mercato: il modello deve stimare una prob. di vittoria
+# SUPERIORE a quella devigata dei bookmaker di almeno +2pp; +4pp per
+# "strong_value". Non si scommette mai il favorito "alla cieca".
+#
+# ⚠️ DIMEZZATO il 14/10/2026 (direttiva del proprietario, "bot piu'
+# aggressivo"): +2pp/+4pp -> **+1pp/+2pp**.
+# PERCHE' NON BASTAVA LA SOLA SOGLIA EV: misurato sul ledger (14 giorni), con
+# edge >= 2pp le righe "nuove" sono **18 a qualunque soglia EV** (2.5% -> 18,
+# 1.5% -> 18, 1.0% -> 18): il gate dell'EDGE assorbe tutta la riduzione
+# dell'EV, che da sola sarebbe stata un no-op. Le due leve vanno mosse
+# insieme: pick nuovi 13 -> **28 in 14 giorni (2,0/giorno)**.
+# ⚠️ Direzione OPPOSTA alla prudenza dell'11/09 (+3pp/+5pp), ripristinata il
+# 13/09: la soglia e' una SCELTA di strategia del proprietario, non un
+# guadagno tecnico. Il tripwire `test_risk_guards.TestFasciaFavoriti` asserisce
+# uguaglianza ESATTA: la protezione e' la DECISIONE tracciata qui, non un
+# numero che si puo' cambiare in silenzio.
+MARKET_EDGE_MIN = 0.01          # +1pp vs mercato (direttiva 14/10/2026)
+MARKET_EDGE_MODERATE = 0.01     # +1pp per moderate
+MARKET_EDGE_STRONG = 0.02       # +2pp vs mercato (strong_value)
 
 # Peso del modello nel blending modello+mercato (0.5 = pari peso).
 # Il mercato e' quasi sempre piu' calibrato del modello: non superare 0.6.

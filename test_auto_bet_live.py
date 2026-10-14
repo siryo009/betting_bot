@@ -626,8 +626,13 @@ class TestBankrollEquity:
 class TestFlatLive:
     """Flat-stake LIVE (09/09): 1 USDC fisso per ogni segnale +EV del
     Calcio 1X2, con risk cap a unita' intere sul saldo REALE del wallet.
-    Con ~12 USDC: cap esposizione 40% = ~4.9 -> max 4 ordini/giorno;
-    cap correlazione 30% = ~3.7 -> max 3 ordini per blocco correlato.
+    Cap correlazione 30% -> max 3 ordini per blocco correlato; cap
+    TOTALE del giorno -> max `floor(bankroll x cap / 1 USDC)` ordini.
+
+    ⚠️ Il bankroll dei test sul cap TOTALE e' DERIVATO dalla costante di
+    produzione (14/10/2026: il cap e' passato 40% -> 60% e il valore scritto
+    a mano era diventato rumore): quello che il test deve misurare e' che il
+    cap morda, non QUANTO vale.
     """
 
     def _seed_n(self, n, league_prefix=True):
@@ -673,10 +678,11 @@ class TestFlatLive:
         return sent
 
     def test_flat_live_un_usdc_a_segno_cap_totale(self, monkeypatch, temp_db):
-        """5 value in leghe diverse su wallet 12.28: entrano 4 segni da 1
-        USDC (cap esposizione 40% ~4.91), il 5° esce."""
+        """5 value in leghe diverse: il wallet e' scelto perche' il cap
+        TOTALE valga 4 unita' da 1 USDC -> entrano 4 segni, il 5° esce."""
+        wallet = 4.0 / auto_bet.TOTAL_EXPOSURE_CAP_PCT
         self._seed_n(5)
-        sent = self._setup_live(monkeypatch)
+        sent = self._setup_live(monkeypatch, wallet=wallet)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 4
         assert all(p["stake"] == 1.0 for p in placed)
@@ -699,10 +705,13 @@ class TestFlatLive:
     def test_flat_live_budget_esaurito_nessun_ordine(self, monkeypatch,
                                                       temp_db):
         """Budget del giorno gia' consumato (already_placed >= cap): il
-        giro non piazza nulla."""
+        giro non piazza nulla. Il cap e' calcolato sullo STESSO wallet del
+        test, cosi' il consumo risulti davvero totale."""
+        wallet = 12.28
         self._seed_n(2)
-        self._setup_live(monkeypatch)
-        monkeypatch.setattr(auto_bet, "_today_placed_stake", lambda: 5.0)
+        self._setup_live(monkeypatch, wallet=wallet)
+        monkeypatch.setattr(auto_bet, "_today_placed_stake",
+                            lambda: wallet * auto_bet.TOTAL_EXPOSURE_CAP_PCT)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert placed == []
         assert tracker.get_bets() == []

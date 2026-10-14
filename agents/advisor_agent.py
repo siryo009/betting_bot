@@ -34,9 +34,9 @@ congelate (22/09) — l'Advisor puo' solo ESCALARE all'umano.
 
 **Recinto di esposizione APERTA (direttiva 28/09/2026).** Prima di qualunque
 consiglio l'Advisor interroga lo stato degli ORDINI APERTI (lettura fornita
-dall'Execution Engine, che delega ad `auto_bet.exposure_allows`): il 40% del
-bankroll e' un tetto sul capitale immobilizzato SIMULTANEO, non una finestra
-giornaliera. Se la proiezione (esposizione aperta + nuovo stake) sfora il
+dall'Execution Engine, che delega ad `auto_bet.exposure_allows`): la
+percentuale vigente del bankroll (letta da `auto_bet`, 70% dal 14/10/2026) e'
+un tetto sul capitale immobilizzato SIMULTANEO, non una finestra giornaliera. Se la proiezione (esposizione aperta + nuovo stake) sfora il
 tetto il piano viene RESPINTO — e un tetto di capitale non si negozia: il
 micro-stake non e' una risposta (un piano ridotto occuperebbe comunque il
 recinto). Il rilascio e' dinamico: appena un settlement chiude un match

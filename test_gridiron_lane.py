@@ -195,12 +195,24 @@ class TestConfig:
         assert gl.ev_min() > 0
 
     def test_ev_min_override_della_corsia(self, monkeypatch):
-        """La soglia del torneo e' una env DELLA CORSIA: abbassarla non
-        tocca la soglia globale di `value_filter`."""
-        monkeypatch.setenv("GRIDIRON_EV_MIN", "0.015")
-        assert gl.ev_min() == pytest.approx(0.015)
+        """La soglia del torneo e' una env DELLA CORSIA: tararla non tocca
+        la soglia globale di `value_filter`, e togliendo l'override la corsia
+        torna da sola alla soglia di progetto.
+
+        ⚠️ Il valore di override e' scelto DIVERSO da quello di produzione
+        (0.008): con `GRIDIRON_EV_MIN == vf.EV_MIN` il test non proverebbe
+        nulla (14/10/2026 il default di progetto e' sceso proprio a 0.015 e
+        l'assert originale `vf.EV_MIN != 0.015` e' diventato falso senza che
+        nulla fosse rotto).
+        """
         import value_filter as vf
-        assert vf.EV_MIN != pytest.approx(0.015)
+        monkeypatch.setenv("GRIDIRON_EV_MIN", "0.008")
+        assert gl.ev_min() == pytest.approx(0.008)
+        # l'override della corsia NON tocca la soglia globale
+        assert vf.EV_MIN != pytest.approx(0.008)
+        # senza override la corsia riusa la soglia unica di progetto
+        monkeypatch.delenv("GRIDIRON_EV_MIN", raising=False)
+        assert gl.ev_min() == pytest.approx(vf.EV_MIN)
 
     def test_ev_min_env_impossibile_ricade_sul_default(self, monkeypatch):
         """Una soglia non si spegne con un env sbagliato: valori non numerici,

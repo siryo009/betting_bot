@@ -112,7 +112,8 @@ DISCLAIMER = (
 # dopo i cambi di strategia del 12-13/09).
 FILTRI_TXT = (f"EV {EV_MIN*100:g}%-{EV_MAX*100:g}% | "
               f"Odds {ODDS_MIN:.2f}-{ODDS_MAX:.2f} | "
-              f"Edge ≥ +{MARKET_EDGE_MIN*100:.0f}pp | Kelly frazionato | Cap 0.5-2%")
+              f"Edge ≥ +{MARKET_EDGE_MIN*100:g}pp | Kelly dinamico | "
+              f"cap 12%/ordine")
 
 chat_bankrolls: dict[int, float] = {}
 

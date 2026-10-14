@@ -286,9 +286,13 @@ class TestTripwire:
             src = Path(path).read_text(encoding="utf-8")
             assert "OPEN_EXPOSURE_CAP_PCT" not in src, path
             assert "cap_order_stake" not in src, path
-            # Nessuna percentuale di recinto scritta a mano: ne' la vecchia
-            # (0.40), ne' quella del torneo (0.70), ne' l'attuale (0.50).
-            for pct in ("0.40", "0.50", "0.70"):
+            # Nessuna percentuale di recinto scritta a mano: ne' le STORICHE
+            # (0.40 del 28/09, 0.50 del 13/10) ne' quella IN VIGORE, letta
+            # dalla costante e non ricopiata — cosi' il tripwire segue da solo
+            # il valore di produzione invece di elencarne uno vecchio.
+            pcts = {"0.40", "0.50",
+                    f"{auto_bet.OPEN_EXPOSURE_CAP_PCT:.2f}"}
+            for pct in sorted(pcts):
                 assert pct not in src, f"{path}: {pct} copiato a mano"
 
     def test_l_execution_agent_delega_il_tetto(self):

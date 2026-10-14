@@ -25,7 +25,7 @@ from pydantic import ValidationError
 import auto_bet
 import value_filter as vf
 from agents.analysis_agent import AnalysisAgent
-from agents.brain_agent import BrainAgent
+from agents.brain_agent import BrainAgent, base_ev_min, dynamic_ev_min
 from agents.contracts import (AnalysisOutput, BrainOutput, CycleReport,
                               FinanceOutput, OracleSignal, SizingOutput,
                               ValidatedTrade, DEFAULT_MAX_AGE_S)
@@ -251,17 +251,34 @@ class TestCatenaEndToEnd:
         assert trade.analysis["juice"] == 0.045
 
     def test_la_volatilita_alza_la_soglia_e_il_trade_puo_cadere(self):
-        """EV 3% con sharp in movimento: la soglia dinamica sale al 3% e il
-        trade non passa piu' (il Cervello non allarga, restringe)."""
-        analysis = AnalysisAgent(
-            steam_fn=lambda *a: {"steam_move": True, "move_pct": -2.0,
-                                 "span_minutes": 10.0},
-            oracle_fn=lambda h, a: None,
-            names_fn=lambda mid: {"home": "H", "away": "A", "league": "PL"})
+        """Soglia dinamica: l'EV di prova sta DENTRO la banda [base, base x
+        volatilita'). Con lo sharp fermo il trade passa; con lo sharp in
+        movimento la soglia sale e cade (il Cervello non allarga, restringe).
+
+        I due estremi si DERIVANO dal motore (`base_ev_min`/
+        `dynamic_ev_min`): un numero copiato a mano non proverebbe la banda, e
+        dopo il ritocco delle soglie del 14/10 sarebbe fuori intervallo.
+        """
+        league, vel = "PL", -0.2
+        base = base_ev_min("1X2", league)
+        thr = dynamic_ev_min(market="1X2", league=league,
+                             velocity_pct_min=vel)["ev_min"]
+        assert thr > base, "senza margine la banda non e' misurabile"
+        blended = (1 + (base + thr) / 2) / 1.66      # EV a meta' banda
         brain = BrainAgent(bankroll=100.0, open_bets_fn=lambda: [],
                            min_ticket_fn=lambda: 2.0)
-        sig = _signal(blended=0.62)      # EV = 0.62*1.66 - 1 = 0.0292
-        b = brain.process(analysis.process([sig]).signals)
+        names = lambda mid: {"home": "H", "away": "A", "league": league}
+
+        calmo = AnalysisAgent(steam_fn=lambda *a: None,
+                              oracle_fn=lambda h, a: None, names_fn=names)
+        ok = brain.process(calmo.process([_signal(blended=blended)]).signals)
+        assert ok.validated == 1        # controllo: l'EV da solo passerebbe
+
+        mosso = AnalysisAgent(
+            steam_fn=lambda *a: {"steam_move": True, "move_pct": -2.0,
+                                 "span_minutes": 10.0},
+            oracle_fn=lambda h, a: None, names_fn=names)
+        b = brain.process(mosso.process([_signal(blended=blended)]).signals)
         assert b.validated == 0 and b.rejected == 1
 
     def test_shield_scale_limita_lo_stake_finale(self):

@@ -11860,3 +11860,113 @@ spurio).
 `KELLY_MAX_STAKE_PCT=0.171` (17,1%) per tornare a 8.00; oppure
 `KELLY_MAX_STAKE_PCT=0.05` (tetto 2,34) per applicare davvero il contenimento al
 5% chiesto il 13/10 (il default di codice e' gia' 5%, l'env 0.12 lo annulla).
+
+### Direttiva "bot piu' aggressivo": volume di ordini (14/10/2026)
+
+**Direttiva del proprietario**: rendere il bot molto piu' aggressivo per
+aumentare drasticamente il volume di scommesse giornaliere, su tre assi
+dichiarati: (1) abbassare il margine di valore richiesto, (2) allargare
+fascia quote / filtri di accettazione, (3) permettere piu' scommesse in
+parallelo senza attendere la chiusura delle precedenti.
+
+**LA MISURA che ha dimensionato le scelte** (ledger di produzione, 14 giorni,
+1506 righe, sola lettura):
+
+| leva mossa | righe ammesse | delta |
+|---|---|---|
+| `EV_MIN` 2,5% -> 1,5% | 289 -> 307 | **+18 in 14 giorni (+1,3/giorno)** |
+| fascia 1.30-1.80 -> 1.20-2.00 (con EV >= 1,5%) | 307 -> **346** | ~+3/giorno |
+| fascia estesa a 1.05-2.50 | 346 -> 435 | ~+9/giorno, **ESCLUSA** (contiene la fascia 2.00-2.50 misurata dal tennis a **-15,1%** il 13/10) |
+
+⚠️ **SCOPERTA DECISIVA**: con edge >= 2pp le righe "nuove" erano **18 a
+QUALUNQUE soglia EV** (2,5% -> 18, 1,5% -> 18, 1,0% -> 18): il gate
+dell'**EDGE** assorbiva per intero la riduzione dell'EV, che da sola sarebbe
+stata un **no-op**. Le due leve sono state quindi mosse **INSIEME**, e i pick
+nuovi passano da 13 a **28 in 14 giorni (2,0/giorno)**.
+
+**1) SOGLIE DI VALORE (`value_filter`, `market_calib`).**
+- `EV_MIN` 0.025 -> **0.015** (env assente: costante di codice);
+- `EV_MIN_LIQUID` 0.01 -> **0.005** (mercati liquidi AH/OU/Totals/BTTS/ML);
+- `EV_MIN_CORE` 0.015 -> **0.010** (leghe Tier-1/Core);
+- `MARKET_EDGE_MIN`/`MARKET_EDGE_MODERATE` 0.02 -> **0.01**,
+  `MARKET_EDGE_STRONG` 0.04 -> **0.02** (`market_calib`);
+- edge di lega (`STRATEGY_LEAGUES`) core 2,0/2,5pp -> **1,0/1,25pp**,
+  `PROBATION_STRATEGY` 4pp -> **2pp**, `DEFAULT_LEAGUE_STRATEGY` 2pp -> **1pp**;
+- il tennis **NON** e' stato toccato sull'EV (`TENNIS_EV_MIN` resta 2,5%):
+  li' l'EV e' misurato allineato allo sharp entro ~0,7% (30/09) e la leva
+  utile e' la banda quota.
+
+**2) FASCIA QUOTE (`value_filter` + `tennis_lane`).**
+- `ODDS_MIN` 1.30 -> **1.20**, `ODDS_MAX` 1.80 -> **2.00** (calcio 1X2).
+  ⚠️ Direzione opposta al guardrail dell'11/09 (che esisteva per escludere il
+  "pantano" 1.45-1.60 e le sfavorite): resta invariato il vincolo che rende la
+  fascia sensata — `FAVOURITES_ONLY` + `MIN_FAVOURITE_MARKET_PROB` 0.50, quindi
+  allargare la fascia **NON riammette le sfavorite**.
+- tennis: `TENNIS_ODDS_MAX` 2.00 -> **2.30** (env Railway). Il sotto-tratto
+  2.00-2.30 contiene la parte alta di varianza senza prendere il resto del
+  tratto 2.00-2.50 misurato in perdita. Il **pavimento resta 1.30** (dichiarato:
+  a 1.20 la probabilita' implicita e' ~83% e il margine finisce dentro l'errore
+  di misura).
+
+**3) ROTAZIONE DEL CAPITALE (`auto_bet`).**
+- `TOTAL_EXPOSURE_CAP_PCT` (portafoglio del giorno) 0.40 -> **0.60**;
+- `OPEN_EXPOSURE_CAP_PCT` (recinto sull'esposizione **APERTA**, capitale
+  immobilizzato simultaneo) 0.50 -> **0.70** (env Railway: era 0.50).
+  Storia della soglia: 40% (28/09) -> 70% (12/10, torneo) -> 50% (13/10,
+  contenimento) -> **70% (14/10, rotazione)**.
+  Misura con equity 23,36: 50% = **11,68** -> a stake 3,3-5,6 entrano **2-3
+  ordini**; 70% = **16,35** -> **3-5 ordini**. La rotazione e' intrinseca: il
+  recinto misura il capitale **aperto**, non il giorno, quindi i settlement
+  liberano il tetto da soli.
+- ⚠️ **Trade-off dichiarato**: il 13/10 il 70% era stato riportato al 50%
+  proprio perche' con stake grandi una singola perdita faceva scattare sia lo
+  stop giornaliero (5%) sia quello settimanale (12%). Il 14/10 la scelta e'
+  stata ribaltata a favore del volume: **le due protezioni restano attive e
+  invariate** (sono loro, ora, il freno al sovraccarico).
+- I log dei cap si STAMPANO dalle costanti (`%.0f%%` di `TOTAL_EXPOSURE_CAP_PCT`
+  e `CORRELATION_CAP_PCT`): un testo fisso avrebbe continuato a dichiarare
+  "40%" a fronte di un tetto diverso (lezione del 13/09).
+
+**4) ETICHETTE E TESTI ALLINEATI** (un testo che mente fa sbagliare la
+diagnosi): `bot.FILTRI_TXT` aggiornato (EV 1.5-20%, odds 1.20-2.00, edge ≥
++1pp, `:g` invece di `:.0f` per non arrotondare 1,5 a "2"), pagina webapp
+`/value`, docstring/commenti di `auto_bet` (60%/70%), `sx_signals`,
+`decision/market`, `decision/models.t60_executable`, `agents/*`. **Nessuna
+copia dei valori**: dove serve la soglia si cita la COSTANTE, non il numero.
+⚠️ Il tripwire `test_exposure_gate.TestTripwire.test_soglie_non_duplicate`
+vieta il **nome** della costante dentro `agents/`: i commenti degli agenti
+rimandano ad `auto_bet` senza nominarla (l'intento del test e' impedire che la
+soglia venga ricopiata; il guardrail e' stato rispettato, non allentato).
+
+**5) TEST.** Aggiornati **derivandoli dalle costanti** dove possibile (cosi' un
+prossimo ritocco non fa passare un test per il motivo sbagliato):
+`test_value_filter`, `test_market_calib` (edge vs costanti), `test_risk_guards`
+(fascia e edge), `test_league_gate` (tier-2/probation), `test_book_flow`,
+`test_decision_pipeline`/`test_decision_limits`, `test_tennis_lane` (banda
+parametrizzata), `test_auto_bet(_live)`, `test_exposure_gate` (CAP derivato),
+`test_capital_enclosure`, `test_order_watch`, `test_t60_breakers`,
+`test_resting_orders`, `test_aggressive_kelly`/`test_agent_kelly` (cap 12%),
+`test_gridiron_lane`, `test_top_down`, `test_league_gate`.
+`verify_guardrails.py`: **lo scenario D e' stato RIPARATO**, non aggirato — i
+seed "fuori fascia" (1.90 / 1.20) sono ora **derivati** da
+`value_filter.ODDS_MAX + 0.10` e `ODDS_MIN - 0.10`: con la fascia allargata a
+1.20-2.00 il vecchio 1.90 era DENTRO la banda e lo scenario falliva per il
+motivo sbagliato. Esito: **A-H TUTTI BLOCCANO** (exit 0).
+
+**6) ENV SU RAILWAY** (lette **all'IMPORT** -> il set da solo non basta, serve
+il redeploy). Erano impostate e **annullavano i nuovi default**:
+- `EV_MIN_LIQUID` 0.01 -> **0.005**;
+- `OPEN_EXPOSURE_CAP_PCT` 0.50 -> **0.70**;
+- `TENNIS_ODDS_MAX` 2.00 -> **2.30**.
+Restano ai default di codice (non impostate): `EV_MIN_CORE` (0.010),
+`EV_MIN_OTHER` (= `EV_MIN` 0.015), `TENNIS_ODDS_MIN` (1.30, esplicita su
+Railway e coerente). `railway config plan`: **already up to date**
+(0 to add, 0 to change, 0 to destroy). `TOTAL_EXPOSURE_CAP_PCT` e' una costante
+di codice: nessuna env la sovrascrive.
+
+⚠️ **Cosa NON e' cambiato** (e resta il freno): `FAVOURITES_ONLY` + prob di
+mercato >= 0.50, `EV_MAX` 20%, `CORRELATION_CAP_PCT` 30%, stop giornaliero 5%,
+stop settimanale 12%, CB2 25 USDC, finestra T-180..T-2, floor EV
+dell'esecuzione, soglia di liquidita' SX 20/4/20 x1.6, `KELLY_MAX_STAKE_PCT`
+12% per ordine, ticket minimo 1.00 USDC. Il volume sale dove i gate
+**ammettono**, non dove un guardrail protegge.

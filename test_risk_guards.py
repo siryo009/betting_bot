@@ -1,8 +1,10 @@
 """Test dei guardrail di rischio aggiunti l'11/09/2026.
 
-1. Quota minima: fascia favoriti 1.30-1.80 (ODDS_MIN 1.30).
-2. Filtro di edge: +2pp minimo vs mercato (MARKET_EDGE_MIN), +4pp strong
-   (direttiva del proprietario, 21/09/2026: era +3pp/+5pp).
+1. Fascia quota: **1.20-2.00** (direttiva del proprietario, 14/10/2026:
+   era 1.30-1.80 dal guardrail dell'11/09).
+2. Filtro di edge: **+1pp** minimo vs mercato (MARKET_EDGE_MIN), **+2pp**
+   strong (direttiva del proprietario, 14/10/2026: era +2pp/+4pp dal 21/09,
+   che a sua volta era +3pp/+5pp dall'11/09).
 3. Stop-loss giornaliero: -5% dal bankroll di inizio giornata -> puntate
    bloccate per 24h (stato persistente sul volume).
 4. Filtro liquidita' SX Bet: niente segnali/ordini su mercati sottili
@@ -42,35 +44,43 @@ class TestFasciaFavoriti:
         import value_filter as vf
         from market_calib import (MARKET_EDGE_MIN, MARKET_EDGE_MODERATE,
                                   MARKET_EDGE_STRONG)
-        assert vf.ODDS_MIN == 1.30
-        assert vf.ODDS_MAX == 1.80         # favoriti netti (niente "pantano")
-        # Direttiva 21/09/2026: soglia di edge abbassata a +2pp (strong +4pp)
-        # per aumentare il volume di pick. Uguaglianza ESATTA di proposito:
-        # un ulteriore abbassamento e' una decisione di strategia, non un
-        # dettaglio — va tracciata in AGENTS.md, non fatto in silenzio.
-        assert MARKET_EDGE_MIN == 0.02     # +2pp minimo vs mercato
-        assert MARKET_EDGE_MODERATE == 0.02
-        assert MARKET_EDGE_STRONG == 0.04  # +4pp per strong_value
+        assert vf.ODDS_MIN == 1.20
+        assert vf.ODDS_MAX == 2.00         # fascia allargata (direttiva 14/10)
+        # Direttiva 14/10/2026 ("bot piu' aggressivo"): soglia di edge
+        # dimezzata a +1pp (strong +2pp) per aumentare il volume di pick.
+        # Uguaglianza ESATTA di proposito: un ulteriore abbassamento e' una
+        # decisione di strategia, non un dettaglio — va tracciata in
+        # AGENTS.md, non fatto in silenzio.
+        assert MARKET_EDGE_MIN == 0.01     # +1pp minimo vs mercato
+        assert MARKET_EDGE_MODERATE == 0.01
+        assert MARKET_EDGE_STRONG == 0.02  # +2pp per strong_value
+        # Il pavimento della soglia EV segue la direttiva (2.5% -> 1.5%).
+        assert vf.EV_MIN == pytest.approx(0.015)
 
     def test_quota_sotto_il_minimo_bocciata(self):
         from value_filter import is_sane
-        ok, reason = is_sane(0.80, 1.29, 0.05, market_prob=0.75)
+        ok, reason = is_sane(0.85, 1.19, 0.05, market_prob=0.80)
         assert not ok and "quota troppo bassa" in reason
-        # 1.31 in fascia: passa (edge 5pp, EV 4.8%)
-        ok, _ = is_sane(0.80, 1.31, 0.048, market_prob=0.75)
+        # 1.21 in fascia: passa (edge 5pp, EV 4.8%)
+        ok, _ = is_sane(0.80, 1.21, 0.048, market_prob=0.75)
+        assert ok
+        # 1.95 in fascia (sopra il vecchio cap 1.80): passa
+        ok, _ = is_sane(0.55, 1.95, 0.048, market_prob=0.50)
         assert ok
 
-    def test_edge_sotto_2pp_bocciato(self):
+    def test_edge_sotto_1pp_bocciato(self):
         from value_filter import is_sane
-        # Direttiva 21/09/2026: +2pp minimo vs mercato (il fallback
-        # DEFAULT_LEAGUE_STRATEGY e' allineato a +2pp).
-        ok, reason = is_sane(0.61, 1.65, 0.03, market_prob=0.60)   # +1pp
+        # Direttiva 14/10/2026: +1pp minimo vs mercato (il fallback
+        # DEFAULT_LEAGUE_STRATEGY e' allineato a +1pp).
+        # NB: mezzo punto, non "+1pp esatto": con i float 0.61-0.60 =
+        # 0.0099999... e un test sul bordo misurerebbe l'aritmetica.
+        ok, reason = is_sane(0.605, 1.65, 0.03, market_prob=0.60)
         assert not ok and "non batte il mercato" in reason
-        # +2pp: OK (con la soglia a +3pp questo caso era respinto)
-        ok, reason = is_sane(0.62, 1.65, 0.03, market_prob=0.60)   # +2pp
+        # +2pp: OK (con la soglia a +2pp esatti questo caso era al bordo)
+        ok, reason = is_sane(0.62, 1.65, 0.03, market_prob=0.60)
         assert ok, reason
-        # +4pp (fascia strong_value): OK
-        ok, _ = is_sane(0.64, 1.65, 0.05, market_prob=0.60)
+        # +2pp (fascia strong_value): OK
+        ok, _ = is_sane(0.62, 1.65, 0.05, market_prob=0.60)
         assert ok
 
 

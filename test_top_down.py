@@ -551,21 +551,27 @@ class TestWiringCorsiaLive:
 
 class TestProbationExtra:
     def test_probation_alza_la_soglia_ev(self, monkeypatch, temp_db):
-        """Liga MX (probation): EV +3% con extra 2pp NON basta (servirebbe
-        >= 4.5% col tier protettivo 2.5%); la stessa EV su una lega core passa
-        perche' il tier core porta la soglia a 1.5% (direttiva 08/10/2026)."""
+        """Liga MX (probation): la soglia sale di `TOP_DOWN_PROBATION_EXTRA`
+        (default +2pp) SOPRA quella effettiva della lega; la stessa EV su una
+        lega core passa perche' li' vale la soglia core (0.010).
+
+        Le due soglie si DERIVANO da `value_filter.ev_min`: con l'EV di prova
+        (+3%) il caso e' costruito per stare fra le due.
+        """
         pick = {"match_id": "p1", "home": "A", "away": "B",
                 "esito_key": "1", "quota": 2.00}
-        # p_true 0.515, quota 2.00 -> EV = 0.515 - 0.485 = +3% (strettamente
-        # fra le due soglie: 2% core < 3% < 4% probation).
+        # p_true 0.515, quota 2.00 -> EV = 0.515 - 0.485 = +3%.
         _patch_load(monkeypatch, {"1": 0.515, "X": 0.26, "2": 0.225,
                                   "overround": 0.04})
+        core_min = vf.ev_min("Premier League", "")
+        probation_min = vf.ev_min("Liga MX", "") + auto_bet.TOP_DOWN_PROBATION_EXTRA
+        assert probation_min > 0.03 > core_min, "l'EV di prova deve stare fra le due"
         v = auto_bet._top_down_eval(pick, league="Liga MX")
-        assert v["ok"] and v["trigger"] is False        # EV 3% < 2.5%+2%
-        assert v["ev_min"] == pytest.approx(0.045)
+        assert v["ok"] and v["trigger"] is False
+        assert v["ev_min"] == pytest.approx(probation_min)
         v_core = auto_bet._top_down_eval(pick, league="Premier League")
         assert v_core["ok"] and v_core["trigger"] is True
-        assert v_core["ev_min"] == pytest.approx(vf.EV_MIN_CORE)
+        assert v_core["ev_min"] == pytest.approx(core_min)
 
     def test_senza_leaga_nessun_extra(self, monkeypatch):
         pick = {"match_id": "p1", "home": "A", "away": "B",
@@ -573,7 +579,7 @@ class TestProbationExtra:
         _patch_load(monkeypatch, {"1": 0.52, "X": 0.25, "2": 0.23,
                                   "overround": 0.04})
         v = auto_bet._top_down_eval(pick)
-        assert v["ev_min"] == pytest.approx(0.025) and v["trigger"] is True
+        assert v["ev_min"] == pytest.approx(vf.EV_MIN) and v["trigger"] is True
 
     def test_extra_configurabile(self, monkeypatch):
         pick = {"match_id": "p1", "home": "A", "away": "B",
@@ -582,7 +588,8 @@ class TestProbationExtra:
                                   "overround": 0.04})
         monkeypatch.setattr(auto_bet, "TOP_DOWN_PROBATION_EXTRA", 0.10)
         v = auto_bet._top_down_eval(pick, league="Liga MX")
-        assert v["ev_min"] == pytest.approx(0.125) and v["trigger"] is False
+        assert v["ev_min"] == pytest.approx(vf.ev_min("Liga MX", "") + 0.10)
+        assert v["trigger"] is False
 
 
 # ---------------------------------------------------------------------------

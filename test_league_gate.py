@@ -157,18 +157,27 @@ class TestPropagazioneLega:
             {**cand, "league": ALLOWED}) == "value"
 
     def test_tier2_edge_alzato_applicato_dal_motore(self):
-        """In probation l'edge minimo e' +4pp, e vale nel codice VERO del
-        motore (`_candidate_status`), non solo in `is_sane`.
+        """In probation l'edge minimo e' piu' severo di quello core, e vale nel
+        codice VERO del motore (`_candidate_status`), non solo in `is_sane`.
 
-        +2.5pp: rifiutato (passerebbe invece in una lega core, es. Turchia);
-        +4.5pp: accettato come `value`.
+        Le due soglie si DERIVANO dalle costanti (lezione del 13/09: un numero
+        copiato a mano smette di proteggere al primo ritocco). L'edge scelto sta
+        FRA le due: rifiutato in probation, accettato in una lega core.
         """
-        debole = {"prob": 0.625, "quota": 1.65, "ev": 0.031,
-                  "market_prob": 0.60, "market_edge": 0.025}
+        prob, quota = 0.625, 1.65
+        probation_edge = value_filter.PROBATION_STRATEGY["min_edge"]
+        core_edge = value_filter.STRATEGY_LEAGUES["Turkey Super Lig"]["min_edge"]
+        assert probation_edge > core_edge, "la probation deve essere piu' severa"
+        edge = round((probation_edge + core_edge) / 2, 5)
+        cand = {"prob": prob, "quota": quota, "ev": prob * quota - 1,
+                "market_prob": prob - edge, "market_edge": edge}
         assert fixture_engine._candidate_status(
-            {**debole, "league": PROBATION}) == "rejected"
-        forte = {"prob": 0.645, "quota": 1.65, "ev": 0.064,
-                 "market_prob": 0.60, "market_edge": 0.045}
+            {**cand, "league": PROBATION}) == "rejected"
+        assert fixture_engine._candidate_status(
+            {**cand, "league": "Turkey Super Lig"}) != "rejected"
+        # Sopra la soglia di probation: accettato come `value` (EV 6.4% < 8%).
+        forte = {**cand, "prob": 0.645, "ev": 0.645 * quota - 1,
+                 "market_edge": probation_edge + 0.02}
         assert fixture_engine._candidate_status(
             {**forte, "league": PROBATION}) == "value"
 
@@ -301,7 +310,9 @@ class TestNomiDelleLegheAmmesse:
         assert value_filter.canonical_league(raw) == "MLS"
         assert value_filter.league_allowed(raw)
         assert value_filter.league_tier(raw) == "probation"
-        assert value_filter.get_league_strategy(raw)["min_edge"] == 0.04
+        # La soglia si legge dalla costante: la probation e' definita UNA volta.
+        assert (value_filter.get_league_strategy(raw)["min_edge"]
+                == value_filter.PROBATION_STRATEGY["min_edge"])
 
     def test_alias_non_fonde_leghe_diverse(self):
         """`Brazil Serie B` NON e' `Serie B`: l'alias non deve promuovere la

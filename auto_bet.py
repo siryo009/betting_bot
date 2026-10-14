@@ -33,7 +33,8 @@ Regole prudenti di esecuzione (scelte per questo progetto):
 - una sola puntata per (match, esito): la UNIQUE(match_id, esito) in `bets`
   impedisce di raddoppiare se il job viene rilanciato;
 - correlation risk cap (30% bankroll per blocco correlato) + cap esposizione
-  totale del giorno (40% bankroll), applicati PRIMA di salvare;
+  totale del giorno (60% bankroll dal 14/10/2026) + recinto sull'esposizione
+  APERTA (70%), applicati PRIMA di salvare;
 - in LIVE il market dell'exchange deve riferirsi alla STESSA partita del
   segnale (nomi squadre + kickoff): nessun ordine su eventi ambigui
   (fail-closed), e nessun riempimento sotto la quota-segnale (floor EV).
@@ -135,10 +136,15 @@ WEEKLY_RECONCILE_TOLERANCE_USDC = float(
 CORRELATION_CAP_PCT = 0.30     # max 30% di bankroll per blocco correlato
 CORRELATION_WINDOW_MIN = 90    # kickoff entro 90' = stesso blocco temporale
 # Cap di portafoglio: esposizione TOTALE del giorno (somma di tutti gli
-# stake) <= 40% del bankroll. Kelly dimensiona ogni stake singolarmente;
+# stake) <= 60% del bankroll. Kelly dimensiona ogni stake singolarmente;
 # senza questo cap, 5+ segnali indipendenti sommano comunque un rischio
 # complessivo che cresce col numero di pick (varianza additiva).
-TOTAL_EXPOSURE_CAP_PCT = 0.40  # max 40% di bankroll per il portafoglio del giorno
+# 40% -> **60% dal 14/10/2026** (direttiva del proprietario: "piu' scommesse
+# in parallelo senza attendere che le precedenti siano chiuse"). Il cap
+# misura i FLUSSI (somma degli stake piazzati nella giornata, multi-giro) e va
+# letto INSIEME al recinto sotto: il 60% e' il tetto della giornata, il 70% il
+# tetto del capitale contemporaneamente immobilizzato.
+TOTAL_EXPOSURE_CAP_PCT = 0.60  # max 60% di bankroll per il portafoglio del giorno
 
 # --- RECINTO DI CAPITALE (direttiva 27/09/2026) -----------------------------
 # Il cap di portafoglio sopra misura i FLUSSI del giorno; questo misura
@@ -149,12 +155,22 @@ TOTAL_EXPOSURE_CAP_PCT = 0.40  # max 40% di bankroll per il portafoglio del gior
 # DEGRADA a shadow: nessun nuovo ordine REALE, telemetria e valutazione
 # (corsia + catena) continuano a girare. Si sblocca da sola quando i
 # settlement chiudono le righe e l'esposizione torna sotto soglia.
-# 40% -> **50% dal 13/10/2026** (direttiva del proprietario: il 70% del
-# 12/10, alzato per il torneo, lasciava aperti fino a 35 USDC su ~50 di
-# equity — con stake da 2.4-7.5 una singola perdita faceva scattare sia lo
-# stop giornaliero (5%) sia quello settimanale (12%)). Il 50% dimezza la
-# varianza simultanea senza spegnere la corsia del torneo.
-OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.50"))
+# Storia delle soglie, per non ripercorrerla:
+#  40% (28/09) -> 70% (12/10, torneo) -> 50% (13/10, contenimento) ->
+#  **70% (14/10/2026, direttiva del proprietario: "bot piu' aggressivo,
+#  rotazione del capitale")**. Misura che ha dimensionato la scelta con
+#  equity 23,36: 50% = **11,68** -> a stake 3,3-5,6 entrano **2-3 ordini**;
+#  70% = **16,35** -> **3-5 ordini**. E' la leva che conta davvero sulla
+#  "rotazione" (il capitale si libera da solo coi settlement, quindi il tetto
+#  non e' giornaliero ma istantaneo).
+# ⚠️ Trade-off dichiarato e non nascosto: il 13/10 il 70% era stato riportato
+#  al 50% proprio perche' con stake grandi una singola perdita faceva scattare
+#  sia lo stop giornaliero (5%) sia quello settimanale (12%). Il 14/10 la
+#  scelta e' stata ribaltata a favore del VOLUME, e le due protezioni restano
+#  attive e invariate (stop giornaliero 5%, stop settimanale 12%): il freno
+#  contro il sovraccarico non e' piu' il recinto, sono gli stop.
+# Per tornare al contenimento: `OPEN_EXPOSURE_CAP_PCT=0.50` (env, preserve()).
+OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.70"))
 # Tetto per SINGOLO ordine. **DINAMICO dal 04/10/2026** (direttiva del
 # proprietario: "sostituisci qualsiasi hard cap fisso precedente con una
 # percentuale dinamica sul bankroll"): il tetto e' `bankroll x
@@ -456,7 +472,7 @@ def t60_stake(bankroll: float, *, mode: str = "sim") -> float:
     fisso 1.00 del 17/09 ma la percentuale dinamica del 04/10, dalla stessa
     fonte del cap per-ordine: cosi' un ordine T-60 non puo' valere piu' del
     tetto che vale sulla corsia normale. Rispetta comunque i limiti di
-    portafoglio (correlazione 30%, esposizione totale 40%) e la cassa reale
+    portafoglio (correlazione 30%, esposizione totale 60%) e la cassa reale
     del wallet: mai un ordine sopra i fondi disponibili.
     """
     try:
@@ -487,7 +503,7 @@ def t60_stake(bankroll: float, *, mode: str = "sim") -> float:
 _TOP_DOWN_CACHE_DIR = None
 
 #: Corsia TOP-DOWN (25/09, direttiva "andiamo live subito"): la corsia LIVE
-#: non eredita il filtro bottom-up (fascia favoriti 1.30-1.80, tier
+#: non eredita il filtro bottom-up (fascia favoriti `ODDS_MIN`-`ODDS_MAX`, tier
 #: value/strong_value): il candidato nasce da OGNI riga 1X2 aperta della
 #: finestra mobile 24h e l'unico giudice del prezzo e' l'oracolo Pinnacle
 #: (EV >= EV_MIN, fail-closed senza oracolo).
@@ -496,7 +512,7 @@ _TOP_DOWN_CACHE_DIR = None
 #: finche' non lo si accende esplicitamente con `TOP_DOWN_BYPASS=1` (env
 #: Railway, dichiarata in `preserve()`). Il default era ON nella bozza del
 #: 25/09: con `AUTO_BET_DRY_RUN` a 0 significava ordini reali che scavalcano
-#: il gate di prezzo 1.30-1.80 senza una decisione esplicita.
+#: il gate di prezzo bottom-up senza una decisione esplicita.
 TOP_DOWN_BYPASS = os.getenv("TOP_DOWN_BYPASS", "0").strip().lower() \
     in ("1", "true", "yes", "on")
 
@@ -1549,7 +1565,7 @@ def _harvest_oracle_board(board: list[dict]) -> dict:
 # USDC). I cap di sicurezza restano SEMPRE attivi ma vengono applicati a
 # UNITÀ INTERE (vedi apply_flat_budget): con un saldo wallet ~12 USDC
 # entrano al massimo 3-4 ordini da 1 USDC al giorno (cap correlazione 30%
-# + esposizione totale 40%), mai frazioni non piazzabili.
+# + esposizione totale 60%), mai frazioni non piazzabili.
 STAKE_MODE = os.getenv("AUTO_BET_STAKE_MODE", "adaptive").strip().lower()
 FLAT_STAKE_EUR = float(os.getenv("AUTO_BET_FLAT_STAKE_EUR", "1.0"))
 
@@ -1708,7 +1724,7 @@ def apply_flat_budget(candidates: list[dict], bankroll: float,
       - blocco correlato (stessa lega + finestra 90', o stesso match):
         al massimo floor(30% bankroll / unit) segni;
       - esposizione totale del giorno: al massimo
-        floor((40% bankroll - gia' piazzato) / unit) segni complessivi.
+        floor((TOTAL_EXPOSURE_CAP_PCT bankroll - gia' piazzato) / unit) segni.
     Gli esuberi (in coda per EV) vengono azzerati ("stake"=0) con i flag
     corr_cap/total_cap per il log. Con un saldo wallet ~12 USDC entrano al
     massimo 3-4 ordini da 1 USDC al giorno.
@@ -1772,7 +1788,7 @@ def apply_total_exposure_cap(candidates: list[dict], bankroll: float,
 
     Con piu' giri al giorno (auto-bet 24/7 dal 08/09) il cap e' RIMANENTE:
     sottrae l'esposizione GIÀ piazzata nei giri precedenti (puntate aperte
-    nelle ultime 24h), cosi' il tetto del 40% vale sul giorno intero e non
+    nelle ultime 24h), cosi' il tetto del giorno vale sul giorno intero e non
     per ogni singolo giro.
 
     Args:
@@ -1865,7 +1881,7 @@ def _open_live_snapshot() -> tuple[float, int]:
     sull'exchange (escrow) ma NON ha una riga in `bets` finche' non si riempie.
     Senza contarli qui l'equity (`available + exposure`) SCENDEREBBE al
     piazzamento e risalirebbe alla cancellazione: un drawdown fantasma, la
-    stessa classe del falso stop settimanale del 09/10. E il recinto 40% non
+    stessa classe del falso stop settimanale del 09/10. E il recinto aperto non
     vedrebbe un capitale realmente impegnato. Fail-open sulla lettura (0):
     una telemetria rotta non deve aprire il recinto ne' muovere l'equity.
     """
@@ -2277,7 +2293,7 @@ def kelly_size_for_pick(pick: dict, *, price: float, bankroll: float,
 #
 #   chief_trade -> corsia della catena piramidale (stake del Finance Agent)
 #   corr_cap    -> stake ridotto dal cap di CORRELAZIONE (30% per blocco)
-#   total_cap   -> stake ridotto dal cap di ESPOSIZIONE TOTALE (40%/giorno)
+#   total_cap   -> stake ridotto dal cap di ESPOSIZIONE TOTALE (TOTAL_EXPOSURE_CAP_PCT/giorno)
 #
 # Una corsia NUOVA che porta con se' uno stake deciso va dichiarata QUI: la
 # regola sta in un solo posto apposta (stessa lezione del 13/09 sul doppio
@@ -2382,7 +2398,8 @@ def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
 # solo ALZARE lo stake di un segnale GIA' approvato (x1.5 di default) entro un
 # budget di esposizione e un cap per ordine, con una soglia di sicurezza
 # sull'equity. NON bypassa nessun gate: i cap di portafoglio (correlazione 30%,
-# esposizione 40%), il recinto aperto, CB2 e gli stop restano quelli del giro.
+# esposizione totale del giorno), il recinto aperto, CB2 e gli stop restano
+# quelli del giro.
 def _apply_tournament(candidates: list[dict], *,
                       bankroll: float | None = None) -> tuple[list[dict], dict]:
     """Applica il layer di staking del torneo ai candidati LIVE. Fail-safe.
@@ -2776,7 +2793,7 @@ def _esports_picks() -> list[dict]:
     la fixture OddsPapi e calcola l'EV contro le probabilita' fair de-vigate di
     Pinnacle — con la STESSA soglia del calcio (`value_filter.EV_MIN`, importata).
 
-    E' SOLO una fonte di candidati: stake fisso, recinto 40%/30%, T-60,
+    E' SOLO una fonte di candidati: Kelly, cap per-ordine, recinto aperto, T-60,
     liquidita', dedup e gate di mercato restano quelli del giro, applicati a
     valle. Nessuna scrittura di ledger qui (e' `run_today_bets` che salva).
 
@@ -2808,7 +2825,7 @@ def _tennis_picks() -> list[dict]:
     profondita': il longshot non e' un edge, e' varianza (misura 02/10:
     ROI -75% su 7 ordini, 5 delle 6 sconfitte a quota >= 2,42).
 
-    E' SOLO una fonte di candidati: stake fisso, recinto 40%/30%, T-60,
+    E' SOLO una fonte di candidati: Kelly, cap per-ordine, recinto aperto, T-60,
     liquidita', dedup e gate di mercato restano quelli del giro, applicati a
     valle. Il pick porta `market_id`/`selection_id` di SX (l'ordine non deve
     ri-risolvere il mercato: la struttura a UN mercato per match non e' quella
@@ -2858,7 +2875,7 @@ def _gridiron_picks() -> list[dict]:
     probabilita' fair de-vigate a 2 esiti.
 
     E' SOLO una fonte di candidati: stake (Kelly aggressivo + layer torneo),
-    recinto 40%, T-60, liquidita', dedup e gate di mercato restano quelli del
+    recinto aperto, T-60, liquidita', dedup e gate di mercato restano quelli del
     giro, applicati a valle. Il pick porta `market_id`/`selection_id` di SX e il
     flag `gridiron_lane` (esenta la corsia dal gate top-down del CALCIO).
 
@@ -2897,7 +2914,7 @@ def _top_down_picks() -> list[dict]:
     """Corsia TOP-DOWN LIVE: candidati 1X2 senza il filtro bottom-up.
 
     Direttiva 25/09/2026 ("bypass del filtro quote e merge"): sul denaro REALE
-    il giudice del prezzo non e' piu' la fascia favoriti 1.30-1.80 ne' il tier
+    il giudice del prezzo non e' piu' la fascia favoriti `ODDS_MIN`-`ODDS_MAX` ne' il tier
     del modello, ma l'ORACOLO Pinnacle de-vigato (`_top_down_eval`, ev >=
     EV_MIN, fail-closed senza oracolo). Questa corsia pesca da OGNI riga 1X2
     aperta della finestra mobile 24h (qualsiasi status, qualsiasi quota > 1),
@@ -3440,7 +3457,7 @@ def sizing_equity(equity) -> float:
     dimensionamento, non solo per il picco del drawdown: misurata in
     produzione la finestra di doppio conteggio aveva gonfiato l'equity di
     +5.95 USDC su ~34.8 (≈ +17%), con tre ordini sopra il cap per-ordine e un
-    superamento del recinto 40% (14.10 vs 13.47) — i cap erano misurati su un
+    superamento del recinto aperto (14.10 vs 13.47) — i cap erano misurati su un
     capitale che non esisteva. Un solo punto di verita': tutte le corsie che
     dimensionano un ordine reale passano da qui.
 
@@ -4209,12 +4226,12 @@ def run_today_bets(stake_eur: float | None = None,
             _wallet_balance = snapshot["available"]
             _wallet_exposure = snapshot["exposure"]
             _spendable = snapshot["available"]
-            # Kelly, cap per-ordine, recinto 40%, CB2 e stop-loss misurano
+            # Kelly, cap per-ordine, recinto aperto, CB2 e stop-loss misurano
             # l'EQUITY RICONCILIATA: cosi' una bet piazzata (liberi -> escrow)
             # non e' una perdita E una puntata gia' risolta ma non ancora
             # saldata non gonfia il capitale di DIMENSIONAMENTO (10/10/2026:
             # con l'equity grezza i cap si misuravano su un capitale fantasma,
-            # con ordini sopra il cap e un recinto 40% superato).
+            # con ordini sopra il cap e il recinto aperto superato).
             _equity_raw = snapshot["equity"]
             _bankroll = sizing_equity(_equity_raw)
             _wallet_equity = _bankroll
@@ -4319,8 +4336,8 @@ def run_today_bets(stake_eur: float | None = None,
                                 EV_MIN, ODDS_MIN, ODDS_MAX, MARKET_EDGE_MIN)
 
     # --- Soglie lette dalle costanti di value_filter: il log non puo'
-    # divergere dalla strategia reale (favoriti netti 1.30-1.80; edge minimo
-    # +2pp sul mercato dal 21/09, era +3pp). ---
+    # divergere dalla strategia reale (favoriti netti nella fascia
+    # `ODDS_MIN`-`ODDS_MAX`; edge minimo `MARKET_EDGE_MIN` sul mercato). ---
     # A DEBUG di proposito (21/09/2026): sono CONFIGURAZIONE, identiche a ogni
     # giro. Ripetute a INFO ogni 60s affogavano il log operativo. Le soglie
     # reali restano leggibili con `/autobet` e qui sopra nel report.
@@ -4344,7 +4361,7 @@ def run_today_bets(stake_eur: float | None = None,
     # Corsia TOP-DOWN (25/09, solo LIVE): quando il gate oracolo governa il
     # denaro reale, il board 1X2 non e' pre-filtrato dalla fascia bottom-up
     # (le righe scartate dal filtro quote restano nel ledger e diventano
-    # candidati: il prezzo lo giudica Pinnacle, non la fascia 1.30-1.80).
+    # candidati: il prezzo lo giudica Pinnacle, non la fascia bottom-up).
     # In SIM il board resta quello storico (era del ledger intatta).
     board = _today_value_picks() + _multi_market_picks()
     if mode == "live" and TOP_DOWN_EV and TOP_DOWN_BYPASS:
@@ -4530,7 +4547,7 @@ def run_today_bets(stake_eur: float | None = None,
 
         # Flat-stake (09/09, Calcio 1X2): importo FISSO per ogni segnale
         # value/strong_value invece del Kelly dinamico. Il rispetto dei cap
-        # (correlazione 30% + esposizione totale 40% del giorno) e del
+        # (correlazione 30% + esposizione totale del giorno) e del
         # minimo ordine SX avviene a UNITA' INTERE in FASE 2
         # (apply_flat_budget). Identico per SIM e live.
         if STAKE_MODE == "flat":
@@ -4737,11 +4754,16 @@ def run_today_bets(stake_eur: float | None = None,
     _exposure = calculate_exposure(candidates, _bankroll)
     if _exposure.get("correlation_risk"):
         logger.warning("auto_bet: CORRELATION RISK! Max league exposure "
-                       "%.1f%% > 30%% — riduci stake",
-                       _exposure["max_league_pct"] * 100)
+                       "%.1f%% > %.0f%% — riduci stake",
+                       _exposure["max_league_pct"] * 100,
+                       CORRELATION_CAP_PCT * 100)
     if not _exposure.get("total_pct_ok"):
-        logger.warning("auto_bet: Total exposure %.1f%% > 40%% — "
-                       "cap ridotto", _exposure["total_pct"] * 100)
+        # Le soglie si STAMPANO dalle costanti: il 14/10/2026 il cap totale e'
+        # passato 40% -> 60% e il testo fisso "40%" avrebbe continuato a
+        # dichiarare al log un tetto che non esisteva piu' (lezione del 13/09).
+        logger.warning("auto_bet: Total exposure %.1f%% > %.0f%% — "
+                       "cap ridotto", _exposure["total_pct"] * 100,
+                       TOTAL_EXPOSURE_CAP_PCT * 100)
     # Il cap TOTALE e' giornaliero: sottrae l'esposizione gia' piazzata nei
     # giri precedenti (puntate aperte nelle ultime 24h), poi scarta i
     # candidati azzerati dal cap e (in LIVE) riapplica il floor exchange.
@@ -4883,7 +4905,7 @@ def run_today_bets(stake_eur: float | None = None,
             # stake aperto non torna sotto il tetto E il nuovo ordine non
             # farebbe superare il cap (PROIEZIONE: aperto + questo stake).
             # La lettura e' fresca per ogni candidato: piu' ordini nella
-            # stessa tornata non possono sfondare il 40% sommandosi.
+            # stessa tornata non possono sfondare il recinto sommandosi.
             _allow = exposure_allows(_bankroll, pick_stake,
                                      open_stake=_wallet_exposure)
             if _exposure_blocked or not _allow.get("allowed"):
@@ -5006,8 +5028,8 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
     Gate applicati qui, perche' nascono come piano e non come segnale grezzo:
       - verdetto `approve` + stake eseguibile (l'Engine Agent li richiede a sua
         volta, ma il Capo filtera: difesa in profondita');
-      - quota nella fascia della strategia (1.30-1.80): un piano non puo'
-        superarla perche' l'oracolo e' de-vigato altrove;
+      - quota nella fascia della strategia (`ODDS_MIN`-`ODDS_MAX`): un piano
+        non puo' superarla perche' l'oracolo e' de-vigato altrove;
       - T-60 e timing: la finestra esecutiva e' un vincolo di denaro, non di
         segnaletica.
 
