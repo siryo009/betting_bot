@@ -157,8 +157,10 @@ class AnalysisAgent:
     def _names(self, match_id: str) -> Optional[dict[str, Any]]:
         if self.names_fn is not None:
             return dict(self.names_fn(match_id) or {}) or None
-        from .data_agent import _match_rows   # RIUSO: nessuna seconda query
-        return _match_rows(None, {match_id}).get(match_id)
+        # Modulo NEUTRO, non un agente fratello (15/10/2026): fra gli agenti
+        # passa solo il Capo, ma la lettura del ledger e' condivisa.
+        from .ledger_read import match_rows
+        return match_rows(None, {match_id}).get(match_id)
 
     # -- ciclo -------------------------------------------------------------
     def process(self, signals: Sequence[Signal]) -> AnalysisOutput:

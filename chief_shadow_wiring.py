@@ -78,9 +78,11 @@ def run_chief_cycle_shadow(*, bankroll: float = 0.0, mode: str = "sim") -> Optio
         from chief_orchestrator import ChiefOrchestrator
         from agents.execution_agent import ExecutionAgent
 
-        chief = ChiefOrchestrator(
+        # Fabrica del Capo (15/10/2026): la Finanza si costruisce in UN solo
+        # posto, cosi' shadow e ciclo reale non possono divergere.
+        chief = ChiefOrchestrator.for_cycle(
+            bankroll=bankroll, mode=mode,
             execution=ExecutionAgent(),  # solo gateway che non eseguono
-            finance=FinanceAgent_default(bankroll, mode),
         )
         report = chief.run_cycle()
         record = {
@@ -98,9 +100,14 @@ def run_chief_cycle_shadow(*, bankroll: float = 0.0, mode: str = "sim") -> Optio
 
 
 def FinanceAgent_default(bankroll: float, mode: str):
-    """FinanceAgent del ciclo con bankroll/mode del giro reale (same-era)."""
-    from agents.finance_agent import FinanceAgent
-    return FinanceAgent(bankroll=bankroll, mode=mode)
+    """FinanceAgent del ciclo con bankroll/mode del giro reale (same-era).
+
+    NON e' un secondo costruttore: delega alla fabbrica del Capo
+    (`ChiefOrchestrator.default_finance`), che resta l'unico punto in cui la
+    Finanza del ciclo viene costruita.
+    """
+    from chief_orchestrator import ChiefOrchestrator
+    return ChiefOrchestrator.default_finance(bankroll, mode)
 
 
 def summarize(days: int = 7, *, path: Optional[Path] = None) -> dict[str, Any]:

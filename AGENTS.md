@@ -12154,6 +12154,27 @@ Fail-safe: qualunque errore lascia i candidati **invariati** (fail-open
 dichiarato, stessa direzione di `apply_correlation_cap`) — un guasto di calcolo
 non e' un rischio misurato.
 
+**SECONDO punto d'ordine coperto (`t60_dispatch_pending`, 15/10/2026).** Il
+T-60 manda ordini con lo **stesso** `_live_fill` partendo dalle righe
+`decisions` validate: finche' il gate viveva solo nella corsia principale, due
+pick correlati (stessa partita / stessa lega nella stessa finestra) potevano
+essere spediti da li' senza alcun controllo — il gate sarebbe stato aggirabile.
+Ora il dispatch ha tre fasi: **A** costruisce i pick (nessun ordine, nessuna
+scrittura), **B** applica lo **stesso** `_apply_copula(picks, bankroll=...)`
+sull'intera lista del giro (i candidati si vedono fra loro; le posizioni gia'
+APERTE le legge il modulo dal ledger), **C** valida CB3 ed esegue. Un pick
+bloccato esce con `stake = 0` e viene **saltato** senza riga sul ledger (l'ordine
+non e' mai nato), con lo scarto loggato uno per uno da `_apply_copula`
+(`COPULA bloccato [blocked_critical] ... stake 1.70`) piu' il riepilogo del
+giro. Solo in **LIVE**: la riga `t60-sim` e' paper e non cambia era (stessa
+direzione della corsia principale). Tripwire in `test_copula_portfolio.py`
+(`TestGateNelDispatchT60`, 5 verdi): ordine della chiamata nel corpo della
+funzione (gate **dopo** la guardia LIVE e **prima** di `_live_fill`), due pick
+sulla **stessa partita** -> un solo ordine e una sola riga `bets`, controprova
+con `COPULA_GUARD=0` -> due ordini (a prova che il blocco viene dal gate),
+dipendenza bassa (leghe diverse) -> stake **invariato** e mai amplificato, e in
+SIM il gate non gira affatto (mai verso il provider).
+
 **Env** (tutte `preserve()` in `.railway/railway.ts`, lette a RUNTIME):
 `COPULA_GUARD` (1, interruttore), `COPULA_MODE` (enforce), `COPULA_MAX_CORR`
 (0.45), `COPULA_CRITICAL_CORR` (0.80), `COPULA_DD_LEVEL` (0.35 perdita di coda
@@ -12183,3 +12204,75 @@ e va deciso a livello di deploy/requirements — questo e' il passo bloccante.
 Prossimo passo raccomandato: **M3 (inferenza bayesiana, `bayes_ratings.py`)**,
 che usa solo `match_results` (17k righe gia' presenti) e alimenta `rating_engine`
 senza nuove dipendenze.
+
+### Agenti isolati: fra loro passa SOLO il Capo (15/10/2026)
+
+**Direttiva del proprietario**: "aggiorna gli agenti a diventare piu' potenti,
+ognuno deve lavorare separatamente dagli altri: passera' solo da chief, ogni
+agente". Prima del 15/10 la regola era scritta ma non garantita: l'**Agente
+Analisi importava un fratello** (`from .data_agent import _match_rows`) e
+`auto_bet` **assemblava la catena da solo** (Analysis + Brain + finances), cioe'
+tre modi di comporre gli agenti convivevano (Chief, corsia di denaro, shadow).
+
+**1) LETTURA CONDIVISA SENZA AGENTI (`agents/ledger_read.py`, nuovo).**
+`match_rows(conn, match_ids)` e' la lettura delle righe `matches` (nomi squadre
+per l'intel e per la steam velocity), spostata in un modulo NEUTRO: sola
+lettura, import PIGRO di `tracker` (importare `agents` resta leggero), fail-safe.
+`agents/data_agent._match_rows` resta esportato come alias (retrocompatibilita'
+dei chiamanti e di `test_live_intel`, che lo monkeypatcha) e
+`agents/analysis_agent` importa da `ledger_read`, non piu' da un agente.
+
+**2) IL CAPO E' L'UNICO COMPOSITORE (`chief_orchestrator.py`).**
+- `ChiefOrchestrator.default_finance(bankroll, mode)` = **unico punto** in cui
+  la Finanza del ciclo viene costruita (di default e per il ciclo shadow);
+- `ChiefOrchestrator.for_cycle(bankroll=..., mode=..., **kwargs)` = **fabbrica**
+  del Capo pronto per un giro (la Finanza si costruisce li');
+- `chief_shadow_wiring.FinanceAgent_default` **delega** alla fabbrica: non e'
+  un secondo costruttore, quindi shadow e ciclo reale non possono divergere.
+
+**3) PORTA PUBBLICA PER LE CORSIE DI DENARO.**
+`ChiefOrchestrator.live_trades(bankroll=..., conn=None, now=None)` esegue la
+catena INTERNAMENTE (Data -> Strategy -> Analysis -> Brain -> Finance) in
+modalita' LIVE e restituisce i `ValidatedTrade` gia' dimensionati. Se il ciclo
+e' stato fermato (gate di mercato, fail-fast, errore) **logga il motivo** e
+restituisce lista vuota: mai un vuoto silenzioso (prima quella diagnosi stava
+solo in `auto_bet`). Fail-safe: nessuna eccezione verso la corsia.
+
+**4) LA CORSIA NON ASSEMBLA PIU' NULLA (`auto_bet._chief_live_candidates`).**
+Rimosse le importazioni di `AnalysisAgent`/`BrainAgent` e la scrittura diretta
+di `chief.finance.bankroll`/`mode`: ora `ChiefOrchestrator.for_cycle(...)` +
+`chief.live_trades(...)`. I **gate di corsia restano invariati** (fascia quota
+`ODDS_MIN`-`ODDS_MAX`, kickoff obbligatorio, finestra esecutiva, timing
+ottimale, flag `chief_trade`, dedup, cap e recinto nella FASE 2):
+isolare gli agenti non allenta un solo guardrail sul denaro.
+
+**5) L'ADVISOR NON SI PRENDE PIU' IL LETTORE DA SOLO (`agents/advisor_agent.py`).**
+`_exposure_state` non risolve piu' `agents.execution_agent.default_exposure_reader`:
+il lettore lo **inietta il Capo** (`self.advisor.exposure_reader =
+self.execution.open_exposure`), cosi' "chi ha eseguito" resta l'unica fonte
+dello stato. Senza lettore -> **fail-closed** (`allowed=False`, motivo
+dichiarato), direzione invariata rispetto a prima.
+
+**6) TEST.** `test_agent_hierarchy.py` **41 verdi**: nuova classe
+`TestPorteDelCapo` (fabbrica = unico costruttore della Finanza, `live_trades`
+che espone i trade del ciclo, ciclo fermato che non restituisce trade e lo
+dichiara nel report, fail-safe sulle eccezioni, corsia che non assembla la
+catena) e due tripwire **basati sull'AST, non sulla prosa** (lezione del 30/09):
+"nessun agente importa un altro agente" (unica eccezione ammessa: `.contracts`)
+e "`_chief_live_candidates` non importa moduli `agents.*` ne' tocca
+`chief.finance`". `ledger_read` e' verificato anche in sottoprocesso: importarlo
+NON carica `tracker`.
+Aggiornati **di proposito**: `test_exposure_gate._advisor` inietta il lettore
+(come fa il Capo) e il tripwire e' riscritto in
+`test_l_advisor_riceve_il_lettore_solo_dal_capo` (nessun percorso privato a
+valle **e** iniezione a monte, altrimenti il gate resterebbe muto);
+`test_advisor_agent._chain`/`advisor_small` iniettano il lettore;
+`test_capital_enclosure` usa un `_ChiefFinto` che implementa il contratto usato
+dalla corsia (`for_cycle` + `live_trades`).
+
+**7) VERIFICHE.** 41 (agent_hierarchy) + 102 (capital_enclosure,
+chief_shadow_wiring, exposure_gate, advisor_agent, agent_kelly) + 215
+(resting_orders, decision_shadow, decision_pipeline, decision_feed) + 119
+(auto_bet, order_watch, t60_breakers) + 45 (auto_bet_live) + 92
+(live_intel, analysis_agent, brain_agent) verdi; `verify_guardrails.py`
+**A–I TUTTI BLOCCANO** (exit 0); `compileall` OK; **0 marker di conflitto**.

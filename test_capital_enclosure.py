@@ -466,8 +466,31 @@ def _chief_candidates(monkeypatch, *, stake: float = 3.70, price: float = 1.65,
     chief.strategy = type("S", (), {"process": staticmethod(
         lambda sigs: type("SO", (), {"signals": []})())})()
     import chief_orchestrator
-    monkeypatch.setattr(chief_orchestrator, "ChiefOrchestrator",
-                        lambda *a, **k: chief)
+
+    class _ChiefFinto:
+        """Chief finto COMPLETO: fabbrica + porta pubblica `live_trades`.
+
+        Dal 15/10/2026 la corsia parla al Capo SOLO con `for_cycle(...)` e
+        `live_trades(...)`: un fake che espone soltanto `finance`/`data`/
+        `strategy` non esercita piu' nulla — il ciclo fallirebbe nel
+        `try/except` e la lista tornerebbe vuota (la stessa classe di test
+        vacuo corretta l'08/10/2026). Il fake implementa quindi il contratto
+        che la corsia usa davvero, non l'interno della catena.
+        """
+
+        def __init__(self, **kwargs):
+            self.finance = fin
+            self.data = chief.data
+            self.strategy = chief.strategy
+
+        @classmethod
+        def for_cycle(cls, **kwargs):   # fabbrica del Capo
+            return cls(**kwargs)
+
+        def live_trades(self, *, bankroll, now=None):
+            return [trade]
+
+    monkeypatch.setattr(chief_orchestrator, "ChiefOrchestrator", _ChiefFinto)
     return auto_bet._chief_live_candidates(bankroll=100.0)
 
 

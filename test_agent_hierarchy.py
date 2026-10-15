@@ -264,6 +264,55 @@ class TestTripwire:
             assert "PlaceOrderGateway(" not in src, mod.__name__
             assert "execution_engine" not in src, mod.__name__
 
+    def test_nessun_agente_importa_un_altro_agente(self):
+        """Direttiva 15/10/2026: fra gli agenti passa SOLO il Capo.
+
+        Un agente che importa un fratello si costruisce un percorso privato,
+        diventa ostaggio del suo contratto e scavalca l'orchestratore: e'
+        esattamente cio' che l'Agente Analisi faceva con `data_agent._match_rows`.
+        La lettura condivisa vive ora in `agents/ledger_read.py` (modulo neutro,
+        nessun agente), e questa e' l'unica eccezione ammessa: i CONTRATTI.
+        """
+        from pathlib import Path
+        sibling = {"data", "strategy", "analysis", "brain", "finance",
+                   "execution", "advisor"}
+        for path in sorted(Path("agents").glob("*_agent.py")):
+            own = path.stem.replace("_agent", "")
+            src = path.read_text(encoding="utf-8")
+            for other in sorted(sibling - {own}):
+                for pattern in (f"from .{other}_agent", f"from agents.{other}_agent",
+                                f"import {other}_agent"):
+                    assert pattern not in src, f"{path}: {pattern}"
+
+    def test_il_lettore_condiviso_non_dipende_dagli_agenti(self):
+        """`ledger_read` e' neutro: nessun agente importato, tracker solo pigro.
+
+        Il controllo giudica il CODICE (AST), non la prosa: il docstring del
+        modulo NOMINA `data_agent._match_rows` proprio per raccontare quale
+        dipendenza e' stata tolta, e un tripwire testuale la scambierebbe per
+        una regressione (lezione del 30/09: i tripwire che colpiscono la prosa).
+        La seconda meta' del test e' la prova sostanziale: importare il modulo
+        NON deve tirare dentro `tracker` (import pigro dentro la funzione).
+        """
+        import ast
+        import subprocess
+        import sys
+        src = open("agents/ledger_read.py", encoding="utf-8").read()
+        modules: list[str] = []
+        for node in ast.parse(src).body:
+            if isinstance(node, ast.Import):
+                modules += [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                modules.append(node.module or "")
+        assert not any("agent" in m for m in modules), modules
+        assert "tracker" not in modules, modules
+        assert "_get_conn" in src
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, agents.ledger_read; print('tracker' in sys.modules)"],
+            capture_output=True, text=True, timeout=60)
+        assert out.stdout.strip() == "False", out.stderr[-400:]
+
     def test_execution_agent_default_solo_shadow(self, tmp_path):
         agent = ExecutionAgent(shadow_path=tmp_path / "shadow.jsonl")
         names = [getattr(g, "name", "?") for g in agent._gateways()]
@@ -363,6 +412,97 @@ class TestCicloCompleto:
                                    finance=FinanceAgent(),
                                    execution=ExecutionAgent()).run_cycle()
         assert report.ok is False and "orchestrator_error" in report.blocked_reason
+
+
+# ---------------------------------------------------------------------------
+# 4. LE PORTE PUBBLICHE DEL CAPO (direttiva 15/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestPorteDelCapo:
+    """Gli agenti lavorano separatamente: fra loro passa SOLO il Capo.
+
+    Le due porte sono `ChiefOrchestrator.for_cycle(...)` (fabbrica: la Finanza
+    e gli altri agenti li compone il Capo) e `live_trades(...)` (i trade gia'
+    dimensionati). Le corsie di denaro usano QUESTE, non riassemblano la
+    catena: senza questi test la regola resterebbe una convenzione.
+    """
+
+    def test_for_cycle_e_il_solo_costruttore_della_finanza(self):
+        chief = ChiefOrchestrator.for_cycle(bankroll=42.5, mode="live")
+        assert chief.finance.bankroll == 42.5
+        assert chief.finance.mode == "live"
+        # La fabbrica e' una sola: `FinanceAgent_default` (usata dalla shadow)
+        # non e' un secondo costruttore ma delega a questa.
+        import chief_shadow_wiring as csw
+        finto = csw.FinanceAgent_default(7.0, "sim")
+        assert finto.bankroll == 7.0 and finto.mode == "sim"
+
+    def test_live_trades_espone_i_trade_del_ciclo(self, conn, tmp_path):
+        chief = ChiefOrchestrator.for_cycle(
+            bankroll=100.0, mode="sim",
+            data=DataAgent(), strategy=StrategyAgent(),
+            execution=ExecutionAgent(shadow_path=tmp_path / "s.jsonl"))
+        trades = chief.live_trades(bankroll=100.0, conn=conn, now=NOW)
+        assert trades, "il ledger di test ha un segnale approvabile"
+        assert all(hasattr(t, "stake") for t in trades)
+        assert chief.last_report is not None
+        # In LIVE la Finanza lavora in live (e' la stessa-era del giro reale).
+        assert chief.finance.mode == "live"
+        assert chief.finance.bankroll == 100.0
+
+    def test_ciclo_fermato_non_restituisce_trade_e_lo_dichiara(self, tmp_path):
+        from decision.feeds import FeedGateResult, ReasonCode
+        gate = FeedGateResult(allowed=False, reason=ReasonCode.FEED_UNAVAILABLE,
+                              detail="sorgenti giu'")
+        blocked = MarketData(snapshot=None, gate=gate, signals=[])
+
+        class DataDown:
+            def process(self, **kwargs):
+                return blocked
+
+        chief = ChiefOrchestrator.for_cycle(
+            bankroll=100.0, mode="sim", data=DataDown(),
+            strategy=StrategyAgent(), execution=ExecutionAgent())
+        # Nessun trade e nessun vuoto silenzioso: il motivo sta nel report.
+        assert chief.live_trades(bankroll=100.0) == []
+        assert "feed_unavailable" in chief.last_report.blocked_reason.lower()
+
+    def test_live_trades_mai_eccezioni(self, tmp_path):
+        class DataBoom:
+            def process(self, **kwargs):
+                raise RuntimeError("boom")
+
+        chief = ChiefOrchestrator.for_cycle(
+            bankroll=100.0, mode="sim", data=DataBoom(),
+            strategy=StrategyAgent(), execution=ExecutionAgent())
+        assert chief.live_trades(bankroll=100.0) == []
+
+    def test_nessuna_corsia_assembla_la_catena(self):
+        """`auto_bet` non importa piu' Analysis/Brain ne' tocca `chief.finance`.
+
+        Il controllo giudica il CODICE (AST), non la prosa: il docstring della
+        funzione NOMINA `chief.finance` e gli agenti proprio per raccontare
+        cosa e' stato tolto, e un tripwire testuale lo leggerebbe come una
+        regressione (lezione del 30/09).
+        """
+        import ast
+        import auto_bet
+        from pathlib import Path
+        tree = ast.parse(Path(auto_bet.__file__).read_text(encoding="utf-8"))
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == "_chief_live_candidates")
+        names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+        attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+        imports: list[str] = []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Import):
+                imports += [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                imports.append(node.module or "")
+        assert "AnalysisAgent" not in names and "BrainAgent" not in names
+        assert not any("agent" in m for m in imports), imports  # solo il Capo
+        assert "finance" not in attrs          # nessun accesso a chief.finance
+        assert "for_cycle" in attrs and "live_trades" in attrs
 
 
 # ---------------------------------------------------------------------------

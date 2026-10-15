@@ -30,6 +30,7 @@ import numpy as np
 import pytest
 
 import copula_portfolio as cp
+import tracker
 
 ROOT = Path(__file__).resolve().parent
 LAMBDA_H, LAMBDA_A = 1.6, 1.1
@@ -753,6 +754,183 @@ class TestPercorsoOrdini:
         conf = c.config()
         assert conf["enabled"] is True and conf["active"] is True
         assert conf["mode"] == "enforce"
+
+
+# ---------------------------------------------------------------------------
+# Secondo punto d'ordine: il dispatch T-60
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def t60_db(monkeypatch, tmp_path):
+    """Ledger di PRODUZIONE completo + isolamento del percorso T-60.
+
+    Il dispatch T-60 legge `decisions` e `matches` con lo schema vero (non
+    quello minimo di `_temp_db`), quindi serve `tracker.init_db()`. Nessun
+    file reale viene toccato: kill flag, stop-loss e wallet sono finti, come
+    in `test_t60_breakers`.
+    """
+    import tracker
+    import auto_bet
+    monkeypatch.setattr(tracker, "DB_PATH", tmp_path / "t60.db")
+    tracker.init_db()
+    monkeypatch.setattr(auto_bet, "T60_KILL_FILE", tmp_path / "t60_kill.json")
+    monkeypatch.setattr(auto_bet, "DAILY_STOP_FILE",
+                        tmp_path / "daily_stop.json")
+    monkeypatch.setattr(auto_bet, "KILL_SWITCH_FILE",
+                        tmp_path / "kill_switch.json")
+    monkeypatch.setattr(auto_bet, "_market_feed_gate",
+                        lambda *a, **k: (True, "test", {}))
+    monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
+                        lambda: {"available": 34.0, "exposure": 0.0,
+                                 "equity": 34.0})
+    monkeypatch.setattr(auto_bet, "_t60_emergency_alert", lambda *a, **k: None)
+    yield
+
+
+def _live_mode(monkeypatch):
+    """Modalita' live con provider pronto (wallet finto dal fixture `t60_db`)."""
+    import auto_bet
+    monkeypatch.setattr(auto_bet, "_execution_mode",
+                        lambda allow_sim=True: "live")
+
+
+def _seed_decision(record_id, mid, outcome, *, league="Premier League",
+                   minutes=30, price=1.65):
+    """Partita + riga `decisions` validate (stato Shadow Validation).
+
+    `record_id` esplicito: e' la chiave di idempotenza del ledger, quindi due
+    esiti della STESSA partita devono essere due righe diverse.
+    """
+    import tracker
+    start = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    tracker.save_match(mid, league, "Arsenal", "Chelsea", start.isoformat())
+    tracker.save_decision({
+        "record_id": record_id, "signal_id": f"sig-{record_id}",
+        "match_id": mid, "league": league, "market": "1X2",
+        "outcome": outcome,
+        "selection_label": "Arsenal" if outcome == "1" else "Chelsea",
+        "kickoff": start.isoformat(), "price": price,
+        "price_source": "sxbet", "market_prob": 0.60, "model_prob": 0.63,
+        "blended_prob": 0.62, "edge": 0.05, "ev": 0.08, "tier": "value",
+        "confidence": 0.7, "model_coverage": 1.0, "calibrated": True,
+        "verdict": "approve", "reason": "ok", "status": "validated",
+        "mode": "live", "provider": "sxbet", "stake": 1.0,
+        "stake_executable": True, "kelly_fraction": 0.05, "cap_pct": 0.01,
+        "cap_source": "tier", "approved_by": "", "review_note": "",
+        "created_at": (datetime.now(timezone.utc)
+                       - timedelta(minutes=5)).isoformat(),
+    })
+
+
+
+class TestGateNelDispatchT60:
+    """Il gate di dipendenza deve valere anche sul SECONDO punto d'ordine.
+
+    Fino al 14/10 il gate viveva solo nella corsia principale: il T-60 ordina
+    pero' con lo stesso `_live_fill` su `decisions` validate, quindi due pick
+    correlati (stessa partita / stessa lega nella stessa finestra) potevano
+    essere spediti da li' senza alcun controllo. Questi test esercitano il
+    PERCORSO VERO (`t60_dispatch_pending`), non solo la presenza della
+    chiamata nel sorgente.
+    """
+
+    def _src(self):
+        import auto_bet
+        return Path(auto_bet.__file__).read_text(encoding="utf-8")
+
+    def test_gate_chiamato_nel_dispatch_t60_prima_dell_ordine(self):
+        src = self._src()
+        start = src.index("def t60_dispatch_pending(")
+        end = src.index("\ndef ", start + 10)
+        corpo = src[start:end]
+        i_live = corpo.index('if mode == "live":')
+        i_gate = corpo.index("picks, _cop = _apply_copula(picks")
+        i_ordine = corpo.index("filled = _live_fill({")
+        assert i_live < i_gate < i_ordine
+        # Una sola chiamata nel percorso (nessuna seconda formula) e dentro il
+        # ramo LIVE: la riga `t60-sim` e' paper e non tocca il denaro.
+        assert corpo.count("_apply_copula(") == 1
+        # ... sotto la guardia LIVE: la riga e' l'ultima del blocco `if`.
+        assert corpo[:i_gate].rstrip().splitlines()[-1].strip() \
+            == 'if mode == "live":'
+
+    def test_stessa_partita_ordina_uno_solo(self, t60_db, monkeypatch, caplog):
+        """Correlazione CRITICA (stessa partita, rho 0.98) -> un solo ordine."""
+        import auto_bet
+        _live_mode(monkeypatch)
+        calls = []
+        monkeypatch.setattr(
+            auto_bet, "_live_fill",
+            lambda pick, stake, floor: calls.append(pick["match_id"]) or {
+                "ok": True, "market_id": "mx", "selection_id": 1,
+                "bet_id": "b-" + str(pick["match_id"]),
+                "status": "FULLY_FILLED", "price": floor, "stake": stake})
+        # Stessa partita, due esiti diversi (l'esito unico e' gia' vietato
+        # dal ledger): e' il caso che il gate deve fermare.
+        _seed_decision("rec-same-1", "same", "1")
+        _seed_decision("rec-same-2", "same", "2")
+        with caplog.at_level("INFO"):
+            placed = auto_bet.t60_dispatch_pending(bankroll=34.0)
+        assert len(placed) == 1, placed
+        assert calls == ["same"]
+        assert "COPULA bloccato" in caplog.text
+        # Una sola riga live sul ledger: l'altro ordine non e' mai nato.
+        conn = tracker._get_conn()
+        n_live = conn.execute("SELECT COUNT(*) FROM bets WHERE mode='live' "
+                              "AND match_id='same'").fetchone()[0]
+        conn.close()
+        assert n_live == 1
+
+    def test_controprova_senza_gate_ordinano_entrambi(self, t60_db, monkeypatch):
+        """Controprova: col gate SPENTO partono due ordini (-<-- la copula)."""
+        import auto_bet
+        _live_mode(monkeypatch)
+        monkeypatch.setenv("COPULA_GUARD", "0")
+        calls = []
+        monkeypatch.setattr(
+            auto_bet, "_live_fill",
+            lambda pick, stake, floor: calls.append(pick["esito_key"]) or {
+                "ok": True, "market_id": "mx", "selection_id": 1,
+                "bet_id": "b", "status": "FULLY_FILLED",
+                "price": floor, "stake": stake})
+        _seed_decision("rec-same-1", "same", "1")
+        _seed_decision("rec-same-2", "same", "2")
+        placed = auto_bet.t60_dispatch_pending(bankroll=34.0)
+        assert len(placed) == 2
+        assert sorted(calls) == ["1", "2"]
+
+    def test_correlazione_bassa_non_tocca_lo_stake(self, t60_db, monkeypatch):
+        """Dipendenza bassa (leghe diverse, stessa finestra) -> 1.0: lo stake
+        resta quello del Kelly, mai amplificato."""
+        import auto_bet
+        _live_mode(monkeypatch)
+        monkeypatch.setenv("COPULA_GUARD", "1")
+        monkeypatch.setattr(
+            auto_bet, "_live_fill",
+            lambda pick, stake, floor: {
+                "ok": True, "market_id": "mx", "selection_id": 1,
+                "bet_id": "b", "status": "FULLY_FILLED",
+                "price": floor, "stake": stake})
+        _seed_decision("rec-pl", "m-pl", "1", league="Premier League")
+        _seed_decision("rec-bl", "m-bl", "2", league="Bundesliga")
+        placed = auto_bet.t60_dispatch_pending(bankroll=34.0)
+        atteso = round(auto_bet.t60_stake(34.0, mode="live"), 2)
+        assert [p["stake"] for p in placed] == [atteso, atteso]
+        assert all(p["mode"] == "t60-live" for p in placed)
+
+    def test_sim_non_applica_il_gate(self, t60_db, monkeypatch):
+        """La riga `t60-sim` e' paper: l'era della cassa simulata non cambia."""
+        import auto_bet
+        monkeypatch.setattr(auto_bet, "_execution_mode",
+                            lambda allow_sim=True: "sim")
+        calls = []
+        monkeypatch.setattr(auto_bet, "_live_fill",
+                            lambda *a, **k: calls.append(a) or None)
+        _seed_decision("rec-same-1", "same", "1")
+        _seed_decision("rec-same-2", "same", "2")
+        placed = auto_bet.t60_dispatch_pending(bankroll=34.0)
+        assert calls == []                      # mai verso il provider
+        assert [p["mode"] for p in placed] == ["t60-sim", "t60-sim"]
 
 
 # ---------------------------------------------------------------------------

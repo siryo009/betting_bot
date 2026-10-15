@@ -29,6 +29,11 @@ from decision.feeds import FeedGateResult, MarketFeed, verify_feed
 from decision.models import ReasonCode, Signal
 
 from .contracts import MarketData
+# La lettura delle righe `matches` vive in un modulo NEUTRO (`ledger_read`):
+# prima l'Agente Analisi la importava DA QUI, cioe' un agente dipendeva
+# direttamente da un fratello (direttiva 15/10/2026: fra gli agenti passa solo
+# il Capo). Il nome resta esportato per retrocompatibilita' dei chiamanti.
+from .ledger_read import match_rows as _match_rows
 
 logger = logging.getLogger(__name__)
 
@@ -43,40 +48,6 @@ def _pass_gate() -> FeedGateResult:
     """
     return FeedGateResult(allowed=True, reason=ReasonCode.OK,
                           detail="feed non attivo (off)")
-
-
-def _match_rows(conn, match_ids: set[str]) -> dict[str, dict]:
-    """Righe `matches` per i match dei segnali (LETTURA, mai scritture).
-
-    Serve per i NOMI delle squadre (il `Signal` non li porta): l'intel e'
-    costruita su nomi reali, mai su match_id opachi. Ritorna un dict
-    `match_id -> {match_id, league, home, away}`; un match senza riga (o una
-    lettura fallita) NON e' un errore: quel match resta senza intel.
-    """
-    if not match_ids:
-        return {}
-    if conn is None:
-        from tracker import _get_conn  # pigro: `import agents` resta leggero
-        conn = _get_conn()
-    try:
-        placeholders = ",".join("?" for _ in match_ids)
-        cursor = conn.execute(
-            f"SELECT * FROM matches WHERE id IN ({placeholders})",
-            tuple(match_ids))
-        cols = [str(d[0]) for d in (cursor.description or [])]
-        out: dict[str, dict] = {}
-        for rec in cursor.fetchall():
-            row = dict(zip(cols, rec))
-            out[row.get("id") or ""] = {
-                "match_id": row.get("id") or "",
-                "league": row.get("league") or "",
-                "home": row.get("home_team") or row.get("home") or "",
-                "away": row.get("away_team") or row.get("away") or "",
-            }
-        return out
-    except Exception as exc:
-        logger.debug("data: righe matches non leggibili: %s", exc)
-        return {}
 
 
 class DataAgent:

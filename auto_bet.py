@@ -1205,7 +1205,8 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
         "AND m.commence_time <= ? ORDER BY m.commence_time",
         (win_lo.isoformat(), win_hi.isoformat())).fetchall()
     conn.close()
-    placed: list[dict] = []
+    # --- FASE A: candidati in finestra (nessun ordine, nessuna scrittura) ---
+    picks: list[dict] = []
     for (signal_id, record_id, mid, league, home, away, outcome, sel_label,
          kickoff, price, verdict, row_mode, provider, created_at) in rows:
         k = _parse_iso_utc(kickoff)   # SEMPRE aware UTC (contratto CB3)
@@ -1218,17 +1219,64 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
         if bet_exists_open(mid, esito):
             continue                     # CB dedup: UNIQUE(match_id, esito)
         created = _parse_iso_utc(created_at)  # ledger puo' avere ISO naive
-        payload = {
+        picks.append({
             "signal_id": signal_id, "record_id": record_id,
             "match_id": mid, "league": (league or "").strip(),
-            "market": "1X2", "outcome": outcome,
+            "mercato": "1X2", "outcome": outcome, "esito_key": esito,
             "home": home or "", "away": away or "",
-            "price": float(price or 0), "stake": float(stake),
-            "verdict": verdict, "mode": mode, "provider": provider or "sxbet",
+            "price": float(price or 0), "quota": float(price or 0),
+            "stake": float(stake), "verdict": verdict,
+            "provider": provider or "sxbet",
+            "kickoff": k.isoformat() if k else "",
+            "commence": k.isoformat() if k else "",
+            "created_at": created.isoformat() if created else "",
+        })
+
+    # --- FASE B: GATE DI DIPENDENZA (copula) — direttiva 14/10/2026 ---------
+    # Il T-60 e' il SECONDO punto che manda ordini all'execution engine: la
+    # dipendenza fra posizioni simultanee va misurata anche qui, o il gate
+    # sarebbe aggirabile ordinando due pick correlati da questa corsia (stessa
+    # partita / stessa lega nella stessa finestra). Si usa lo STESSO
+    # `_apply_copula` della corsia principale — nessuna seconda formula — e
+    # sulla lista COMPLETA del giro, cosi' i candidati si vedono fra loro (le
+    # posizioni gia' APERTE le legge il modulo dal ledger). Solo in LIVE: la
+    # riga `t60-sim` e' paper e non tocca il denaro.
+    if mode == "live":
+        picks, _cop = _apply_copula(picks, bankroll=bankroll)
+        if _cop.get("blocked"):
+            logger.warning("auto_bet: T60 %d candidati bloccati dal gate di "
+                           "dipendenza (copula): nessun ordine per loro",
+                           _cop["blocked"])
+
+    # --- FASE C: contratto CB3 + esecuzione --------------------------------
+    placed: list[dict] = []
+    for pick in picks:
+        mid, esito = pick["match_id"], pick["esito_key"]
+        price, stake = pick["price"], float(pick["stake"] or 0.0)
+        home, away = pick["home"], pick["away"]
+        league, outcome = pick["league"], pick["outcome"]
+        kickoff = pick["kickoff"]
+        k = _parse_iso_utc(kickoff)
+        created = _parse_iso_utc(pick["created_at"])
+        if stake <= 0:
+            # Bloccato o azzerato dal gate di dipendenza: nessun ordine e
+            # nessuna riga (l'ordine non e' mai nato). Lo scarto e' gia'
+            # loggato uno per uno da `_apply_copula`.
+            logger.info("auto_bet: T60 %s (%s) stake azzerato dal gate di "
+                        "dipendenza: nessun ordine", mid, esito)
+            continue
+        payload = {
+            "signal_id": pick["signal_id"], "record_id": pick["record_id"],
+            "match_id": mid, "league": league,
+            "market": "1X2", "outcome": outcome,
+            "home": home, "away": away,
+            "price": price, "stake": stake,
+            "verdict": pick["verdict"], "mode": mode,
+            "provider": pick["provider"],
             # Timestamp con fuso OBBLIGATORIO: un payload con date naive
             # NON supera CB3 (riga di rifiuto, mai ordine).
-            "kickoff": k.isoformat() if k else "",
-            "created_at": created.isoformat() if created else "",
+            "kickoff": kickoff,
+            "created_at": pick["created_at"],
         }
         ok, contract, errors = validate_order_payload(payload, bankroll=bankroll)
         if not ok:
@@ -5133,6 +5181,10 @@ def run_today_bets(stake_eur: float | None = None,
 def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
     """Candidati REALI dalla catena piramidale (Chief Orchestrator).
 
+    Agenti (15/10/2026): la catena la compone il CAPO, qui non si importano
+    Analysis/Brain ne' si tocca `chief.finance` — `ChiefOrchestrator.for_cycle`
+    + `live_trades()` sono l'unico modo di parlare con gli agenti.
+
     Non esiste un secondo canale di denaro: i piani approvati dal Finance
     Agent entrano nella STESSA coda di esecuzione della corsia storica e
     quindi passano per gli stessi guardrail (finestra T-60, timing, dedup
@@ -5157,37 +5209,16 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
         return []
     out: list[dict] = []
     try:
-        from agents.analysis_agent import AnalysisAgent
-        from agents.brain_agent import BrainAgent
         from chief_orchestrator import ChiefOrchestrator
         from value_filter import get_optimal_timing, ODDS_MIN, ODDS_MAX
 
-        chief = ChiefOrchestrator()
-        # La Finanza del ciclo lavora sul bankroll REALE e in modalita' live:
-        # e' l'unica differenza rispetto al giro shadow (stessa-era).
-        chief.finance.bankroll = float(bankroll or 0.0)
-        chief.finance.mode = "live"
-        # 1+2. Dati (feed di mercato) e Strategia (tier giocabili): stessi
-        # agenti del Capo, quindi stesso feed validato e stesso filtro.
-        market = chief.data.process(now=now)
-        if not market.validated:
-            logger.warning("auto_bet: ciclo chief live fermato dal gate di "
-                           "mercato (%s): nessun ordine",
-                           market.gate.reason.value)
-            return []
-        strategy = chief.strategy.process(market.signals)
-        # 2b. ANALISI (steam velocity + juice) -> CERVELLO (EV dinamico +
-        # Portfolio Shield) -> FINANZA (Kelly frazionario k 0.15-0.25, cap 5%,
-        # ticket 1.00). Direttiva 04/10/2026: la catena agenti applica lo
-        # STESSO motore Kelly della corsia storica (`decision.stake_engine`),
-        # quindi le due corsie non possono dimensionarsi in modo diverso.
-        analysis = AnalysisAgent().process(strategy.signals)
-        brain = BrainAgent(bankroll=float(bankroll or 0.0)).process(
-            analysis.signals)
-        sizing = chief.finance.process_trades(
-            [t for t in brain.trades if t.shield_action != "block"],
-            bankroll=bankroll)
-        for trade in sizing.trades:
+        # UNICO percorso verso gli agenti (15/10/2026): il Capo compone la
+        # catena internamente e restituisce i trade gia' dimensionati. Questa
+        # corsia NON importa piu' Analysis/Brain e non tocca `chief.finance`:
+        # gli agenti lavorano separatamente e si passa solo dal Chief.
+        chief = ChiefOrchestrator.for_cycle(bankroll=bankroll, mode="live")
+        trades = chief.live_trades(bankroll=bankroll, now=now)
+        for trade in trades:
             if not trade.executable or float(trade.stake or 0.0) <= 0:
                 continue
             price = float(trade.price)
@@ -5241,7 +5272,7 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
             logger.info("auto_bet: %d trade chief approvati entrano nella "
                         "coda di esecuzione (Kelly k=%.2f, stake %s)",
                         len(out),
-                        float(sizing.trades[0].kelly_fraction if sizing.trades else 0.0),
+                        float(trades[0].kelly_fraction if trades else 0.0),
                         ", ".join("%.2f" % c["stake"] for c in out))
     except Exception as exc:
         logger.warning("auto_bet: ciclo chief live saltato (%s)", exc)

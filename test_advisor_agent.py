@@ -87,7 +87,11 @@ def _chain(conn, *, bankroll=100.0, kills=None):
     data = DataAgent()
     strategy = StrategyAgent()
     finance = FinanceAgent(bankroll=bankroll, kills=kills)
-    advisor = AdvisorAgent(finance=finance, strategy=strategy)
+    # Il lettore del recinto lo inietta il CAPO (15/10/2026): gli agenti
+    # lavorano separatamente e fra loro passa solo il Capo. Nei test che
+    # costruiscono l'Advisor a mano si inietta quello dell'Execution Agent.
+    advisor = AdvisorAgent(finance=finance, strategy=strategy,
+                           exposure_reader=ExecutionAgent().open_exposure)
     return data, strategy, finance, advisor
 
 
@@ -165,7 +169,8 @@ class TestMicroStake:
         strategy_out = strategy.process(market.signals)
         signal = strategy_out.signals[0]
         finance_small = FinanceAgent(bankroll=3.0, mode="live")   # 2% di 3 = 0.06 < 1
-        advisor_small = AdvisorAgent(finance=finance_small)
+        advisor_small = AdvisorAgent(finance=finance_small,
+                                     exposure_reader=ExecutionAgent().open_exposure)
         plan = finance_small.process(signal)
         assert plan.record.risk.verdict == "approve"
         assert plan.record.stake.executable is False   # cap severo sotto il floor

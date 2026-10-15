@@ -145,7 +145,15 @@ class TestLetturaOrdiniAperti:
 
 class TestGateAdvisor:
     def _advisor(self, **kw) -> AdvisorAgent:
-        return AdvisorAgent(exposure_reader=kw.pop("exposure_reader", None), **kw)
+        """Advisor col lettore INIETTATO, come fa il Capo nel ciclo.
+
+        Dal 15/10/2026 l'Advisor non si prende piu' il lettore di produzione da
+        solo (gli agenti lavorano separatamente e fra loro passa solo il Capo):
+        i test che lo costruiscono direttamente devono iniettarlo, esattamente
+        come fa `ChiefOrchestrator` con `self.advisor.exposure_reader`.
+        """
+        kw.setdefault("exposure_reader", ExecutionAgent().open_exposure)
+        return AdvisorAgent(**kw)
 
     def test_sotto_il_tetto_passa(self, temp_db):
         for i in range(3):
@@ -300,10 +308,20 @@ class TestTripwire:
         assert "auto_bet.exposure_allows" in src      # delega esplicita
         assert "PlaceOrderGateway(" not in src        # nessun ordine reale
 
-    def test_l_advisor_interroga_il_lettore_di_produzione(self):
+    def test_l_advisor_riceve_il_lettore_solo_dal_capo(self):
+        """Direttiva 15/10/2026: gli agenti lavorano separatamente.
+
+        L'Advisor NON si risolve piu' da solo il lettore di produzione:
+        lo inietta il Capo dal suo Execution Agent. Il test difende le DUE
+        meta' dell'invariante — nessuna scorciatoia a valle, iniezione a monte
+        — perche' senza l'iniezione il gate resterebbe muto.
+        """
         src = Path("agents/advisor_agent.py").read_text(encoding="utf-8")
-        assert "default_exposure_reader" in src
-        assert "1.50" not in src             # lo stake fisso non si copia
+        assert "default_exposure_reader" not in src   # nessun percorso privato
+        assert "exposure_reader" in src               # il lettore e' iniettato
+        assert "1.50" not in src                      # lo stake fisso non si copia
+        chief = Path("chief_orchestrator.py").read_text(encoding="utf-8")
+        assert "self.advisor.exposure_reader = self.execution.open_exposure" in chief
 
     def test_env_dichiarate_in_iac(self):
         """`railway config apply` distrugge cio' che non e' in `preserve()`."""

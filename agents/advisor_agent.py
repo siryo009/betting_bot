@@ -50,11 +50,17 @@ import logging
 from typing import Any, Optional
 
 from agents.contracts import AdvisorResolution
-from agents.data_agent import DataAgent
-from agents.finance_agent import FinanceAgent
-from agents.strategy_agent import StrategyAgent
 
 logger = logging.getLogger("agents.advisor")
+
+# NOTA DI ARCHITETTURA (direttiva 15/10/2026): questo modulo NON importa NESSUN
+# altro agente. Ogni agente lavora separatamente e l'UNICO che compone la
+# catena e' il Capo (`chief_orchestrator`), che inietta qui la Finanza (per il
+# micro-stake), la Strategia e i Dati (per il market switch) e il lettore dello
+# stato degli ordini aperti dell'Execution Agent. Un `AdvisorAgent()` costruito
+# da solo resta utilizzabile ma DEGRADA in modo dichiarato (fail-closed),
+# invece di costruirsi un percorso privato che nessuno puo' vedere dal Capo.
+# Il vincolo e' difeso da un tripwire (`test_agent_isolation.py`).
 
 
 class AdvisorAgent:
@@ -80,9 +86,9 @@ class AdvisorAgent:
     #: sulla frazione calcolata dallo Stake Engine del piano rifiutato).
     STAKE_SCALE_STEPS = (0.5, 0.25)
 
-    def __init__(self, *, finance: Optional[FinanceAgent] = None,
-                 strategy: Optional[StrategyAgent] = None,
-                 data: Optional[DataAgent] = None,
+    def __init__(self, *, finance: Optional[Any] = None,
+                 strategy: Optional[Any] = None,
+                 data: Optional[Any] = None,
                  llm_classifier: Optional[Any] = None,
                  review_queue: Optional[Any] = None,
                  exposure_reader: Optional[Any] = None) -> None:
@@ -201,13 +207,14 @@ class AdvisorAgent:
     def _exposure_state(self, bankroll: float, stake: float) -> dict:
         """Legge lo stato degli ordini aperti e proietta il nuovo stake.
 
-        La lettura arriva dall'Execution Engine (iniettata); se manca si usa
-        quella di produzione (`agents.execution_agent.default_exposure_reader`),
-        risolta a OGNI chiamata — cosi' un lettore sostituito dai test vale
-        anche da qui. Fail-closed: senza lettura o con lettore rotto si
+        La lettura arriva SEMPRE dall'esterno (il Capo inietta il bound method
+        dell'Execution Agent): l'Advisor non risolve alcun lettore di
+        produzione da solo, cosi' "chi ha eseguito" resta l'unica fonte dello
+        stato e gli agenti non si parlano alle spalle del Capo (direttiva
+        15/10/2026). Fail-closed: senza lettore o con lettore rotto si
         risponde `allowed=False`, mai un varco aperto per un errore.
         """
-        reader = self.exposure_reader or self._default_reader()
+        reader = self.exposure_reader
         if reader is None:
             return {"allowed": False, "blocked": True, "count": -1,
                     "open_stake": float("inf"), "cap": 0.0, "projected": float("inf"),
@@ -222,17 +229,6 @@ class AdvisorAgent:
                     "open_stake": float("inf"), "cap": 0.0, "projected": float("inf"),
                     "bankroll": float(bankroll or 0.0),
                     "reason": "lettura ordini aperti fallita (fail-closed): %s" % exc}
-
-    @staticmethod
-    def _default_reader() -> Optional[Any]:
-        """Lettore di produzione (Execution Engine), import pigro e fail-safe."""
-        try:
-            from agents.execution_agent import default_exposure_reader
-            return default_exposure_reader()
-        except Exception as exc:
-            logger.warning("advisor: lettore esposizione di produzione non "
-                           "disponibile: %s", exc)
-            return None
 
     # ------------------------------------------------------------------
     # 1. Riduzione rischio (micro-stake)

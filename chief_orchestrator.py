@@ -46,6 +46,11 @@ class ChiefOrchestrator:
                  analysis: Optional[AnalysisAgent] = None,
                  brain: Optional[BrainAgent] = None, *,
                  advisor_enabled: Optional[bool] = None) -> None:
+        # Esito dell'ultimo ciclo (porta pubblica `live_trades`): inizializzato
+        # qui perche' una corsia possa chiederlo anche prima di un ciclo,
+        # senza `AttributeError`.
+        self.last_report: Optional[CycleReport] = None
+        self.last_trades: list = []
         self.data = data
         self.strategy = strategy or StrategyAgent()
         # ANALISI + CERVELLO (direttiva 04/10/2026): arricchiscono e validano i
@@ -102,16 +107,73 @@ class ChiefOrchestrator:
             if getattr(self.advisor, "exposure_reader", None) is None:
                 self.advisor.exposure_reader = self.execution.open_exposure
 
+    @staticmethod
+    def default_finance(bankroll: float = 0.0, mode: str = "sim"):
+        """La Finanza del ciclo: UN SOLO punto di costruzione (import pigro).
+
+        Importa `FinanceAgent` a chiamata, cosi' `import chief_orchestrator`
+        resta leggero (tripwire) e la shadow non puo' costruire una Finanza
+        diversa da quella del ciclo reale.
+        """
+        from agents.finance_agent import FinanceAgent
+        return FinanceAgent(bankroll=bankroll, mode=mode)
+
+    @classmethod
+    def for_cycle(cls, *, bankroll: float = 0.0, mode: str = "sim",
+                  **kwargs) -> "ChiefOrchestrator":
+        """Capo pronto per un ciclo con bankroll/mode dati (FABBRICA del Capo).
+
+        Esiste perche' NESSUN altro modulo debba costruire gli agenti della
+        catena: chi vuole un ciclo configurato lo chiede a lui (direttiva
+        15/10/2026: ogni agente lavora separatamente, si passa solo dal Capo).
+        La Finanza si costruisce qui, con bankroll e mode del giro.
+        """
+        kwargs.setdefault("finance", cls.default_finance(bankroll, mode))
+        return cls(**kwargs)
+
     def run_cycle(self, *, conn=None, now=None) -> CycleReport:
         report = CycleReport(
             started_at=datetime.now(timezone.utc).isoformat())
         try:
-            return self._run(report, conn=conn, now=now)
+            report = self._run(report, conn=conn, now=now)
         except Exception as exc:  # fail-safe: un giro mai rompe il chiamante
             logger.warning("chief: ciclo fallito: %s", exc, exc_info=True)
             report.blocked_reason = f"orchestrator_error: {exc}"
             report.finished_at = datetime.now(timezone.utc).isoformat()
-            return report
+        # Esito dell'ULTIMO ciclo, per chi (una corsia) deve consumarlo senza
+        # riassemblare la catena: e' il contratto della porta pubblica
+        # `live_trades()` qui sotto.
+        self.last_report = report
+        return report
+
+    # ------------------------------------------------------------------
+    # Porte pubbliche per le corsie di DENARO (unico percorso verso gli agenti)
+    # ------------------------------------------------------------------
+    def live_trades(self, *, bankroll: float, conn=None, now=None) -> list:
+        """I trade dimensionati dal ciclo, in modalita' LIVE.
+
+        E' l'UNICO modo per una corsia di ottenere cio' che il Capo ha
+        dimensionato: Data -> Strategy -> Analysis -> Brain -> Finance girano
+        QUI dentro, nello stesso ordine e con le stesse soglie della catena, e
+        il chiamante riceve solo il risultato. Senza questo, ogni chiamante
+        dovrebbe ricomporre la catena da solo (ed e' esattamente cio' che si e'
+        voluto togliere il 15/10/2026). Fail-safe: un errore -> lista vuota.
+        """
+        try:
+            self.finance.bankroll = float(bankroll or 0.0)
+            self.finance.mode = "live"
+            report = self.run_cycle(conn=conn, now=now)
+            if report.blocked_reason:
+                # Mai un vuoto silenzioso: chi chiede i trade deve sapere che il
+                # ciclo e' stato FERMATO (gate di mercato, fail-fast, errore) e
+                # non che non c'era nulla da giocare.
+                logger.warning("chief: ciclo live fermato (%s): nessun trade",
+                               report.blocked_reason)
+                return []
+            return list(getattr(self, "last_trades", []) or [])
+        except Exception as exc:
+            logger.warning("chief: trade live non calcolabili: %s", exc)
+            return []
 
     def _run(self, report: CycleReport, *, conn=None, now=None) -> CycleReport:
         # --- 1. DATI & MERCATO -------------------------------------------
@@ -164,6 +226,10 @@ class ChiefOrchestrator:
                 sized = self.finance.process_trades(
                     [t for t in brain.trades if t.shield_action != "block"])
                 report.sizing = sized.as_json()
+                # Gli OGGETTI dei trade restano sul Capo (non solo il JSON):
+                # la corsia di denaro li legge da `live_trades()` invece di
+                # ricomporre la catena (direttiva 15/10/2026).
+                self.last_trades = list(getattr(sized, "trades", []) or [])
         except Exception as exc:
             logger.warning("chief: sizing ValidatedTrade fallito: %s", exc)
 
