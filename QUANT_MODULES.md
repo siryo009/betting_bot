@@ -380,7 +380,12 @@ Non sono gate-abili (testo libero, non un dato strutturato) e restano un
 ## 3-ter. Fase 2 — FATTA: `copula_portfolio.py` in ENFORCE (14/10/2026)
 
 **File**: `copula_portfolio.py` (1360 righe) + `test_copula_portfolio.py`
-(**93 test, tutti offline**) — **collegato** al percorso ordini LIVE.
+(**84 test, tutti offline**) — **collegato** al percorso ordini LIVE.
+⚠️ Il conteggio era scritto **93** e il commit del 15/10 (`a7f2121`) l'aveva
+corretto a 84 **in `AGENTS.md`, non qui**: due file, due numeri. Verificato il
+15/10/2026 con `pytest --collect-only -q` (84 test raccolti). La regola che ne
+deriva: **un numero in due documenti e' due numeri** — si corregge dove si
+dichiara, e il conteggio si prende dal comando, non dalla memoria.
 
 E' il gate che risponde alla domanda lasciata aperta dalla Fase 1: *cosa fare*
 del rischio misurato. Direttiva del proprietario: **ENFORCE** (nessuna shadow),
