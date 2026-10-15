@@ -1,3 +1,4 @@
+import contextlib
 import math
 from typing import Dict, Tuple
 
@@ -24,6 +25,30 @@ def prob_score(home_goals: int, away_goals: int, lam_h: float, lam_a: float) -> 
 
 
 RHO = -0.15  # Correzione Dixon-Coles (draw correlation)
+
+
+def current_rho() -> float:
+    """RHO effettivo del modello (diagnostica e moduli che lo STIMANO)."""
+    return RHO
+
+
+@contextlib.contextmanager
+def rho_value(rho):
+    """Usa un RHO diverso per la durata del blocco (stima/backtest/diagnostica).
+
+    Esiste perche' il modello vive in UN solo posto: `dixon_coles.fit_rho`
+    stima il parametro sui dati reali, ma la griglia dei punteggi resta questa
+    — nessuna seconda formula. Il valore di DEFAULT (`RHO = -0.15`) NON cambia
+    e viene SEMPRE ripristinato, anche se il blocco solleva: un errore dentro
+    la stima non deve lasciare il modello con un parametro di prova.
+    """
+    global RHO
+    previous = RHO
+    RHO = float(rho)
+    try:
+        yield RHO
+    finally:
+        RHO = previous
 
 # ---------------------------------------------------------------------------
 # NUCLEO VETTORIALIZZATO (direttiva 29/09/2026)
@@ -78,6 +103,10 @@ def _probs_grid(lam_h: float, lam_a: float, max_goals: int = 10):
 
     Ritorna un array (max_goals+1)x(max_goals+1) normalizzato a somma 1, dove
     `grid[hg, ag]` e' la probabilita' del punteggio esatto.
+
+    RHO si legge dal modulo (globale) e puo' essere sostituito per la durata di
+    un blocco con `rho_value(...)`: e' il gancio che usa `dixon_coles.fit_rho`
+    per stimare il parametro SENZA duplicare la formula.
     """
     np = _np()
     grid = np.outer(_pmf_vector(max_goals, lam_h),
