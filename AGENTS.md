@@ -12098,7 +12098,8 @@ classe del 20/10: uno strumento che non distingue "0" da "illeggibile"):
 moltiplicatore puo' **SOLO ridurre o azzerare** (range [0, 1]), correlazione
 bassa -> 1.0, moderata -> riduzione proporzionale, critica -> **BLOCCO
 dell'ordine** con lo scarto loggato. Nuovo modulo `copula_portfolio.py`
-(1360 righe) + `test_copula_portfolio.py` (**93 verdi, tutti OFFLINE**).
+(1360 righe) + `test_copula_portfolio.py` (**84 verdi, tutti OFFLINE**: 79
+alla nascita + 5 del 15/10 per il percorso T-60, `TestGateNelDispatchT60`).
 
 **PERCHE' GIRA DOPO IL TETTO E PRIMA DELLA FASE 3** (e non subito dopo il
 Kelly): i layer che stanno sopra al Kelly (torneo x1.5, rush finale) **alzano**
