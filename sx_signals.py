@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -109,6 +110,10 @@ SX_LIVE_MIN_AGE_MS = 120 * 60 * 1000
 # outcomeOne, 2 = vince outcomeTwo, 0 = void/NO_CONTEST) E' il verdetto
 # definitivo e NON va ricavato dai punteggi (vedi `_results_from_sx`).
 SX_MONEYLINE_TYPE = 52
+
+# `market_hash` scritto DENTRO il `match_id` dalla corsia tennis
+# (`sx-tennis-0x<hash>`, 32 byte). Vedi `_prediction_market_hashes`.
+_HASH_IN_MID = re.compile(r"0x[0-9a-fA-F]{64}")
 
 _LEAGUE_MAP_CACHE: Dict[str, Optional[str]] = {}
 
@@ -736,6 +741,25 @@ def _prediction_market_hashes() -> Dict[str, List[dict]]:
     delle bet. I bersagli sono una LISTA perche' bet e previsioni dello stesso
     evento possono avere `match_id` diversi e nessuno dei due va perso.
 
+    DUE FONTI, in ordine di precisione (16/10/2026):
+
+    1. `market_quotes.extra_json` (qui sotto) — il percorso del CALCIO, dove
+       l'hash del mercato vive nella tabella delle quote.
+    2. il `match_id` stesso, quando lo CONTIENE (`sx-tennis-0x<hash>`): la
+       corsia tennis scrive li' il proprio mercato proprio perche' il referto
+       SX-native lo saldi (`tennis_lane` docstring). Il tennis NON passa da
+       `market_quotes` (ci passa `multi_market`, cioe' il calcio), quindi
+       senza questa fonte quelle righe non avevano ne' una puntata (la corsia
+       registra la telemetria anche quando l'ordine non parte) ne' una riga
+       in `market_quotes`: restavano aperte fino alla scadenza push a 5
+       giorni. Misura del 16/10/2026: 6 righe aperte con kickoff passato
+       (4 WTA Wuhan + 2 ATP Shanghai) con l'esito VERO disponibile gratis su
+       SX. `moneyline_ok=True` perche' l'esito di quelle righe e' una GAMBA
+       del mercato ('1'/'2', o il nome di uno dei due lati): il verdetto si
+       prende dal campo `outcome` dell'exchange (punteggi canonici 1-0/0-1)
+       e non dai punteggi-game del tennis, che possono pareggiare con un
+       vincitore.
+
     Solo lettura, nessuna rete: un errore torna `{}` (il percorso nativo resta
     quello di prima, fail-closed sulle fonti esterne).
     """
@@ -784,6 +808,37 @@ def _prediction_market_hashes() -> Dict[str, List[dict]]:
         out[str(market_hash)] = [{"mid": mid, "moneyline_ok": False,
                                   "home": home or "", "away": away or "",
                                   "league": league or ""}]
+    # --- fonte 2: hash DENTRO il match_id (tennis / corsie a 2 esiti) -------
+    # Il match_id e' la chiave della riga e il mercato in esso scritto e'
+    # quello DELLA riga: l'identita' e' strutturale, quindi `moneyline_ok`
+    # puo' essere True (nessuna verifica di evento da fare, a differenza
+    # degli hash scelti per fixture_id).
+    try:
+        from tracker import _get_conn
+        conn = _get_conn()
+        try:
+            rows2 = conn.execute(
+                "SELECT DISTINCT p.match_id, m.home_team, m.away_team, "
+                "       m.league FROM predictions p "
+                "LEFT JOIN matches m ON m.id = p.match_id "
+                "WHERE p.esito_finale IS NULL AND p.match_id LIKE '%0x%'"
+            ).fetchall()
+        finally:
+            conn.close()
+        for mid, home, away, league in rows2:
+            mid = str(mid or "")
+            m = _HASH_IN_MID.search(mid)
+            if not m:
+                continue       # '0x' non seguito da un hash: non e' un mercato
+            market_hash = m.group(0)
+            targets = out.setdefault(market_hash, [])
+            if any(t.get("mid") == mid for t in targets):
+                continue
+            targets.append({"mid": mid, "moneyline_ok": True,
+                            "home": home or "", "away": away or "",
+                            "league": league or ""})
+    except Exception as exc:
+        logger.debug("sx_signals: hash nel match_id non leggibili (%s)", exc)
     if out:
         logger.debug("sx_signals: %d partite con sole previsioni hanno un "
                      "market_hash (referto SX-native gratuito)", len(out))

@@ -399,10 +399,12 @@ class TestMercatoDueEsiti:
         verdetto dell'exchange: il risultato salvato dal percorso find ha la
         chiave sx-<id>, quindi `settle_predictions` la aggancia per match_id.
 
-        NOTA: il percorso find parte dal `market_id` delle BET — un match con
-        la SOLA previsione (nessuna puntata) non storea market_id nel ledger e
-        non e' coperto qui. E' telemetria, non denaro: nella corsia tennis la
-        previsione e la puntata nascono insieme.
+        NOTA aggiornata (16/10/2026): l'assunzione "nella corsia tennis la
+        previsione e la puntata nascono insieme" NON regge in produzione —
+        la telemetria viene registrata anche quando l'ordine non parte (6
+        righe aperte misurate sul container). Per quelle righe la copertura
+        arriva dall'hash scritto NEL `match_id` (vedi
+        `TestHashNelMatchId`), non dalla bet.
         """
         monkeypatch.setattr(
             "odds_api.fetch_scores",
@@ -882,6 +884,111 @@ class TestRefertoSoloPrevisioni:
         assert calls == []
         assert res["results"] == 0
         assert _pred_outcome(mid) == (None, None)
+
+
+class TestHashNelMatchId:
+    """REGRESSION 16/10/2026 — la corsia tennis registra la TELEMETRIA anche
+    quando l'ordine non parte (finestra chiusa, prezzo fuori banda, salto del
+    gate): esistono quindi previsioni `TENNIS` SENZA puntata. Il loro mercato
+    NON e' in `market_quotes` (il tennis non passa da `multi_market`, che
+    scrive le quote del calcio) ma e' scritto NEL `match_id`
+    (`sx-tennis-0x<hash>`), perche' e' li' che `tennis_lane` lo mette proprio
+    per il referto SX-native. Finche' l'hash si leggeva solo da
+    `market_quotes`, quelle righe restavano aperte fino alla scadenza push a
+    5 giorni — col verdetto VERO disponibile gratis su SX.
+    Misura che l'ha motivata (container, 16/10): 6 righe aperte con kickoff
+    passato (4 WTA Wuhan + 2 ATP Shanghai).
+    """
+
+    H1 = "0x" + "a1" * 32
+    H2 = "0x" + "b2" * 32
+
+    def test_hash_letto_dal_match_id(self, temp_db):
+        mid = f"sx-tennis-{self.H1}"
+        tracker.save_match(mid, "WTA Wuhan", "Yulia Putintseva",
+                           "Diana Shnaider", _ago_hours(30))
+        tracker.save_prediction(mid, "TENNIS", "2", 1.3422, 0.79, 0.03)
+        out = sx_signals._prediction_market_hashes()
+        assert list(out) == [self.H1]
+        t = out[self.H1][0]
+        assert t["mid"] == mid
+        assert t["home"] == "Yulia Putintseva"
+        # esito = GAMBA del mercato: il verdetto si prende dal campo `outcome`
+        # dell'exchange (punteggi canonici), non dai punteggi-game del tennis
+        assert t["moneyline_ok"] is True
+
+    def test_previsione_senza_puntata_saldata_dal_verdetto_sx(self, temp_db,
+                                                             monkeypatch):
+        monkeypatch.setattr(
+            "odds_api.fetch_scores",
+            lambda sport=None, days_from=3: (_ for _ in ()).throw(
+                AssertionError("no crediti")))
+        mid = f"sx-tennis-{self.H1}"
+        tracker.save_match(mid, "WTA Wuhan", "Yulia Putintseva",
+                           "Diana Shnaider", _ago_hours(30))
+        tracker.save_prediction(mid, "TENNIS", "2", 1.3422, 0.79, 0.03)
+        assert tracker.get_bets() == []            # nessuna puntata
+        prov = FakeSxSettle(find_data=[
+            _tennis_market(self.H1, outcome=2, home="Yulia Putintseva",
+                           away="Diana Shnaider", league="WTA Wuhan")])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert prov.find_calls[0]["marketHashes"] == self.H1
+        assert res["source"] == "sx" and res["results"] == 1
+        assert res["predictions"] == 1
+        # outcome 2 = ha vinto il lato 2: la nostra riga esito '2' e' VINTA
+        assert _pred_outcome(mid) == ("won", 0.3422)
+
+    def test_due_lati_dello_stesso_mercato(self, temp_db, monkeypatch):
+        """Caso reale ATP Shanghai (Gea–Davidovich): DUE righe aperte sullo
+        stesso hash, esito '1' e esito '2'. Un solo punteggio canonico chiude
+        entrambe — vince il lato giocato, perde il complementare."""
+        monkeypatch.setattr(
+            "odds_api.fetch_scores",
+            lambda sport=None, days_from=3: (_ for _ in ()).throw(
+                AssertionError("no crediti")))
+        mid = f"sx-tennis-{self.H2}"
+        tracker.save_match(mid, "ATP - Shanghai", "Arthur Gea",
+                           "Alejandro Davidovich Fokina", _ago_hours(28))
+        tracker.save_prediction(mid, "TENNIS", "1", 2.0833, 0.51, 0.05)
+        tracker.save_prediction(mid, "TENNIS", "2", 1.9704, 0.52, 0.05)
+        prov = FakeSxSettle(find_data=[
+            _tennis_market(self.H2, outcome=1, home="Arthur Gea",
+                           away="Alejandro Davidovich Fokina")])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["results"] == 1 and res["predictions"] == 2
+        conn = tracker._get_conn()
+        verdicts = dict(conn.execute(
+            "SELECT esito, esito_finale FROM predictions WHERE match_id=?",
+            (mid,)).fetchall())
+        conn.close()
+        assert verdicts == {"1": "won", "2": "lost"}
+
+    def test_void_non_chiude(self, temp_db):
+        """`outcome` 0 (NO_CONTEST): fail-closed, nessuna chiusura qui. La
+        riga la chiude la scadenza come push — per un void e' il P/L giusto."""
+        mid = f"sx-tennis-{self.H2}"
+        tracker.save_match(mid, "ATP - Shanghai", "Arthur Gea",
+                           "Alejandro Davidovich Fokina", _ago_hours(28))
+        tracker.save_prediction(mid, "TENNIS", "1", 2.0833, 0.51, 0.05)
+        prov = FakeSxSettle(find_data=[
+            _tennis_market(self.H2, outcome=0, home="Arthur Gea",
+                           away="Alejandro Davidovich Fokina")])
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert res["results"] == 0 and res["predictions"] == 0
+        assert _pred_outcome(mid) == (None, None)
+
+    def test_0x_non_seguito_da_un_hash_non_entra(self, temp_db):
+        """'0x' senza un hash da 32 byte NON e' un mercato: la riga non
+        entra nel batch (nessuna chiamata `markets/find` inutile)."""
+        tracker.save_match("sx-tennis-0xBAD", "ATP - Shanghai", "A", "B",
+                           _ago_hours(28))
+        tracker.save_prediction("sx-tennis-0xBAD", "TENNIS", "1", 2.0,
+                                0.5, 0.05)
+        prov = FakeSxSettle()
+        res = sx_signals.settle_sx_bets(provider=prov)
+        assert sx_signals._prediction_market_hashes() == {}
+        assert prov.find_calls == []
+        assert res["results"] == 0
 
 
 class TestSettlementPausa:
