@@ -12338,3 +12338,88 @@ file nuovi, offline; regressioni verdi su `poisson_engine`,
 `capital_enclosure`, `agent_hierarchy`, `advisor_agent`, `exposure_gate`,
 `order_watch`, `t60_breakers`, `weekly_stop`, `match_features`, `tournament`;
 `verify_guardrails.py` **A–I TUTTI BLOCCANO** (exit 0); 0 marker di conflitto.
+
+### Audit di salute + sblocco operativo (15/10/2026, sera)
+
+**Direttiva del proprietario**: controllo completo della giornata (health, ciclo di
+polling, 0 ordini, configurazioni da aggiornare) e ripresa immediata degli ordini.
+Tutte le misure sono state prese SUL container (`railway ssh --service betting_bot`,
+SQLite `mode=ro`, API pubblica SX), mai dedotte.
+
+**1) HEALTH: nessun guasto tecnico.** `/api/health` **200**; `auto_bet` ogni
+**60s**; **0 Traceback**; deployment `8ebf2100` SUCCESS (boot 22:11:44 UTC);
+`overdue_orphans 0`; kill-switch assente (LIVE + `provider_ready`), settlement non
+in pausa, CB2 e stop settimanale non armati, `DRY_RUN False`, registro RESTING
+vuoto. L'unico `ERROR` nel log era il messaggio **intenzionale** dello stop-loss.
+
+**2) LA CAUSA DEGLI 0 ORDINI: stop-loss GIORNALIERO armato, e la perdita era
+REALE.** `daily_stop.json` = `{day 2026-10-15, start_bankroll 42.0814,
+stopped_until 2026-10-16T01:41:42, reason "equity wallet -11.8% (valore 37.12)"}`.
+Catena di controllo sui 4 settlement delle 01:41: #57 won +4.47, #56 lost -5.14,
+#63 lost -2.05, #64 lost -2.19 → **netto -4.91**, `42.0814 - 4.91 = 37.17 ≈ 37.12`
+✅. **Nessun ordine creato il 15/10** (le 11 bet degli ultimi 2 giorni sono del
+14/10). Due pick erano **IN FINESTRA** e sono stati persi dallo stop:
+NCAAF `sx-L20484372` `2` @1.6806 (EV +4,14%, ko 23:30) e NFL `sx-L19431555` `2`
+@1.7467 (EV +3,87%, ko 00:15, finestra scadeva 01:41).
+
+**3) AZIONI DI SBLOCCO (eseguite su decisione esplicita del proprietario).**
+- **`auto_bet.clear_daily_stop()`** → `stopped: false`.
+- ⚠️ **Il ciclo ha poi raggiunto il controllo SETTIMANALE (prima mai valutato:
+  il giornaliero usciva prima) e lo ha armato**: drawdown rolling 168h **15,56%**
+  (soglia 12%) dal picco **46,7282**. **Verificato REALE, non un artefatto di
+  escrow** (come il falso stop del 09/10): campioni `46,7282 (14/10 06:41, con 2 bet
+  aperte) → 42,8007 (11:35) = -3,91 = P/L reale di #54 +1,70 e #55 -5,61` ✅;
+  `42,0814 (14/10 21:40) = 42,80 -4,61` ✅; `39,4561 (15/10 22:23) = 42,08 -2,51` ✅;
+  `reconciled_equity` → `applied: False / no_growth`.
+- **`clear_weekly_stop()` DA SOLO NON BASTA** (scoperta operativa): cancella il
+  flag, ma al ciclo successivo (60s) `check_weekly_stop` rilegge il picco dalla
+  storia rolling e **ri-arma** (osservato: riarmo alle 22:27:56). Il breaker
+  misura sul PICCO di `bankroll_history.json`, non su un riferimento giornaliero.
+- **Riavvio della finestra rolling** (stessa manovra del 09/10, con **backup**
+  `bankroll_history.json.bak-<ts>`): samples ridotti a `[[now, 39.4561]]` +
+  `reset_at`/`reset_reason`. Verifica: `weekly_drawdown(39.4561)` → **0,0%**,
+  picco 39,4561; `weekly_stop_status()` → `stopped false`. **Si riarma** solo con
+  un'ulteriore perdita di **4,73 USDC** (-12% di 39,46).
+  ⚠️ Dichiarato: la finestra riavviata **dimentica le perdite passate** (scelta
+  del proprietario) e `order_watch` usera' la fonte `nearest` per gli ordini
+  precedenti al reset.
+- **Ripristinata la finestra esecutiva documentata**: su Railway erano rimaste
+  `T60_WINDOW_MIN_MIN=120` e `T60_WINDOW_MAX_MIN=15` (**T-120..T-15**, il valore
+  del 30/09) mentre il default di codice e' **720** con chiusura derivata da
+  `MIN_MINUTES_TO_START=2` → **T-720..T-2**. Set a **720/2** + redeploy
+  (`bf0df123` SUCCESS): verificato `attr 720.0 / 2.0`, `window_label T-720..T-2`.
+  Le due env sono gia' `preserve()` in `.railway/railway.ts`.
+
+**4) ESITO: primo ordine reale dopo ~24h.** Bet **#65** `sx-L20484372`
+(NCAAF Old Dominion–Georgia Southern, `2`) @ **1.6877**, stake **2.25 USDC**
+(layer torneo 1.50 → 2.25), **FULLY_FILLED**, alle **22:30:17 UTC** — 60s dopo lo
+sblocco. Wallet: `available 37.2061 + exposure 2.25 = equity 39.4561`, 1 ordine
+aperto. Classifica torneo: **#109/128**, RETURN 0.00, **2 trade**, taglio top-30
+**384,23**, 4,60 giorni residui.
+
+**5) CREDITI — rischio strutturale, NESSUNA azione per decisione del
+proprietario (fino al 20/10).** `remaining 377`, reset 01/11 → sostenibile
+**23,6/giorno**, misurato **42,5/giorno** (finestra 35h) → **esaurimento ~24/10**.
+Composizione 48h (**71 crediti**): oracolo **NFL 24** + **NCAAF 24** (68%),
+tennis 6, oracolo a LINEA 6, settlement 4, rotation+h2h ~7. Il torneo chiude il
+20/10 13:00Z ed e' coperto (~165 crediti residui dopo); i tagli vanno valutati
+**dopo**.
+
+**6) DIFETTI TROVATI (backlog, non corretti).**
+1. **Pick NFL non ordinabile pur essendo in finestra**: `sx-L19431555` esiste nel
+   ledger (`mercato=1X2`, league NFL) ma e' **assente dalla board live della
+   corsia gridiron** → `lane_specific: False`, nessun `market_id`/flag → il
+   resolver calcistico non trova il mercato. Causa a monte: **budget/TTL della
+   corsia sbilanciati** (`GRIDIRON_CREDIT_BUDGET_DAY=24` = 8 richieste × 3 crediti
+   contro un TTL di **150 min** su un orizzonte di **168h**) → copertura reale
+   **~4-10h su 24**: oggi l'**oracolo gridiron era esaurito (8/8)** e il pick e'
+   rimasto una riga "zombie". Fix naturale: alzare `GRIDIRON_ORACLE_TTL_MIN`
+   (es. 360-720) mantenendo il budget, cosi' la copertura copre la giornata.
+2. **Oracolo a LINEA acceso e inutile**: `ORACLE_ENABLED=1` +
+   `ORACLE_BUDGET_DAY=8` (fino a 24 cr/giorno) su una corsia con **0 ordini in
+   tutta la sua storia** (griglia SX a passi di 0,5 vs main line Pinnacle).
+   Oggi: 1 chiamata, 3 crediti.
+3. **`T60_WINDOW_*` su Railway era in drift** rispetto al codice/documentazione
+   (120/15 vs 720/2) — corretto in questa sessione.
+4. Il registro **RESTING non e' mai stato esercitato** (`total 0`, file assente):
+   tutti gli ordini si riempiono in IOC, il percorso GTC resta armato ma non usato.
