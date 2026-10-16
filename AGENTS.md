@@ -12956,3 +12956,25 @@ questa sessione):
 **numero letterale** in un test e' un test che scade in silenzio al primo ritocco
 di una soglia. Le riparazioni derivano dalle costanti e **dichiarano** le
 premesse, invece di aggiornare il valore (che avrebbe solo spostato la scadenza).
+
+**9) DEPLOY E VERIFICA SUL VOLUME (16/10/2026, commit `d5a4e79`).** Push su
+`main` → deploy automatico, health **200**. Verificato SUL CONTAINER (regola 6:
+la migrazione si controlla sul volume, non sul codice):
+- `bets` = **67 righe** con le quattro colonne di identita' (`home`/`away`/
+  `league`/`commence`) — ALTER idempotente, **zero righe perse**;
+- `clv_history.betfair_odds` presente (la colonna del secondo benchmark);
+- **0 backup `_old` residui** in `sqlite_master`: la migrazione dei vincoli
+  UNIQUE e' passata pulita (era il percorso che il fix del punto 7 protegge);
+- moduli nuovi vivi sul container: `auto_bet.event_identity`,
+  `pinnacle_oracle.sharp_odds_from_cache` + `benchmark_odds_from_cache`,
+  `tennis_markov.calibrate_hold_pair`, `clv_tracker.SOURCE_BENCHMARK` =
+  `betfair_t0`, `match_features.history_feature_rows` con `ts`, `ml_harness.py`
+  presente;
+- **0 ERROR/Traceback** nei log del nuovo container; cicli `auto_bet` puliti
+  (`bankroll LIVE = equity 39.49 USDC`, esposizione `0.00/27.64`, 0 candidati),
+  `/api/health` con `overdue_orphans` **0**;
+- `railway config plan`: **0 to destroy**.
+
+⚠️ **`ml_harness.py` NON e' in nessun job**: e' uno strumento di misura da CLI
+(`venv/bin/python ml_harness.py --json`), quindi in produzione non gira nulla di
+nuovo da solo — coerente con lo stato "misura, non decide" dei tre cantieri.
