@@ -1012,42 +1012,42 @@ def ledger_games_stats(rows: Optional[Sequence[Dict[str, Any]]] = None, *,
                                 "OR m.league LIKE '%%Challenger%%' "
                                 "OR m.league LIKE '%%ITF%%' "
                                 "OR m.league LIKE '%%Tennis%%')")
-                rows: List[tuple] = []
-                try:
-                    q = ("SELECT m.%s, m.%s, m.%s, m.%s, MAX(p.prob) "
-                         "FROM match_results m LEFT JOIN predictions p "
-                         "ON p.match_id = m.match_id AND p.prob IS NOT NULL "
-                         "WHERE %s AND m.%s IS NOT NULL AND m.%s IS NOT NULL "
-                         "GROUP BY m.match_id ORDER BY m.rowid DESC LIMIT ?"
-                         % (teams[0], teams[1], cols[0], cols[1], tennis_where,
-                            cols[0], cols[1]))
-                    rows = list(conn.execute(q, (int(limit),)))
-                except Exception as exc:                      # pragma: no cover
-                    logger.debug("tennis_markov: join predictions non "
-                                 "disponibile (%s): leggo i soli punteggi", exc)
-                    # Le parentesi NON sono decorative: senza, l'`AND` lega
-                    # piu' stretto dell'`OR` e il filtro di lega salta (una
-                    # query che sembra giusta e restituisce il campione
-                    # sbagliato).
-                    plain_where = ("(league LIKE '%%ATP%%' "
-                                   "OR league LIKE '%%WTA%%' "
-                                   "OR league LIKE '%%Challenger%%' "
-                                   "OR league LIKE '%%ITF%%' "
-                                   "OR league LIKE '%%Tennis%%')")
-                    q = ("SELECT %s, %s, %s, %s FROM match_results "
-                         "WHERE %s AND %s IS NOT NULL AND %s IS NOT NULL "
-                         "ORDER BY rowid DESC LIMIT ?"
-                         % (teams[0], teams[1], cols[0], cols[1], plain_where,
-                            cols[0], cols[1]))
-                    rows = [(h, a, sh, sa, None)
-                            for h, a, sh, sa in conn.execute(q, (int(limit),))]
-                for home, away, sh, sa, prob in rows:
-                    data.append({"home": home, "away": away,
-                                 "sh": sh, "sa": sa, "league": "",
-                                 "prob": prob})
+                # DUE CAMPIONI, in ordine di preferenza (16/10/2026):
+                #  1. il DETTAGLIO GREZZO della fonte (`detail_kind='games'`): i
+                #     game VERI che SX restituisce accanto al verdetto canonico.
+                #     E' l'unico ingresso che misura la tenuta del servizio;
+                #  2. i punteggi canonici (1,0)/(0,1): totali da 1 game, che
+                #     NON dicono nulla sui game (il gate di plausibilita' li
+                #     respinge — ed e' la ragione per cui la calibrazione
+                #     rispondeva `unknown` prima del backfill).
+                # Un campione il cui 90% non sta nell'intervallo plausibile NON
+                # viene usato: si passa al successivo, e il motivo resta
+                # leggibile (`semantics`/`reason`).
+                samples: List[Tuple[str, List[Dict[str, Any]]]] = []
+                detail_rows = _detail_game_rows(conn, tennis_where, limit)
+                if detail_rows:
+                    samples.append(("ledger_detail", detail_rows))
+                samples.append(("ledger", _score_game_rows(conn, teams, cols,
+                                                            tennis_where, limit)))
+                chosen = None
+                for label, rows_ in samples:
+                    if not rows_:
+                        continue
+                    if _plausible_share(rows_) >= 0.9:
+                        chosen = (label, rows_)
+                        break
+                    if chosen is None:
+                        chosen = (label, rows_)     # nessuno plausibile: il primo
+                if chosen is None:
+                    out["reason"] = "nessun_punteggio_utilizzabile"
+                    return out
+                out["source"] = chosen[0]
+                out["sources_tried"] = [label for label, rows_ in samples if rows_]
+                if chosen[0] == "ledger_detail":
+                    out["detail_columns"] = list(_detail_columns(conn) or ())
+                data.extend(chosen[1])
             finally:
                 conn.close()
-            out["source"] = "ledger"
         except Exception as exc:
             logger.debug("tennis_markov: lettura game dal ledger fallita (%s)", exc)
             out["reason"] = "lettura_fallita"
@@ -1057,15 +1057,7 @@ def ledger_games_stats(rows: Optional[Sequence[Dict[str, Any]]] = None, *,
     out["prob_source"] = ("ledger" if any(r.get("prob") is not None for r in data)
                           else "neutro_0.5")
 
-    totals: List[int] = []
-    for r in data:
-        try:
-            sh, sa = int(r.get("sh")), int(r.get("sa"))
-        except (TypeError, ValueError):
-            continue
-        if sh < 0 or sa < 0:
-            continue
-        totals.append(sh + sa)
+    totals: List[int] = _totals_of(data)
     out["sample"] = len(totals)
     if not totals:
         out["reason"] = "nessun_punteggio_utilizzabile"
@@ -1087,6 +1079,119 @@ def ledger_games_stats(rows: Optional[Sequence[Dict[str, Any]]] = None, *,
     else:
         out["semantics"] = "games"
     return out
+
+
+def _detail_columns(conn) -> Optional[Tuple[str, str]]:
+    """Colonne del DETTAGLIO grezzo in `match_results`, se presenti.
+
+    `None` su un DB di un deploy precedente (le colonne nascono dal 16/10): il
+    campione di ripiego (i punteggi canonici) resta la strada, senza errori.
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(match_results)")}
+    except Exception:
+        return None
+    if "detail_home" in cols and "detail_away" in cols:
+        return ("detail_home", "detail_away")
+    return None
+
+
+def _detail_game_rows(conn, tennis_where: str, limit: int
+                      ) -> List[Dict[str, Any]]:
+    """Game dal DETTAGLIO della fonte (`detail_kind='games'`).
+
+    Il filtro sul `kind` non e' cosmetico: i numeri di un type 52 non-tennis
+    sono registrati come `raw` proprio perche' la loro semantica NON e'
+    verificata, e mescolarli ai game falserebbe la calibrazione.
+    """
+    cols = _detail_columns(conn)
+    if cols is None:
+        return []
+    teams = _team_columns(conn) or ("home_team", "away_team")
+    out: List[Dict[str, Any]] = []
+    try:
+        q = ("SELECT m.%s, m.%s, m.%s, m.%s, m.league, MAX(p.prob) "
+             "FROM match_results m LEFT JOIN predictions p "
+             "ON p.match_id = m.match_id AND p.prob IS NOT NULL "
+             "WHERE %s AND m.%s IS NOT NULL AND m.%s IS NOT NULL "
+             "AND m.detail_kind = 'games' "
+             "GROUP BY m.match_id ORDER BY m.rowid DESC LIMIT ?"
+             % (teams[0], teams[1], cols[0], cols[1], tennis_where,
+                cols[0], cols[1]))
+        rows = list(conn.execute(q, (int(limit),)))
+    except Exception as exc:
+        logger.debug("tennis_markov: dettaglio game non leggibile (%s)", exc)
+        return []
+    for home, away, sh, sa, league, prob in rows:
+        out.append({"home": home, "away": away, "sh": sh, "sa": sa,
+                    "league": league or "", "prob": prob})
+    return out
+
+
+def _score_game_rows(conn, teams: Tuple[str, str], cols: Tuple[str, str],
+                     tennis_where: str, limit: int) -> List[Dict[str, Any]]:
+    """Campione di ripiego: i punteggi canonici del referto.
+
+    Sul tennis a due esiti sono (1,0)/(0,1) — totali da 1 game: la
+    calibrazione li respinge col gate di plausibilita'. Restano perche' su un
+    referto vecchio (o su un tennis di cui la fonte non pubblica i game) sono
+    comunque meglio di niente.
+    """
+    rows: List[tuple] = []
+    try:
+        q = ("SELECT m.%s, m.%s, m.%s, m.%s, MAX(p.prob) "
+             "FROM match_results m LEFT JOIN predictions p "
+             "ON p.match_id = m.match_id AND p.prob IS NOT NULL "
+             "WHERE %s AND m.%s IS NOT NULL AND m.%s IS NOT NULL "
+             "GROUP BY m.match_id ORDER BY m.rowid DESC LIMIT ?"
+             % (teams[0], teams[1], cols[0], cols[1], tennis_where,
+                cols[0], cols[1]))
+        rows = list(conn.execute(q, (int(limit),)))
+    except Exception as exc:                                  # pragma: no cover
+        logger.debug("tennis_markov: join predictions non "
+                     "disponibile (%s): leggo i soli punteggi", exc)
+        # Le parentesi NON sono decorative: senza, l'`AND` lega piu' stretto
+        # dell'`OR` e il filtro di lega salta (una query che sembra giusta e
+        # restituisce il campione sbagliato).
+        plain_where = ("(league LIKE '%%ATP%%' OR league LIKE '%%WTA%%' "
+                       "OR league LIKE '%%Challenger%%' "
+                       "OR league LIKE '%%ITF%%' "
+                       "OR league LIKE '%%Tennis%%')")
+        try:
+            q = ("SELECT %s, %s, %s, %s FROM match_results "
+                 "WHERE %s AND %s IS NOT NULL AND %s IS NOT NULL "
+                 "ORDER BY rowid DESC LIMIT ?"
+                 % (teams[0], teams[1], cols[0], cols[1], plain_where,
+                    cols[0], cols[1]))
+            rows = [(h, a, sh, sa, None)
+                    for h, a, sh, sa in conn.execute(q, (int(limit),))]
+        except Exception:
+            return []
+    return [{"home": h, "away": a, "sh": sh, "sa": sa, "league": "",
+             "prob": prob} for h, a, sh, sa, prob in rows]
+
+
+def _totals_of(data: Sequence[Dict[str, Any]]) -> List[int]:
+    """Totali utilizzabili del campione (punteggi negativi o illeggibili fuori)."""
+    totals: List[int] = []
+    for r in data:
+        try:
+            sh, sa = int(r.get("sh")), int(r.get("sa"))
+        except (TypeError, ValueError):
+            continue
+        if sh < 0 or sa < 0:
+            continue
+        totals.append(sh + sa)
+    return totals
+
+
+def _plausible_share(data: Sequence[Dict[str, Any]]) -> float:
+    """Quota di totali che stanno nell'intervallo plausibile di un match."""
+    totals = _totals_of(data)
+    if not totals:
+        return 0.0
+    return sum(1 for t in totals
+               if GAMES_MIN_PLAUSIBLE <= t <= GAMES_MAX_PLAUSIBLE) / len(totals)
 
 
 def _pair_for_base(prob: float, base: float,

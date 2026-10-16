@@ -12978,3 +12978,84 @@ la migrazione si controlla sul volume, non sul codice):
 ⚠️ **`ml_harness.py` NON e' in nessun job**: e' uno strumento di misura da CLI
 (`venv/bin/python ml_harness.py --json`), quindi in produzione non gira nulla di
 nuovo da solo — coerente con lo stato "misura, non decide" dei tre cantieri.
+
+### Sessione 17/10/2026 — M3 bayesiano, feature ELO/lega, i GAME del tennis nel referto
+
+Tre cantieri della roadmap quantitativa (`QUANT_MODULES.md`), **tutti in
+modalita' MISURA**: nessun percorso di produzione importa i moduli nuovi
+(verificato: `match_features` e' importato solo da `ml_harness` e dai test,
+`bayes_ratings` solo dai suoi test), quindi l'effetto sui soldi e' **zero** per
+costruzione.
+
+**1) M3 — `bayes_ratings.py` (NUOVO, 62 test verdi, tutti OFFLINE).** Fit
+gerarchico con discesa del gradiente (numpy) + **shrinkage empirico-Bayes**:
+`sigma` per lega stimato dai dati, con pavimento/soffitto e **seme largo** nel
+primo stadio (senza, il primo stadio collassava sul pavimento e i rating non si
+muovevano). API: `fit`, `fit_ledger` (sola lettura `mode=ro`), `lambdas_for_match`,
+`walk_forward` (pieghe **cronologiche**), `save`/`load` (`BAYES_STATE`, volume),
+report + CLI. Il valore aggiunto rispetto a `dixon_coles` non e' la media: e'
+l'**incertezza** (ogni lambda porta la varianza del posterior, quindi 3 match
+visti non pesano come 30).
+
+**2) M1 — feature nuove in `match_features.py` (25 -> 34).** Aggiunte, tutte
+**leak-free** (aggiornate nella passata cronologica unica di
+`history_feature_rows`, nessuna in `LOOKAHEAD_UNSAFE`):
+- **ELO di CALCIO** (formula World Football Elo, `ELO_BASE` 1500, `ELO_K` 20,
+  vantaggio casa 65): `elo_home`, `elo_away`, `elo_diff`, `elo_expect_home`;
+- **contesto di lega**: `league_goal_avg`, `league_prev_matches`.
+Perche' qui e non in un modulo condiviso: in casa c'e' l'ELO **tennis** e nessun
+Elo di calcio; l'unica alternativa era ClubElo via `live_intel` (provider
+ESTERNO, caduto dal 08/10) — cosi' resta **offline, zero crediti**.
+
+**3) M1 — il harness e' stato riesercitato con le feature nuove.** Prova locale
+su dati sintetici (generatore con forza latente, quindi l'Elo e' informativo):
+```
+righe 5994 | out-of-fold 3994 | boosting: xgboost
+  prior      brier=0.2501 auc=0.4987
+  logistica  brier=0.1426 auc=0.8827
+  boosting   brier=0.1471 auc=0.8709
+  -> boosting_vs_prior +0.10294 p=0.0 better | vs_logistica -0.00452 p=0.0047 worse
+verdetto: reject — lo sfidante e' SIGNIFICATIVAMENTE peggiore su boosting_vs_logistica
+```
+Tre letture: le feature nuove **portano segnale**; il confronto **discrimina** e
+sa dire `reject`; su un processo lineare il risultato corretto e' logistica >=
+boosting, quindi il harness **non e' tarato a favore del boosting**.
+⚠️ Il campione locale NON e' la misura che conta: `match_results` in locale e'
+**vuoto** (17k righe vivono sul volume). La misura vera e' `ml_harness.py --json`
+sul container.
+
+**4) M5 — i GAME del tennis arrivano nel referto (`tracker.py` + `sx_signals.py`
++ `tennis_markov.py`, `test_tennis_games.py` NUOVO).** Il referto salva per il
+tennis il punteggio **canonico** `(1,0)`/`(0,1)` dall'`outcome` dell'exchange
+(giusto per il VERDETTO: i game possono pareggiare con un vincitore) ma buttava
+via i game veri di `teamOneScore`/`teamTwoScore`: senza, la calibrazione di
+`BASE_HOLD` era **rifiutata** (`semantics="unknown"`, plausible_share 0.417).
+- quattro colonne di DETTAGLIO in `match_results` (`detail_home`, `detail_away`,
+  `detail_kind`, `detail_source`), ALTER **idempotente** e `COALESCE` in UPDATE
+  (il watchdog ri-salva spesso: non deve cancellare i game gia' registrati);
+  `score_home`/`score_away`/`result` **intatti**;
+- `tennis_markov.ledger_games_stats` legge il dettaglio e DICHIARA la fonte del
+  campione (`ledger_detail`, ripiego `ledger`); `calibrate_hold_pair` resta
+  **fail-closed** (senza game reali **rifiuta**, non stima su numeri falsi);
+- backfill delle righe gia' saldate (CLI) + IaC: `TENNIS_MARKOV_*` e `BAYES_*`
+  ora dichiarate `preserve()` (erano lette e NON dichiarate: un `config apply`
+  avrebbe distrutto la taratura) con **tripwire automatico** in
+  `test_bayes_ratings.TestIaC` e `test_tennis_games.TestIaCMarkov` — ogni env
+  letta dal sorgente deve comparire nella IaC.
+
+**5) Verifiche in locale**: lotti verdi su
+match_features/ml_harness/bayes_ratings/portfolio_risk/significance (372),
+auto_bet+auto_bet_live+capital_enclosure+exposure_gate+order_watch,
+t60+tournament+gridiron+resting+rush+tennis_quant+tennis_games+sx_signals,
+bot+secret_hygiene+railway_drift+sx_native_settlement+bets+predictions+
+clv_tracker+closing_line, decision (pipeline/limits/compare/feed/market/multi)
++multi_market+value_filter+risk_guards+favourites_only+league_gate,
+portfolio_sizing+risk_parity+drawdown_rebalancer+copula+dixon_coles+
+poisson_engine+ml_ensemble+ml_dataset+flow_measure+tennis_lane+esports_lane;
+`py_compile` OK, **0 marker di conflitto**, `railway config plan` =
+**"already up to date"** (0 to add, 0 to change, **0 to destroy**).
+
+**6) Da misurare sul container** (unica cosa che manca per chiudere il giro):
+`bayes_ratings.fit_ledger()` sui 17k match reali + walk-forward bayesiano;
+`ml_harness --json` con le 34 feature; backfill dei game tennis e calibrazione
+di `BASE_HOLD` su `ledger_games_stats`.

@@ -510,6 +510,106 @@ Env `MLH_FOLDS` / `MLH_MIN_TRAIN` / `MLH_SEED` in `preserve()`.
 
 ---
 
+## 3-octies. Sessione 17/10/2026 — M3 bayesiano, feature ELO/lega, i GAME del tennis nel referto
+
+Tre cantieri chiusi, **tutti ancora in modalita' MISURA** (nessun percorso di
+produzione importa questi moduli: `match_features` e' importato solo da
+`ml_harness`, `bayes_ratings` solo dai suoi test — verificato con `grep`).
+
+### M3 — `bayes_ratings.py`: inferenza gerarchica con shrinkage empirico-Bayes
+
+Risponde alla domanda che il progetto si e' posto dal 14/10: **quanto** del
+rating di una squadra e' misura e quanto e' prior? Il modulo stima i parametri
+con discesa del gradiente (numpy, nessuna dipendenza nuova), poi applica lo
+**shrinkage empirico-Bayes**: `sigma` per lega stimato dai dati (con pavimento e
+soffitto, e un **seme largo** nel primo stadio — senza, il primo stadio collassava
+sul pavimento e i rating non si muovevano).
+
+- `fit()` / `fit_ledger()` (sola lettura `mode=ro` su `match_results`),
+  `lambdas_for_match()`, `walk_forward()` (pieghe **cronologiche**), `save`/`load`
+  (`BAYES_STATE`, volume) e report/CLI.
+- **Il parametro nuovo e' l'INCERTEZZA**: ogni lambda porta con se' la varianza
+  del posterior inattaccabile (`sigma_state`), quindi una squadra con 3 match
+  visti non ha lo stesso peso di una con 30.
+- Fail-closed dove serve: target/parametri impossibili ricadono sul default
+  **dichiarato** (mai un valore assurdo silenzioso).
+
+### M1 — feature nuove: ELO di calcio pre-kickoff + contesto di lega
+
+`FEATURE_NAMES` passa da 25 a **34** feature, tutte **leak-free** per costruzione
+e tutte dentro `HISTORY_FEATURES` (nessuna delle nuove finisce in
+`LOOKAHEAD_UNSAFE`):
+
+| gruppi nuovi | feature |
+|---|---|
+| Elo di CALCIO (formula World Football Elo, UNICA definizione) | `elo_home`, `elo_away`, `elo_diff`, `elo_expect_home` |
+| contesto di lega | `league_goal_avg`, `league_prev_matches` |
+
+Perche' l'Elo vive qui e non in un modulo condiviso: in casa esiste l'ELO
+**tennis** (`tennis_sandbox`, superficie-specifico, seminato dal mercato) e
+nessun Elo di calcio; l'unica alternativa era ClubElo via `live_intel`
+(provider ESTERNO, non interrogabile offline e gia' caduto il 08/10). L'Elo si
+aggiorna nella **passata cronologica unica** di `history_feature_rows`, quindi
+un match del 2023 non vede mai un aggiornamento del 2024 (tripwire dedicato).
+
+### M1 — il harness e' stato riesercitato con le feature nuove
+
+`ml_harness.run()` (prior / logistica / boosting, pieghe cronologiche,
+confronto appaiato via `significance.roi_test`) e' stato fatto girare **sui dati
+sintetici** in locale per provare che la catena completa (feature nuove ->
+matrice -> tre stimatori -> verdetto) regge dopo l'estensione di `FEATURE_NAMES`:
+
+```
+righe 5994 | out-of-fold 3994 | motore boosting: xgboost
+  prior      brier=0.2501 auc=0.4987
+  logistica  brier=0.1426 auc=0.8827
+  boosting   brier=0.1471 auc=0.8709
+  -> boosting_vs_prior     gain=+0.10294 p=0.0    better
+  -> boosting_vs_logistica gain=-0.00452 p=0.0047 worse
+verdetto: reject — lo sfidante e' SIGNIFICATIVAMENTE peggiore su boosting_vs_logistica
+```
+
+Le tre letture che contano: (a) le feature nuove **portano segnale** (AUC 0.88
+su un processo generativo la cui forza e' latente); (b) il confronto **discrimina**
+e sa dire `reject`; (c) il generatore e' lineare per costruzione, quindi il
+risultato corretto e' logistica >= boosting — il harness **non e' tarato a
+favore del boosting** (il verdetto del 15/10 sul dato reale era gia' `reject`,
+questo lo conferma da un'altra direzione).
+
+### M5 — i GAME del tennis arrivano nel referto (e la calibrazione si sblocca)
+
+Il referto SX-native salva per il tennis il punteggio **canonico** `(1,0)`/`(0,1)`
+preso dal campo `outcome` dell'exchange: e' la scelta giusta per il VERDETTO (i
+game possono pareggiare con un vincitore — Giron-Baez 13-13 con `outcome` 2) ma
+buttava via i game VERI che la stessa risposta porta in
+`teamOneScore`/`teamTwoScore`. Senza quelli `tennis_markov.ledger_games_stats`
+vedeva solo totali da 1 game, rispondeva `semantics="unknown"` e la calibrazione
+di `BASE_HOLD` **non poteva partire** (misurato: `plausible_share` 0.417).
+
+Cosa e' stato fatto, senza toccare il percorso del denaro:
+- **`match_results` ha quattro colonne di DETTAGLIO** (`detail_home`, `detail_away`,
+  `detail_kind`, `detail_source`) con ALTER **idempotente** e `COALESCE` in
+  UPDATE: una ri-scrittura senza dettaglio (il watchdog ri-salva spesso) **non
+  cancella** i game gia' registrati. `score_home`/`score_away`/`result` restano
+  intatti (il verdetto non cambia di una virgola);
+- `sx_signals` popola il dettaglio dalla risposta `markets/find` quando la
+  semantica e' `games`;
+- `tennis_markov.ledger_games_stats` legge il dettaglio (e dichiara la fonte del
+  campione: `ledger_detail`, con `ledger` — punteggi canonici — solo come
+  ripiego) e `calibrate_hold_pair` resta **fail-closed**: senza game reali la
+  calibrazione e' **rifiutata**, non stimata su numeri falsi.
+- **Backfill** delle righe gia' saldate senza dettaglio (CLI) e test dedicati
+  (`test_tennis_games.py`): registrazione, non-invenzione (`NULL` resta `NULL`,
+  `no_row` per le partite assenti dal referto), lettura del campione,
+  nessuna regressione nel percorso del denaro (una bet tennis resta `won` con il
+  profit invariato).
+
+**Il numero che chiude il cerchio**: i game reali dai referti (e il backfill)
+rendono `BASE_HOLD` **calibrabile** — la calibrazione va poi **misurata sul
+container** (17k righe di referto), perche' in locale `match_results` e' vuoto.
+
+---
+
 ## 4. Roadmap per modulo (ordine consigliato, per costo/beneficio)
 
 L'ordine non e' quello della richiesta: e' quello che **non tocca il denaro
@@ -685,8 +785,8 @@ soglie da configurare, e i cap che mostra li legge dai moduli che li applicano.
 | modulo | stato | prossimo passo |
 |---|---|---|
 | 6 — Portfolio theory | **Fase 1 FATTA** (misura) + **Fase 2 FATTA** (`copula_portfolio` in ENFORCE) + **Fase 3/4 FATTE e promosse in SHADOW** (`risk_parity`, `drawdown_rebalancer` via `portfolio_sizing`, § 3-quinquies) | `PORTFOLIO_SIZING=enforce` dopo aver letto i log shadow |
-| 1 — ML/feature | **Fase 1 FATTA** (28 feature, 10 sopra soglia su 17k partite) + **rho Dixon-Coles promosso in misura** (`dixon_coles.promote()`, § 3-sexies) + **harness walk-forward fatto** (§ 3-septies: boosting **RESPINTO**, l'incumbent logistico vince) | nessun cambio di `FEATURE_NAMES`/modello: la porta di uscita e' gia' stata attraversata **in negativo**, si riapre solo con feature nuove (o piu' dati) |
-| 3 — Bayesiano | empirico-bayesiano presente | `bayes_ratings.py` con incertezza, parita' + Brier |
+| 1 — ML/feature | **Fase 1 FATTA** (28 feature, 10 sopra soglia su 17k partite) + **rho Dixon-Coles promosso in misura** (`dixon_coles.promote()`, § 3-sexies) + **harness walk-forward fatto** (§ 3-septies: boosting **RESPINTO**) + **34 feature** con ELO di calcio pre-kickoff e contesto di lega, harness **riesercitato** (§ 3-octies) | rilanciare il harness **sui 17k match reali** con le feature nuove: e' l'unica cosa che puo' riaprire la porta al boosting, e il gate e' gia' scritto (Bonferroni + AUC + effetto minimo distinguibile) |
+| 3 — Bayesiano | **Fase 1 FATTA** (`bayes_ratings.py`: fit gerarchico, shrinkage EB, walk-forward, persistenza sul volume) | misurare sul container (`fit_ledger` sui 17k match reali + walk-forward bayesiano vs `dixon_coles`); poi decidere se alimentare `rating_engine` |
 | 2 — Line movement | **completo** + **CLV contro DUE sharp** (§ 3-septies: `pinnacle_t0` + `betfair_t0`) | M2-2: segmentazione CLV steam/non-steam |
-| 5 — Markov tennis | ELO+Poisson presenti + **catena esatta promossa come componente di servizio** di `tennis_quant` (§ 3-septies), ponte calibrato, superfici | spw/rpw misurati: il referto attuale salva un flag di vincitore, non i game, quindi la calibrazione resta **rifiutata** (fail-closed) |
+| 5 — Markov tennis | ELO+Poisson presenti + **catena esatta promossa come componente di servizio** di `tennis_quant` (§ 3-septies) + **i GAME arrivano nel referto** (`match_results.detail_*`, § 3-octies): la calibrazione non e' piu' strutturalmente impossibile | backfill dei game sui referti vecchi + calibrazione di `BASE_HOLD` **misurata sul container**, poi confronto del modello calibrato contro la versione a prior fisso |
 | 4 — Lineup window | finestra presente | rinviato fino a volume di candidati |

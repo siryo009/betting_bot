@@ -809,3 +809,245 @@ class TestTripwire:
         src = Path(mf.__file__).read_text(encoding="utf-8")
         for bad in ("EV_MIN", "MARKET_EDGE", "ODDS_MAX", "KELLY"):
             assert bad not in src, f"soglia di strategia nel modulo: {bad}"
+
+
+# ---------------------------------------------------------------------------
+# Elo pre-kickoff + contesto di lega (stato CRONOLOGICO, nessun look-ahead)
+# ---------------------------------------------------------------------------
+
+class TestEloFormula:
+    def test_atteso_meta_con_rating_uguali(self):
+        # senza vantaggio campo, due rating uguali -> 0.5 esatto
+        assert mf.elo_expected(1500.0, 1500.0, home_advantage=0.0) == pytest.approx(0.5)
+
+    def test_vantaggio_campo_alza_l_atteso_di_casa(self):
+        assert mf.elo_expected(1500.0, 1500.0) > 0.5
+        assert mf.elo_expected(1700.0, 1500.0) > mf.elo_expected(1500.0, 1500.0)
+        assert mf.elo_expected(1500.0, 1700.0) < 0.5
+
+    def test_input_illeggibile_non_solleva(self):
+        assert mf.elo_expected(None, "x") == 0.5
+
+    @pytest.mark.parametrize("gd,atteso", [(0, 1.0), (1, 1.0), (2, 1.5), (3, 1.75),
+                                           (5, 2.0), (-3, 1.75)])
+    def test_indice_del_margine(self, gd, atteso):
+        assert mf.goal_margin_index(gd) == pytest.approx(atteso)
+
+    def test_vittoria_casa_sale_e_ospite_scende(self):
+        h, a = mf.elo_update(1500.0, 1500.0, 2, 0)
+        assert h > 1500.0 > a
+        assert h + a == pytest.approx(3000.0)          # a somma zero
+
+    def test_pareggio_di_una_favorita_la_fa_scendere(self):
+        h, a = mf.elo_update(1700.0, 1400.0, 1, 1)
+        assert h < 1700.0 and a > 1400.0
+
+    def test_squadre_uguali_pareggio_non_muovono_i_rating(self):
+        h, a = mf.elo_update(1500.0, 1500.0, 1, 1, home_advantage=0.0)
+        assert (h, a) == (pytest.approx(1500.0), pytest.approx(1500.0))
+
+    def test_scarto_piu_grande_muove_di_piu(self):
+        h1, _ = mf.elo_update(1500.0, 1500.0, 1, 0)
+        h3, _ = mf.elo_update(1500.0, 1500.0, 3, 0)
+        assert h3 > h1
+
+
+class TestStatoCronologico:
+    def test_snapshot_puro_non_aggiorna(self):
+        st = mf.ChronoState()
+        before = st.snapshot("A", "B", "Serie A")
+        st.observe("A", "B", 3, 0, "Serie A")
+        assert before["elo_home"] == mf.ELO_BASE
+        assert st.snapshot("A", "B", "Serie A")["elo_home"] > mf.ELO_BASE
+
+    def test_squadra_mai_vista_ha_il_prior(self):
+        st = mf.ChronoState()
+        assert st.rating("Mai Vista") == mf.ELO_BASE
+        assert st.known("Mai Vista") is False
+        st.observe("Mai Vista", "Altra", 1, 0, "Serie A")
+        assert st.known("Mai Vista") is True
+
+    def test_diff_e_la_quantita_da_cui_esce_l_atteso(self):
+        st = mf.ChronoState()
+        snap = st.snapshot("A", "B")
+        assert snap["elo_diff"] == pytest.approx(
+            2 * mf.ELO_BASE + mf.ELO_HOME_ADVANTAGE - 2 * mf.ELO_BASE)
+        assert snap["elo_expect_home"] == pytest.approx(
+            mf.elo_expected(mf.ELO_BASE, mf.ELO_BASE))
+
+    def test_contesto_di_lega_incrementale(self):
+        st = mf.ChronoState()
+        first = st.snapshot("A", "B", "Serie A")
+        assert first["league_goal_avg"] is None and first["league_prev_matches"] is None
+        st.observe("A", "B", 2, 1, "Serie A")
+        second = st.snapshot("C", "D", "Serie A")
+        assert second["league_prev_matches"] == 1
+        assert second["league_goal_avg"] == pytest.approx(3.0)
+        st.observe("C", "D", 1, 1, "Serie A")
+        third = st.snapshot("A", "B", "Serie A")
+        assert third["league_prev_matches"] == 2
+        assert third["league_goal_avg"] == pytest.approx(5 / 2)
+
+    def test_leghe_divise_non_si_mescolano(self):
+        st = mf.ChronoState()
+        st.observe("A", "B", 5, 0, "Serie A")
+        assert st.snapshot("C", "D", "Premier League")["league_goal_avg"] is None
+
+    def test_lega_vuota_non_crea_un_bucket(self):
+        st = mf.ChronoState()
+        st.observe("A", "B", 3, 0, "")
+        assert st.league_matches == {}
+        assert st.snapshot("A", "B", "")["league_goal_avg"] is None
+
+    def test_osservazioni_degeneri_ignorate(self):
+        st = mf.ChronoState()
+        st.observe("A", "A", 3, 0, "Serie A")
+        st.observe("", "B", 3, 0, "Serie A")
+        st.observe("A", "B", -1, 0, "Serie A")
+        assert st.observed == 0 and st.elo == {}
+
+    def test_versione_di_una_lega_non_coperta(self):
+        st = mf.ChronoState()
+        st.observe("A", "B", 1, 1, "")
+        assert st.observed == 1                 # l'Elo si aggiorna comunque
+        assert st.league_matches == {}
+
+
+class TestFeaturesConStato:
+    def test_senza_stato_le_nuove_feature_restano_assenti(self, conn):
+        index, _ = mf.build_index(conn)
+        row = mf.features_for("Inter", "Napoli", BASE + timedelta(days=30),
+                              index=index)
+        for name in ("elo_home", "elo_away", "elo_diff", "elo_expect_home",
+                     "league_goal_avg", "league_prev_matches"):
+            assert row[name] is None, name
+
+    def test_con_stato_i_valori_ci_sono(self, conn):
+        index, _ = mf.build_index(conn)
+        state = mf.build_state(conn, until=(BASE + timedelta(days=30)).timestamp())
+        row = mf.features_for("Inter", "Napoli", BASE + timedelta(days=30),
+                              index=index, league="Serie A", state=state)
+        assert row["elo_home"] is not None and row["elo_away"] is not None
+        assert row["league_prev_matches"] == 5
+        # gol totali della storia: 2 + 2 + 3 + 4 + 2 = 13 su 5 partite
+        assert row["league_goal_avg"] == pytest.approx(13 / 5, abs=1e-3)
+
+    def test_squadra_mai_vista_ha_il_prior_nel_snapshot(self, conn):
+        index, _ = mf.build_index(conn)
+        state = mf.build_state(conn)
+        row = mf.features_for("Inter", "Squadra Nuova", BASE + timedelta(days=40),
+                              index=index, league="Serie A", state=state)
+        assert row["elo_away"] == mf.ELO_BASE
+
+    def test_build_state_fino_a_un_istante(self, conn):
+        # Milan entra in scena al giorno 7: con until al giorno 5 non lo conosco
+        state = mf.build_state(conn, until=(BASE + timedelta(days=5)).timestamp())
+        assert state.known("Milan") is False
+        assert state.known("Inter") is True
+        full = mf.build_state(conn)
+        assert full.known("Milan") is True
+        assert full.observed == 5
+
+
+class TestStoricoConElo:
+    def test_le_righe_portano_elo_e_lega(self, conn):
+        data = mf.history_feature_rows(conn)
+        assert data["error"] is None
+        assert data["rows"]
+        for row in data["rows"]:
+            assert row["elo_home"] is not None
+            assert row["elo_away"] is not None
+            assert row["league_prev_matches"] >= 1
+
+    def test_contesto_di_lega_avanza_col_tempo(self, conn):
+        rows = mf.history_feature_rows(conn)["rows"]
+        counts = [r["league_prev_matches"] for r in rows]
+        assert counts == sorted(counts)          # monotono: la storia cresce
+        assert counts[0] >= 1
+
+    def test_stato_caldo_dichiarato(self, conn):
+        stats = mf.history_feature_rows(conn)["stats"]
+        assert stats["elo_observed"] == 5        # tutte le righe usabili
+        assert stats["elo_teams"] >= 4
+        assert stats["leagues"] == 1
+        assert stats["skipped"]["cold_elo"] >= 1
+
+    def test_nessun_look_ahead_end_to_end(self, tmp_path):
+        """Aggiungere una partita SUCCESSIVA non cambia le feature precedenti."""
+        base = [
+            ("m1", "A", "B", 2, 0, _iso(0), "Serie A"),
+            ("m2", "C", "D", 1, 1, _iso(1), "Serie A"),
+            ("m3", "A", "C", 0, 3, _iso(5), "Serie A"),
+        ]
+        extra = base + [("m4", "B", "D", 5, 0, _iso(40), "Serie A")]
+        out = {}
+        for name, rows in (("short", base), ("long", extra)):
+            c = mf.ro_conn(_make_db(tmp_path / f"{name}.db", rows))
+            try:
+                out[name] = {r["match_id"]: r for r in mf.history_feature_rows(c)["rows"]}
+            finally:
+                c.close()
+        shared = set(out["short"]) & set(out["long"])
+        assert shared
+        for mid in shared:
+            for key in ("elo_home", "elo_away", "elo_diff", "elo_expect_home",
+                        "league_goal_avg", "league_prev_matches", "pts5_home",
+                        "rest_days_away"):
+                assert out["short"][mid][key] == out["long"][mid][key], (mid, key)
+        # e la partita aggiunta esiste solo nella versione lunga
+        assert "m4" in out["long"] and "m4" not in out["short"]
+
+    def test_limit_prende_le_piu_recenti_ma_lo_stato_e_caldo(self, tmp_path):
+        rows = [("m%d" % i, "A", "B", 1, 0, _iso(i * 2), "Serie A")
+                for i in range(1, 11)]
+        c = mf.ro_conn(_make_db(tmp_path / "lim.db", rows))
+        try:
+            data = mf.history_feature_rows(c, limit=2)
+        finally:
+            c.close()
+        assert len(data["rows"]) == 2
+        assert [r["match_id"] for r in data["rows"]] == ["m9", "m10"]
+        # lo stato e' costruito su TUTTA la storia: l'Elo non riparte da zero
+        assert data["rows"][0]["elo_home"] > mf.ELO_BASE
+
+    def test_feature_nuove_sono_usabili_dalla_scrematura(self):
+        for name in ("elo_home", "elo_away", "elo_diff", "elo_expect_home",
+                     "league_goal_avg", "league_prev_matches"):
+            assert name in mf.FEATURE_NAMES
+            assert name not in mf.LOOKAHEAD_UNSAFE
+            assert name in mf.HISTORY_FEATURES
+
+    def test_scrematura_riconosce_una_favorita_forte(self, tmp_path):
+        """Con una squadra molto piu' forte l'Elo di casa DEVE avere AUC > 0.5."""
+        import random
+        rng = random.Random(5)
+        teams = ["Forte", "Media", "Debole", "Pessima"]
+        strength = {"Forte": 1.9, "Media": 1.2, "Debole": 0.8, "Pessima": 0.5}
+        rows = []
+        for i in range(400):
+            h = "Forte" if i % 2 == 0 else rng.choice(teams)
+            a = rng.choice([t for t in teams if t != h])
+            lam_h = 1.5 * strength[h] / strength[a]
+            lam_a = 1.2 * strength[a] / strength[h]
+            sh = sum(1 for _ in range(10) if rng.random() < min(0.9, lam_h / 10))
+            sa = sum(1 for _ in range(10) if rng.random() < min(0.9, lam_a / 10))
+            rows.append(("m%d" % i, h, a, sh, sa, _iso(i), "Serie A"))
+        c = mf.ro_conn(_make_db(tmp_path / "auc.db", rows))
+        try:
+            data = mf.history_feature_rows(c)
+        finally:
+            c.close()
+        sc = mf.screening(data["rows"])
+        assert sc["sufficient"] is True
+        by_name = {r["name"]: r for r in sc["results"]}
+        assert by_name["elo_diff"]["auc"] > 0.5
+        assert "elo_expect_home" in sc["useful"]
+
+    def test_cli_match_riporta_elo_e_lega(self, small_db, capsys):
+        rc = mf.main(["--db", str(small_db), "--json", "--match", "Inter", "Napoli",
+                      "--kickoff", (BASE + timedelta(days=30)).isoformat(),
+                      "--league", "Serie A"])
+        assert rc == 0
+        feat = json.loads(capsys.readouterr().out)["features"]
+        assert feat["elo_home"] is not None
+        assert feat["league_prev_matches"] == 5

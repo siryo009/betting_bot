@@ -2593,18 +2593,92 @@ def clear_old_matches():
     conn.commit(); conn.close()
 
 # --- Tracking risultati ---
+# DETTAGLIO GREZZO DEL REFERTO (16/10/2026): i `score_home`/`score_away` sono
+# il punteggio CANONICO che serve a derivare il verdetto (sul tennis a 2 esiti
+# sono (1,0)/(0,1), presi dal campo `outcome` dell'exchange). Accanto a quelli
+# SX restituisce i numeri VERI dell'evento (sul tennis i GAME, es. 12-4):
+# buttarli via rendeva la catena di Markov non calibrabile dal referto
+# (`tennis_markov.ledger_games_stats` vedeva solo totali da 1 game e rispondeva
+# `semantics="unknown"`). Vivono in colonne PROPRIE, cosi' il verdetto resta
+# invariato e il dettaglio e' leggibile da chi lo sa interpretare.
+RESULT_DETAIL_FIELDS = ("detail_home", "detail_away", "detail_kind",
+                        "detail_source")
+
+
 def _create_results_table(conn):
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS match_results (
         match_id TEXT PRIMARY KEY, league TEXT, home_team TEXT, away_team TEXT,
-        score_home INTEGER, score_away INTEGER, result TEXT, settled_at TEXT)''')
+        score_home INTEGER, score_away INTEGER, result TEXT, settled_at TEXT,
+        detail_home INTEGER, detail_away INTEGER,
+        detail_kind TEXT, detail_source TEXT)''')
+    # Migrazione idempotente per i DB nati prima (tabella -> colonne -> indici,
+    # la stessa lezione del 14/09 su `decisions`).
+    _cols = [r[1] for r in c.execute("PRAGMA table_info(match_results)")]
+    for _col in RESULT_DETAIL_FIELDS:
+        if _col not in _cols:
+            _type = "INTEGER" if _col.endswith(("_home", "_away")) else "TEXT"
+            c.execute("ALTER TABLE match_results ADD COLUMN %s %s"
+                      % (_col, _type))
 
-def save_result(match_id, league, home, away, sh, sa, settled_at):
+
+def save_result(match_id, league, home, away, sh, sa, settled_at, detail=None):
+    """Salva il risultato (e, se fornito, il DETTAGLIO grezzo della fonte).
+
+    `detail` = (numero_casa, numero_trasferta, kind, source) — per il tennis
+    `kind="games"`. Colonne NOMINATE e `COALESCE` sul dettaglio: una ri-scrittura
+    SENZA dettaglio (il watchdog ri-salva spesso) non deve cancellare i game
+    gia' registrati — stessa disciplina di `save_clv` (13/10).
+    """
     conn = _get_conn(); _create_results_table(conn); c = conn.cursor()
     res = "1" if sh > sa else ("2" if sh < sa else "X")
-    c.execute('''INSERT OR REPLACE INTO match_results VALUES (?,?,?,?,?,?,?,?)''',
-              (match_id, league, home, away, sh, sa, res, settled_at))
+    d_home = d_away = d_kind = d_source = None
+    if detail:
+        try:
+            d_home, d_away, d_kind, d_source = detail
+        except (TypeError, ValueError):
+            # Dettaglio malformato: si salva comunque il risultato canonico.
+            d_home = d_away = d_kind = d_source = None
+    c.execute('''INSERT INTO match_results
+                 (match_id, league, home_team, away_team, score_home, score_away,
+                  result, settled_at, detail_home, detail_away, detail_kind,
+                  detail_source)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(match_id) DO UPDATE SET
+                   league=excluded.league, home_team=excluded.home_team,
+                   away_team=excluded.away_team, score_home=excluded.score_home,
+                   score_away=excluded.score_away, result=excluded.result,
+                   settled_at=excluded.settled_at,
+                   detail_home=COALESCE(excluded.detail_home, detail_home),
+                   detail_away=COALESCE(excluded.detail_away, detail_away),
+                   detail_kind=COALESCE(excluded.detail_kind, detail_kind),
+                   detail_source=COALESCE(excluded.detail_source, detail_source)''',
+              (match_id, league, home, away, sh, sa, res, settled_at,
+               d_home, d_away, d_kind, d_source))
     conn.commit(); conn.close()
+
+
+def save_result_detail(match_id, d_home, d_away, kind="games", source=""):
+    """Scrive SOLO il dettaglio su una riga GIA' presente (backfill).
+
+    `False` se la partita non e' nel referto: non si inventa una riga di
+    risultato per un dettaglio (un risultato senza esito sarebbe veleno per
+    tutti i consumatori). Mai un'eccezione.
+    """
+    try:
+        if not match_id:
+            return False
+        conn = _get_conn(); _create_results_table(conn); c = conn.cursor()
+        cur = c.execute("UPDATE match_results SET detail_home=?, detail_away=?, "
+                        "detail_kind=COALESCE(?, detail_kind), "
+                        "detail_source=COALESCE(?, detail_source) "
+                        "WHERE match_id=?",
+                        (d_home, d_away, kind, source, match_id))
+        touched = bool(cur.rowcount)
+        conn.commit(); conn.close()
+        return touched
+    except Exception:
+        return False
 
 def get_leagues_with_signals(days=3):
     conn = _get_conn(); c = conn.cursor()

@@ -329,6 +329,24 @@ export default defineRailway(() => {
       MLH_FOLDS: preserve(),
       MLH_MIN_TRAIN: preserve(),
       MLH_SEED: preserve(),
+      // Rating bayesiani (15/10/2026, `bayes_ratings.py`): inferenza gerarchica
+      // con shrinkage empirico-Bayes + walk-forward cronologico. Anche questo
+      // e' SOLO MISURA (zero ordini, zero crediti): le env esistono perche' un
+      // `config apply` non deve distruggere il campione di validazione ne' la
+      // taratura del prior, e perche' `BAYES_STATE` decide DOVE vive il fit
+      // (volume, non filesystem effimero del container).
+      BAYES_ITERATIONS: preserve(),
+      BAYES_LR: preserve(),
+      BAYES_MIN_MATCHES: preserve(),
+      BAYES_FOLDS: preserve(),
+      BAYES_MIN_FOLD: preserve(),
+      BAYES_SIGMA: preserve(),
+      BAYES_SIGMA_FLOOR: preserve(),
+      BAYES_SIGMA_CEIL: preserve(),
+      BAYES_EB_SEED: preserve(),
+      BAYES_DAYS: preserve(),
+      BAYES_MAX_MATCHES: preserve(),
+      BAYES_STATE: preserve(),
       // Oracolo top-down (25/09/2026): `PINNACLE_CONSENSUS=0` (03/10/2026)
       // usa la SOLA Pinnacle de-vigata con Shin — Betfair e Matchbook fuori,
       // per togliere lag e rumore dal confronto. `TOP_DOWN_BYPASS` resta 0: il
@@ -426,6 +444,17 @@ export default defineRailway(() => {
       TENNIS_QUANT_HOURS_AHEAD: preserve(),
       TENNIS_QUANT_MIN_MODEL_MATCHES: preserve(),
       TENNIS_QUANT_SHARP_METHOD: preserve(),
+      // Catena di Markov tennis (15/10/2026, dentro `tennis_quant`): la
+      // probabilita' punto-per-punto e la CALIBRAZIONE delle tenute di
+      // servizio dai game reali del referto (`match_results.detail_*`). Anche
+      // qui solo misura: gli interruttori esistono per tornare al fallback
+      // Poisson-da-hold se la calibrazione non regge.
+      TENNIS_MARKOV_ENABLED: preserve(),
+      TENNIS_MARKOV_BEST_OF: preserve(),
+      TENNIS_MARKOV_TIEBREAK: preserve(),
+      TENNIS_MARKOV_TIEBREAK_TO: preserve(),
+      TENNIS_MARKOV_SURFACE_DELTA: preserve(),
+      TENNIS_MARKOV_CALIBRATE: preserve(),
       // Corsia FOOTBALL USA (11/10/2026, `gridiron_lane.py`): discovery SX
       // sportId 8 (NFL/NCAA) + oracolo Pinnacle `regions=eu` a 2 esiti + gate
       // EV e fascia quota 1.30-3.00. Gli ORDINI sono nella corsia LIVE di

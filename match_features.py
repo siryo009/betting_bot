@@ -1,5 +1,19 @@
 """Feature engineering GRATUITO per il modello ML (modulo 1, `QUANT_MODULES.md`).
 
+Feature di STORIA + stato cronologico
+-------------------------------------
+Oltre alle feature "di forma" (riposo, densita' di calendario, forma recente,
+xG) il modulo costruisce lo **stato cronologico** di ogni partita: l'**Elo**
+delle due squadre PRIMA del kickoff e il **contesto di lega** (media gol della
+lega e quante partite di quella lega sono gia' state viste). Sono le feature
+che mancavano per due ragioni opposte: l'Elo riassume TUTTA la storia di una
+squadra in un numero (le medie a finestra vedono solo le ultime 5 partite) e il
+contesto di lega dice al modello in che tipo di campionato sta giocando —
+informazione che Poisson ricava a mano dalle tabelle di lega.
+Perche' un Elo in casa e non un servizio esterno: `live_intel` puo' leggere
+ClubElo, ma e' un provider ESTERNO (spento offline, non sempre raggiungibile) e
+il progetto non ha un Elo di calcio proprio.
+
 Perche' esiste
 --------------
 `ml_ensemble.py` addestra un booster (`xgboost` se presente, altrimenti la
@@ -98,8 +112,59 @@ FEATURE_NAMES: Tuple[str, ...] = (
     "xg_for_home", "xg_against_home",
     "xg_for_away", "xg_against_away",
     "xg_present",
+    "elo_home", "elo_away", "elo_diff", "elo_expect_home",
+    "league_goal_avg", "league_prev_matches",
     "is_weekend", "kickoff_hour", "month",
 )
+
+# --- Elo di calcio, definizione UNICA del progetto -------------------------
+# Perche' qui e non in un modulo condiviso: il progetto ha un ELO **tennis**
+# (`tennis_sandbox`, superficie-specifico, con seeding dal mercato) e nessun Elo
+# di CALCIO in casa; l'unica alternativa in progetto e' ClubElo via `live_intel`
+# (provider ESTERNO, non interrogabile offline e non sempre raggiungibile).
+# Questi tre numeri sono la formula classica (World Football Elo Ratings):
+#   atteso_casa = 1 / (1 + 10^(-(elo_casa + VANTAGGIO_CASA - elo_ospite)/400))
+#   nuovo       = elo + K x indice_margine x (punteggio - atteso)
+# con punteggio 1/0.5/0 e indice del margine di gol 1.0 / 1.5 / (11+gd)/8.
+# E' materia PRIMA: non tocca nessuna probabilita' di produzione.
+ELO_BASE = 1500.0               # rating di una squadra mai vista (prior neutro)
+ELO_K = 20.0                    # velocita' di aggiornamento
+ELO_HOME_ADVANTAGE = 65.0       # vantaggio campo in punti Elo (convenzione ~1/3 di gol)
+
+
+def goal_margin_index(goal_diff: int) -> float:
+    """Indice del margine (World Football Elo): 1.0, 1.5, poi (11+gd)/8."""
+    gd = abs(int(goal_diff))
+    if gd <= 1:
+        return 1.0
+    if gd == 2:
+        return 1.5
+    return (11.0 + gd) / 8.0
+
+
+def elo_expected(elo_home: float, elo_away: float, *,
+                 home_advantage: float = ELO_HOME_ADVANTAGE) -> float:
+    """Punteggio atteso della squadra di casa (0..1) secondo l'Elo."""
+    try:
+        delta = float(elo_home) + float(home_advantage) - float(elo_away)
+    except (TypeError, ValueError):
+        return 0.5
+    return 1.0 / (1.0 + 10.0 ** (-delta / 400.0))
+
+
+def elo_update(elo_home: float, elo_away: float, score_home: int, score_away: int,
+               *, k: float = ELO_K,
+               home_advantage: float = ELO_HOME_ADVANTAGE) -> Tuple[float, float]:
+    """Nuovi rating dopo il risultato (vittoria casa = 1, pari = 0.5)."""
+    if score_home > score_away:
+        score = 1.0
+    elif score_home == score_away:
+        score = 0.5
+    else:
+        score = 0.0
+    expected = elo_expected(elo_home, elo_away, home_advantage=home_advantage)
+    delta = float(k) * goal_margin_index(score_home - score_away) * (score - expected)
+    return float(elo_home) + delta, float(elo_away) - delta
 
 #: Feature il cui valore, calcolato sulla STORIA, conterrebbe informazione
 #: futura: l'xG di `live_intel` e' un aggregato di STAGIONE, quindi include le
@@ -328,6 +393,151 @@ def build_index(conn: sqlite3.Connection, *, allow_alias: bool = True,
 
 
 # ---------------------------------------------------------------------------
+# Stato CRONOLOGICO: Elo e contesto di lega PRIMA del kickoff
+# ---------------------------------------------------------------------------
+
+class ChronoState:
+    """Elo delle squadre + statistiche di lega nello stato PRE-partita.
+
+    Perche' uno STATO e non una funzione pura: l'Elo di una partita dipende da
+    tutte quelle precedenti, e l'unico modo di calcolarlo senza look-ahead e'
+    scorrere la storia UNA VOLTA in ordine cronologico leggendo il rating PRIMA
+    di aggiornarlo col risultato. Ricostruirlo a ogni riga sarebbe O(n^2) su
+    17k partite (e le medie di lega sono incrementali per costruzione).
+
+    `snapshot()` e' PURO (non aggiorna nulla): le due meta' — leggere prima,
+    aggiornare dopo — restano separate, cosi' una riga non puo' vedere il
+    proprio risultato nemmeno per sbaglio.
+    """
+
+    def __init__(self, *, home_advantage: float = ELO_HOME_ADVANTAGE,
+                 k: float = ELO_K) -> None:
+        self.elo: Dict[str, float] = {}
+        self.league_matches: Dict[str, int] = {}
+        self.league_goals: Dict[str, int] = {}
+        self.home_advantage = float(home_advantage)
+        self.k = float(k)
+        self.observed = 0
+
+    def rating(self, team: Any) -> float:
+        """Elo attuale (squadra mai vista -> `ELO_BASE`, il prior neutro)."""
+        return float(self.elo.get(_norm_key(team), ELO_BASE))
+
+    def known(self, team: Any) -> bool:
+        key = _norm_key(team)
+        return bool(key) and key in self.elo
+
+    def snapshot(self, home: Any, away: Any, league: str = "") -> Dict[str, Any]:
+        """Valori PRE-partita (non aggiorna nulla).
+
+        `elo_diff` e' il divario AGGIUSTATO col vantaggio campo (casa + 65 di
+        Elo), cioe' la quantita' da cui esce `elo_expect_home`: un divario
+        grezzo senza vantaggio campo sarebbe meno informativo.
+        `league_goal_avg`/`league_prev_matches` sono `None` senza precedenti di
+        quella lega: 0 sarebbe un dato inventato (regola del modulo).
+        """
+        rh, ra = self.rating(home), self.rating(away)
+        lk = _norm_key(league)
+        n = int(self.league_matches.get(lk, 0)) if lk else 0
+        out: Dict[str, Any] = {
+            "elo_home": rh,
+            "elo_away": ra,
+            "elo_diff": rh + self.home_advantage - ra,
+            "elo_expect_home": elo_expected(rh, ra,
+                                            home_advantage=self.home_advantage),
+            "league_goal_avg": (self.league_goals[lk] / n) if n else None,
+            "league_prev_matches": n if n else None,
+        }
+        return out
+
+    def observe(self, home: Any, away: Any, score_home: int, score_away: int,
+                league: str = "") -> None:
+        """Aggiorna lo stato col risultato (Elo + medie di lega).
+
+        Una riga con nomi illeggibili non aggiorna nulla: meglio uno stato piu'
+        povero che un rating attribuito alla squadra sbagliata.
+        """
+        hk, ak = _norm_key(home), _norm_key(away)
+        if not hk or not ak or hk == ak:
+            return
+        try:
+            sh, sa = int(score_home), int(score_away)
+        except (TypeError, ValueError):
+            return
+        if sh < 0 or sa < 0:
+            return
+        nh, na = elo_update(self.elo.get(hk, ELO_BASE), self.elo.get(ak, ELO_BASE),
+                            sh, sa, k=self.k, home_advantage=self.home_advantage)
+        self.elo[hk] = nh
+        self.elo[ak] = na
+        lk = _norm_key(league)
+        if lk:
+            self.league_matches[lk] = int(self.league_matches.get(lk, 0)) + 1
+            self.league_goals[lk] = int(self.league_goals.get(lk, 0)) + sh + sa
+        self.observed += 1
+
+
+def _chrono_rows(conn: sqlite3.Connection
+                 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Righe storiche in ordine CRONOLOGICO (sola lettura, fail-safe) + scarti.
+
+    Gli scarti sono CONTATI e restituiti: "stato costruito su 17k righe" e
+    "stato costruito su 200 righe perche' il resto era illeggibile" sono due
+    diagnosi diverse, e senza il conteggio sarebbero indistinguibili.
+    """
+    stats = {"rows": 0, "rows_used": 0, "bad_ts": 0,
+             "bad_score": 0, "bad_names": 0}
+    try:
+        raw = conn.execute(
+            "SELECT match_id, league, home_team, away_team, score_home, "
+            "score_away, settled_at FROM match_results").fetchall()
+    except sqlite3.Error as exc:
+        logger.warning("match_features: storia per lo stato non leggibile (%s)", exc)
+        return [], stats
+    out: List[Dict[str, Any]] = []
+    for r in raw:
+        stats["rows"] += 1
+        ts = _epoch(r["settled_at"], assume_utc=True)
+        if ts is None:
+            stats["bad_ts"] += 1
+            continue
+        try:
+            sh, sa = int(r["score_home"]), int(r["score_away"])
+        except (TypeError, ValueError):
+            stats["bad_score"] += 1
+            continue
+        home, away = str(r["home_team"] or ""), str(r["away_team"] or "")
+        if not _norm_key(home) or not _norm_key(away) or \
+                _norm_key(home) == _norm_key(away):
+            stats["bad_names"] += 1
+            continue
+        out.append({"match_id": r["match_id"], "league": str(r["league"] or ""),
+                    "home_team": home, "away_team": away,
+                    "score_home": sh, "score_away": sa, "ts": float(ts)})
+        stats["rows_used"] += 1
+    out.sort(key=lambda x: x["ts"])
+    return out, stats
+
+
+def build_state(conn: sqlite3.Connection, *,
+                until: Optional[float] = None) -> ChronoState:
+    """Stato caldo fino a `until` (esclusa): per il percorso LIVE di una partita.
+
+    Senza `until` lo stato assorbe tutta la storia (l'ultimo istante noto); con
+    `until` assorbe solo cio' che precede il kickoff, che e' l'unica cosa che
+    una previsione puo' sapere.
+    """
+    state = ChronoState()
+    rows, _stats = _chrono_rows(conn)
+    for row in rows:
+        if until is not None and float(row["ts"]) >= float(until):
+            break
+        state.observe(row["home_team"], row["away_team"],
+                      row["score_home"], row["score_away"], row["league"])
+    return state
+
+
+# ---------------------------------------------------------------------------
 # Le feature
 # ---------------------------------------------------------------------------
 
@@ -374,17 +584,26 @@ def features_for(home: Any, away: Any, kickoff: Any, *,
                  index: TeamIndex,
                  xg_fn: Optional[Callable[[str, str], Any]] = None,
                  league: str = "",
+                 state: Optional[ChronoState] = None,
                  assume_utc: bool = True) -> Dict[str, Any]:
     """Riga di feature completa per una partita (nessun look-ahead).
 
     `xg_fn(team, league)` e' iniettabile e **spento di default**: senza di esso
     le feature xG restano `None` e `xg_present` = 0 (in una diagnostica offline
     non deve partire nessuna rete).
+
+    `state` e' lo stato cronologico (Elo + contesto di lega): senza di esso
+    quelle feature restano `None` — NON si inventa un Elo di base per una
+    partita di cui non conosciamo la storia (il percorso LIVE che vuole l'Elo
+    lo costruisce con `build_state(conn, until=kickoff)`, che e' caldo ma
+    sempre precedente al kickoff).
     """
     ts = _epoch(kickoff, assume_utc=assume_utc)
     row: Dict[str, Any] = {n: None for n in FEATURE_NAMES}
     if ts is None:
         return row
+    if state is not None:
+        row.update(state.snapshot(home, away, league))
     for side, team in (("home", home), ("away", away)):
         block = _team_block(index, team, ts)
         for name, value in block.items():
@@ -488,49 +707,57 @@ def history_feature_rows(conn: Optional[sqlite3.Connection] = None, *,
         if own:
             conn = ro_conn()
         index, stats = build_index(conn)
+        chrono, chrono_stats = _chrono_rows(conn)
+        # Passata CRONOLOGICA UNICA: si legge lo stato PRIMA e si aggiorna DOPO,
+        # quindi nessuna riga vede se stessa ne' il futuro.
+        cap = int(limit) if limit else None
+        # Con un limite si EMETTONO le partite piu' recenti, ma lo stato (Elo,
+        # medie di lega) si costruisce su TUTTA la storia: un Elo "freddo" sulle
+        # righe iniziali sarebbe una feature piu' povera, non piu' corretta.
+        first = 0 if cap is None else max(0, len(chrono) - cap)
+        state = ChronoState()
         rows: List[Dict[str, Any]] = []
-        skipped = {"bad_ts": 0, "bad_score": 0, "bad_names": 0, "unknown_team": 0}
-        try:
-            raw = conn.execute(
-                "SELECT match_id, league, home_team, away_team, score_home, "
-                "score_away, settled_at FROM match_results").fetchall()
-        except sqlite3.Error as exc:
-            out["error"] = f"storia_illeggibile:{exc}"
+        skipped = {"unknown_team": 0, "cold_elo": 0}
+        for i, r in enumerate(chrono):
+            ts = float(r["ts"])
+            home, away = r["home_team"], r["away_team"]
+            league = str(r["league"] or "")
+            if i >= first:
+                feat = features_for(home, away, ts, index=index,
+                                    league=league, state=state)
+                if not feat.get("hist_matches_home") and \
+                        not feat.get("hist_matches_away"):
+                    # Nessuna delle due squadre ha storia: la riga non porta
+                    # informazione (tutte le feature di storia sono assenti).
+                    skipped["unknown_team"] += 1
+                else:
+                    if not (state.known(home) and state.known(away)):
+                        # Almeno una squadra e' alla PRIMA partita osservata: il
+                        # suo Elo e' il prior, non una misura (dichiarato).
+                        skipped["cold_elo"] += 1
+                    feat["match_id"] = r["match_id"]
+                    feat["league"] = league
+                    feat["ts"] = ts          # ordine CRONOLOGICO (walk-forward)
+                    feat["label"] = _label(r["score_home"], r["score_away"], target)
+                    feat["result"] = ("1" if r["score_home"] > r["score_away"]
+                                      else ("2" if r["score_home"] < r["score_away"]
+                                            else "X"))
+                    rows.append(feat)
+            state.observe(home, away, r["score_home"], r["score_away"], league)
+        if not chrono and stats.get("rows"):
+            out["error"] = "storia_senza_righe_usabili"
             return out
-        for r in raw:
-            ts = _epoch(r["settled_at"], assume_utc=True)
-            if ts is None:
-                skipped["bad_ts"] += 1
-                continue
-            try:
-                sh, sa = int(r["score_home"]), int(r["score_away"])
-            except (TypeError, ValueError):
-                skipped["bad_score"] += 1
-                continue
-            home, away = str(r["home_team"] or ""), str(r["away_team"] or "")
-            if not _norm_key(home) or not _norm_key(away):
-                skipped["bad_names"] += 1
-                continue
-            feat = features_for(home, away, ts, index=index,
-                                league=str(r["league"] or ""))
-            if not feat.get("hist_matches_home") and not feat.get("hist_matches_away"):
-                # Nessuna delle due squadre ha storia: la riga non porta
-                # informazione (tutte le feature di storia sono assenti).
-                skipped["unknown_team"] += 1
-                continue
-            feat["match_id"] = r["match_id"]
-            feat["league"] = str(r["league"] or "")
-            feat["ts"] = float(ts)          # ordine CRONOLOGICO (walk-forward)
-            feat["label"] = _label(sh, sa, target)
-            feat["result"] = "1" if sh > sa else ("2" if sh < sa else "X")
-            rows.append(feat)
-            if limit and len(rows) >= int(limit):
-                break
-        # Ordine CRONOLOGICO, non per id: e' la proprieta' su cui poggia
-        # qualunque walk-forward (le pieghe di `ml_harness`).
-        rows.sort(key=lambda x: float(x.get("ts") or 0.0))
         out["rows"] = rows
-        out["stats"] = {**stats, "feature_rows": len(rows), "skipped": skipped}
+        # UN solo posto per gli scarti (gli stessi contatori di prima + i nuovi):
+        # "quante righe ho perso e perche'" non deve richiedere due letture.
+        skipped_extra = {"bad_ts": chrono_stats["bad_ts"],
+                         "bad_score": chrono_stats["bad_score"],
+                         "bad_names": chrono_stats["bad_names"]}
+        out["stats"] = {**stats, **chrono_stats, "feature_rows": len(rows),
+                        "elo_observed": state.observed,
+                        "elo_teams": len(state.elo),
+                        "leagues": len(state.league_matches),
+                        "skipped": {**skipped, **skipped_extra}}
         return out
     except Exception as exc:                          # fail-safe totale
         out["error"] = f"errore:{type(exc).__name__}:{exc}"
@@ -723,15 +950,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:      # pragma: no cover
 
     payload: Dict[str, Any] = {}
     if args.match:
+        kickoff = args.kickoff or datetime.now(timezone.utc).isoformat()
         conn = ro_conn(args.db)
         try:
             index, stats = build_index(conn)
+            # Stato caldo ma SOLO con cio' che precede il kickoff: il percorso
+            # live ha anche l'Elo e il contesto di lega, senza look-ahead.
+            state = build_state(conn, until=_epoch(kickoff, assume_utc=True))
         finally:
             conn.close()
-        kickoff = args.kickoff or datetime.now(timezone.utc).isoformat()
         feat = features_for(args.match[0], args.match[1], kickoff, index=index,
                             xg_fn=live_xg_fn if args.xg else None,
-                            league=args.league)
+                            league=args.league, state=state)
         payload = {"mode": "match", "kickoff": kickoff, "features": feat,
                    "stats": stats}
         if not args.json:

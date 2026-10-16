@@ -111,6 +111,14 @@ SX_LIVE_MIN_AGE_MS = 120 * 60 * 1000
 # definitivo e NON va ricavato dai punteggi (vedi `_results_from_sx`).
 SX_MONEYLINE_TYPE = 52
 
+# Sport di SX che porta i GAME come dettaglio (16/10/2026): sul tennis
+# (`sportId` 6) `teamOneScore`/`teamTwoScore` di un mercato CONCLUSO sono i
+# game totali della partita (misurato su 45 mercati reali del ledger: 12-4,
+# 12-7, 13-13, 19-14 ... tutti entro 12-39 game, la forma di un match vero).
+# Sono un DETTAGLIO da registrare a parte, mai il verdetto: il verdetto resta
+# `outcome` (i game possono pareggiare con un vincitore, Giron-Baez 13-13).
+SX_TENNIS_SPORT_ID = 6
+
 # `market_hash` scritto DENTRO il `match_id` dalla corsia tennis
 # (`sx-tennis-0x<hash>`, 32 byte). Vedi `_prediction_market_hashes`.
 _HASH_IN_MID = re.compile(r"0x[0-9a-fA-F]{64}")
@@ -1130,6 +1138,156 @@ def _results_from_api_football(meta: Dict[str, dict]) -> int:
     return saved
 
 
+def _result_detail(market: dict, mtype: Any) -> Optional[tuple]:
+    """(casa, trasferta, kind, source) dai numeri GREZZI della risposta SX.
+
+    Solo sui mercati a DUE ESITI (type 52): li' i `teamOneScore`/`teamTwoScore`
+    NON sono il punteggio che serve al verdetto (che e' `outcome`) e vengono
+    altrimenti buttati via. Sul tennis (`sportId` 6) sono i **game totali**
+    della partita — verificato su 45 mercati reali del ledger (12-4, 12-7,
+    13-13, 19-14: tutti entro 12-39 game, la forma di un match vero) — quindi
+    `kind="games"`. Su un type 52 di un ALTRO sport i numeri ci sono ma la
+    semantica non e' verificata: si registrano come `kind="raw"` (conservati,
+    non interpretati). `None` se la risposta non porta ENTRAMBI gli interi o se
+    il mercato non e' a due esiti: mai un dettaglio inventato (0 e "assente"
+    sono cose diverse, e questo modulo non lo dimentica).
+    """
+    try:
+        if int(mtype or 0) != SX_MONEYLINE_TYPE:
+            return None
+    except (TypeError, ValueError):
+        return None
+    d_home, d_away = market.get("teamOneScore"), market.get("teamTwoScore")
+    if not isinstance(d_home, int) or not isinstance(d_away, int):
+        return None
+    if isinstance(d_home, bool) or isinstance(d_away, bool):
+        return None                       # `True` non e' un game
+    try:
+        sport = int(market.get("sportId"))
+    except (TypeError, ValueError):
+        sport = 0
+    kind = "games" if sport == SX_TENNIS_SPORT_ID else "raw"
+    return (d_home, d_away, kind, "sx")
+
+
+def _hash_from_match_id(mid: Any) -> Optional[str]:
+    """Market hash scritto DENTRO il match_id (`sx-tennis-0x<hash>`)."""
+    m = _HASH_IN_MID.search(str(mid or ""))
+    return m.group(0) if m else None
+
+
+def _tennis_game_candidates() -> Dict[str, List[str]]:
+    """match_id -> hash dei mercati candidati al backfill dei GAME.
+
+    Due fonti, entrambe GRATUITE: il `market_id` salvato sulle puntate (il
+    ledger del denaro) e l'hash incastonato nel `match_id` della corsia tennis
+    (`sx-tennis-0x...`, letto anche dal referto e da `matches`). Fail-safe:
+    una tabella assente o illeggibile non fa fallire il backfill.
+    """
+    from tracker import _get_conn
+    out: Dict[str, List[str]] = {}
+    conn = _get_conn()
+    try:
+        for sql, args in (("SELECT match_id, market_id FROM bets "
+                           "WHERE market_id IS NOT NULL AND market_id != ''", ()),
+                          ("SELECT match_id FROM match_results", ()),
+                          ("SELECT id FROM matches", ())):
+            try:
+                for row in conn.execute(sql, args):
+                    mid = row[0]
+                    mh = row[1] if len(row) > 1 else None
+                    if not mh:
+                        mh = _hash_from_match_id(mid)
+                    if not mid or not mh:
+                        continue
+                    bucket = out.setdefault(str(mid), [])
+                    if mh not in bucket:
+                        bucket.append(str(mh))
+            except Exception as e:                       # tabella assente/rotata
+                logger.debug("sx_signals: fonte backfill non leggibile (%s)", e)
+    finally:
+        conn.close()
+    return out
+
+
+def backfill_tennis_games(provider: Optional[SxBetProvider] = None, *,
+                          max_calls: int = 8) -> Dict[str, Any]:
+    """Riempie i GAME dei match di tennis GIA' nel referto (16/10/2026).
+
+    Perche' serve: il referto nuovo registra i game MAN MANO che le partite si
+    chiudono, ma le righe salvate PRIMA hanno solo il punteggio canonico
+    (1,0): la calibrazione di `tennis_markov` vedeva totali da 1 game e
+    rispondeva `semantics="unknown"` (plausible_share 0.417). Il backfill
+    rilegge `markets/find` (lettura PUBBLICA: zero crediti, zero ordini) sulle
+    partite gia' concluse e scrive il dettaglio sulle righe ESISTENTI.
+
+    Regole: si scrive SOLO il dettaglio di mercati di tennis con ENTRAMBI i
+    numeri; una partita non presente nel referto finisce in `no_row` (non si
+    inventa una riga di risultato); mai un'eccezione al chiamante.
+    """
+    out: Dict[str, Any] = {"checked": 0, "hashes": 0, "calls": 0,
+                           "tennis": 0, "saved": 0, "no_row": 0,
+                           "no_scores": 0, "error": None}
+    try:
+        from tracker import save_result_detail
+        cands = _tennis_game_candidates()
+        by_hash: Dict[str, List[str]] = {}
+        for mid, hashes in cands.items():
+            for h in hashes:
+                by_hash.setdefault(h, []).append(mid)
+        out["checked"] = len(cands)
+        out["hashes"] = len(by_hash)
+        if not by_hash:
+            return out
+        prov = provider or SxBetProvider()
+        hashes = list(by_hash)
+        for i in range(0, len(hashes), SX_FIND_BATCH):
+            if out["calls"] >= int(max_calls):
+                out["truncated"] = True
+                break
+            batch = hashes[i:i + SX_FIND_BATCH]
+            try:
+                data = prov._get("markets/find", params={
+                    "marketHashes": ",".join(batch)})
+            except Exception as e:
+                logger.warning("sx_signals: backfill find fallita: %s", e)
+                out["error"] = f"find:{type(e).__name__}"
+                continue
+            out["calls"] += 1
+            arr = data.get("data") if isinstance(data, dict) else None
+            if not isinstance(arr, list):
+                continue
+            for m in arr:
+                if not isinstance(m, dict):
+                    continue
+                mh = m.get("marketHash")
+                targets = by_hash.get(mh)
+                if not targets:
+                    continue
+                detail = _result_detail(m, m.get("type"))
+                if not detail:
+                    out["no_scores"] += 1
+                    continue
+                if detail[2] != "games":
+                    continue                 # non e' tennis: dettaglio non interpretato
+                out["tennis"] += 1
+                for mid in targets:
+                    if save_result_detail(mid, detail[0], detail[1], "games",
+                                          "sx-backfill"):
+                        out["saved"] += 1
+                        out["rows"] = out.get("rows", 0) + 1
+                    else:
+                        out["no_row"] += 1
+        if out["saved"]:
+            logger.info("sx_signals: backfill game tennis — %d righe aggiornate",
+                        out["saved"])
+        return out
+    except Exception as e:                               # fail-safe totale
+        logger.warning("sx_signals: backfill game tennis non riuscito: %s", e)
+        out["error"] = f"{type(e).__name__}"
+        return out
+
+
 def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
     """Punteggi via SX Bet (FONTE NATIVA, 12/09): l'esito e' quello
     dell'exchange dove il denaro si regola davvero.
@@ -1220,10 +1378,10 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
             if not any(e["mid"] == _t["mid"] for e in entries):
                 entries.append(_t)
 
-    def _save(mid, league_label, home, away, sh, sa):
+    def _save(mid, league_label, home, away, sh, sa, detail=None):
         nonlocal saved
         save_result(mid, league_label, home, away, sh, sa,
-                    datetime.now(timezone.utc).isoformat())
+                    datetime.now(timezone.utc).isoformat(), detail=detail)
         saved += 1
 
     # --- 1. mercati delle bet aperte E delle sole previsioni (find, a batch) ---
@@ -1301,12 +1459,18 @@ def _results_from_sx(provider: Optional[SxBetProvider] = None) -> int:
                 if (t.get("moneyline_ok") and mtype == SX_MONEYLINE_TYPE
                         and outcome in (1, 2) and home and away):
                     sh, sa = (1, 0) if outcome == 1 else (0, 1)
-                    _save(mid, label, home, away, sh, sa)
+                    # I GAME della fonte accanto al verdetto canonico: da soli
+                    # non decidono nulla (13-13 con un vincitore e' un caso
+                    # reale), ma sono l'unico ingresso che rende la catena di
+                    # Markov calibrabile dal referto (`tennis_markov`).
+                    _save(mid, label, home, away, sh, sa,
+                          detail=_result_detail(m, mtype))
                     continue
                 sh, sa = m.get("teamOneScore"), m.get("teamTwoScore")
                 if isinstance(sh, int) and isinstance(sa, int) \
                         and (home or t_home) and (away or t_away):
-                    _save(mid, label, home or t_home, away or t_away, sh, sa)
+                    _save(mid, label, home or t_home, away or t_away, sh, sa,
+                          detail=_result_detail(m, mtype))
 
     # --- 2. partite aperte con riga nel ledger (active, punteggi live) ---
     meta = _sx_open_matches()
@@ -1483,6 +1647,12 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "repair":
         res = repair_sx_leagues()
         print(f"🔧 repair leghe SX: {res}")
+    elif len(sys.argv) > 1 and sys.argv[1] == "backfill-games":
+        # Riempie i GAME dei match di tennis gia' nel referto (lettura
+        # pubblica: zero crediti, zero ordini). Uso:
+        #   venv/bin/python sx_signals.py backfill-games
+        res = backfill_tennis_games()
+        print(f"🎾 backfill game tennis: {res}")
     else:
         sig = scan()
         print(f"✅ {len(sig)} segnali value salvati")
