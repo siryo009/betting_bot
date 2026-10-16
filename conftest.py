@@ -245,6 +245,21 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     _gl.reset_cache()
     if "test_gridiron_lane" not in request.node.nodeid:
         monkeypatch.setenv("GRIDIRON_LANE", "0")
+    # INDICE DELL'IDENTITA' DI MERCATO DELLE CORSIE (16/10/2026,
+    # `auto_bet._lane_index`). Un candidato che arriva dal LEDGER non porta
+    # `market_id`/`selection_id` (la tabella `predictions` non ha quelle
+    # colonne) e la corsia che POSSIEDE il mercato e' l'autorita' sulla sua
+    # identita': l'indice interroga `_tennis_picks`, `_esports_picks` e
+    # `_gridiron_picks`. Nei test quelle chiamate sono rete reale (discovery SX
+    # pubblica; per gli eSports anche l'oracolo OddsPapi a quota) su OGNI
+    # `_live_fill`/`_chief_live_candidates` — cioe' su quasi tutta la suite — e
+    # il MEMO e' di modulo (sopravvivrebbe fra i test). Si sostituisce la
+    # funzione e si azzera il memo; il file dedicato (`test_gridiron_lane`) la
+    # esercita con le corsie finte.
+    import auto_bet as _ab_lane
+    _ab_lane.reset_lane_index_cache()
+    if "test_gridiron_lane" not in request.node.nodeid:
+        monkeypatch.setattr("auto_bet._lane_index", lambda **kw: {})
     # Staking del TORNEO (11/10/2026, `tournament.py`): il layer puo' solo
     # ALZARE lo stake di un pick gia' approvato (return-based), ma nei test che
     # misurano altro (cap, wallet, liquidita', T-60, recinto) un incremento

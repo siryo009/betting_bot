@@ -3920,6 +3920,138 @@ def _execution_mode(allow_sim: bool = True) -> str:
     return "sim"
 
 
+# Prefix del `match_id` che DICHIARANO la corsia proprietaria del mercato.
+# Il football USA non ha un prefisso (usa `sx-<eventId>`, come il calcio): per
+# lui la proprieta' si chiede alla corsia (`gridiron_lane.owns_event`).
+LANE_PREFIXES: tuple = (("sx-tennis-", "tennis"),
+                        ("sx-esports-", "esports"))
+
+
+# Memo dell'indice (secondi): il giro gira ogni 60s e `_live_fill` viene
+# chiamato PER CANDIDATO — senza memo l'indice (che interroga le corsie)
+# verrebbe ricostruito a ogni pick della stessa tornata. Le corsie hanno gia'
+# un TTL proprio sulle loro discovery; qui basta non ripetere il lavoro.
+_LANE_INDEX_MEMO: dict = {"ts": 0.0, "idx": {}}
+_LANE_INDEX_TTL_S = 30.0
+
+
+def reset_lane_index_cache() -> None:
+    """Azzera il memo dell'indice (test e diagnostica)."""
+    _LANE_INDEX_MEMO["ts"] = 0.0
+    _LANE_INDEX_MEMO["idx"] = {}
+
+
+def _lane_index(*, ttl_s: float | None = None) -> dict:
+    """`{(match_id, esito): pick}` dalle corsie che POSSIEDONO quei mercati.
+
+    PERCHE' ESISTE (16/10/2026). Un candidato che arriva al percorso ordini da
+    una corsia specifica (tennis / eSports / football USA) deve portare con se'
+    l'IDENTITA' del proprio mercato (`market_id`, `selection_id`, flag): senza,
+    il resolver calcistico (catalogo sport 1X2: tre mercati "X vs Not X") non
+    trova nulla e il candidato muore con "mercato non trovato/ambiguo" — un
+    messaggio che accusa il mercato quando il problema e' l'identita' mancante.
+
+    Caso reale (16/10/2026): `sx-L19431555` (Denver Broncos - Seattle Seahawks,
+    NFL) proposto dalla CATENA (che legge il ledger, dove `predictions` non ha
+    `market_id`) e non eseguibile in nessun percorso.
+
+    La fonte e' la corsia stessa: le sue `picks()` ri-valutano l'EV a ogni
+    ciclo, quindi l'indice dice anche cio' che la corsia NON propone piu'.
+    Fail-safe: errore di una corsia -> quella corsia non contribuisce (le
+    altre si'); l'indice vuoto non fa danno (nessuna identita' => nessun
+    ordine per i mercati di corsia, che e' la direzione giusta).
+    """
+    ttl = _LANE_INDEX_TTL_S if ttl_s is None else float(ttl_s)
+    now = datetime.now(timezone.utc).timestamp()
+    if _LANE_INDEX_MEMO.get("idx") and now - float(
+            _LANE_INDEX_MEMO.get("ts") or 0.0) < ttl:
+        return _LANE_INDEX_MEMO["idx"]
+    idx: dict = {}
+    for fn in (_tennis_picks, _esports_picks, _gridiron_picks):
+        try:
+            for p in fn() or []:
+                mid = str(p.get("match_id") or "")
+                if mid:
+                    idx[(mid, str(p.get("esito_key") or ""))] = p
+        except Exception as e:                                 # noqa: BLE001
+            logger.warning("auto_bet: corsia non leggibile nell'indice "
+                           "identita' mercato (%s)", e)
+            continue
+    _LANE_INDEX_MEMO["ts"] = now
+    _LANE_INDEX_MEMO["idx"] = idx
+    return idx
+
+
+def _lane_identity(pick: dict, index: dict | None = None) -> dict | None:
+    """Identita' di mercato presa dalla corsia proprietaria (None se assente).
+
+    Nessuna regola del mercato viene copiata: si prendono i campi che la corsia
+    ha GIA' risolto e verificato (`market_id`/`selection_id` di SX, `mercato`
+    canonico, `team`, `line`, flag di corsia). La QUOTA non viene ripresa: il
+    prezzo resta quello del candidato (il segnale), e il floor EV di
+    `_live_fill` continua a valere.
+    """
+    idx = _lane_index() if index is None else index
+    mid = str(pick.get("match_id") or "")
+    esito = str(pick.get("esito_key") or pick.get("esito") or "")
+    src = idx.get((mid, esito))
+    if not src or not str(src.get("market_id") or "").strip():
+        return None
+    out: dict = {"market_id": src.get("market_id"),
+                 "selection_id": src.get("selection_id")}
+    for k in ("mercato", "team", "esito_raw", "line"):
+        if src.get(k) is not None:
+            out[k] = src.get(k)
+    if src.get(GRIDIRON_FLAG):
+        out[GRIDIRON_FLAG] = True
+    return out
+
+
+def _lane_owned(match_id) -> bool:
+    """True se il mercato appartiene a una corsia specifica (non al calcio).
+
+    Serve solo a decidere il MOTIVO dello scarto e a non chiamare un resolver
+    calcistico su un mercato che non e' calcio. Fail-safe: un errore risponde
+    False (il percorso continua come sempre).
+    """
+    mid = str(match_id or "")
+    if not mid:
+        return False
+    if any(mid.startswith(pref) for pref, _lane in LANE_PREFIXES):
+        return True
+    try:
+        import gridiron_lane
+        return bool(gridiron_lane.owns_event(mid))
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def _lane_needs_identity(pick: dict) -> bool:
+    """True se il mercato e' di una corsia che il resolver GENERICO non sa
+    risolvere, quindi senza identita' non si ordina affatto.
+
+    La distinzione NON e' un dettaglio: due corsie su tre hanno un percorso
+    storico funzionante e toglierlo sarebbe una perdita di volume.
+
+    | corsia | mercato nel ledger | risolvibile per nome? |
+    |---|---|---|
+    | tennis | `TENNIS` | NO: SX ha **un mercato per match** (lati sulle
+      chiavi 1/2) e `resolve_moneyline_market` cerca un mercato per SQUADRA |
+    | football USA | `1X2`/`AH`/`OU` con match `sx-<eventId>` | NO: il catalogo
+      1X2 e' il CALCIO (tre mercati "X vs Not X") e il moneyline football vive
+      sullo sport 8 |
+    | eSports | `ML` | SI': `resolve_moneyline_market(prov, home, away, team)`
+      cerca proprio lo sport 9 / type 52 per NOME (percorso storico, testato da
+      `test_esports_lane.TestCablaggioAutoBet`) |
+    """
+    mercato = str(pick.get("mercato") or "").upper()
+    if pick.get(GRIDIRON_FLAG) or mercato == "TENNIS":
+        return True
+    if mercato == "ML":
+        return False
+    return _lane_owned(pick.get("match_id"))
+
+
 def _live_available_size(prov, market_id: str, selection_id: int,
                          min_price: float) -> float | None:
     """Profondita' BACK disponibile a prezzo >= `min_price` (USDC/stake).
@@ -4077,6 +4209,32 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
     # mercato a linea NON si indovina — nessun ordine.
     # Corsia eSports (30/09/2026): mercato binario 2 VIE (type 52) sullo sport
     # 9. Si compra il lato `team`, risolto per NOME e non per "1"/"2": su SX
+    # IDENTITA' DI MERCATO DALLE CORSIE SPECIFICHE (16/10/2026).
+    # Un candidato che arriva dal LEDGER (la catena chief, o `_today_value_picks`
+    # su una riga gridiron) porta `mercato`/`esito` ma NON `market_id`: la tabella
+    # `predictions` non ha quella colonna. Senza questo passaggio finiva nel
+    # resolver CALCISTICO (`resolve_match_market`, catalogo sport 1X2) e moriva
+    # con "mercato non trovato/ambiguo" — un messaggio che accusa il mercato
+    # mentre il problema e' l'identita' mancante. Caso reale: `sx-L19431555`
+    # (Denver Broncos - Seattle Seahawks, NFL).
+    # Regola: la corsia che POSSIEDE il mercato e' l'autorita' sulla sua
+    # identita' (e ri-valuta l'EV a ogni ciclo). Se non lo propone piu', non si
+    # ordina col motivo DICHIARATO: fail-closed, mai un resolver sbagliato.
+    if not str(pick.get("market_id") or "").strip():
+        ident = _lane_identity(pick)
+        if ident:
+            logger.info("auto_bet: %s (%s) identita' di mercato ripresa dalla "
+                        "corsia (market %s, selection %s)",
+                        pick.get("match_id"), pick.get("esito_key"),
+                        str(ident.get("market_id"))[:14],
+                        ident.get("selection_id"))
+            pick = {**pick, **ident}
+        elif _lane_needs_identity(pick):
+            logger.info("auto_bet: %s (%s) mercato di corsia NON risolvibile "
+                        "per nome e nessuna identita' di mercato: nessun "
+                        "ordine (fail-closed)",
+                        pick.get("match_id"), pick.get("esito_key"))
+            return None
     # l'esito 1|2 e' una convenzione del 1X2 e non esiste per un moneyline.
     is_ml = str(pick.get("mercato") or "").upper() == "ML"
     if is_ml and not str(pick.get("team") or "").strip():
@@ -5245,7 +5403,7 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
                 logger.info("auto_bet: trade chief %s (%s) timing non "
                             "ottimale, scartato", trade.match_id, trade.esito)
                 continue
-            out.append({
+            candidate = {
                 "match_id": trade.match_id,
                 "mercato": trade.market or "1X2",
                 "esito_key": trade.esito,
@@ -5267,7 +5425,31 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
                           "raw_stake": trade.raw_stake,
                           "dynamic_ev_min": trade.dynamic_ev_min,
                           "shield_action": trade.shield_action},
-            })
+            }
+            # CORSIE SPECIFICHE (16/10/2026): la catena legge il LEDGER, che non
+            # porta l'identita' di mercato di tennis / eSports / football USA
+            # (`predictions` non ha `market_id`). Si prende dalla corsia che
+            # possiede il mercato; se la corsia NON lo propone piu' (l'EV e'
+            # svanito: e' la sua valutazione viva, non uno snapshot) il
+            # candidato non entra in coda col motivo DICHIARATO — prima moriva
+            # nel resolver calcistico con "mercato non trovato/ambiguo".
+            ident = _lane_identity({"match_id": trade.match_id,
+                                    "esito_key": trade.esito})
+            if ident:
+                candidate.update(ident)
+                logger.info("auto_bet: trade chief %s (%s) identita' di mercato "
+                            "ripresa dalla corsia (market %s, selection %s)",
+                            trade.match_id, trade.esito,
+                            str(ident.get("market_id"))[:14],
+                            ident.get("selection_id"))
+            elif _lane_needs_identity({"match_id": trade.match_id,
+                                       "mercato": candidate.get("mercato")}):
+                logger.info("auto_bet: trade chief %s (%s) mercato di corsia non "
+                            "risolvibile per nome e nessuna identita' di "
+                            "mercato: fuori dalla coda (fail-closed)",
+                            trade.match_id, trade.esito)
+                continue
+            out.append(candidate)
         if out:
             logger.info("auto_bet: %d trade chief approvati entrano nella "
                         "coda di esecuzione (Kelly k=%.2f, stake %s)",

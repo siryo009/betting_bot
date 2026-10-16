@@ -161,6 +161,23 @@ def _corsia_accesa(monkeypatch):
     gl.reset_cache()
 
 
+@pytest.fixture(autouse=True)
+def _indice_identita_offline(monkeypatch):
+    """L'indice dell'identita' di mercato (`auto_bet._lane_index`) interroga le
+    TRE corsie: qui sono finte tutte e tre, cosi' nessun test di questo file fa
+    discovery pubblica SX (o oracolo OddsPapi) per sbaglio. I test che
+    verificano l'indice riempiono la corsia che serve; il MEMO e' di modulo
+    (sopravvivere fra i test farebbe rispondere con la corsia di un altro).
+    """
+    import auto_bet as ab
+    ab.reset_lane_index_cache()
+    monkeypatch.setattr(ab, "_tennis_picks", lambda: [])
+    monkeypatch.setattr(ab, "_esports_picks", lambda: [])
+    monkeypatch.setattr(ab, "_gridiron_picks", lambda: [])
+    yield
+    ab.reset_lane_index_cache()
+
+
 @pytest.fixture
 def temp_db(monkeypatch, tmp_path):
     import tracker
@@ -1086,11 +1103,270 @@ class TestLiveFillGridiron:
         assert res["market_id"] == "0xAH" and res["selection_id"] == 1
 
     def test_pick_gridiron_senza_identita_fail_closed(self, monkeypatch):
-        """Senza `market_id`/`selection_id` NON si indovina il mercato."""
+        """Senza `market_id`/`selection_id` NON si indovina il mercato.
+
+        L'evento appartiene alla corsia (`owns_event`), ma la corsia non lo
+        propone: nessuna identita' -> nessun ordine (fail-closed) e nessuna
+        chiamata a un resolver. `discover`/le corsie sono iniettati: la prova
+        deve restare OFFLINE.
+        """
         import auto_bet as ab
+        monkeypatch.setattr(gl, "discover", lambda provider=None: [
+            {"event_id": "ev-0xAH"}])
         prov = self._Prov(best=None)
         self._engine(monkeypatch, prov)
         res = ab._live_fill(self._pick(market_id="", selection_id=None),
                             stake=1.0, floor=2.10)
         assert res is None
         assert prov.place_calls == []
+
+
+class TestIdentitaDallaCorsia:
+    """Un candidato che arriva dal LEDGER non porta `market_id`: l'autorita'
+    sulla sua identita' e' la corsia che POSSIEDE quel mercato (16/10/2026).
+
+    Caso reale: `sx-L19431555` (Denver Broncos - Seattle Seahawks, NFL). Il
+    candidato nasce dal ledger (la catena chief, o `_today_value_picks` su una
+    riga gridiron) dove `predictions` NON ha `market_id`/`selection_id`: senza
+    l'identita' finiva nel resolver CALCISTICO (`resolve_match_market`,
+    catalogo sport 1X2 = tre mercati "X vs Not X") e moriva con "mercato non
+    trovato/ambiguo" — un messaggio che accusa il mercato mentre il problema e'
+    l'identita' mancante. Ora la corsia risponde per il suo mercato; se non lo
+    propone piu' (la sua `picks()` ri-valuta l'EV a ogni ciclo) non si ordina,
+    col motivo DICHIARATO.
+    """
+
+    LANE = {"match_id": "sx-L19431555", "esito_key": "2", "mercato": "1X2",
+            "team": "2", "esito_raw": "2", "market_id": "0xDEN",
+            "selection_id": 2, "quota": 1.40, "price": 1.40,
+            gl.PICK_FLAG: True}
+
+    # ------------------------------------------------------------------ indice
+
+    def test_indice_raccoglie_le_tre_corsie(self, monkeypatch):
+        import auto_bet as ab
+        monkeypatch.setattr(ab, "_tennis_picks", lambda: [
+            {"match_id": "sx-tennis-1", "esito_key": "1",
+             "market_id": "0xT", "selection_id": 1}])
+        monkeypatch.setattr(ab, "_esports_picks", lambda: [
+            {"match_id": "sx-esports-1", "esito_key": "2",
+             "market_id": "0xE", "selection_id": 1}])
+        monkeypatch.setattr(ab, "_gridiron_picks", lambda: [dict(self.LANE)])
+        idx = ab._lane_index()
+        assert set(idx) == {("sx-tennis-1", "1"), ("sx-esports-1", "2"),
+                            ("sx-L19431555", "2")}
+        assert idx[("sx-L19431555", "2")]["selection_id"] == 2
+
+    def test_indice_salta_i_pick_senza_match_id(self, monkeypatch):
+        """Un pick senza `match_id` non puo' essere indicizzato: la chiave
+        dell'indice E' il match. Non si inventa una voce."""
+        import auto_bet as ab
+        monkeypatch.setattr(ab, "_gridiron_picks", lambda: [
+            {"match_id": "", "esito_key": "1", "market_id": "0xX"},
+            {"esito_key": "2", "market_id": "0xY"}])
+        assert ab._lane_index() == {}
+
+    def test_indice_memoizzato_fino_al_reset(self, monkeypatch):
+        """Il giro gira ogni 60s e `_live_fill` e' chiamato PER CANDIDATO:
+        senza memo l'indice (che interroga le corsie) verrebbe ricostruito a
+        ogni pick della stessa tornata."""
+        import auto_bet as ab
+        chiamate = {"n": 0}
+
+        def _lane():
+            chiamate["n"] += 1
+            return [dict(self.LANE)]
+
+        monkeypatch.setattr(ab, "_gridiron_picks", _lane)
+        ab._lane_index()
+        ab._lane_index()
+        assert chiamate["n"] == 1            # memo, non due costruzioni
+        ab.reset_lane_index_cache()
+        ab._lane_index()
+        assert chiamate["n"] == 2            # il reset la ricostruisce
+
+    def test_indice_fail_safe_su_corsia_rotta(self, monkeypatch):
+        """Una corsia che esplode non deve azzerare l'indice delle altre: la
+        telemetria rotta non e' un motivo per non ordinare."""
+        import auto_bet as ab
+
+        def _boom():
+            raise RuntimeError("corsia giu'")
+
+        monkeypatch.setattr(ab, "_tennis_picks", _boom)
+        monkeypatch.setattr(ab, "_gridiron_picks", lambda: [dict(self.LANE)])
+        idx = ab._lane_index()
+        assert list(idx) == [("sx-L19431555", "2")]
+
+    # --------------------------------------------------------------- identita'
+
+    def test_identita_presa_dalla_corsia(self, monkeypatch):
+        """L'identita' arriva dalla corsia (mercato, lato, mercato canonico,
+        flag). La QUOTA no: il prezzo resta quello del candidato/segnale, cosi'
+        il floor EV di `_live_fill` continua a valere."""
+        import auto_bet as ab
+        monkeypatch.setattr(ab, "_gridiron_picks", lambda: [dict(self.LANE)])
+        ident = ab._lane_identity({"match_id": "sx-L19431555", "esito_key": "2"})
+        assert ident["market_id"] == "0xDEN"
+        assert ident["selection_id"] == 2
+        assert ident[ab.GRIDIRON_FLAG] is True
+        assert ident["mercato"] == "1X2"
+        assert "quota" not in ident and "price" not in ident
+
+    def test_identita_none_se_la_corsia_non_propone(self, monkeypatch):
+        import auto_bet as ab
+        ident = ab._lane_identity({"match_id": "sx-L19431555",
+                                   "esito_key": "2"})
+        assert ident is None
+
+    def test_identita_ignora_un_market_id_vuoto(self, monkeypatch):
+        """Una voce della corsia senza `market_id` non e' un'identita': vale
+        come assenza (fail-closed a valle, non un mercato inventato)."""
+        import auto_bet as ab
+        monkeypatch.setattr(ab, "_gridiron_picks", lambda: [
+            {**self.LANE, "market_id": "  "}])
+        assert ab._lane_identity({"match_id": "sx-L19431555",
+                                  "esito_key": "2"}) is None
+
+    # -------------------------------------------------------------- proprieta'
+
+    def test_lane_owned_riconosce_prefissi_e_catalogo(self, monkeypatch):
+        import auto_bet as ab
+        assert ab._lane_owned("sx-tennis-123") is True
+        assert ab._lane_owned("sx-esports-456") is True
+        assert ab._lane_owned("") is False
+        # Football USA: nessun prefisso (usa `sx-<eventId>`, come il calcio),
+        # quindi la risposta viene dal CATALOGO della corsia.
+        monkeypatch.setattr(gl, "discover", lambda provider=None: [
+            {"event_id": "ev-0xAH"}])
+        assert ab._lane_owned("sx-ev-0xAH") is True
+        assert ab._lane_owned("ev-0xAH") is True
+        assert ab._lane_owned("sx-ALTRO") is False
+
+    def test_lane_owned_fail_safe_su_catalogo_rotto(self, monkeypatch):
+        """`discover` che esplode -> False: il percorso continua come sempre
+        (un resolver calcistico in piu' non e' un ordine sbagliato)."""
+        import auto_bet as ab
+
+        def _boom(provider=None):
+            raise RuntimeError("discovery giu'")
+
+        monkeypatch.setattr(gl, "discover", _boom)
+        assert ab._lane_owned("sx-ev-0xAH") is False
+
+    # ------------------------------------------------------------- percorso
+
+    class _Prov:
+        """Provider SX finto: book a 2.00 e ordine sempre riempito."""
+
+        name = "sxbet"
+
+        def __init__(self, best=2.00):
+            self.best = best
+            self.calls = []
+
+        def best_back_price(self, market_id, selection_id):
+            return self.best
+
+        def place_limit_order(self, market_id, selection_id, side, price,
+                              size, persistence="LAPSE"):
+            self.calls.append((market_id, selection_id, side, price, size))
+            import execution_engine as ee
+            return ee.OrderResult(True, "0x1", "FULLY_FILLED", price, price,
+                                  size, 5.0)
+
+    def _ledger_pick(self, **kw):
+        """Candidato come esce dal LEDGER: nessuna identita' di mercato."""
+        base = {"match_id": "sx-L19431555", "esito_key": "2",
+                "mercato": "1X2", "home": HOME, "away": AWAY,
+                "quota": 1.90, "price": 1.90, "status": "value",
+                "commence": (datetime.now(timezone.utc)
+                             + timedelta(hours=3)).isoformat()}
+        base.update(kw)
+        return base
+
+    def test_live_fill_riprende_l_identita_dalla_corsia(self, monkeypatch):
+        """Il caso Denver end-to-end: senza `market_id` l'ordine parte lo
+        stesso, sul mercato DELLA CORSIA e alla QUOTA DEL CANDIDATO (non a
+        quella della corsia)."""
+        import auto_bet as ab
+        import execution_engine as ee
+        monkeypatch.setattr(ab, "_gridiron_picks", lambda: [dict(self.LANE)])
+        prov = self._Prov(best=2.00)
+        monkeypatch.setattr(ee, "ExecutionEngine",
+                            lambda *a, **k: type("_Eng", (), {"provider": prov})())
+        res = ab._live_fill(self._ledger_pick(), stake=3.0, floor=1.90)
+        assert res is not None and res["ok"] is True
+        assert prov.calls == [("0xDEN", 2, "BACK", 1.90, 3.0)]
+        assert res["market_id"] == "0xDEN" and res["selection_id"] == 2
+
+    def test_live_fill_corsia_che_non_propone_fail_closed(self, monkeypatch):
+        """L'evento e' della corsia ma la corsia non lo propone piu' (l'EV e'
+        svanito): NESSUN ordine e NESSUNA chiamata a un resolver sbagliato."""
+        import auto_bet as ab
+        import execution_engine as ee
+        monkeypatch.setattr(gl, "discover", lambda provider=None: [
+            {"event_id": "L19431555"}])
+        prov = self._Prov()
+        monkeypatch.setattr(ee, "ExecutionEngine",
+                            lambda *a, **k: type("_Eng", (), {"provider": prov})())
+        res = ab._live_fill(self._ledger_pick(), stake=3.0, floor=1.90)
+        assert res is None
+        assert prov.calls == []
+
+    def test_live_fill_non_tocca_i_pick_del_calcio(self, monkeypatch):
+        """Regressione: un pick 1X2 di CALCIO (evento non della corsia) resta
+        sul percorso storico — la nuova ramo non deve cambiare nulla per lui."""
+        import auto_bet as ab
+        import execution_engine as ee
+        monkeypatch.setattr(gl, "discover", lambda provider=None: [])
+        prov = self._Prov()
+        chiamate = []
+
+        def _resolve(prov_, home, away, esito, commence=None):
+            chiamate.append((home, away, esito))
+            return {"market_id": "0xCALCIO", "selection_id": 1}
+
+        monkeypatch.setattr(ee, "resolve_match_market", _resolve)
+        monkeypatch.setattr(ee, "ExecutionEngine",
+                            lambda *a, **k: type("_Eng", (), {"provider": prov})())
+        res = ab._live_fill(self._ledger_pick(match_id="abc123def"), stake=3.0,
+                            floor=1.85)
+        assert res is not None and res["ok"] is True
+        assert chiamate == [(HOME, AWAY, "2")]
+        assert prov.calls == [("0xCALCIO", 1, "BACK", 1.85, 3.0)]
+
+    def test_chief_usa_la_stessa_identita(self):
+        """TRIPWIRE: la catena chief legge il LEDGER, quindi deve usare lo
+        STESSO meccanismo della corsia (una sola definizione di come si
+        recupera l'identita' di mercato)."""
+        from pathlib import Path as _P
+        import auto_bet as ab
+        body = _P(ab.__file__).read_text(encoding="utf-8").split(
+            "def _chief_live_candidates", 1)[1].split("\ndef ", 1)[0]
+        assert "_lane_identity(" in body
+        assert "_lane_needs_identity(" in body
+
+    # ------------------------------------------------ chi ha bisogno d'identita'
+
+    def test_needs_identity_distingue_le_corsie(self, monkeypatch):
+        """Tennis e football USA NON hanno un resolver per nome; eSports si'
+        (`resolve_moneyline_market`, sport 9 / type 52, che cerca per NOME).
+        Il percorso storico degli eSports resta: toglierlo sarebbe volume perso
+        per un'identita' che il resolver sa trovare da solo."""
+        import auto_bet as ab
+        monkeypatch.setattr(gl, "discover", lambda provider=None: [
+            {"event_id": "L19431555"}])
+        assert ab._lane_needs_identity(
+            {"match_id": "sx-tennis-1", "mercato": "TENNIS"}) is True
+        assert ab._lane_needs_identity(
+            {"match_id": "sx-L19431555", "mercato": "1X2"}) is True
+        assert ab._lane_needs_identity(
+            {"match_id": "sx-esports-1", "mercato": "ML"}) is False
+        # ...ma il FLAG della corsia football vince sul nome del mercato: un
+        # pick gridiron non deve mai finire nel resolver eSports.
+        assert ab._lane_needs_identity(
+            {"match_id": "sx-L1", "mercato": "ML", gl.PICK_FLAG: True}) is True
+        # pick di CALCIO: nessuna corsia, percorso storico intatto
+        assert ab._lane_needs_identity(
+            {"match_id": "abc123", "mercato": "1X2"}) is False

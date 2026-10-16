@@ -688,6 +688,35 @@ def discover(provider: Any = None) -> List[dict]:
     return out
 
 
+def owns_event(match_id: Any) -> bool:
+    """True se `match_id` e' un evento della corsia football USA.
+
+    PERCHE' ESISTE (16/10/2026). Il percorso ordini deve sapere se un candidato
+    proviene da QUESTA corsia o dal CALCIO: `sx-L19431555` (Denver-Seattle) non
+    ha un prefisso che lo dica (la corsia usa `sx-<eventId>`, come il calcio) e
+    un resolver calcistico
+    (`execution_engine.resolve_match_market`, catalogo sport 1X2) non trova
+    nulla -> il candidato moriva con "mercato non trovato/ambiguo" invece che
+    col motivo vero (la corsia non lo propone piu').
+
+    La risposta NON viene da una tabella di etichette di lega (fragile: SX
+    scrive 'NFL'/'NCAAF'/'CFL' e cambierebbe in silenzio), ma dal CATALOGO
+    della corsia stessa (`discover`, memoizzato 300s: nel giro ordini e' gia'
+    caldo perche' `picks()` lo chiama). Fail-safe: errore o lista vuota ->
+    False — il chiamante NON deve dedurre nulla da un dato che non ha letto.
+    """
+    try:
+        eid = str(match_id or "").strip()
+        if not eid:
+            return False
+        if eid.startswith("sx-"):
+            eid = eid[3:]
+        return any(str(ev.get("event_id") or "") == eid for ev in discover())
+    except Exception as exc:                                   # pragma: no cover
+        logger.warning("gridiron_lane: owns_event non valutabile (%s)", exc)
+        return False
+
+
 def _side_labels(type_id: str, line: Optional[float],
                  outcome_one: Any) -> Optional[Tuple[str, str]]:
     """Etichette di ledger dei due lati (side 1 = outcomeOne).

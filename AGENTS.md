@@ -12423,3 +12423,93 @@ tennis 6, oracolo a LINEA 6, settlement 4, rotation+h2h ~7. Il torneo chiude il
    (120/15 vs 720/2) — corretto in questa sessione.
 4. Il registro **RESTING non e' mai stato esercitato** (`total 0`, file assente):
    tutti gli ordini si riempiono in IOC, il percorso GTC resta armato ma non usato.
+
+### Fix del meccanismo: l'identita' di mercato delle CORSIE + ordine NFL forzato (16/10/2026)
+
+**Direttiva del proprietario**: *"Fix del meccanismo + forza l'ordine"* — il pick
+NFL `sx-L19431555` (Denver Broncos – Seattle Seahawks) era in finestra, con edge
+misurato positivo, e **non partiva**.
+
+**1) DIAGNOSI (misurata prima di toccare il percorso ordini).** Il pick esiste nel
+ledger (`mercato=1X2`, league NFL, `predictions` **non ha** `market_id`), quindi
+`_live_fill` cadeva sul resolver **CALCISTICO** (`resolve_match_market`, catalogo
+sport 1X2 = tre mercati "X vs Not X") e moriva con
+`mercato non trovato/ambiguo su sxbet` — un messaggio che **accusa il mercato**
+mentre il problema e' l'**identita' mancante**. La corsia football USA usa
+`match_id = sx-<eventId>` (nessun prefisso che la distingua dal calcio) e la
+catena chief legge il **ledger**, che non porta l'identita' di mercato: erano due
+percorsi (corsia chief e `_live_fill` chiamato su un candidato del ledger) ciechi
+allo stesso modo. Edge misurato al momento della verifica: p(Denver) 0.4353 /
+p(Seattle) 0.5647 (Pinnacle), libro SX 2.2857 / 1.766 -> **Seattle** era il lato
+giocabile.
+
+**2) MECCANISMO NUOVO (`auto_bet.py` + `gridiron_lane.owns_event`).**
+- **`_lane_index()`** = `{(match_id, esito): pick}` delle tre corsie che POSSIEDONO
+  mercati non calcistici (tennis, eSports, football USA), con **memo 30s**
+  (`_LANE_INDEX_TTL_S`, `reset_lane_index_cache()`): il giro gira ogni 60s e
+  `_live_fill` e' chiamato PER CANDIDATO — senza memo l'indice verrebbe
+  ricostruito a ogni pick della stessa tornata. Fail-safe: una corsia che esplode
+  non azzera l'indice delle altre.
+- **`_lane_identity(pick)`** = identita' presa dalla corsia (`market_id`,
+  `selection_id`, `mercato`, `team`, `line`, flag). **La QUOTA non viene ripresa**:
+  il prezzo resta quello del candidato/segnale e il floor EV di `_live_fill`
+  continua a valere (una corsia non puo' spostare il prezzo di un ordine).
+- **`_lane_needs_identity(pick)`** = distinzione **dichiarata** fra le corsie,
+  perche' due su tre hanno un percorso storico funzionante e toglierlo sarebbe
+  volume perso: **tennis** (`TENNIS`: un mercato per match, i lati sono le chiavi
+  1/2 — nessun resolver per nome) e **football USA** (catalogo 1X2 = calcio,
+  moneyline sullo sport 8) **NON sono risolvibili per nome** -> senza identita'
+  NESSUN ordine (fail-closed); **eSports** (`ML`) **SI'**
+  (`resolve_moneyline_market`, sport 9 / type 52, cerca per NOME) -> percorso
+  storico INTATTO. Il flag `gridiron_lane` vince sul nome del mercato.
+- **`_lane_owned(match_id)`** = prefissi `sx-tennis-` / `sx-esports-`, oppure il
+  **catalogo** della corsia per il football USA (`gridiron_lane.owns_event`, che
+  confronta l'id con `sportXeventId` — mai una tabella di etichette di lega, che
+  SX potrebbe riscrivere in silenzio). Fail-safe: errore -> False.
+- **Due punti di applicazione, una sola definizione**: in `_live_fill` (ramo
+  "nessuna identita': la riprendo dalla corsia / fail-closed") e in
+  `_chief_live_candidates` (la catena chief usa lo STESSO meccanismo, altrimenti
+  divergerebbe — tripwire di sorgente).
+
+**3) ORDINE FORZATO (autorizzato dal proprietario).** Bet **#66** —
+`sx-L19431555` (Denver Broncos – Seattle Seahawks, NFL), esito **2** @ **1.7582**,
+stake **1.5 USDC**, `mode=live`, **FULLY_FILLED**,
+`market_id 0x92288450e95f…32ffb384`, `bet_id 0x545170279a8d…a594276`, kickoff
+**2026-10-16T00:15Z**. Il ledger e' stato scritto a mano (la chiamata diretta
+salta la persistenza del giro): **una sola riga**, con `market_id` -> il referto
+SX-native lo salda **gratis** (`sx-` + hash).
+⚠️ **Perche' e' stato necessario forzarlo**: alla verifica la corsia aveva **12
+pick** aperti (TTL 150' + budget 24 hanno risolto l'esaurimento descritto
+nell'audit del 15/10) ma **Denver NON era fra loro** — l'EV vivo era svanito
+(libro a 1.766 contro p_fair 0.5647 -> EV ~0). Col meccanismo nuovo quel pick, in
+un giro automatico, **non sarebbe stato ordinato**: e' il comportamento voluto
+(la corsia e' l'autorita' sul proprio edge, non uno snapshot del ledger).
+
+**4) VERIFICHE.** `test_gridiron_lane.py`: nuova classe `TestIdentitaDallaCorsia`
+(**15 test**: indice dalle tre corsie, chiave senza match_id, memo+reset,
+fail-safe, identita' senza quota, `market_id` vuoto = assente, `_lane_owned` con
+prefissi/catalogo/errore, distinzione per corsia in `_lane_needs_identity`,
+`_live_fill` che riprende l'identita' e **ordina sul mercato della corsia alla
+QUOTA DEL CANDIDATO**, fail-closed quando la corsia non lo propone, regressione
+sui pick di CALCIO che restano sul percorso storico, tripwire sul sorgente del
+chief) -> file **95 verdi**. **`conftest.py`**: l'indice e' isolato (funzione
+sostituita + memo azzerato) per tutti i file tranne `test_gridiron_lane`; senza,
+quasi tutta la suite farebbe discovery SX pubblica (e oracolo OddsPapi) a ogni
+`_live_fill`/`_chief_live_candidates`.
+**Bug reale trovato dai test**: `_lane_index` usava `time.time()` ma `auto_bet`
+**non importa `time`** -> `NameError` su ogni chiamata (il percorso ordini
+sarebbe morto al primo pick di corsia senza identita'). Ora usa
+`datetime.now(timezone.utc).timestamp()` (nessun import nuovo).
+Regressioni verdi: gridiron/esports/tennis (229), capital_enclosure +
+exposure_gate + order_watch + resting_orders (190), auto_bet x2 + t60 +
+agent_hierarchy + rush (249), tournament + bot + secret_hygiene + risk_guards +
+favourites_only + league_gate, chief/advisor/shadow/compare/agent_kelly (128).
+`verify_guardrails.py`: **A–I TUTTI BLOCCANO** (exit 0). `compileall` OK,
+0 marker di conflitto.
+
+**5) BACKLOG AGGIORNATO.** L'item 6.1 dell'audit del 15/10 ("pick NFL non
+ordinabile pur essendo in finestra") e' **chiuso dal lato identita'**: la causa
+non era solo il budget/TTL della corsia (ora TTL 150' e 12 pick attivi), ma
+l'assenza di un canale che desse al candidato del ledger l'identita' del proprio
+mercato. Restano aperti, invariati: l'oracolo a LINEA acceso e inutile (0 ordini
+in tutta la sua storia) e il registro RESTING mai esercitato.
