@@ -13055,7 +13055,78 @@ poisson_engine+ml_ensemble+ml_dataset+flow_measure+tennis_lane+esports_lane;
 `py_compile` OK, **0 marker di conflitto**, `railway config plan` =
 **"already up to date"** (0 to add, 0 to change, **0 to destroy**).
 
-**6) Da misurare sul container** (unica cosa che manca per chiudere il giro):
-`bayes_ratings.fit_ledger()` sui 17k match reali + walk-forward bayesiano;
-`ml_harness --json` con le 34 feature; backfill dei game tennis e calibrazione
-di `BASE_HOLD` su `ledger_games_stats`.
+**6) MISURATO SUL CONTAINER (17/10/2026, deploy `03c34e3e` SUCCESS, health 200).**
+Tre misure, tutte in sola lettura tranne il backfill (che scrive SOLO colonne di
+dettaglio gia' esistenti) e tutte **a costo ZERO**: le letture SX sono pubbliche,
+zero crediti the-odds-api, zero ordini.
+
+**(a) M1 — harness sulle 34 feature, dato reale (`ml_harness.run`):**
+```
+Righe 17213 (da 17644 match_results: 366 squadre mai viste, 305 Elo freddi,
+65 date illeggibili) | out-of-fold 15213 | pieghe 4
+  prior      brier=0.2468 auc=0.5018
+  logistica  brier=0.2344 auc=0.6324     <- incumbent
+  boosting   brier=0.2395 auc=0.6135
+  boosting_vs_prior     +0.00728 p=0.0 better  (min. distinguibile 0.00324)
+  boosting_vs_logistica -0.00513 p=0.0 worse   (min. distinguibile 0.00227)
+Verdetto: reject — lo sfidante e' SIGNIFICATIVAMENTE peggiore su boosting_vs_logistica
+```
+Confronto con il run del 15/10 (25 feature, 15.193 righe): logistica Brier
+**0.24017 -> 0.2344** e AUC **0.600 -> 0.6324**; boosting Brier 0.24309 ->
+0.2395 e AUC 0.588 -> 0.6135; lo svantaggio del boosting passa da **-0.00293 a
+-0.00513**. Lettura: le feature nuove (Elo di calcio + contesto di lega)
+**portano segnale vero** — entrambi i modelli migliorano in modo netto — ma il
+gap a favore dell'incumbent **si allarga**: la porta al boosting non si riapre,
+si chiude piu' forte. (Il campione e' 16.259/17.213 in **76 leghe**, **1.037
+squadre** con Elo.)
+
+**(b) M3 — walk-forward bayesiano, tre campioni (dato reale):**
+
+| campione | bayesiano | rating attuale | neutra | gain vs rating | sigma | fold a favore |
+|---|---|---|---|---|---|---|
+| 414 (finestra 365gg) | 0.6250 | 0.5159 | 0.6252 | **-0.1091** | 0.050 | 0/3 |
+| 2.994 (`--days 1200`) | 0.6473 | 0.5907 | 0.6473 | **-0.0566** | 0.050 | 0/4 |
+| **16.259** (`--max 17000`) | **0.6477** | **0.6350** | **0.6477** | **-0.0127** | **0.050** | 3/4 |
+
+Verdetto su tutti e tre: **`rating_engine_migliore`** — il bayesiano **non si
+promuove**. ⚠️ **Causa diagnosticata, ed e' l'unica cosa da sapere**: `sigma`
+(l'entita' dello shrinkage empirico-Bayes) resta **inchiodato al pavimento
+0.050** a ogni campione, quindi il modello **comprime ogni squadra sulla media
+di lega** e le sue probabilita' **coincidono con la baseline neutra** (0.6250 vs
+0.6252 · 0.6473 vs 0.6473 · 0.6477 vs 0.6477 — identici al quarto decimale).
+Non e' un problema di dati (16k righe non cambiano nulla) ne' di implementazione:
+e' lo **stimatore ai momenti dello stage 1** che su dati reali non stima un
+sigma utile (sui dati sintetici del test riusciva perche' le squadre erano 12
+con 50 match ciascuna; qui sono 1.037 con ~16). Prossimo passo, se si vuole
+riaprire il cantiere: sigma **fittato gerarchicamente** (o un prior fisso
+dichiarato) invece del metodo dei momenti — con la regola di sempre: si misura
+dopo, non si tara per far vincere il modello.
+
+**(c) M5 — i game del tennis sono nel referto e la calibrazione PARTE:**
+```
+schema: migrazione idempotente applicata (detail_home/away/kind/source presenti)
+backfill (1.9s, 3 chiamate pubbliche, 0 crediti): checked 73, hashes 76,
+  tennis 47, SAVED 47, no_row 0, no_scores 29
+ledger_games_stats: ok=True semantics=games source=ledger_detail
+  sample 47 plausible_share 1.000   (era semantics=unknown, 0.417)
+calibrate_base_hold: observed_mean 24.64 game/match
+  BASE_HOLD 0.80 -> previsti 25.53 (gap 0.89 game, +3.6%)
+  base suggerita 0.689 | curva monotona=True | probs neutre 0.5, troncato
+```
+Cioe': la calibrazione di `BASE_HOLD` **non e' piu' strutturalmente
+impossibile** (era il blocco del 16/10) e il numero suggerito e' **0.689**
+contro il priore di progetto **0.80**. ⚠️ Il suggerimento va letto con le sue
+dichiarazioni: le probabilita' d'ingresso sono **neutre 0.5** (le righe del
+ledger non portano `predictions.prob`) e il campione e' di **47 partite**.
+**Nessuna env e' stata cambiata**: cambiare `TENNIS_QUANT_BASE_HOLD` sposta le
+probabilita' del modello, quindi e' una decisione del proprietario (una riga:
+`railway variables --service betting_bot --set TENNIS_QUANT_BASE_HOLD=0.689`).
+
+**7) Due fatti operativi del container (17/10).** `match_results` = **17.644
+righe**, `team_ratings` = **703**, `matches` = **442**, `bets` = **72**. ⚠️ Le
+colonne di dettaglio **esistono solo dopo la prima `_create_results_table`**
+(la migrazione e' agganciata alla creazione/uso del ledger, non al boot del
+container): subito dopo il deploy `PRAGMA table_info` **non le mostrava
+ancora** — un probe che concludesse "la migrazione non e' passata" sbaglierebbe
+diagnosi (verificato: dopo la chiamata esplicita le quattro colonne ci sono e il
+backfill ha scritto senza errori).

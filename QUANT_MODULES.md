@@ -604,9 +604,58 @@ Cosa e' stato fatto, senza toccare il percorso del denaro:
   nessuna regressione nel percorso del denaro (una bet tennis resta `won` con il
   profit invariato).
 
-**Il numero che chiude il cerchio**: i game reali dai referti (e il backfill)
-rendono `BASE_HOLD` **calibrabile** — la calibrazione va poi **misurata sul
-container** (17k righe di referto), perche' in locale `match_results` e' vuoto.
+### MISURATO SUL CONTAINER (17/10/2026, deploy `03c34e3e`) — i tre numeri
+
+**(a) M1 — harness con le feature nuove, 17.213 righe out-of-sample su 4 pieghe
+(16.259 nel campione pieno, 76 leghe, 1.037 squadre con Elo):**
+
+| modello | Brier | LogLoss | AUC |
+|---|---|---|---|
+| prior | 0.2468 | 0.6867 | 0.5018 |
+| **logistica** (incumbent) | **0.2344** | **0.6632** | **0.6324** |
+| boosting | 0.2395 | 0.6729 | 0.6135 |
+
+boosting vs prior **+0.00728** (p=0.0, meglio) · boosting vs logistica
+**-0.00513** (p=0.0, **peggio**) → verdetto **`reject`**.
+Contro il run del 15/10 **entrambi i modelli migliorano** (logistica Brier
+0.24017 → 0.2344, AUC 0.600 → 0.6324) ma il gap a favore dell'incumbent
+**si allarga** (-0.00293 → -0.00513): le feature nuove portano segnale vero e
+**non** riaprono la porta al boosting.
+
+**(b) M3 — walk-forward bayesiano su tre campioni:**
+
+| campione | bayesiano | rating attuale | neutra | gain vs rating | sigma |
+|---|---|---|---|---|---|
+| 414 (365gg) | 0.6250 | 0.5159 | 0.6252 | -0.1091 | 0.050 |
+| 2.994 (`--days 1200`) | 0.6473 | 0.5907 | 0.6473 | -0.0566 | 0.050 |
+| 16.259 (`--max 17000`) | 0.6477 | 0.6350 | 0.6477 | -0.0127 | 0.050 |
+
+Verdetto **`rating_engine_migliore`** su tutti e tre: il modulo **non si
+promuove**. La causa e' **una sola e trasparente**: `sigma` resta al
+**pavimento** (0.050) a ogni campione, quindi lo shrinkage comprime ogni
+squadra sulla media di lega e le probabilita' **coincidono con la baseline
+neutra** (0.6477 vs 0.6477). Lo stimatore ai **momenti** dello stage 1 non
+stima un sigma utile sui dati reali (1.037 squadre, ~16 match a testa); sui
+dati sintetici del test riusciva perche' erano 12 squadre con 50 match. Per
+riaprire il cantiere serve un sigma **fittato gerarchicamente** (o un prior
+fisso dichiarato), non un ritocco del pavimento.
+
+**(c) M5 — game del tennis e calibrazione di `BASE_HOLD`:**
+```
+migrazione idempotente applicata (detail_home/away/kind/source)
+backfill: checked 73, hashes 76, tennis 47, SAVED 47, no_row 0, no_scores 29
+          (1.9s, 3 chiamate pubbliche = 0 crediti)
+ledger_games_stats: ok=True semantics=games source=ledger_detail
+                    sample 47 plausible_share 1.000  (era unknown / 0.417)
+calibrate_base_hold: observed_mean 24.64 game/match | BASE_HOLD 0.80 -> 25.53
+                     (gap 0.89 = +3.6%) | base suggerita 0.689 | monotona
+```
+La calibrazione **non e' piu' strutturalmente impossibile** (era il blocco del
+16/10) e il numero suggerito e' **0.689** contro il priore di progetto **0.80**.
+⚠️ Da leggere con le sue dichiarazioni: probabilita' d'ingresso **neutre 0.5**
+(le righe non portano `predictions.prob`) e campione di **47 partite**.
+**Nessuna env e' stata cambiata**: applicare `TENNIS_QUANT_BASE_HOLD=0.689`
+sposta le probabilita' del modello ed e' una decisione del proprietario.
 
 ---
 
@@ -786,7 +835,7 @@ soglie da configurare, e i cap che mostra li legge dai moduli che li applicano.
 |---|---|---|
 | 6 — Portfolio theory | **Fase 1 FATTA** (misura) + **Fase 2 FATTA** (`copula_portfolio` in ENFORCE) + **Fase 3/4 FATTE e promosse in SHADOW** (`risk_parity`, `drawdown_rebalancer` via `portfolio_sizing`, § 3-quinquies) | `PORTFOLIO_SIZING=enforce` dopo aver letto i log shadow |
 | 1 — ML/feature | **Fase 1 FATTA** (28 feature, 10 sopra soglia su 17k partite) + **rho Dixon-Coles promosso in misura** (`dixon_coles.promote()`, § 3-sexies) + **harness walk-forward fatto** (§ 3-septies: boosting **RESPINTO**) + **34 feature** con ELO di calcio pre-kickoff e contesto di lega, harness **riesercitato** (§ 3-octies) | rilanciare il harness **sui 17k match reali** con le feature nuove: e' l'unica cosa che puo' riaprire la porta al boosting, e il gate e' gia' scritto (Bonferroni + AUC + effetto minimo distinguibile) |
-| 3 — Bayesiano | **Fase 1 FATTA** (`bayes_ratings.py`: fit gerarchico, shrinkage EB, walk-forward, persistenza sul volume) | misurare sul container (`fit_ledger` sui 17k match reali + walk-forward bayesiano vs `dixon_coles`); poi decidere se alimentare `rating_engine` |
+| 3 — Bayesiano | **Fase 1 FATTA e MISURATA** (`bayes_ratings.py`): walk-forward su 414 / 2.994 / 16.259 match reali -> **`rating_engine_migliore`**, `sigma` inchiodato al pavimento, probabilita' identiche alla baseline neutra | il modulo **NON si promuove**: per riaprirlo serve un `sigma` fittato gerarchicamente (l'attuale stimatore ai momenti degenera su ~16 match/squadra) |
 | 2 — Line movement | **completo** + **CLV contro DUE sharp** (§ 3-septies: `pinnacle_t0` + `betfair_t0`) | M2-2: segmentazione CLV steam/non-steam |
-| 5 — Markov tennis | ELO+Poisson presenti + **catena esatta promossa come componente di servizio** di `tennis_quant` (§ 3-septies) + **i GAME arrivano nel referto** (`match_results.detail_*`, § 3-octies): la calibrazione non e' piu' strutturalmente impossibile | backfill dei game sui referti vecchi + calibrazione di `BASE_HOLD` **misurata sul container**, poi confronto del modello calibrato contro la versione a prior fisso |
+| 5 — Markov tennis | ELO+Poisson presenti + **catena esatta promossa come componente di servizio** di `tennis_quant` + **i GAME sono nel referto** (backfill: 47 partite, `plausible_share` 1.000) e la calibrazione di `BASE_HOLD` **gira**: suggerisce **0.689** contro il priore 0.80 (campione 47, probabilita' neutre) | applicare (o no) `TENNIS_QUANT_BASE_HOLD=0.689` — **decisione del proprietario**, poi rimisurare l'EV intrinseco della corsia |
 | 4 — Lineup window | finestra presente | rinviato fino a volume di candidati |
