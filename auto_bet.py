@@ -1232,6 +1232,14 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
             "created_at": created.isoformat() if created else "",
         })
 
+    # --- FASE B0: M6 FASE 3+4 (risk parity + drawdown rebalancing), 16/10/2026.
+    # Il T-60 e' il SECONDO punto che manda ordini reali: gli stessi due gate
+    # della corsia principale, applicati sullo stake DEFINITIVO del T-60, o il
+    # gate sarebbe aggirabile ordinando da qui. Stessa funzione, nessuna
+    # seconda implementazione (`portfolio_sizing.py`).
+    if mode == "live":
+        picks, _psize = _apply_portfolio_sizing(picks, bankroll=bankroll)
+
     # --- FASE B: GATE DI DIPENDENZA (copula) — direttiva 14/10/2026 ---------
     # Il T-60 e' il SECONDO punto che manda ordini all'execution engine: la
     # dipendenza fra posizioni simultanee va misurata anche qui, o il gate
@@ -1259,11 +1267,14 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
         k = _parse_iso_utc(kickoff)
         created = _parse_iso_utc(pick["created_at"])
         if stake <= 0:
-            # Bloccato o azzerato dal gate di dipendenza: nessun ordine e
-            # nessuna riga (l'ordine non e' mai nato). Lo scarto e' gia'
-            # loggato uno per uno da `_apply_copula`.
-            logger.info("auto_bet: T60 %s (%s) stake azzerato dal gate di "
-                        "dipendenza: nessun ordine", mid, esito)
+            # Azzerato da UNO dei gate di sizing (16/10/2026: risk parity /
+            # drawdown, oppure la copula): nessun ordine e nessuna riga
+            # (l'ordine non e' mai nato). Lo scarto e' gia' loggato uno per uno
+            # dal gate che l'ha deciso — qui NON si attribuisce il motivo a un
+            # gate specifico, perche' un log che indica il gate sbagliato fa
+            # cercare il difetto dove non c'e'.
+            logger.info("auto_bet: T60 %s (%s) stake azzerato da un gate di "
+                        "sizing (portfolio o copula): nessun ordine", mid, esito)
             continue
         payload = {
             "signal_id": pick["signal_id"], "record_id": pick["record_id"],
@@ -1970,17 +1981,23 @@ def _open_live_rows() -> list[dict]:
         from tracker import _get_conn
         conn = _get_conn()
         rows = conn.execute(
-            "SELECT match_id, esito, stake, price, created_at FROM bets "
-            "WHERE esito_finale IS NULL AND mode = 'live'").fetchall()
+            "SELECT match_id, esito, stake, price, created_at, mercato "
+            "FROM bets WHERE esito_finale IS NULL AND mode = 'live'"
+        ).fetchall()
         conn.close()
     except Exception as e:
         logger.warning("auto_bet: lettura righe aperte fallita: %s", e)
         return []
     out: list[dict] = []
     for r in rows:
+        # `mercato` (16/10/2026): serve al BUCKET del risk parity
+        # (`portfolio_sizing`, M6 Fase 3), che classifica le posizioni aperte
+        # per mercato+sport. E' additivo per il ricircolo del rush, che legge
+        # solo `created_at`.
         out.append({"match_id": r[0], "esito": r[1],
                     "stake": float(r[2] or 0.0),
-                    "price": float(r[3] or 0.0), "created_at": r[4]})
+                    "price": float(r[3] or 0.0), "created_at": r[4],
+                    "mercato": r[5]})
     return out
 
 
@@ -2641,6 +2658,42 @@ def enforce_order_ceiling(candidates: list[dict], *,
         cand["stake"] = stake
         info["kept"] += 1
         kept.append(cand)
+    return kept, info
+
+
+# --- M6 FASE 3+4: RISK PARITY + DRAWDOWN REBALANCING (16/10/2026) -----------
+# Promozione nel percorso ordini dei due moduli di rischio di portafoglio
+# (`risk_parity.py`, `drawdown_rebalancer.py`). Gira DOPO il tetto per-ordine
+# (lo stake e' quello che verra' ordinato) e PRIMA del gate di dipendenza
+# (copula), che resta l'ULTIMO passo di sizing: nessun layer segue questi due,
+# e il loro prodotto e' in [0, 1] — solo riduzione, mai amplificazione.
+# In modo `shadow` (default, direttiva "shadow per primo") gli stake NON
+# cambiano: i gate misurano e loggano cosa farebbero. La semantica sta in UN
+# solo posto (`portfolio_sizing.py`) perche' anche il percorso T-60 manda
+# ordini reali: due implementazioni divergerebbero (lezione del 13/09).
+def _apply_portfolio_sizing(candidates: list[dict], *,
+                            bankroll: float | None = None
+                            ) -> tuple[list[dict], dict]:
+    """Risk parity + drawdown rebalancing sui candidati LIVE. Fail-safe.
+
+    Il modulo delega le due misure ai loro moduli (nessuna formula copiata) e
+    non solleva mai: qualunque errore lascia i candidati INVARIATI (fail-open
+    dichiarato — un guasto di telemetria non e' un rischio misurato).
+    """
+    info: dict = {"enabled": False, "mode": "off", "applied": False,
+                  "kept": len(candidates), "dropped": 0, "reason": ""}
+    try:
+        import portfolio_sizing as _ps
+    except Exception as exc:                                  # pragma: no cover
+        logger.debug("auto_bet: portfolio sizing non disponibile (%s)", exc)
+        return candidates, info
+    try:
+        kept, info = _ps.apply(candidates, bankroll=bankroll)
+    except Exception as exc:                                  # pragma: no cover
+        logger.warning("auto_bet: gate portfolio (risk parity/drawdown) non "
+                       "applicato (%s): candidati invariati", exc)
+        return candidates, dict(info, error="errore_valutazione")
+    info["reason"] = "portfolio_sizing"
     return kept, info
 
 
@@ -5174,6 +5227,16 @@ def run_today_bets(stake_eur: float | None = None,
                         aggressive_cap_pct() * 100.0,
                         float(_bankroll or 0.0), _ceiling.get("clamped", 0),
                         _ceiling.get("dropped", 0))
+
+        # --- M6 FASE 3+4 (16/10/2026): RISK PARITY + DRAWDOWN REBALANCING.
+        # Ultimo passo di sizing PRIMA della copula: il drawdown dice quanto
+        # capitale si e' disposti a mettere in gioco adesso, il risk parity
+        # come distribuirlo fra i bucket (mercato x sport). In modo `shadow`
+        # (default) gli stake NON cambiano: i gate misurano e loggano. Solo in
+        # `enforce` riducono — e chi scende sotto il ticket minimo del motore
+        # viene scartato (fail-closed), mai rimesso a un importo diverso.
+        candidates, _psize = _apply_portfolio_sizing(candidates,
+                                                     bankroll=_bankroll)
 
         # --- GATE DI DIPENDENZA / COPULA (14/10/2026, direttiva proprietario):
         # ENFORCE in produzione, ultimo passo di sizing prima della FASE 3. Il

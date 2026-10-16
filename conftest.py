@@ -377,7 +377,21 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
         _ab._LAM_CACHE.clear()
     except Exception:
         pass
+    # M6 FASE 3+4 — RISK PARITY + DRAWDOWN REBALANCING (16/10/2026,
+    # `portfolio_sizing.py`): la promozione e' in modo `shadow` di default
+    # (misura e logga, gli stake NON cambiano) e legge il ledger delle posizioni
+    # APERTE e la varianza storica delle `bets` saldate. Nei test che non la
+    # esercitano si spegne alla fonte: in shadow non cambierebbe gli stake, ma
+    # leggerebbe il DB di PRODUZIONE (`tracker.DB_PATH`) e riempirebbe i log di
+    # un portafoglio che non e' quello del test. Le due memorie sono di MODULO
+    # e sopravvivono fra i test dello stesso processo: si azzerano sempre (prima
+    # e dopo), la stessa lezione della cache di prontezza OU (26/09).
+    import portfolio_sizing as _psz
+    _psz.reset_caches()
+    if "test_portfolio_sizing" not in request.node.nodeid:
+        monkeypatch.setenv("PORTFOLIO_SIZING", "off")
     yield
+    _psz.reset_caches()
     _ld.reset_cache()
     _oracle_skips.reset_dedup()
     _tbl.reset_cache()

@@ -12513,3 +12513,127 @@ non era solo il budget/TTL della corsia (ora TTL 150' e 12 pick attivi), ma
 l'assenza di un canale che desse al candidato del ledger l'identita' del proprio
 mercato. Restano aperti, invariati: l'oracolo a LINEA acceso e inutile (0 ordini
 in tutta la sua storia) e il registro RESTING mai esercitato.
+
+### Promozione dei due M6 nel percorso ordini: risk parity + drawdown in SHADOW (16/10/2026)
+
+Direttiva del proprietario: i due moduli di rischio di portafoglio del 15/10
+(`risk_parity.py` = **FASE 3**, `drawdown_rebalancer.py` = **FASE 4**) erano
+pronti e misurati ma **scollegati**. Nuovo modulo di wiring
+**`portfolio_sizing.py`** + cablaggio in `auto_bet.py`, `test_portfolio_sizing.py`,
+isolamento in `conftest.py`, blocco M6 in `.railway/railway.ts` e scenario **J**
+in `verify_guardrails.py`.
+
+**PERCHE' UN MODULO DI WIRING E NON DUE CHIAMATE IN `auto_bet`.** `auto_bet` ha
+**due** percorsi che mandano ordini reali — il giro delle 60s (FASE 2) e il
+dispatch **T-60** — e devono applicare gli STESSI gate nello STESSO ordine,
+altrimenti il gate e' aggirabile ordinando dall'altro. La semantica di "shadow"
+sta in un posto solo: se la implementasse ogni chiamante, "shadow" potrebbe
+voler dire due cose diverse. E' la regola anti-bug del progetto (stop-loss
+fantasma 21/09, doppio Kelly 13/09, doppio ordine 26/09: tutti logica copiata).
+
+**DUE SHADOW, NON UNO — e il motivo e' un rischio di denaro.** I due moduli
+hanno gia' un `mode` (`enforce`/`shadow`/`off`) ma il loro `shadow` **applica**
+comunque la riduzione (`active` resta True): un'interfaccia che promette shadow e
+riduce lo stake e' la classe di difetto piu' pericolosa in questo progetto. La
+promozione quindi NON si affida al modo dei moduli: `PORTFOLIO_SIZING` (qui)
+decide se i risultati vengono **scritti** sui candidati, e in shadow i due moduli
+girano su **copie** dei candidati (l'originale non puo' essere toccato nemmeno
+per errore).
+
+| modo `PORTFOLIO_SIZING` | comportamento |
+|---|---|
+| `off` | nessuna valutazione (nessun import dei due moduli, nessuna lettura del ledger) |
+| **`shadow`** (default) | i due gate VALUTANO e loggano; gli stake NON cambiano |
+| `enforce` | riducono davvero e **scartano** fail-closed chi scende sotto il ticket minimo del MOTORE |
+
+**ORDINE DEI GATE (non arbitrario)**: `enforce_order_ceiling` -> **M6** ->
+`copula`. Prima il **drawdown** ("quanto capitale sono disposto a mettere in
+gioco adesso"), poi il **risk parity** ("come distribuirlo fra i bucket", sugli
+importi sopravvissuti al taglio di salute); la copula resta l'ULTIMO passo di
+sizing e nessun layer segue i due M6. Invertirli farebbe calcolare le quote di
+rischio su stake che poi vengono riscalati. Entrambi sono raggiunti **anche dal
+percorso T-60** (`_apply_portfolio_sizing(picks, ...)` subito prima della
+`_apply_copula`).
+
+**DIREZIONE UNICA**: `min(stake_prima, prodotto_dei_due_moduli)`. Se un domani
+un modulo tornasse un moltiplicatore > 1 il valore viene riportato indietro e
+l'evento e' **CONTATO** (`clamped`), mai nascosto: un modulo che alza lo stake
+dopo un drawdown e' l'opposto di un controllo di rischio.
+
+**FAIL-OPEN DOVE SERVE, FAIL-CLOSED DOVE CONTA**: modulo non importabile, errore
+di valutazione, copia di lavoro non riconoscibile (indice perso) -> candidati
+**INVARIATI** con `error` dichiarato; stake ridotto **sotto il ticket** ->
+candidato **BLOCCATO** (`below_ticket_after_reduction`). Il ticket si LEGGE da
+`auto_bet.aggressive_min_ticket()` (mai copiato) e se non e' leggibile NON si
+inventa una soglia (fail-open dichiarato).
+
+**LE POSIZIONI APERTE ENTRANO NEL CALCOLO**: il risk parity e' una proprieta'
+del PORTAFOGLIO, non di un pick isolato — senza il capitale gia' impegnato il
+modulo giudicherebbe i candidati solo fra loro e non vedrebbe la concentrazione
+in corso. Lettore = `auto_bet._open_live_rows` (una sola definizione di "cosa e'
+aperto", con la colonna `mercato` per il bucket aggiunta in questo giro).
+
+**DIAGNOSTICABILITA' IN SHADOW.** La riga di riduzione porta il valore FINALE
+(`stake_after`, cio' che l'ordine userebbe) **e** i passi intermedi (`steps`:
+drawdown -> risk parity con lo stake dopo ogni gate): in shadow i verbi dei due
+moduli non vengono scritti sui candidati veri, quindi senza `steps` un audit non
+potrebbe dire QUALE gate ha tagliato quanto.
+
+**DUE FIX REALI trovati dai test/diagnostica (non ipotesi).**
+1. la riga di riduzione riportava solo il valore finale: aggiunto `steps` (senza,
+in shadow la diagnosi di chi ha tagliato quanto era impossibile);
+2. il log del T-60 attribuiva lo stake azzerato al **gate di dipendenza**
+   (copula) mentre ora puo' arrivare anche dai due M6: ora dice "da un gate di
+   sizing (portfolio o copula)" ed e' chiaro dove guardare.
+In piu' in `verify_guardrails.py`: **`RUSH_FINAL=0` e `TOURNAMENT_MODE=0`**
+entrano nell'isolamento. Non era un difetto di oggi ma lo sarebbe stato
+**domani**: la finestra del rush (17-20/10) e' una data di calendario e dal 17/10
+la diagnostica sarebbe entrata nel rush, cambiando gli stake attesi senza che
+nulla fosse rotto (stessa classe delle date fisse nei test, 15/09 e 17/09).
+
+**ENV** (tutte `preserve()` in `.railway/railway.ts`, blocco M6 accanto alla
+copula): `PORTFOLIO_SIZING` (default di codice **shadow**), i dieci
+`RISK_PARITY_*` (`GUARD`, `MODE`, `MAX_SHARE_RATIO`, `MIN_MULTIPLIER`,
+`MIN_SAMPLE`, `DAYS`, `MIN_DAYS`, `GRID`, `TTL_S`) e i sei `DRAWDOWN_REBALANCE*`
+(`DRAWDOWN_REBALANCE`, `_MODE`, `_TIERS`, `_MIN_MULTIPLIER`,
+`_MIN_TICKET_USDC`, `_TTL_S`). La lettura dell'env e' a RUNTIME: cambiare modo
+non richiede un redeploy.
+
+**TEST E VERIFICHE.** `test_portfolio_sizing.py` **61 verdi, tutti OFFLINE** (i
+due moduli sono sostituiti da curve deterministiche: qui si misura il WIRING —
+la loro matematica ha `test_risk_parity`/`test_drawdown_rebalancer`): configurazione
+e reversibilita', modo `off` (i moduli non vengono nemmeno chiamati), shadow
+(stake e OGGETTI invariati, log che dichiara "NON applicato"), enforce
+(riduzione scritta, mai amplificata, blocco sotto ticket, ticket illeggibile =
+nessun blocco), **parita' shadow/enforce** su una griglia di moltiplicatori,
+fail-open (moduli che esplodono, allineamento perso, candidato non valido),
+mappatura delle posizioni aperte (incluso il lettore VERO quando non se ne passa
+uno), cablaggio (ordine dei gate, percorso T-60, nessuna soglia ricopiata,
+import leggero in sottoprocesso, nessuna soglia negli agenti), IaC (ogni env
+letta dai tre moduli e' dichiarata — il tripwire scansiona anche gli helper
+`_env_bool/_env_float/_env_int`, non solo `os.getenv`, altrimenti controllerebbe
+3 variabili su 18), e il **giro reale** (`run_today_bets` in LIVE con wallet
+finto: off/shadow = stake pieno, enforce = `floor(base x mult)`, moltiplicatore
+1.0 = nessun tocco, blocco = 0 ordini e 0 righe a ledger).
+**Scenario J in `verify_guardrails.py`**: SHADOW (ordine a stake pieno con la
+riduzione dichiarata a log), ENFORCE (ordine ridotto), riduzione sotto ticket
+(0 ordini/0 righe), OFF (reversibile) -> **A–J TUTTI BLOCCANO** (exit 0).
+**Regressioni verdi in 4 lotti: 1179 test** (`risk_parity`,
+`drawdown_rebalancer`, `copula_portfolio`, `t60_breakers`, `capital_enclosure`,
+`auto_bet` x2, `exposure_gate`, `order_watch`, `aggressive_kelly`, `agent_kelly`,
+`weekly_stop`, `bot`, `rush_final`, `tournament`, `gridiron_lane`,
+`resting_orders`, `railway_drift_check`, `secret_hygiene`, `agent_hierarchy`,
+`advisor_agent`, `chief_shadow_wiring`, `analysis_agent`, `brain_agent`,
+`tennis_lane`, `money_decimal`), `compileall` OK, **0 marker di conflitto**.
+**`conftest.py`**: `PORTFOLIO_SIZING=off` per tutti i file tranne
+`test_portfolio_sizing` (in shadow non cambierebbe gli stake, ma leggerebbe il
+db di **produzione** per la varianza) e le due memorie di modulo azzerate prima
+e dopo ogni test (stessa lezione della cache di prontezza OU del 26/09).
+
+⚠️ **STATO: in produzione gira in SHADOW** (`PORTFOLIO_SIZING` non e' impostata
+-> default di codice): i due gate misurano e loggano, gli stake NON cambiano —
+effetto sul denaro **zero** finche' non si passa `PORTFOLIO_SIZING=enforce`
+(una env, nessun redeploy). La promozione serve prima a **misurare** quale
+riduzione sarebbe stata applicata, come la shadow mode della catena `decision/`.
+Prossimo passo naturale: leggere i log `portfolio_sizing [SHADOW]` per qualche
+giorno e decidere il passaggio a `enforce`.

@@ -91,6 +91,20 @@ os.environ["COPULA_GUARD"] = "0"
 # che gira offline con un provider finto.
 os.environ["RESTING_ORDERS"] = "0"
 os.environ.setdefault("RESTING_STATE", "/tmp/qv_resting_orders_verify.json")
+# PROMOZIONE M6 (risk parity + drawdown, 16/10/2026): la promozione gira DOPO
+# il tetto per-ordine e PRIMA della copula, quindi in modo `enforce` gli stake
+# degli scenari C/H/I cambierebbero (e in `shadow` leggerebbe il ledger per la
+# varianza). Gli scenari A-I misurano ALTRI guardrail: qui si spegne, e lo
+# scenario J (l'ultimo) la riaccende nei tre modi.
+os.environ["PORTFOLIO_SIZING"] = "off"
+# RUSH FINALE (13/10): l'interruttore e' ON di default e la finestra
+# (17-20/10) e' una DATA DI CALENDARIO — da domani questa diagnostica
+# entrerebbe nel rush e cambierebbe gli stake attesi senza che nulla sia
+# rotto (stessa classe delle date fisse nei test, 15/09 e 17/09). Spento.
+os.environ["RUSH_FINAL"] = "0"
+# LAYER DI STAKING DEL TORNEO (11/10): x1.5 entro budget e cap. E' coperto da
+# `test_tournament.py`; qui falserebbe lo stake atteso di C/H/I.
+os.environ["TOURNAMENT_MODE"] = "0"
 # Registro azzerato a ogni run. E' un percorso FISSO: un file lasciato da un
 # run interrotto (o da una prova manuale) entrerebbe nel calcolo del capitale
 # immobilizzato (`_open_live_snapshot` conta anche i resting aperti) e
@@ -809,10 +823,144 @@ def main() -> int:
     auto_bet._execution_mode = lambda allow_sim=True: "sim"
     ok_i = ok_i1 and ok_i2 and ok_i3
 
+    # ------- J. PROMOZIONE M6 — RISK PARITY + DRAWDOWN — 16/10/2026 -----------
+    _head("J. M6 (risk parity + drawdown) — shadow MISURA, enforce RIDUCE")
+    import math as _math
+    import drawdown_rebalancer as _dd
+    import risk_parity as _rp
+    import portfolio_sizing as _psz
+    _reset_state()
+    equity_j = 60.0
+    base_j = 1.50                 # importo FISSO legacy: stake deterministico
+    mult_j = 0.80                 # 1.50 x 0.80 = 1.20 >= ticket (1.00)
+    auto_bet._execution_mode = lambda allow_sim=True: "live"
+    auto_bet._live_wallet_snapshot = lambda: {
+        "available": equity_j, "exposure": 0.0, "equity": equity_j}
+    auto_bet.T60_EXECUTION_ONLY = False
+    # Stake deterministico: il motore Kelly (1.68 su equity 60) darebbe numeri
+    # che coincidono per caso con la riduzione — il test misurerebbe
+    # l'aritmetica invece del gate. L'importo fisso rende l'atteso esatto.
+    auto_bet.FIXED_STAKE_USDC = base_j
+    calls_j = {"fill": 0, "stakes": []}
+
+    def _fill_j(pick, stake, floor):  # noqa: ANN001
+        calls_j["fill"] += 1
+        calls_j["stakes"].append(round(float(stake), 2))
+        return {"ok": True, "market_id": "m", "selection_id": 1,
+                "bet_id": "b", "status": "FULLY_FILLED",
+                "price": floor, "stake": stake}
+
+    auto_bet._live_fill = _fill_j
+    # Curve DETERMINISTICHE al posto dei due moduli: la loro matematica ha la
+    # propria suite (`test_risk_parity`/`test_drawdown_rebalancer`); qui si
+    # misura la PROMOZIONE (chi riduce cosa, in quale modo, e la sua
+    # reversibilita'), esattamente come `test_portfolio_sizing` fa offline.
+    _real_dd_apply, _real_rp_apply = _dd.apply, _rp.apply
+    _factor_j = {"dd": mult_j}
+
+    def _dd_apply(cands, **kw):  # noqa: ANN001
+        info = {"enabled": True, "active": True, "mode": "enforce",
+                "kept": len(cands), "scaled": 0, "blocked": 0,
+                "drawdown_pct": 15.0, "multiplier": _factor_j["dd"],
+                "factor_legacy": 0.5, "reason": "curva di diagnostica",
+                "error": None}
+        out = []
+        for cand in cands:
+            stake = float(cand.get("stake") or 0.0)
+            if stake > 0:
+                after = _math.floor(stake * _factor_j["dd"] * 100.0) / 100.0
+                cand["stake"] = after
+                cand["drawdown_rebalance"] = {
+                    "decision": "scaled", "multiplier": _factor_j["dd"],
+                    "stake_before": stake, "stake_after": after,
+                    "detail": "curva di diagnostica"}
+                info["scaled"] += 1
+            out.append(cand)
+        return out, info
+
+    def _rp_apply(cands, **kw):  # noqa: ANN001
+        return list(cands), {"mode": "enforce", "kept": len(cands),
+                             "scaled": 0, "blocked": 0, "clear": len(cands),
+                             "skipped_no_sample": 0, "error": None}
+
+    _dd.apply, _rp.apply = _dd_apply, _rp_apply
+
+    def _board_j() -> None:
+        """Board pulito + un segnale valido (la riga `bets` di un giro
+        precedente bloccherebbe il giro successivo con `bet_exists_open`)."""
+        conn = tracker._get_conn()
+        conn.execute("DELETE FROM bets")
+        conn.execute("DELETE FROM predictions")
+        conn.execute("DELETE FROM matches")
+        conn.commit()
+        conn.close()
+        _seed("j-1", "1", 1.65, 0.60, 0.07, hours=5)
+        calls_j["fill"] = 0
+        calls_j["stakes"] = []
+
+    # (1) SHADOW (default di codice): il gate misura e logga, lo stake NON
+    #     cambia — e' la promozione richiesta ("shadow per primo").
+    os.environ["PORTFOLIO_SIZING"] = "shadow"
+    _psz.reset_caches()
+    _board_j()
+    mark = len(_RECORDS)
+    placed_j1 = auto_bet.run_today_bets(stake_eur=5.0)
+    log_j1 = "\n".join(_logs_since(mark))
+    ok_j1 = (calls_j["stakes"] == [base_j]
+             and bool(placed_j1) and placed_j1[0]["stake"] == base_j
+             and "portfolio_sizing [SHADOW]" in log_j1
+             and "NON applicato" in log_j1)
+    print(f"  {GREEN if ok_j1 else RED}→ SHADOW: ordine a "
+          f"{calls_j['stakes']} (atteso [{base_j:.2f}]) — il gate dichiara "
+          f"la riduzione a {base_j * mult_j:.2f} senza applicarla{RESET}")
+
+    # (2) ENFORCE: la stessa riduzione viene SCRITTA sullo stake ordinato.
+    os.environ["PORTFOLIO_SIZING"] = "enforce"
+    _board_j()
+    placed_j2 = auto_bet.run_today_bets(stake_eur=5.0)
+    atteso_j2 = _math.floor(base_j * mult_j * 100.0) / 100.0
+    ok_j2 = (calls_j["stakes"] == [atteso_j2]
+             and bool(placed_j2) and placed_j2[0]["stake"] == atteso_j2)
+    print(f"  {GREEN if ok_j2 else RED}→ ENFORCE: ordine a "
+          f"{calls_j['stakes']} (atteso [{atteso_j2:.2f}]){RESET}")
+
+    # (3) ENFORCE con riduzione sotto il ticket: nessun ordine (fail-closed).
+    _factor_j["dd"] = 0.0
+    _board_j()
+    placed_j3 = auto_bet.run_today_bets(stake_eur=5.0)
+    ok_j3 = (placed_j3 == [] and calls_j["fill"] == 0
+             and tracker.get_bets() == [])
+    print(f"  {GREEN if ok_j3 else RED}→ ENFORCE sotto il ticket: ordini al "
+          f"provider {calls_j['fill']}, righe a ledger "
+          f"{len(tracker.get_bets())} (attesi 0){RESET}")
+    _factor_j["dd"] = mult_j
+
+    # (4) OFF: reversibilita' in una variabile (nessuna valutazione).
+    os.environ["PORTFOLIO_SIZING"] = "off"
+    _board_j()
+    mark = len(_RECORDS)
+    placed_j4 = auto_bet.run_today_bets(stake_eur=5.0)
+    log_j4 = "\n".join(_logs_since(mark))
+    ok_j4 = (calls_j["stakes"] == [base_j]
+             and "portfolio_sizing" not in log_j4)
+    print(f"  {GREEN if ok_j4 else RED}→ OFF (reversibilita'): ordine a "
+          f"{calls_j['stakes']} (atteso [{base_j:.2f}]), nessuna riga del "
+          f"gate nei log{RESET}")
+
+    # Ripristino: il resto della diagnostica (e i moduli veri) non devono
+    # restare alterati da questo scenario.
+    _dd.apply, _rp.apply = _real_dd_apply, _real_rp_apply
+    _psz.reset_caches()
+    os.environ["PORTFOLIO_SIZING"] = "off"
+    auto_bet.FIXED_STAKE_USDC = 0.0
+    auto_bet.T60_EXECUTION_ONLY = True
+    auto_bet._execution_mode = lambda allow_sim=True: "sim"
+    ok_j = ok_j1 and ok_j2 and ok_j3 and ok_j4
+
     # ------------------------------------------------------------- ESITO ------
     _head("ESITO")
     all_ok = (ok_a and ok_b and ok_c and ok_d and ok_e and ok_f and ok_g
-              and ok_h and ok_i)
+              and ok_h and ok_i and ok_j)
     for name, ok in (("A kill-switch OFF", ok_a),
                      ("B stop-loss 24h", ok_b),
                      ("C Kelly dinamico k 0.15-0.25 / cap 12% / ticket 1.00", ok_c),
@@ -822,7 +970,8 @@ def main() -> int:
                      ("G circuit breakers T-60", ok_g),
                      ("H recinto esposizione %.0f%%"
                       % (auto_bet.OPEN_EXPOSURE_CAP_PCT * 100), ok_h),
-                     ("I gate di dipendenza (copula)", ok_i)):
+                     ("I gate di dipendenza (copula)", ok_i),
+                     ("J M6 risk parity + drawdown (shadow/enforce)", ok_j)):
         print(f"  {GREEN + '✅' if ok else RED + '❌'} {name}{RESET}")
     print(f"\n  {BOLD}{GREEN + 'TUTTI I GUARDRAIL BLOCCANO' if all_ok else RED + 'QUALCOSA NON BLOCCA'}{RESET}\n")
     return 0 if all_ok else 1

@@ -217,6 +217,40 @@ export default defineRailway(() => {
       COPULA_SIMS: preserve(),
       COPULA_SEED: preserve(),
       COPULA_VIG_HAIRCUT: preserve(),
+      // M6 FASE 3+4 — RISK PARITY + DRAWDOWN REBALANCING (16/10/2026): la
+      // promozione dei due moduli di rischio di PORTAFOGLIO nel percorso
+      // ordini. `PORTFOLIO_SIZING` e' l'UNICO interruttore della promozione:
+      // `off` (nessuna valutazione, nessun import, nessuna lettura del ledger),
+      // `shadow` (default: i due gate misurano e loggano cosa farebbero, gli
+      // stake NON cambiano) oppure `enforce` (riducono davvero e scartano
+      // fail-closed chi scende sotto il ticket minimo del motore). Gira dopo
+      // il tetto per-ordine e prima della copula.
+      // Risk parity (`risk_parity.py`): `RISK_PARITY_GUARD` (1 = attivo),
+      // `RISK_PARITY_MODE`, `RISK_PARITY_MAX_SHARE_RATIO` (quota massima di un
+      // bucket), `RISK_PARITY_MIN_MULTIPLIER` (pavimento: sotto si blocca
+      // invece di ridurre), campione `RISK_PARITY_MIN_SAMPLE` /
+      // `RISK_PARITY_DAYS` / `RISK_PARITY_MIN_DAYS`, griglia `RISK_PARITY_GRID`,
+      // cache `RISK_PARITY_TTL_S`.
+      // Drawdown (`drawdown_rebalancer.py`): `DRAWDOWN_REBALANCE` (1 = attivo),
+      // `DRAWDOWN_REBALANCE_MODE`, `DRAWDOWN_REBALANCE_TIERS` (curva drawdown ->
+      // moltiplicatore), `DRAWDOWN_REBALANCE_MIN_MULTIPLIER`,
+      // `DRAWDOWN_REBALANCE_MIN_TICKET_USDC`, `DRAWDOWN_REBALANCE_TTL_S`.
+      PORTFOLIO_SIZING: preserve(),
+      RISK_PARITY_GUARD: preserve(),
+      RISK_PARITY_MODE: preserve(),
+      RISK_PARITY_MAX_SHARE_RATIO: preserve(),
+      RISK_PARITY_MIN_MULTIPLIER: preserve(),
+      RISK_PARITY_MIN_SAMPLE: preserve(),
+      RISK_PARITY_DAYS: preserve(),
+      RISK_PARITY_MIN_DAYS: preserve(),
+      RISK_PARITY_GRID: preserve(),
+      RISK_PARITY_TTL_S: preserve(),
+      DRAWDOWN_REBALANCE: preserve(),
+      DRAWDOWN_REBALANCE_MODE: preserve(),
+      DRAWDOWN_REBALANCE_TIERS: preserve(),
+      DRAWDOWN_REBALANCE_MIN_MULTIPLIER: preserve(),
+      DRAWDOWN_REBALANCE_MIN_TICKET_USDC: preserve(),
+      DRAWDOWN_REBALANCE_TTL_S: preserve(),
       ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),
       T60_MAX_STAKE_USDC: preserve(),
