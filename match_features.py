@@ -520,12 +520,15 @@ def history_feature_rows(conn: Optional[sqlite3.Connection] = None, *,
                 continue
             feat["match_id"] = r["match_id"]
             feat["league"] = str(r["league"] or "")
+            feat["ts"] = float(ts)          # ordine CRONOLOGICO (walk-forward)
             feat["label"] = _label(sh, sa, target)
             feat["result"] = "1" if sh > sa else ("2" if sh < sa else "X")
             rows.append(feat)
             if limit and len(rows) >= int(limit):
                 break
-        rows.sort(key=lambda x: str(x.get("match_id")))
+        # Ordine CRONOLOGICO, non per id: e' la proprieta' su cui poggia
+        # qualunque walk-forward (le pieghe di `ml_harness`).
+        rows.sort(key=lambda x: float(x.get("ts") or 0.0))
         out["rows"] = rows
         out["stats"] = {**stats, "feature_rows": len(rows), "skipped": skipped}
         return out

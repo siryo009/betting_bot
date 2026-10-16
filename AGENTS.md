@@ -12768,3 +12768,191 @@ l'applicazione e' una decisione del proprietario: cambierebbe le probabilita' di
 la rifiuterebbe comunque. Prossimo passo naturale: accumulare la serie del rho e
 rileggere il verdetto di calibrazione quando il ledger ha piu' chiusure (il
 campione del 16/10 era di 118 match di holdout).
+
+### Sessione 16/10/2026 — Markov tennis promosso dentro `tennis_quant`, CLV a DUE benchmark, boosting RESPINTO dalla misura
+
+Direttiva del proprietario: chiudere i tre cantieri del piano quantitativo con
+la stessa disciplina del progetto — la misura decide, e dove la misura non
+esiste il modulo **rifiuta** invece di produrre un numero. Due cantieri sono
+stati promossi, il terzo e' stato **respinto dai dati**.
+
+**1) MODULO 5 — LA CATENA ESATTA E' DIVENTATA LA COMPONENTE DI SERVIZIO DI
+`tennis_quant`** (`tennis_quant._serve_prob_exact`).
+
+Il Poisson sui **break** e' un'approssimazione dichiarata: a parita' di tenute e'
+**basso di 1.5-3.5pp** rispetto alla catena esatta, e quel buco entrava dritto
+nel `p_intrinsic` (e quindi nel gate "entrambi confermano"). Ora `evaluate()`
+prova la catena (`tennis_markov.exact_serve_prob`) e la **provenienza viaggia
+col numero**: `serve_engine` = `markov_chain` | `poisson_hold_break`, con
+`serve_delta_pp` esposto. Fail-safe: se la catena non e' importabile si ricade
+sul Poisson **dichiarandolo** (un fallback silenzioso non deve passare per una
+misura migliore di quella che e').
+
+**Il difetto che ha reso necessario il ponte calibrato.** Il ponte
+"probabilita' -> tenute" e' DERIVATO (nessuno stat provider nel repo): non porta
+informazione indipendente, quindi il suo unico uso corretto e' di essere un
+**cambio di variabile** dentro la catena. Con lo spread lineare NON lo era —
+MISURATO: input **0.75 -> la catena restituiva 0.636 (-11.4pp)**; su 0.62
+restituiva 0.620 **solo per caso**. `calibrate_hold_pair` risolve il
+**differenziale** di tenuta a **media fissata dal fallback** (il livello non si
+inventa) e riproduce la probabilita' d'ingresso a **~1e-7**, con residuo esposto
+e stato `bounded` fuori dal box. ⚠️ Una coppia **misurata** (`hold_a`/`hold_b`
+da uno stat provider) **non si calibra mai**: la calibrazione esiste solo per il
+ponte derivato.
+
+**Superfici**: `surface_prob_offset` (grass **+0.02**, hard **0.0**, clay
+**-0.025**, override `TENNIS_MARKOV_SURFACE_DELTA`) e' un **PRIORE del
+progetto, non una misura** — la calibrazione lo riassorbe e l'informazione resta
+leggibile in punti di probabilita' invece di sparire in silenzio.
+
+**Il referto di tennis NON porta i game (trovato misurando, 16/10).** Le colonne
+vengono rilevate davvero (`home_team`/`away_team`, `score_home`/`score_away`) e
+le **48 righe** di tennis del ledger vengono lette — poi il modulo **rifiuta**:
+`plausible_share` **0.417**, mediana del totale **1.0**,
+`semantics="unknown"`, motivo `punteggi_non_compatibili_con_i_game`. La causa e'
+reale: il referto **SX-native** salva in `score_home/score_away` un **flag di
+vincitore (1/0)**, non i game (una riga 19-15 arriva dal percorso esterno).
+Conseguenza dichiarata: **`TENNIS_QUANT_BASE_HOLD` non e' calibrabile da questo
+ledger** — l'ingresso non esiste, e il modulo lo dice invece di calibrare su un
+campione sbagliato in modo invisibile. La porta di uscita resta **spw/rpw** (o un
+referto che salvi i game).
+
+**2) MODULO 2 — CLV CONTRO DUE SHARP INDIPENDENTI.** Il CLV si misura contro un
+benchmark, e Pinnacle (book) e Betfair Exchange EU (exchange P2P, margine ~0)
+sono **meccanismi diversi**: un edge che batte entrambi e' molto meno spiegabile
+con l'errore di una singola fonte.
+- `pinnacle_oracle.sharp_odds_from_cache(home, away, book=...)`: la lettura cache
+  diventa **generica sulla fonte** (una sola definizione del percorso);
+  `pinnacle_odds_from_cache` resta la stessa funzione con `book=PRIMARY_BOOK`,
+  quindi `closing_line` e `steam_move` **non cambiano firma**. Nuova
+  `benchmark_odds_from_cache` (Betfair EX EU).
+- `tracker`: colonna **`clv_history.betfair_odds`** (ALTER idempotente);
+  `closing_line.benchmark_closing()` scrive la chiusura del secondo benchmark a
+  T-0 con etichetta di fonte `betfair_t0`.
+- `clv_tracker`: ogni trade porta `benchmark`/`clv_benchmark`/`benchmark_source`
+  e la sezione `benchmark` del riepilogo **non entra nella statistica del CLV
+  principale**: un benchmark assente **non e' un benchmark a zero** e non deve
+  declassare il campione.
+
+**Esito REALE (container, sola lettura, 16/10/2026)**: 67 trade scansionati,
+**45 con una chiusura utilizzabile** (22 pendenti), CLV medio **+4.54%**, IC95
+**[+2.98%, +6.11%]**, p ~ 0, **40/45 positivi (88.9%)**, edge minimo
+distinguibile **2.18%** → `status: beating`. Per fonte: `pinnacle_t0` n=41 media
+**+5.00%**, `sx` n=4 media **-0.11%** (le due chiusure non si mescolano). La
+colonna del secondo benchmark e' **0/45 popolata**: il percorso e' cablato e non
+ha ancora catturato un T-0 di Betfair (la colonna nasce con questa modifica).
+
+**3) L'IDENTITA' DELL'EVENTO SULLA RIGA DEL DENARO** (cio' che ha reso possibile
+la copertura del CLV). `bets` ha ora **`home`/`away`/`league`/`commence`**
+(ALTER idempotente + `BET_EVENT_FIELDS`) e `auto_bet.event_identity(pick)` e'
+l'**unico punto di estrazione**: tutte le corsie (1X2, multi-mercato, tennis,
+gridiron, eSports, SIM, rifiuti T-60) scrivono gli stessi quattro campi senza
+riscriverli a mano. Motivo: la tabella `matches` viene **potata** dopo due giorni
+(`clear_old_matches`) mentre una puntata resta per sempre, quindi la chiusura di
+una bet vecchia non era piu' calcolabile (copertura del CLV ferma al 67%).
+Stesso lettore autosufficiente dato a **`smart_hedging`** (`LEFT JOIN` + `COALESCE`
+fra puntata e partita: una bet la cui riga `matches` e' stata potata non sparisce
+piu' dalla copertura) e a **`resting_orders`** (la riga `RESTING_FILLED` nasce
+con l'identita' dell'evento).
+
+**4) MODULO 1 — `ml_harness.py`: IL BOOSTING E' STATO RESPINTO DALLA MISURA.**
+Harness walk-forward **cronologico** che confronta `prior` (probabilita' base),
+`logistica` (l'incumbent numpy di `ml_ensemble`) e `boosting` (XGBoost) sulle
+feature storiche di `match_features`, con pieghe temporali **contigue e senza
+rimescolamento**, IC95 sulla differenza di Brier e Bonferroni sui confronti
+multipli.
+
+**Esito REALE (container, 4 pieghe, 15.193 righe out-of-fold):**
+
+| modello | Brier pooled | LogLoss | AUC | calib_gap |
+|---|---|---|---|---|
+| `prior` | 0.24678 | 0.68668 | 0.502 | 0.0082 |
+| **`logistica`** (incumbent) | **0.24017** | **0.67564** | **0.600** | 0.0113 |
+| `boosting` (XGBoost) | 0.24309 | 0.68007 | 0.588 | 0.0150 |
+
+| confronto | guadagno di Brier | IC95 | p | verdetto |
+|---|---|---|---|---|
+| boosting vs prior | **+0.00368** | [+0.00178, +0.00558] | 0.0001 | meglio |
+| boosting vs **logistica** | **-0.00293** | [-0.00437, -0.00148] | 0.0001 | **peggio (significativo)** |
+
+Verdetto **`reject`**: "lo sfidante e' SIGNIFICATIVAMENTE peggiore su
+boosting_vs_logistica". Il boosting batte la baseline ingenua ma **perde contro
+l'incumbent**, e l'intervallo sta **tutto sotto zero**: non e' rumore.
+**Azione: il modello di produzione NON cambia** — nessuna riga di `ml_ensemble`
+tocca la decisione per questo esito. Un booster piu' moderno non e' un modello
+migliore: si misura.
+
+**Una correzione necessaria al modulo 1**: `match_features.history_feature_rows`
+ordinava le righe **per `match_id`**, che non e' un ordine temporale — un
+walk-forward su quell'ordine sarebbe stato un falso (le pieghe non sarebbero
+state "passato -> futuro"). Ora ogni riga porta `ts` e l'ordinamento e' su
+quello: **l'ordine cronologico e' la proprieta' su cui poggia qualunque misura
+walk-forward**.
+
+**5) TEST E VERIFICHE.** Conteggi dai comandi (non dalla memoria):
+`test_tennis_markov` **96**, `test_tennis_quant` **57**, `test_clv_tracker`
+**83**, `test_closing_line` **50**, `test_ml_harness` **50** (nuovo),
+`test_match_features` **105**. Tutti **OFFLINE** (DB temporanei, nessuna rete,
+nessun credito, nessun ordine; la connessione di sola lettura **rifiuta** una
+`UPDATE` nei moduli che leggono il ledger). Env nuove in `preserve()` di
+`.railway/railway.ts`: `MLH_FOLDS`, `MLH_MIN_TRAIN`, `MLH_SEED`.
+
+⚠️ **STATO OPERATIVO (cosa tocca il denaro e cosa no)**: la catena di Markov e'
+promossa **dentro `tennis_quant`**, che e' un modulo di **telemetria** (dal
+03/10: misura e tace, la corsia tennis decide sull'oracolo sharp) → **zero
+effetto sugli ordini**. Le uniche modifiche al percorso del denaro sono i
+**quattro campi di identita' sulla riga `bets`** e il `LEFT JOIN` di
+`smart_hedging`/`resting_orders`: **metadati in piu'**, nessuna decisione
+cambiata. `clv_history.betfair_odds` e' telemetria.
+
+**6) DOCUMENTAZIONE**: `QUANT_MODULES.md` ha la nuova sezione **3-septies**
+(i tre cantieri con le tabelle misurate) e la tabella di stato (§ 6) aggiornata:
+il modulo 1 risulta con la **porta di uscita attraversata in negativo** (si
+riapre solo con feature nuove o piu' dati), il modulo 2 completo su due sharp, il
+modulo 5 con la calibrazione **rifiutata** per assenza di game nel referto.
+
+**7) REGRESSIONE TROVATA DAI LOTTI DI VERIFICA (e corretta) — il recupero del
+backup `_old` si spegneva con UNA colonna in piu'.** `_ensure_unique_constraints`
+recupera le righe di una migrazione interrotta confrontando i backup `_old` solo
+se gli elenchi di colonne erano **IDENTICI** (`bk_cols == cur_cols`). Aggiungere
+le quattro colonne di identita' evento a `bets` (`home`/`away`/`league`/
+`commence`, ALTER in `_get_conn` **prima** della migrazione) rendeva il backup
+legacy (15 colonne) diverso dalla tabella nuova (19) → il recupero **saltava in
+silenzio** e le righe sarebbero rimaste in `bets_old` per sempre.
+⚠️ **E' il caso che si presenta a OGNI cambio di schema con un backup pendente** —
+cioe' esattamente la situazione del deploy di questa modifica.
+Il rosso lo ha colto un test che esisteva dal 02/09
+(`test_dedup_ml.test_migrazione_recupera_backup_interrotto`): il lotto di
+regressione ha fatto il suo lavoro. Fix: si recupera cio' che il backup
+**CONTIENE** (`bk_set <= cur_set`, copia delle colonne comuni), e se il backup ha
+una colonna che la tabella nuova non ha piu' il backup **NON si distrugge** e il
+motivo e' dichiarato ("mai perdere dati" vale piu' di un recupero completo).
+Tripwire nuovi: `test_recupero_con_colonne_nuove_in_piu` (il caso che ha
+regredito) e `test_backup_con_colonna_sparita_non_si_distrugge` (il backup
+conservato e il warning). `test_dedup_ml` = **11 verdi**.
+
+**8) DUE TEST STALII RIPARATI (preesistenti, non causati da questo lavoro).** Il
+cambio di soglie del **14/10** (fascia 1.20-2.00, `MARKET_EDGE_MIN` 0.01,
+`MARKET_EDGE_STRONG` 0.02) aveva lasciato due test rossi a HEAD, tutti e due
+**provati preesistenti** con `git stash` (falliscono anche senza le modifiche di
+questa sessione):
+- `test_decision_adapters.test_tier_coerente_con_get_signal_tier`: asseriva il
+  valore letterale `"value"` per un edge di 0.03, che con STRONG a 0.02 e'
+  `strong_value`. Ora prova l'**accordo** fra lo `status` del ledger e il tier
+  derivato, su ENTRAMBI i tier, con le soglie lette dalle costanti;
+- `test_flow_measure.TestAttribuzione`: seminava quota **1.20** (ora DENTRO la
+  fascia) e un edge di 0.01 (ora ESATTAMENTE la soglia) → il gate odierno
+  approvava la riga e l'attribuzione diventava `gate_non_riconciliato`. Ora i
+  semi sono **derivati** (`ODDS_MAX + 0.10`, `ODDS_MIN - 0.10`, `EV_MIN / 2`,
+  edge sotto soglia con EV sopra) — la stessa lezione dello scenario D di
+  `verify_guardrails` del 14/10;
+- `test_performance_report.TestEdgeAnalysis.test_edge_counts`: derivava il bucket
+  `value` come `MODERATE + 0.01`, che con `STRONG = MODERATE + 0.01` cade
+  **esattamente** sulla soglia strong (bucket strong a 2, value a 0). Ora usa il
+  **punto medio** fra le due soglie e **dichiara** l'ordine richiesto
+  (`assert MARKET_EDGE_MODERATE < MARKET_EDGE_STRONG`).
+
+⚠️ **Lezione di metodo**: i tre rossi sono arrivati dallo stesso pattern — un
+**numero letterale** in un test e' un test che scade in silenzio al primo ritocco
+di una soglia. Le riparazioni derivano dalle costanti e **dichiarano** le
+premesse, invece di aggiornare il valore (che avrebbe solo spostato la scadenza).

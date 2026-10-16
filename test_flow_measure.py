@@ -15,6 +15,7 @@ import pytest
 
 import flow_measure as fm
 import tracker
+import value_filter as vf
 
 
 def _iso(hours_ago: float = 1.0) -> str:
@@ -125,17 +126,29 @@ class TestAttribuzione:
         code, _ = fm.attribute_reject(self._row(league="Serie A"))
         assert code == "league_blocked"
 
+    # Soglie DERIVATE dalle costanti (16/10/2026): dopo l'allargamento della
+    # fascia del 14/10 (odds 1.20-2.00, edge 1pp) i valori letterali 1.20 e
+    # 0.61/0.60 finivano DENTRO i gate, il gate odierno approvava la riga e
+    # l'attribuzione diventava `gate_non_riconciliato`: due test rossi a HEAD
+    # per una soglia cambiata, non per un difetto. Derivandoli, il test misura
+    # cio' che vuole misurare a qualunque soglia.
     def test_quota_fuori_fascia(self):
-        assert fm.attribute_reject(self._row(quota=2.50))[0] == "odds_max"
-        assert fm.attribute_reject(self._row(quota=1.20))[0] == "odds_min"
+        assert fm.attribute_reject(
+            self._row(quota=vf.ODDS_MAX + 0.10))[0] == "odds_max"
+        assert fm.attribute_reject(
+            self._row(quota=vf.ODDS_MIN - 0.10))[0] == "odds_min"
 
     def test_ev_basso(self):
-        code, _ = fm.attribute_reject(self._row(ev=0.005))
+        code, _ = fm.attribute_reject(self._row(ev=vf.EV_MIN / 2.0))
         assert code == "ev_low"
 
     def test_edge_basso(self):
-        code, _ = fm.attribute_reject(self._row(prob=0.61, market_prob=0.60,
-                                                ev=0.037))
+        # Edge sotto la soglia di lega ma EV sopra la sua: la riga deve cadere
+        # sull'EDGE, non sull'EV (l'ordine delle verifiche e' parte del test).
+        sotto = vf.MARKET_EDGE_MIN / 2.0
+        code, _ = fm.attribute_reject(self._row(prob=0.60 + sotto,
+                                                market_prob=0.60,
+                                                ev=vf.EV_MIN * 2))
         assert code == "edge_low"
 
     def test_non_favorito(self):

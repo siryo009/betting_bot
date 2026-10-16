@@ -369,6 +369,7 @@ def place(prov, *, pick: Dict[str, Any], stake: float, price: float,
         "price": round(float(price), 4),
         "home": pick.get("home"),
         "away": pick.get("away"),
+        "league": pick.get("league"),
         "kickoff": pick.get("commence"),
         "sx_status": status,
         "cancel_attempted": False,
@@ -532,7 +533,11 @@ def reconcile(prov=None, *, now: Optional[datetime] = None,
                 selection_id=r.get("selection_id"),
                 price=float(r.get("price") or 0.0),
                 stake=float(r.get("stake") or 0.0),
-                mode="live", status="RESTING_FILLED", bet_id=oid)
+                mode="live", status="RESTING_FILLED", bet_id=oid,
+                # Identita' dell'evento (15/10/2026): la riga del denaro resta
+                # autosufficiente anche dopo la potatura di `matches`.
+                home=r.get("home"), away=r.get("away"),
+                league=r.get("league"), commence=r.get("kickoff"))
         except Exception as e:
             res["errors"].append(f"save:{match_id}:{type(e).__name__}")
             logger.warning("resting_orders: salvataggio bet %s fallito (%s)",

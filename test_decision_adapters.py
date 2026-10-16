@@ -112,8 +112,23 @@ class TestSignalDaRiga:
         assert signal.kickoff.year == 2026
 
     def test_tier_coerente_con_get_signal_tier(self):
-        signal = signal_from_row(row(status="value", market_edge=0.03, ev=0.03))
-        assert signal.tier == "value" == vf.get_signal_tier(0.03, 0.03)
+        """La proprieta' in prova e' l'ACCORDO fra lo `status` del ledger e il
+        tier derivato dagli stessi numeri — non un valore specifico.
+
+        Derivato dalle costanti (16/10/2026): con `MARKET_EDGE_STRONG` a 0.02
+        (direttiva del 14/10) un edge di 0.03 e' `strong_value`, quindi il
+        vecchio assert sul valore letterale `"value"` era ROSSO a HEAD, senza
+        che nulla fosse rotto. Si prova l'accordo su ENTRAMBI i tier, cosi' un
+        prossimo ritocco delle soglie non fa passare il test per il motivo
+        sbagliato.
+        """
+        for edge, status in ((vf.MARKET_EDGE_MODERATE, "value"),
+                             (vf.MARKET_EDGE_STRONG, "strong_value")):
+            atteso = vf.get_signal_tier(edge, edge)
+            assert atteso == status
+            signal = signal_from_row(row(status=status, market_edge=edge, ev=edge))
+            assert signal.tier == status == atteso
+            assert atteso in vf.PLAYABLE_TIERS
 
     def test_tier_derivato_se_lo_status_e_ignoto(self):
         signal = signal_from_row(row(status="rejected"))

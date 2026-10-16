@@ -419,6 +419,26 @@ def shin_probabilities(odds_map: Dict[str, float],
     return out
 
 
+def _serve_prob_exact(hold_a: float, hold_b: float, fallback: float, *,
+                      best_of: Optional[int] = None) -> Tuple[float, str]:
+    """Probabilita' di match dalla coppia di tenute: catena esatta, fallback dichiarato.
+
+    Ritorna `(prob, motore)`. Il motore e' `markov_chain` quando la catena e'
+    disponibile, altrimenti `poisson_hold_break` (l'approssimazione storica):
+    la provenienza viaggia col numero, cosi' un fallback silenzioso non puo'
+    passare per una misura migliore di quella che e'.
+    """
+    try:
+        import tennis_markov as tmk
+        got = tmk.exact_serve_prob(hold_a, hold_b, best_of=best_of)
+        if got.get("ok") and got.get("prob") is not None:
+            return float(got["prob"]), "markov_chain"
+    except Exception as exc:                                   # pragma: no cover
+        logger.debug("tennis_quant: catena Markov non disponibile (%s): "
+                     "uso il Poisson sui break", exc)
+    return float(fallback), "poisson_hold_break"
+
+
 def combine_probabilities(p_elo: float, p_poisson: float,
                           w_elo: Optional[float] = None) -> float:
     """Combinazione lineare ELO + Poisson (peso dichiarato, mai nascosto).
@@ -453,10 +473,11 @@ def evaluate(*, team_a: str, team_b: str, price_a: float, price_b: float,
     I due modelli sono indipendenti solo se `elo` ha storico reale: il verdetto
     lo dichiara.
 
-    Ritorna un blocco con: p_elo, p_poisson, p_intrinsic, p_sharp, gli EV dei
-    due modelli sul prezzo SX, `both_confirm` (entrambi >= soglia), il Kelly di
-    misura e lo stato del recinto 40%. Fail-safe: su input incompleti ritorna
-    `{"ok": False, "reason": ...}`, mai eccezioni.
+    Ritorna un blocco con: p_elo, p_poisson (approssimazione storica), p_serve
+    (catena esatta, `serve_engine` ne dichiara la provenienza), p_intrinsic,
+    p_sharp, gli EV dei due modelli sul prezzo SX, `both_confirm` (entrambi >=
+    soglia), il Kelly di misura e lo stato del recinto 40%. Fail-safe: su input
+    incompleti ritorna `{"ok": False, "reason": ...}`, mai eccezioni.
     """
     try:
         e_min = float(ev_min if ev_min is not None else EV_MIN)
@@ -485,8 +506,14 @@ def evaluate(*, team_a: str, team_b: str, price_a: float, price_b: float,
         hold_a, hold_b = hold_rates_from_prob(p_elo)
         stats_source = "elo_fallback"
     p_poisson = poisson_prob_from_hold_break(hold_a, hold_b)
+    # La componente di servizio: CATENA ESATTA (`tennis_markov`), con il prodotto
+    # di Poisson come FALLBACK dichiarato. Stesse tenute in ingresso, matematica
+    # esatta invece dell'approssimazione: il Poisson sui break e' MISURATO basso
+    # di 1.5-3.5pp sulle stesse tenute, e quel buco entrava diretto nel
+    # `p_intrinsic` (e quindi nel gate "entrambi confermano").
+    p_serve, serve_engine = _serve_prob_exact(hold_a, hold_b, p_poisson)
 
-    p_intrinsic = combine_probabilities(p_elo, p_poisson)
+    p_intrinsic = combine_probabilities(p_elo, p_serve)
 
     # --- modello 2: mercato (Shin) ---------------------------------------
     p_sharp = p_sharp_a
@@ -535,6 +562,9 @@ def evaluate(*, team_a: str, team_b: str, price_a: float, price_b: float,
         "price_a": round(pa, 4), "price_b": round(pb, 4),
         "p_elo": round(p_elo, 6),
         "p_poisson": round(p_poisson, 6),
+        "p_serve": round(p_serve, 6),
+        "serve_engine": serve_engine,
+        "serve_delta_pp": round(100.0 * (p_serve - p_poisson), 4),
         "p_intrinsic": round(p_intrinsic, 6),
         "p_sharp_a": round(p_sharp_a, 6),
         "p_sharp_b": round(p_sharp_b, 6),

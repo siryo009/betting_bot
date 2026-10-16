@@ -1054,6 +1054,43 @@ def load_oracle(home: str, away: str, sport_key: Optional[str] = None, *,
     return None
 
 
+def sharp_odds_from_cache(home: str, away: str, *, book: str = PRIMARY_BOOK,
+                          sport_key: Optional[str] = None,
+                          cache_dir: Optional[Path] = None,
+                          now: Optional[float] = None,
+                          outcomes: Tuple[str, ...] = OUTCOMES
+                          ) -> Optional[Dict[str, Any]]:
+    """Quote GREZZE di UNA fonte sharp per la partita, dalle cache. **0 crediti.**
+
+    NON e' un oracolo: nessun de-vig, nessuna probabilita'. Restituisce il
+    prezzo PUBBLICATO dallo sharp (con il `ts` della cache e la chiave sport)
+    per registrare lo storico dei prezzi, misurare il movimento (steam move) e
+    catturare la CLOSING LINE di un benchmark specifico.
+
+    **Perche' e' generica dal 15/10/2026**: il CLV si misura contro un
+    benchmark, e due benchmark INDIPENDENTI valgono piu' di uno — Betfair
+    Exchange EU (`BENCHMARK_BOOK`) e' uno sharp per un meccanismo diverso
+    (exchange P2P, margine ~0) mentre Pinnacle e' un book. Un edge che batte
+    ENTRAMBI e' molto meno spiegabile con l'errore di una singola fonte.
+    `pinnacle_odds_from_cache` resta la stessa funzione con `book=PRIMARY_BOOK`:
+    una sola definizione del percorso cache (mai due copie che divergono).
+
+    Fail-closed: None se la partita non c'e' in nessuna cache fresca o se la
+    fonte non ha TUTTI gli esiti attesi.
+    """
+    for match, data, path in _iter_cached_matches(
+            home, away, cache_dir=cache_dir, sport_key=sport_key, now=now):
+        odds = book_quotes(match, match.get("home_team") or "",
+                           match.get("away_team") or "", book,
+                           outcomes=outcomes)
+        if odds:
+            stem = path.stem[len("toa_"):] if path.stem.startswith("toa_") \
+                else path.stem
+            return {"odds": {k: float(v) for k, v in odds.items()},
+                    "ts": data.get("ts"), "sport_key": stem, "book": book}
+    return None
+
+
 def pinnacle_odds_from_cache(home: str, away: str,
                              sport_key: Optional[str] = None, *,
                              cache_dir: Optional[Path] = None,
@@ -1062,23 +1099,25 @@ def pinnacle_odds_from_cache(home: str, away: str,
                              ) -> Optional[Dict[str, Any]]:
     """Quote GREZZE di Pinnacle per la partita, dalle cache. **0 crediti.**
 
-    NON e' un oracolo: nessun de-vig, nessuna probabilita'. Restituisce il
-    prezzo PUBBLICATO dallo sharp (con il `ts` della cache e la chiave sport)
-    per registrare lo STORICO dei prezzi e misurare il movimento
-    (steam move). Fail-closed: None se la partita non c'e' in nessuna cache
-    fresca o se Pinnacle non ha TUTTI gli esiti attesi.
+    Sottile delega a `sharp_odds_from_cache` con la fonte PRIMARIA: la firma
+    storica resta identica per i chiamanti esistenti (`closing_line`,
+    `steam_move`).
     """
-    for match, data, path in _iter_cached_matches(
-            home, away, cache_dir=cache_dir, sport_key=sport_key, now=now):
-        odds = book_quotes(match, match.get("home_team") or "",
-                           match.get("away_team") or "", PRIMARY_BOOK,
-                           outcomes=outcomes)
-        if odds:
-            stem = path.stem[len("toa_"):] if path.stem.startswith("toa_") \
-                else path.stem
-            return {"odds": {k: float(v) for k, v in odds.items()},
-                    "ts": data.get("ts"), "sport_key": stem}
-    return None
+    return sharp_odds_from_cache(home, away, book=PRIMARY_BOOK,
+                                 sport_key=sport_key, cache_dir=cache_dir,
+                                 now=now, outcomes=outcomes)
+
+
+def benchmark_odds_from_cache(home: str, away: str,
+                             sport_key: Optional[str] = None, *,
+                             cache_dir: Optional[Path] = None,
+                             now: Optional[float] = None,
+                             outcomes: Tuple[str, ...] = OUTCOMES
+                             ) -> Optional[Dict[str, Any]]:
+    """Come `sharp_odds_from_cache`, con la fonte BENCHMARK (Betfair EX EU)."""
+    return sharp_odds_from_cache(home, away, book=BENCHMARK_BOOK,
+                                 sport_key=sport_key, cache_dir=cache_dir,
+                                 now=now, outcomes=outcomes)
 
 
 # ---------------------------------------------------------------------------

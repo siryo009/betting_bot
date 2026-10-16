@@ -372,6 +372,144 @@ gate (sconsigliato), banda di sicurezza via `DIXON_COLES_SAFE_MIN/MAX`.
 
 ---
 
+## 3-septies. Sessione 16/10/2026 — i tre moduli del piano "quant avanzato"
+
+Tre cantieri avanzati nella stessa sessione, tutti con la stessa disciplina: la
+misura decide, e dove la misura non esiste il modulo **rifiuta** invece di
+produrre un numero. Due sono stati *promossi dentro il percorso* (il Markov come
+componente di servizio di `tennis_quant`, il secondo benchmark del CLV), il
+terzo e' stato **respinto dalla misura**.
+
+### Modulo 5 — Markov tennis: ponte calibrato, superfici, e il referto che non dice i game
+
+`tennis_markov.py` non e' piu' solo un simulatore in parallelo: e' diventato la
+**componente di servizio** di `tennis_quant.evaluate`. Il motivo e' una misura:
+il Poisson sui break, a parita' di tenute, e' **basso di 1.5-3.5pp** rispetto
+alla catena esatta, e quel buco entrava dritto nel `p_intrinsic` (e quindi nel
+gate "entrambi confermano"). Ora `_serve_prob_exact` prova la catena e la
+provenienza **viaggia col numero** (`serve_engine` = `markov_chain` |
+`poisson_hold_break`, con `serve_delta_pp`): un fallback silenzioso non puo'
+passare per una misura migliore di quella che e'.
+
+**Il difetto che ha reso necessario il ponte calibrato.** Il ponte
+"probabilita' -> tenute" e' DERIVATO (nessuno stat provider): non porta
+informazione indipendente, quindi il suo unico uso corretto e' di essere un
+**cambio di variabile** dentro la catena. Con lo spread lineare NON lo era —
+MISURATO: input 0.75 -> la catena restituiva **0.636 (-11.4pp)**; su 0.62
+restituiva 0.620 **solo per caso**. `calibrate_hold_pair` risolve il
+**differenziale** di tenuta a **media fissata dal fallback** (il livello non si
+inventa) e riproduce la probabilita' d'ingresso a ~1e-7, con residuo esposto e
+`bounded` fuori dal box. Una coppia **misurata** (`hold_a`/`hold_b`) non si
+calibra mai.
+
+**Superfici**: `surface_prob_offset` (grass **+0.02**, hard **0.0**, clay
+**-0.025**, override `TENNIS_MARKOV_SURFACE_DELTA`) e' un **PRIORE del progetto,
+non una misura** — la calibrazione lo riassorbe e l'informazione resta leggibile
+in punti di probabilita' (non sparisce in silenzio).
+
+**Il referto di tennis NON porta i game (misurato sul container, 16/10/2026).**
+La validazione sul ledger funziona — le colonne vengono rilevate davvero
+(`home_team`/`away_team`, `score_home`/`score_away`) e le **48 righe** di tennis
+del referto vengono lette — e poi **rifiuta**: `plausible_share` **0.417**,
+mediana del totale **1.0**, `semantics="unknown"`, motivo
+`punteggi_non_compatibili_con_i_game`. La causa e' reale e va scritta: il
+referto SX-native salva in `score_home/score_away` un **flag di vincitore
+(1/0)**, non i game (una riga 19-15 arriva dal percorso esterno). Quindi
+**`TENNIS_QUANT_BASE_HOLD` non e' calibrabile da questo ledger**: l'ingresso non
+esiste, e il modulo lo dichiara invece di calibrare su un campione sbagliato in
+modo invisibile. La porta di uscita della roadmap M5 resta quella: **spw/rpw**
+(o un referto che salvi i game).
+
+**Verifiche**: `test_tennis_markov.py` **96 test** (parita' formula chiusa vs DP,
+tie-break esatto vs catena troncata, simmetria, calibrazione del ponte,
+superfici, validazione sul ledger con punteggi di calcio rifiutati) +
+`test_tennis_quant.py` **57** (provenienza del motore, delta, fallback). Tutti
+offline.
+
+### Modulo 2 — CLV contro DUE sharp: `clv_history.betfair_odds`
+
+Il CLV si misura **contro un benchmark**, e due benchmark indipendenti valgono
+piu' di uno: Pinnacle e' un book, Betfair Exchange EU e' un exchange P2P con
+margine ~0 — **meccanismi diversi**. Un edge che batte entrambi e' molto meno
+spiegabile con l'errore di una singola fonte.
+
+- `pinnacle_oracle.sharp_odds_from_cache(home, away, book=...)`: la lettura
+  cache diventa **generica sulla fonte** (una sola definizione del percorso;
+  `pinnacle_odds_from_cache` resta la stessa con `book=PRIMARY_BOOK`, quindi
+  `closing_line` e `steam_move` non cambiano firma) +
+  `benchmark_odds_from_cache`;
+- `tracker`: colonna **`clv_history.betfair_odds`** (ALTER idempotente) e
+  `closing_line.benchmark_closing()` che scrive la quota di chiusura del secondo
+  benchmark a T-0, con etichetta di fonte `betfair_t0`;
+- in `clv_tracker` ogni trade porta `benchmark` / `clv_benchmark` /
+  `benchmark_source`, e la sezione `benchmark` del riepilogo **non entra** nella
+  statistica del CLV principale: un benchmark assente **non e' un benchmark a
+  zero** e non deve declassare il campione.
+
+**Esito REALE (container, 16/10/2026, sola lettura)**: 67 trade scansionati, **45
+con una chiusura utilizzabile** (22 pendenti), CLV medio **+4.54%**, IC95
+**[+2.98%, +6.11%]**, p ~ 0, **40/45 positivi (88.9%)**, edge minimo
+distinguibile **2.18%** → `status: beating`. Per fonte: `pinnacle_t0` n=41 media
+**+5.00%**, `sx` n=4 media **-0.11%** — le due chiusure NON si mescolano.
+La colonna del secondo benchmark e' **0/45 popolata**: il percorso e' cablato e
+non ha ancora catturato un T-0 di Betfair (e' nata con questa modifica).
+
+**Cosa ha reso possibile la copertura**: le puntate ora portano l'**identita'
+dell'evento SULLA RIGA DEL DENARO** (`bets.home/away/league/commence`, ALTER
+idempotente + `auto_bet.event_identity()` come unico punto di estrazione). La
+tabella `matches` viene **potata** dopo due giorni mentre una puntata resta per
+sempre: senza quei campi la chiusura di una bet vecchia non era piu'
+calcolabile. Lo stesso lettore autosufficiente e' stato dato a `smart_hedging`
+(LEFT JOIN + COALESCE) e a `resting_orders` (la riga `RESTING_FILLED` nasce con
+l'identita' dell'evento).
+
+**Verifiche**: `test_clv_tracker.py` **83** + `test_closing_line.py` **50**,
+tutti offline (DB temporaneo; la connessione di sola lettura **rifiuta** una
+`UPDATE`).
+
+### Modulo 1 — `ml_harness.py`: il boosting e' STATO RESPINTO dalla misura
+
+Harness di confronto **walk-forward cronologico** degli sfidanti del modello ML
+(`prior` = probabilita' base, `logistica` = l'incumbent numpy di
+`ml_ensemble`, `boosting` = XGBoost), sulle feature storiche di
+`match_features`, con pieghe temporali **contigue e senza rimescolamento**, IC95
+sulla differenza di Brier e correzione di Bonferroni sui confronti multipli.
+
+**Esito REALE (container, 16/10/2026, 4 pieghe, 15.193 righe out-of-fold):**
+
+| modello | Brier pooled | LogLoss | AUC | calib_gap |
+|---|---|---|---|---|
+| `prior` | 0.24678 | 0.68668 | 0.502 | 0.0082 |
+| **`logistica`** (incumbent) | **0.24017** | **0.67564** | **0.600** | 0.0113 |
+| `boosting` (XGBoost) | 0.24309 | 0.68007 | 0.588 | 0.0150 |
+
+| confronto | guadagno di Brier | IC95 | p | verdetto |
+|---|---|---|---|---|
+| boosting vs prior | **+0.00368** | [+0.00178, +0.00558] | 0.0001 | meglio |
+| boosting vs **logistica** | **-0.00293** | [-0.00437, -0.00148] | 0.0001 | **peggio (significativo)** |
+
+Verdetto del modulo: **`reject`** — "lo sfidante e' SIGNIFICATIVAMENTE peggiore
+su: boosting_vs_logistica". Il boosting batte la baseline ingenua ma **perde
+contro l'incumbent**, e l'intervallo di confidenza sta **tutto sotto zero**:
+non e' rumore, e' un peggioramento. **Azione: non si cambia il modello di
+produzione** — nessuna riga di `ml_ensemble` tocca la decisione per questo
+esito, che resta la ragione per cui l'harness esiste (un booster piu' moderno
+non e' un modello migliore: si misura).
+
+**Una correzione necessaria al modulo 1**: `match_features.history_feature_rows`
+ordinava le righe **per `match_id`**, che non e' un ordine temporale — un
+walk-forward su quell'ordine sarebbe stato un falso (le pieghe non sarebbero
+state "passato -> futuro"). Ora le righe portano `ts` e si ordinano su quello:
+**l'ordine cronologico e' la proprieta' su cui poggia qualunque misura
+walk-forward**.
+
+**Verifiche**: `test_ml_harness.py` **50 test, offline** (pieghe contigue e
+coperenti, nessun look-ahead, modello degenere dichiarato `degenerate`, campione
+sotto il minimo, parita' fra i modelli sullo stesso vettore di feature, IoC).
+Env `MLH_FOLDS` / `MLH_MIN_TRAIN` / `MLH_SEED` in `preserve()`.
+
+---
+
 ## 4. Roadmap per modulo (ordine consigliato, per costo/beneficio)
 
 L'ordine non e' quello della richiesta: e' quello che **non tocca il denaro
@@ -547,8 +685,8 @@ soglie da configurare, e i cap che mostra li legge dai moduli che li applicano.
 | modulo | stato | prossimo passo |
 |---|---|---|
 | 6 — Portfolio theory | **Fase 1 FATTA** (misura) + **Fase 2 FATTA** (`copula_portfolio` in ENFORCE) + **Fase 3/4 FATTE e promosse in SHADOW** (`risk_parity`, `drawdown_rebalancer` via `portfolio_sizing`, § 3-quinquies) | `PORTFOLIO_SIZING=enforce` dopo aver letto i log shadow |
-| 1 — ML/feature | **Fase 1 FATTA** (28 feature, 10 sopra soglia su 17k partite) + **rho Dixon-Coles promosso in misura** (`dixon_coles.promote()`, § 3-sexies) | misura di Brier walk-forward **prima** di toccare `FEATURE_NAMES`; serie del rho prima di `DIXON_COLES_APPLY=1` |
+| 1 — ML/feature | **Fase 1 FATTA** (28 feature, 10 sopra soglia su 17k partite) + **rho Dixon-Coles promosso in misura** (`dixon_coles.promote()`, § 3-sexies) + **harness walk-forward fatto** (§ 3-septies: boosting **RESPINTO**, l'incumbent logistico vince) | nessun cambio di `FEATURE_NAMES`/modello: la porta di uscita e' gia' stata attraversata **in negativo**, si riapre solo con feature nuove (o piu' dati) |
 | 3 — Bayesiano | empirico-bayesiano presente | `bayes_ratings.py` con incertezza, parita' + Brier |
-| 2 — Line movement | **completo** | M2-2: segmentazione CLV steam/non-steam |
-| 5 — Markov tennis | ELO+Poisson presenti | aprire il motore quando esiste una fonte spw/rpw |
+| 2 — Line movement | **completo** + **CLV contro DUE sharp** (§ 3-septies: `pinnacle_t0` + `betfair_t0`) | M2-2: segmentazione CLV steam/non-steam |
+| 5 — Markov tennis | ELO+Poisson presenti + **catena esatta promossa come componente di servizio** di `tennis_quant` (§ 3-septies), ponte calibrato, superfici | spw/rpw misurati: il referto attuale salva un flag di vincitore, non i game, quindi la calibrazione resta **rifiutata** (fail-closed) |
 | 4 — Lineup window | finestra presente | rinviato fino a volume di candidati |

@@ -42,6 +42,24 @@ DUE DETTAGLI DICHIARATI (non nascosti):
    poi, ciclo di servizio di 4 punti) e con una DP ricorsiva prima — nessuna
    approssimazione del pareggio a meta'.
 
+PONTE CALIBRATO (15/10/2026). Il ponte "probabilita' -> tenute" e' DERIVATO
+(nessuno stat provider): non ha informazione indipendente, quindi l'unico uso
+corretto e' di essere un **cambio di variabile** dentro la catena. Il ponte a
+spread lineare non lo era — MISURATO: su un 0.75 di input la catena restituiva
+**0.636** (-11.4pp) e su un 0.62 **0.620** solo per caso; l'artefatto finiva
+dritto nell'EV intrinseco della corsia. `calibrate_hold_pair` risolve il
+**differenziale** di tenuta a media fissata (la media viene dal fallback, non si
+inventa un livello) e riproduce la probabilita' d'ingresso a ~1e-7: il residuo e'
+esposto, e fuori dal box la soluzione e' dichiarata `bounded`. Una coppia
+**misurata** (`hold_a`/`hold_b`) non si calibra mai. Il delta di superficie, che
+la calibrazione riassorbe, si legge in `surface_prob_offset` (in punti di
+probabilita') — l'informazione resta, non sparisce in silenzio.
+
+VALIDAZIONE SUL LEDGER. Il referto salva i GAME delle partite di tennis: il
+modello puo' quindi essere confrontato con cio' che e' accaduto davvero
+(`ledger_games_stats`), e la BASE di tenuta servizio — oggi un priore scritto a
+mano (0.80) — diventa una misura (`calibrate_base_hold`).
+
 Confini (tripwire nei test): nessuna scrittura, zero rete, zero crediti, **zero
 ordini**, nessuna soglia di strategia nel sorgente, `import tennis_markov` non
 carica `auto_bet`/`bot`/`tracker`/`odds_api`.
@@ -49,6 +67,8 @@ carica `auto_bet`/`bot`/`tracker`/`odds_api`.
 CLI:
     venv/bin/python tennis_markov.py --prob 0.62 [--surface clay] [--live "1-0,3-2,30-15"]
     venv/bin/python tennis_markov.py --compare --prob 0.62 [--json]
+    venv/bin/python tennis_markov.py --games            # game del referto vs catena
+    venv/bin/python tennis_markov.py --calibrate-base   # BASE_HOLD misurata
 """
 from __future__ import annotations
 
@@ -77,6 +97,28 @@ MAX_RECURSION_SCORE = 40          # guardia: la DP non esplode mai
 #: dichiarati in `hold_source`. Override con `TENNIS_MARKOV_SURFACE_DELTA`.
 SURFACE_DELTA = {"grass": 0.02, "hard": 0.0, "clay": -0.025}
 SURFACE_DELTA_ENV = "TENNIS_MARKOV_SURFACE_DELTA"
+
+#: Intervallo ammesso per una tenuta di servizio (stesso box dei tassi di
+#: `tennis_quant`): fuori di qui il numero non e' un tasso di servizio.
+HOLD_MIN, HOLD_MAX = 0.50, 0.95
+
+#: PONTE CALIBRATO (15/10/2026). Il ponte "probabilita' -> tenute" e' DERIVATO
+#: (fallback dichiarato, nessuno stat provider): nessuna coppia di tenute ha
+#: informazione indipendente, quindi il suo unico compito corretto e' di
+#: **riprodurre la probabilita' d'ingresso** dentro la catena esatta — un
+#: cambio di variabile, non una seconda stima. Il ponte a spread lineare lasciava
+#: un artefatto MISURATO (fino a -11pp sui favoriti), che finiva nell'EV
+#: intrinseco della corsia: qui l'artefatto si toglie alla radice.
+#: Una coppia MISURATA (`hold_a`/`hold_b` da uno stat provider) NON si calibra.
+CALIBRATE_ENV = "TENNIS_MARKOV_CALIBRATE"
+CALIBRATION_SCAN = 48          # passi della scansione grossolana sul differenziale
+CALIBRATION_TOL = 1e-6         # tolleranza sul differenziale (residuo ~1e-7 in pp)
+CALIBRATION_BASE_GRID = (0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
+CALIBRATION_MAX_ROWS = 25      # campione massimo della curva (costo ~0.25s per punto)
+CAL_CACHE_MAX = 1024
+_CAL_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+
+DEFAULT_BASE_HOLD_FALLBACK = 0.80     # solo se `tennis_quant` non e' importabile
 
 
 def _env_float(name: str, default: float, *, minimum: Optional[float] = None,
@@ -530,35 +572,657 @@ def point_from_hold(hold: float, *, tol: float = 1e-9) -> float:
     return (lo + hi) / 2.0
 
 
+def calibrate_default() -> bool:
+    """Il ponte calibrato e' il DEFAULT (l'artefatto a spread lineare era un bug)."""
+    return _env_bool(CALIBRATE_ENV, True)
+
+
+def _fallback_pair(prob_a: float, delta: float) -> Tuple[float, float, float, float]:
+    """Coppia di tenute del fallback DICHIARATO + la coppia SENZA delta.
+
+    Ritorna `(ha, hb, ha_neutral, hb_neutral)`: il delta di superficie e' un
+    priore del progetto e va tenuto distinto (serve a `surface_prob_offset`).
+    """
+    try:
+        import tennis_quant as tq
+        base_a, base_b = tq.hold_rates_from_prob(float(prob_a))
+    except Exception as e:                                    # pragma: no cover
+        logger.debug("tennis_markov: fallback hold/break non disponibile "
+                     "(%s): uso %.2f/%.2f", e, DEFAULT_BASE_HOLD_FALLBACK,
+                     DEFAULT_BASE_HOLD_FALLBACK)
+        base_a = base_b = DEFAULT_BASE_HOLD_FALLBACK
+    na = max(HOLD_MIN, min(HOLD_MAX, float(base_a)))
+    nb = max(HOLD_MIN, min(HOLD_MAX, float(base_b)))
+    ha = max(HOLD_MIN, min(HOLD_MAX, na + float(delta)))
+    hb = max(HOLD_MIN, min(HOLD_MAX, nb - float(delta)))
+    return ha, hb, na, nb
+
+
+def surface_prob_offset(prob_a: float, surface: Any = None, *,
+                        delta_raw: Optional[str] = None,
+                        best_of: Optional[int] = None) -> Dict[str, Any]:
+    """Effetto IN PROBABILITA' del priore di superficie, alla catena esatta.
+
+    Il delta di superficie nasce come differenziale di TENUTA: qui se ne misura
+    la traduzione in punti di probabilita' del match, cosi' l'informazione resta
+    disponibile e dichiarata anche quando il ponte e' calibrato (dove il delta
+    non puo' piu' trasparire dal numero finale, perche' la calibrazione lo
+    riassorbe riproducendo la probabilita' d'ingresso).
+    """
+    conf = config()
+    bo = int(best_of or conf["best_of"])
+    delta, source = surface_delta(surface, raw=delta_raw)
+    ha, hb, na, nb = _fallback_pair(prob_a, delta)
+    p_delta = match_prob(point_from_hold(ha), point_from_hold(hb), best_of=bo,
+                         tiebreak=conf["tiebreak"])
+    p_neutral = match_prob(point_from_hold(na), point_from_hold(nb),
+                           best_of=bo, tiebreak=conf["tiebreak"])
+    return {"surface_delta": delta, "delta_source": source,
+            "prob_delta": float(p_delta), "prob_neutral": float(p_neutral),
+            "offset_pp": 100.0 * (float(p_delta) - float(p_neutral))}
+
+
 def serve_probabilities(prob_a: float, *, surface: Any = None,
                         hold_a: Optional[float] = None,
                         hold_b: Optional[float] = None,
-                        delta_raw: Optional[str] = None) -> Dict[str, Any]:
+                        delta_raw: Optional[str] = None,
+                        calibrate: Optional[bool] = None) -> Dict[str, Any]:
     """(p_a, p_b) = probabilita' del PUNTO al servizio, dai tassi di tenuta.
 
     Con `hold_a`/`hold_b` espliciti (stat provider reale) si usano quelli, senza
-    delta di superficie: un dato misurato non si corregge con un priore. Senza
-    provider, i tassi arrivano dal fallback DICHIARATO di `tennis_quant`
-    (`hold_rates_from_prob`, ELO -> differenziale di servizio) piu' il delta di
-    superficie, e `hold_source` lo dichiara.
+    delta di superficie ne' calibrazione: un dato **misurato** non si corregge
+    (ne' con un priore ne' con il mercato). Senza provider, i tassi arrivano dal
+    fallback DICHIARATO di `tennis_quant` (`hold_rates_from_prob`) piu' il delta
+    di superficie, e `hold_source` lo dichiara.
+
+    `calibrate` (default `TENNIS_MARKOV_CALIBRATE`, ON): sul percorso DERIVATO la
+    coppia viene risolta in modo che la catena esatta riproduca `prob_a` — vedi
+    `calibrate_hold_pair` per il motivo (il ponte a spread lineare comprimeva i
+    favoriti fino a -11pp). Passare `calibrate=False` ripristina il ponte grezzo
+    (diagnostica e test del confronto).
     """
     delta, source = surface_delta(surface, raw=delta_raw)
+    info: Dict[str, Any] = {"calibrated": False, "calibration": None,
+                            "raw_holds": None, "raw_prob": None,
+                            "prob_input": float(prob_a) if isinstance(
+                                prob_a, (int, float)) else None}
     if hold_a is not None and hold_b is not None:
         ha, hb = float(hold_a), float(hold_b)
         source = "provided"
     else:
+        ha, hb, _na, _nb = _fallback_pair(prob_a, delta)
+        info["raw_holds"] = [ha, hb]
+        # ⚠️ Con la calibrazione attiva il delta di superficie NON puo' piu'
+        # trasparire dal numero finale (la coppia viene risolta per riprodurre
+        # `prob_a`): l'effetto si LEGGE qui, in punti di probabilita', invece di
+        # restare implicito. Senza questo campo, passare `surface="clay"`
+        # sembrerebbe non fare nulla.
         try:
-            import tennis_quant as tq
-            ha, hb = tq.hold_rates_from_prob(float(prob_a))
-        except Exception as e:                                # pragma: no cover
-            logger.debug("tennis_markov: fallback hold/break non disponibile "
-                         "(%s): uso 0.80/0.80", e)
-            ha = hb = 0.80
-        ha = max(0.50, min(0.95, ha + delta))
-        hb = max(0.50, min(0.95, hb - delta))
+            info["surface_offset_pp"] = surface_prob_offset(
+                prob_a, surface, delta_raw=delta_raw)["offset_pp"]
+        except Exception:                                     # pragma: no cover
+            info["surface_offset_pp"] = None
+        # La probabilita' del PONTE GREZZO (prima del 15/10 quella che finiva in
+        # produzione): serve al report per misurare l'artefatto rimosso.
+        try:
+            _conf = config()
+            info["raw_prob"] = float(match_prob(
+                point_from_hold(ha), point_from_hold(hb),
+                best_of=_conf["best_of"], tiebreak=_conf["tiebreak"]))
+        except Exception:                                     # pragma: no cover
+            info["raw_prob"] = None
+        do = calibrate_default() if calibrate is None else bool(calibrate)
+        if do:
+            cal = calibrate_hold_pair(prob_a, mean=(ha + hb) / 2.0)
+            if cal.get("ok"):
+                ha, hb = cal["hold_a"], cal["hold_b"]
+                info["calibrated"] = True
+                info["calibration"] = cal
+            else:
+                info["calibration"] = cal      # fallito: coppia grezza + motivo
     return {"p_a": point_from_hold(ha), "p_b": point_from_hold(hb),
             "hold_a": ha, "hold_b": hb, "surface": surface,
-            "surface_delta": delta, "hold_source": source}
+            "surface_delta": delta, "hold_source": source, **info}
+
+
+# ---------------------------------------------------------------------------
+# 5b) PONTE CALIBRATO + GRANDEZZE A LIVELLO DI GAME
+# ---------------------------------------------------------------------------
+def _chain_at_dnet(mean: float, dnet: float, *, best_of: int,
+                   tiebreak: bool) -> Tuple[float, float, float]:
+    """Catena esatta per una coppia simmetrica attorno a `mean`."""
+    ha = max(HOLD_MIN, min(HOLD_MAX, mean + dnet / 2.0))
+    hb = max(HOLD_MIN, min(HOLD_MAX, mean - dnet / 2.0))
+    prob = match_prob(point_from_hold(ha), point_from_hold(hb),
+                      best_of=best_of, tiebreak=tiebreak)
+    return float(prob), ha, hb
+
+
+def calibrate_hold_pair(prob_a: float, *, mean: Optional[float] = None,
+                        best_of: Optional[int] = None,
+                        tiebreak: Optional[bool] = None,
+                        cache: bool = True) -> Dict[str, Any]:
+    """Coppia di tenute la cui catena esatta RIPRODUCE `prob_a`.
+
+    Il ponte `probabilita' -> tenute` e' derivato (nessuno stat provider): non ha
+    informazione indipendente, quindi il suo compito corretto e' di essere un
+    **cambio di variabile** dentro la catena. Il ponte a spread lineare non lo
+    era: con `hold_rates_from_prob(0.75)` la catena restituiva **0.636**
+    (-11.4pp) perche' il differenziale di servizio era troppo piccolo, e quel
+    buco finiva direttamente nell'EV intrinseco della corsia.
+
+    Si risolve il **differenziale** `dn = hold_a - hold_b` a media `m` fissata
+    (la media viene dal fallback dichiarato, cosi' non si inventa un livello):
+    `dn = 0` da' esattamente 0.5 e la catena e' monotona in `dn`, quindi
+    scansione grossolana + bisezione. Fuori dai limiti del box la soluzione e'
+    dichiarata `bounded` con il residuo esposto — mai un numero spacciato per
+    esatto.
+    """
+    conf = config()
+    bo = int(best_of or conf["best_of"])
+    tb = conf["tiebreak"] if tiebreak is None else bool(tiebreak)
+    try:
+        target = float(prob_a)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "prob_non_numerica", "hold_a": None,
+                "hold_b": None, "raw_prob": None}
+    if not (0.0 < target < 1.0):
+        return {"ok": False, "reason": "prob_fuori_range", "hold_a": None,
+                "hold_b": None, "raw_prob": None}
+
+    if mean is None:
+        delta, _src = surface_delta(None)
+        ha, hb, _na, _nb = _fallback_pair(target, delta)
+        m = (ha + hb) / 2.0
+    else:
+        m = max(HOLD_MIN, min(HOLD_MAX, float(mean)))
+
+    key = (round(target, 7), round(m, 4), bo, bool(tb))
+    if cache and key in _CAL_CACHE:
+        return dict(_CAL_CACHE[key])
+
+    dn_lo = 2.0 * (HOLD_MIN - m)
+    dn_hi = 2.0 * (HOLD_MAX - m)
+    # 1) scansione grossolana: trova il primo intervallo che attraversa il target
+    prev_dn, prev_p = dn_lo, None
+    bracket: Optional[Tuple[float, float]] = None
+    for step in range(CALIBRATION_SCAN + 1):
+        dn = dn_lo + (dn_hi - dn_lo) * step / CALIBRATION_SCAN
+        p, _ha, _hb = _chain_at_dnet(m, dn, best_of=bo, tiebreak=tb)
+        if prev_p is not None and p >= target and prev_p < target:
+            bracket = (prev_dn, dn)
+            break
+        prev_dn, prev_p = dn, p
+    bounded = bracket is None and prev_p is not None
+    if bracket is None:
+        # nessun attraversamento: la soluzione sta a un estremo del box
+        prob_lo, ha_lo, hb_lo = _chain_at_dnet(m, dn_lo, best_of=bo, tiebreak=tb)
+        prob_hi, ha_hi, hb_hi = _chain_at_dnet(m, dn_hi, best_of=bo, tiebreak=tb)
+        if abs(prob_hi - target) <= abs(prob_lo - target):
+            dn_best, p_best, ha_b, hb_b = dn_hi, prob_hi, ha_hi, hb_hi
+        else:
+            dn_best, p_best, ha_b, hb_b = dn_lo, prob_lo, ha_lo, hb_lo
+    else:
+        # 2) bisezione dentro l'intervallo
+        lo, hi = bracket
+        for _ in range(200):
+            mid = (lo + hi) / 2.0
+            pm, _ha, _hb = _chain_at_dnet(m, mid, best_of=bo, tiebreak=tb)
+            if pm < target:
+                lo = mid
+            else:
+                hi = mid
+            if hi - lo < CALIBRATION_TOL:
+                break
+        dn_best = (lo + hi) / 2.0
+        p_best, ha_b, hb_b = _chain_at_dnet(m, dn_best, best_of=bo, tiebreak=tb)
+
+    out = {"ok": True, "reason": None, "hold_a": ha_b, "hold_b": hb_b,
+           "prob": p_best, "prob_input": target, "mean": m, "dnet": dn_best,
+           "residual": p_best - target, "bounded": bool(bounded),
+           "method": "scan+bisezione", "raw_prob": None,
+           "best_of": bo, "tiebreak": tb}
+    if cache:
+        if len(_CAL_CACHE) >= CAL_CACHE_MAX:
+            _CAL_CACHE.clear()
+        _CAL_CACHE[key] = dict(out)
+    return out
+
+
+def exact_serve_prob(hold_a: float, hold_b: float, *, best_of: Optional[int] = None,
+                     tiebreak: Optional[bool] = None) -> Dict[str, Any]:
+    """P(A vince) dalla coppia di tenute, con la CATENA ESATTA (nessun priore).
+
+    E' l'alternativa esatta al prodotto di Poisson sui break di
+    `tennis_quant.poisson_prob_from_hold_break` (approssimazione dichiarata e
+    misurata bassa di 1.5-3.5pp sulle stesse tenute). Stessa informazione in
+    ingresso, stessa uscita del motore storico, matematica esatta: nessuna
+    soglia e nessun peso cambiano, cambia il numero che il modello produce.
+    """
+    conf = config()
+    bo = int(best_of or conf["best_of"])
+    tb = conf["tiebreak"] if tiebreak is None else bool(tiebreak)
+    try:
+        ha = max(HOLD_MIN, min(HOLD_MAX, float(hold_a)))
+        hb = max(HOLD_MIN, min(HOLD_MAX, float(hold_b)))
+        prob = match_prob(point_from_hold(ha), point_from_hold(hb), best_of=bo,
+                          tiebreak=tb)
+    except Exception as exc:                                # pragma: no cover
+        logger.warning("tennis_markov: catena esatta non calcolabile (%s)", exc)
+        return {"ok": False, "reason": "catena_non_disponibile", "prob": None}
+    return {"ok": True, "reason": None, "prob": float(prob), "hold_a": ha,
+            "hold_b": hb, "best_of": bo, "engine": "markov_exact"}
+
+
+def set_outcome_distribution(p_a: float, p_b: float, *, server: str = "a",
+                             tiebreak: bool = True,
+                             tiebreak_to: int = DEFAULT_TIEBREAK_TO
+                             ) -> Dict[Tuple[str, int], float]:
+    """Distribuzione congiunta (vincitore del set, game TOTALI) di UN set.
+
+    E' la quantita' che manca alla catena per confrontarsi con il ledger: il
+    referto salva i GAME, non solo il vincitore. Il set si gioca a 6 game con 2
+    di margine, a 7-5, oppure a 7-6 col tie-break (13 game totali: il conteggio
+    dei game di un tie-break e' per definizione 13, non 12+1).
+
+    Con `tiebreak=False` il set puo' durare a oltranza: la distribuzione NON e'
+    calcolata (solleva `ValueError`, dichiarato) — la produzione usa il
+    tie-break, e un numero approssimato qui falserebbe la calibrazione.
+    """
+    if not tiebreak:
+        raise ValueError("distribuzione dei game senza tie-break non supportata")
+    pa = max(0.0, min(1.0, float(p_a)))
+    pb = max(0.0, min(1.0, float(p_b)))
+    memo: Dict[Tuple[int, int, str], Dict[Tuple[str, int], float]] = {}
+
+    def _rec(ga: int, gb: int, srv: str) -> Dict[Tuple[str, int], float]:
+        if ga >= 6 and ga - gb >= 2:
+            return {("a", ga + gb): 1.0}
+        if gb >= 6 and gb - ga >= 2:
+            return {("b", ga + gb): 1.0}
+        if ga == 6 and gb == 6:
+            # Tie-break: chi lo vince vince il set 7-6 = 13 game totali.
+            ptb = tiebreak_prob(pa, pb, target=tiebreak_to)
+            winner = "a" if srv == "a" else "b"
+            loser = "b" if winner == "a" else "a"
+            return {(winner, 13): ptb, (loser, 13): 1.0 - ptb}
+        key = (ga, gb, srv)
+        if key in memo:
+            return memo[key]
+        g = game_prob(pa) if srv == "a" else 1.0 - game_prob(pb)
+        nxt = "b" if srv == "a" else "a"
+        won = _rec(ga + 1, gb, nxt)
+        lost = _rec(ga, gb + 1, nxt)
+        out: Dict[Tuple[str, int], float] = {}
+        for (w, gm), v in won.items():
+            out[(w, gm)] = out.get((w, gm), 0.0) + g * v
+        for (w, gm), v in lost.items():
+            out[(w, gm)] = out.get((w, gm), 0.0) + (1.0 - g) * v
+        memo[key] = out
+        return out
+
+    return _rec(int(0), int(0), server)
+
+
+def expected_total_games(hold_a: float, hold_b: float, *, best_of: Optional[int] = None,
+                         tiebreak: Optional[bool] = None,
+                         first_server: str = "a",
+                         tiebreak_to: Optional[int] = None) -> Dict[str, Any]:
+    """E[game totali] del match dalla coppia di tenute (catena esatta).
+
+    Serve alla VALIDAZIONE sul ledger: il referto delle partite di tennis salva i
+    game, quindi il modello puo' essere confrontato con cio' che e' successo
+    davvero (`ledger_games_stats`), cosa che il solo vincitore non permette.
+    La normalizzazione della distribuzione e' esposta (`total_prob`): se non
+    somma a 1, il numero non e' affidabile e va visto.
+    """
+    conf = config()
+    bo = int(best_of or conf["best_of"])
+    tb = conf["tiebreak"] if tiebreak is None else bool(tiebreak)
+    tbt = int(tiebreak_to or conf["tiebreak_to"])
+    try:
+        ha = max(HOLD_MIN, min(HOLD_MAX, float(hold_a)))
+        hb = max(HOLD_MIN, min(HOLD_MAX, float(hold_b)))
+        p_a = point_from_hold(ha)
+        p_b = point_from_hold(hb)
+        need = (bo + 1) // 2
+        dist: Dict[Tuple[int, int], Dict[int, float]] = {(0, 0): {0: 1.0}}
+        terminal: Dict[int, float] = {}
+        for total_sets in range(0, 2 * need - 1):
+            for sa in range(0, min(need, total_sets) + 1):
+                sb = total_sets - sa
+                if sb > need:
+                    continue
+                cur = dist.get((sa, sb))
+                if not cur:
+                    continue
+                srv = _set_first_server(first_server, sa + sb)
+                sd = set_outcome_distribution(p_a, p_b, server=srv,
+                                              tiebreak=tb, tiebreak_to=tbt)
+                for (winner, games), ps in sd.items():
+                    nsa, nsb = (sa + 1, sb) if winner == "a" else (sa, sb + 1)
+                    bucket = terminal if (nsa >= need or nsb >= need) else dist.setdefault(
+                        (nsa, nsb), {})
+                    for g, pc in cur.items():
+                        bucket[g + games] = bucket.get(g + games, 0.0) + pc * ps
+        total_prob = sum(terminal.values())
+        expected = sum(g * p for g, p in terminal.items())
+    except Exception as exc:
+        logger.warning("tennis_markov: E[game] non calcolabile (%s)", exc)
+        return {"ok": False, "reason": "distribuzione_non_disponibile",
+                "expected_total_games": None}
+    return {"ok": True, "reason": None,
+            "expected_total_games": float(expected),
+            "hold_a": ha, "hold_b": hb, "best_of": bo, "tiebreak": tb,
+            "prob_a": float(match_prob(p_a, p_b, best_of=bo, tiebreak=tb)),
+            "total_prob": float(total_prob),
+            "method": "distribuzione esatta dei game (set + tie-break)"}
+
+
+# ---------------------------------------------------------------------------
+# 5c) VALIDAZIONE SUL LEDGER: i GAME del referto contro la catena
+# ---------------------------------------------------------------------------
+#: Coppie di colonne candidate per i punteggi in `match_results`: lo schema e'
+#: cambiato piu' volte e i nomi sono posizionali in `save_result` — si legge
+#: quali esistono davvero, senza indovinare (una colonna sbagliata darebbe
+#: "0 righe" indistinguibile da "nessun dato", la classe di errore del 20/10).
+_RESULT_SCORE_CANDIDATES = (("score_home", "score_away"),
+                            ("home_score", "away_score"),
+                            ("sh", "sa"), ("gol_home", "gol_away"))
+#: Coppie candidate per i NOMI delle squadre: lo schema di produzione usa
+#: `home_team`/`away_team` mentre altri percorsi del progetto usano `home`/
+#: `away`. Una query nominale su una colonna assente fa fallire TUTTA la
+#: lettura e il motivo dichiarato diventava un generico `lettura_fallita`
+#: (misurato sul container il 16/10/2026: la validazione sui GAME non partiva
+#: pur avendo 200+ risultati di tennis con gli score).
+_RESULT_TEAM_CANDIDATES = (("home_team", "away_team"), ("home", "away"),
+                           ("home_name", "away_name"), ("team_home", "team_away"))
+GAMES_MIN_PLAUSIBLE, GAMES_MAX_PLAUSIBLE = 8, 60
+
+
+def _result_columns(conn) -> Optional[Tuple[str, str]]:
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(match_results)")}
+    except Exception:
+        return None
+    for pair in _RESULT_SCORE_CANDIDATES:
+        if pair[0] in cols and pair[1] in cols:
+            return pair
+    return None
+
+
+#: Alias storico (i test e la prima versione usavano questo nome).
+def _score_columns(conn) -> Optional[Tuple[str, str]]:      # pragma: no cover
+    return _result_columns(conn)
+
+
+def _team_columns(conn) -> Optional[Tuple[str, str]]:
+    """Colonne dei NOMI squadra realmente presenti in `match_results`."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(match_results)")}
+    except Exception:
+        return None
+    for pair in _RESULT_TEAM_CANDIDATES:
+        if pair[0] in cols and pair[1] in cols:
+            return pair
+    return None
+
+
+def ledger_games_stats(rows: Optional[Sequence[Dict[str, Any]]] = None, *,
+                       db: Optional[str] = None, limit: int = 400) -> Dict[str, Any]:
+    """I GAME dei match di tennis nel referto: semantica + campione.
+
+    Con `rows` iniettate la funzione e' OFFLINE (i test). Senza, legge il ledger
+    in SOLA LETTURA. Il referto non salva un esito strutturato per il tennis,
+    quindi la semantica del punteggio va DICHIARATA, non assunta: se i totali
+    non stanno nell'intervallo plausibile di un match (8-60 game) la funzione
+    risponde `semantics="unknown"` e la calibrazione non parte.
+    """
+    out: Dict[str, Any] = {"ok": False, "reason": None, "semantics": None,
+                           "sample": 0, "rows": [], "observed_mean": None,
+                           "observed_median": None, "source": None}
+    data = list(rows or [])
+    if not data:
+        try:
+            import sqlite3
+            from pathlib import Path
+            path = db
+            if path is None:
+                import tracker as _t
+                path = str(getattr(_t, "DB_PATH", ""))
+            if not path or not Path(path).exists():
+                out["reason"] = "ledger_assente"
+                return out
+            conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+            try:
+                cols = _result_columns(conn)
+                if cols is None:
+                    out["reason"] = "colonne_punteggio_assenti"
+                    return out
+                teams = _team_columns(conn)
+                if teams is None:
+                    # Senza i nomi non si costruisce la riga: dichiararlo e'
+                    # meglio che restituire un campione senza intestazione.
+                    out["reason"] = "colonne_squadre_assenti"
+                    return out
+                out["columns"] = {"teams": list(teams), "scores": list(cols)}
+                # Il filtro per LEGA e' obbligatorio: i punteggi del calcio
+                # (0-7) inquinerebbero la semantica "game" in modo invisibile.
+                tennis_where = ("(m.league LIKE '%%ATP%%' OR m.league LIKE '%%WTA%%' "
+                                "OR m.league LIKE '%%Challenger%%' "
+                                "OR m.league LIKE '%%ITF%%' "
+                                "OR m.league LIKE '%%Tennis%%')")
+                rows: List[tuple] = []
+                try:
+                    q = ("SELECT m.%s, m.%s, m.%s, m.%s, MAX(p.prob) "
+                         "FROM match_results m LEFT JOIN predictions p "
+                         "ON p.match_id = m.match_id AND p.prob IS NOT NULL "
+                         "WHERE %s AND m.%s IS NOT NULL AND m.%s IS NOT NULL "
+                         "GROUP BY m.match_id ORDER BY m.rowid DESC LIMIT ?"
+                         % (teams[0], teams[1], cols[0], cols[1], tennis_where,
+                            cols[0], cols[1]))
+                    rows = list(conn.execute(q, (int(limit),)))
+                except Exception as exc:                      # pragma: no cover
+                    logger.debug("tennis_markov: join predictions non "
+                                 "disponibile (%s): leggo i soli punteggi", exc)
+                    # Le parentesi NON sono decorative: senza, l'`AND` lega
+                    # piu' stretto dell'`OR` e il filtro di lega salta (una
+                    # query che sembra giusta e restituisce il campione
+                    # sbagliato).
+                    plain_where = ("(league LIKE '%%ATP%%' "
+                                   "OR league LIKE '%%WTA%%' "
+                                   "OR league LIKE '%%Challenger%%' "
+                                   "OR league LIKE '%%ITF%%' "
+                                   "OR league LIKE '%%Tennis%%')")
+                    q = ("SELECT %s, %s, %s, %s FROM match_results "
+                         "WHERE %s AND %s IS NOT NULL AND %s IS NOT NULL "
+                         "ORDER BY rowid DESC LIMIT ?"
+                         % (teams[0], teams[1], cols[0], cols[1], plain_where,
+                            cols[0], cols[1]))
+                    rows = [(h, a, sh, sa, None)
+                            for h, a, sh, sa in conn.execute(q, (int(limit),))]
+                for home, away, sh, sa, prob in rows:
+                    data.append({"home": home, "away": away,
+                                 "sh": sh, "sa": sa, "league": "",
+                                 "prob": prob})
+            finally:
+                conn.close()
+            out["source"] = "ledger"
+        except Exception as exc:
+            logger.debug("tennis_markov: lettura game dal ledger fallita (%s)", exc)
+            out["reason"] = "lettura_fallita"
+            return out
+    else:
+        out["source"] = "iniettate"
+    out["prob_source"] = ("ledger" if any(r.get("prob") is not None for r in data)
+                          else "neutro_0.5")
+
+    totals: List[int] = []
+    for r in data:
+        try:
+            sh, sa = int(r.get("sh")), int(r.get("sa"))
+        except (TypeError, ValueError):
+            continue
+        if sh < 0 or sa < 0:
+            continue
+        totals.append(sh + sa)
+    out["sample"] = len(totals)
+    if not totals:
+        out["reason"] = "nessun_punteggio_utilizzabile"
+        return out
+    ordered = sorted(totals)
+    mid = len(ordered) // 2
+    median = float(ordered[mid]) if len(ordered) % 2 else \
+        (ordered[mid - 1] + ordered[mid]) / 2.0
+    plausible = sum(1 for t in totals if GAMES_MIN_PLAUSIBLE <= t <= GAMES_MAX_PLAUSIBLE)
+    out.update({"observed_mean": float(sum(totals)) / len(totals),
+                "observed_median": median,
+                "plausible_share": plausible / len(totals),
+                "rows": totals,
+                "ok": True})
+    if out["plausible_share"] < 0.9:
+        out["semantics"] = "unknown"
+        out["reason"] = "punteggi_non_compatibili_con_i_game"
+        out["ok"] = False
+    else:
+        out["semantics"] = "games"
+    return out
+
+
+def _pair_for_base(prob: float, base: float,
+                   spread: Optional[float] = None) -> Tuple[float, float]:
+    """Coppia del fallback a una BASE data — delega a `tennis_quant`."""
+    try:
+        import tennis_quant as tq
+        ha, hb = tq.hold_rates_from_prob(float(prob), base=float(base),
+                                         spread=spread)
+    except Exception as exc:                                  # pragma: no cover
+        logger.debug("tennis_markov: base hold non calcolabile (%s)", exc)
+        ha = hb = float(base)
+    return (max(HOLD_MIN, min(HOLD_MAX, float(ha))),
+            max(HOLD_MIN, min(HOLD_MAX, float(hb))))
+
+
+def predicted_mean_games(probs: Sequence[float], *, base: float,
+                         spread: Optional[float] = None,
+                         best_of: Optional[int] = None,
+                         calibrate: bool = True) -> Dict[str, Any]:
+    """E[game totali] MEDIO previsto dalla catena su un insieme di probabilita'."""
+    probs = [p for p in probs if isinstance(p, (int, float)) and 0.0 < float(p) < 1.0]
+    if not probs:
+        return {"ok": False, "reason": "nessuna_probabilita",
+                "mean_games": None, "sample": 0}
+    conf = config()
+    bo = int(best_of or conf["best_of"])
+    total, used = 0.0, 0
+    for p in probs:
+        ha, hb = _pair_for_base(p, base, spread)
+        if calibrate:
+            cal = calibrate_hold_pair(float(p), mean=(ha + hb) / 2.0,
+                                      best_of=bo)
+            if not cal.get("ok"):
+                continue
+            ha, hb = cal["hold_a"], cal["hold_b"]
+        eg = expected_total_games(ha, hb, best_of=bo)
+        if not eg.get("ok"):
+            continue
+        total += float(eg["expected_total_games"])
+        used += 1
+    if not used:
+        return {"ok": False, "reason": "previsione_non_disponibile",
+                "mean_games": None, "sample": 0}
+    return {"ok": True, "reason": None, "mean_games": total / used,
+            "sample": used, "base": float(base),
+            "best_of": bo, "calibrated": bool(calibrate)}
+
+
+def calibrate_base_hold(*, rows: Optional[Sequence[Dict[str, Any]]] = None,
+                        db: Optional[str] = None,
+                        grid: Optional[Sequence[float]] = None,
+                        spread: Optional[float] = None,
+                        probs: Optional[Sequence[float]] = None,
+                        best_of: Optional[int] = None) -> Dict[str, Any]:
+    """Suggerisce la BASE di tenuta servizio che riproduce i GAME del referto.
+
+    `tennis_quant.BASE_HOLD` (0.80) e' un PRIORE del progetto, mai misurato. Qui
+    diventa una MISURA: sui match di tennis del referto si confronta la media dei
+    game osservati con quella prevista dalla catena a diverse basi e si prende la
+    base che le uguaglia. E' un numero da applicare via env
+    (`TENNIS_QUANT_BASE_HOLD`), non un automatismo: cambio di probabilita' =
+    decisione del proprietario.
+
+    Dichiarato sempre: campione, semantica dei punteggi, monotonia della curva.
+    """
+    stats = ledger_games_stats(rows, db=db)
+    out: Dict[str, Any] = {"ok": False, "reason": None, "semantics": stats.get("semantics"),
+                           "sample": stats.get("sample", 0),
+                           "observed_mean": stats.get("observed_mean"),
+                           "base_current": None, "base_suggested": None,
+                           "predicted_mean_at_current": None,
+                           "curve": [], "monotone": None}
+    if not stats.get("ok") or stats.get("semantics") != "games":
+        out["reason"] = stats.get("reason") or "campione_non_utilizzabile"
+        return out
+    # Probabilita' d'ingresso: dal ledger se disponibili (`predictions.prob`),
+    # altrimenti 0.5 e la cosa e' DICHIARATA (una partita pari merita altri game
+    # di una sbilanciata: usare 0.5 su tutte distorce il livello, non la forma).
+    prob_rows = [r.get("prob") for r in (rows or []) if r.get("prob") is not None]
+    used_probs = probs if probs is not None else prob_rows
+    if used_probs:
+        probs_used = [float(p) for p in used_probs]
+        out["probs_source"] = "ledger"
+    else:
+        probs_used = [0.5] * int(stats["sample"])
+        out["probs_source"] = "neutro_0.5"
+    try:
+        import tennis_quant as tq
+        current = float(tq.BASE_HOLD)
+    except Exception:                                         # pragma: no cover
+        import os as _os
+        current = float(_os.getenv("TENNIS_QUANT_BASE_HOLD", "0.80"))
+    out["base_current"] = current
+    step_grid = list(grid) if grid else list(CALIBRATION_BASE_GRID)
+    if len(probs_used) > CALIBRATION_MAX_ROWS:
+        probs_used = probs_used[:CALIBRATION_MAX_ROWS]
+        out["probs_truncated"] = True
+    curve: List[Dict[str, float]] = []
+    for base in step_grid:
+        pred = predicted_mean_games(probs_used, base=float(base), spread=spread,
+                                    best_of=best_of)
+        if pred.get("ok"):
+            curve.append({"base": float(base), "mean_games": float(pred["mean_games"])})
+    out["curve"] = curve
+    if len(curve) < 3:
+        out["reason"] = "curva_non_calcolabile"
+        return out
+    values = [c["mean_games"] for c in curve]
+    out["monotone"] = all(b >= a for a, b in zip(values, values[1:])) or \
+        all(b <= a for a, b in zip(values, values[1:]))
+    for c in curve:
+        if abs(c["base"] - current) < 1e-9:
+            out["predicted_mean_at_current"] = c["mean_games"]
+    if out["predicted_mean_at_current"] is None:
+        best = min(curve, key=lambda c: abs(c["base"] - current))
+        out["predicted_mean_at_current"] = best["mean_games"]
+    target = float(stats["observed_mean"])
+    chosen: Optional[float] = None
+    for a, b in zip(curve, curve[1:]):
+        lo, hi = sorted((a["mean_games"], b["mean_games"]))
+        if lo <= target <= hi and hi > lo:
+            frac = (target - a["mean_games"]) / (b["mean_games"] - a["mean_games"])
+            chosen = a["base"] + frac * (b["base"] - a["base"])
+            break
+    if chosen is None:
+        nearest = min(curve, key=lambda c: abs(c["mean_games"] - target))
+        chosen = nearest["base"]
+        out["reason"] = "target_fuori_curva"
+    out.update({"ok": True, "base_suggested": float(chosen),
+                "gap_games_at_current": out["predicted_mean_at_current"] - target,
+                "grid": [float(g) for g in step_grid],
+                "method": "catena esatta su E[game] vs media osservata "
+                          "(curva a %d punti, interpolazione lineare)"
+                          % len(step_grid)})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +1233,8 @@ def evaluate(*, prob_a: float, surface: Any = None,
              live: Optional[Dict[str, Any]] = None, server: str = "a",
              best_of: Optional[int] = None,
              hold_a: Optional[float] = None,
-             hold_b: Optional[float] = None) -> Dict[str, Any]:
+             hold_b: Optional[float] = None,
+             calibrate: Optional[bool] = None) -> Dict[str, Any]:
     """Verdetto del motore: probabilita' pre-match, live e (se c'e' un prezzo) EV.
 
     L'EV delega a `tennis_quant.expected_value` (definizione unica del progetto)
@@ -579,7 +1244,7 @@ def evaluate(*, prob_a: float, surface: Any = None,
     conf = config()
     bo = int(best_of or conf["best_of"])
     serves = serve_probabilities(prob_a, surface=surface, hold_a=hold_a,
-                                 hold_b=hold_b)
+                                 hold_b=hold_b, calibrate=calibrate)
     p_pre = match_prob(serves["p_a"], serves["p_b"], best_of=bo,
                        tiebreak=conf["tiebreak"])
     out: Dict[str, Any] = {
@@ -590,8 +1255,21 @@ def evaluate(*, prob_a: float, surface: Any = None,
         "hold_b": serves["hold_b"], "p_point_a": serves["p_a"],
         "p_point_b": serves["p_b"], "prob_input": float(prob_a),
         "deviation_from_input": float(p_pre) - float(prob_a),
+        "calibrated": serves.get("calibrated"),
+        "raw_holds": serves.get("raw_holds"), "raw_prob": serves.get("raw_prob"),
+        "raw_deviation_from_input": (
+            (float(serves["raw_prob"]) - float(prob_a))
+            if serves.get("raw_prob") is not None else None),
+        "calibration": serves.get("calibration"),
+        "expected_total_games": None,
         "live": None, "ev": None,
     }
+    try:
+        eg = expected_total_games(serves["hold_a"], serves["hold_b"], best_of=bo)
+        out["expected_total_games"] = (round(float(eg["expected_total_games"]), 2)
+                                       if eg.get("ok") else None)
+    except Exception as e:                                    # pragma: no cover
+        logger.debug("tennis_markov: E[game] non calcolabile (%s)", e)
     if live is not None:
         out["live"] = live_match_prob(serves["p_a"], serves["p_b"], live,
                                       best_of=bo, server=server,
@@ -610,7 +1288,8 @@ def evaluate(*, prob_a: float, surface: Any = None,
 
 
 def compare_with_poisson(*, prob_a: float, surface: Any = None,
-                         live: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                         live: Optional[Dict[str, Any]] = None,
+                         calibrate: Optional[bool] = None) -> Dict[str, Any]:
     """Confronto DICHIARATO fra il motore Markov e il Poisson di `tennis_quant`.
 
     Serve a misurare quanto i due modelli divergono sulla stessa partita: sono
@@ -630,7 +1309,12 @@ def compare_with_poisson(*, prob_a: float, surface: Any = None,
                     "poisson": float(p_poisson),
                     "diff_pp": 100.0 * (float(p_markov) - float(p_poisson)),
                     "hold_source": serves["hold_source"],
-                    "surface": surface})
+                    "surface": surface,
+                    "calibrated": serves.get("calibrated"),
+                    "raw_prob": serves.get("raw_prob"),
+                    "raw_deviation_pp": (
+                        100.0 * (float(serves["raw_prob"]) - float(prob_a))
+                        if serves.get("raw_prob") is not None else None)})
         if live is not None:
             out["live"] = live_match_prob(serves["p_a"], serves["p_b"], live)
     except Exception as e:
@@ -662,6 +1346,18 @@ def format_report(block: Dict[str, Any]) -> str:
                  % (float(block.get("prob_a") or 0.0),
                     float(block.get("prob_input") or 0.0),
                     float(block.get("deviation_from_input") or 0.0) * 100.0))
+    if block.get("raw_prob") is not None:
+        lines.append("  ponte %s: coppia grezza %s -> %.4f (%+.2fpp), "
+                     "calibrata %.4f %s"
+                     % ("CALIBRATO" if block.get("calibrated") else "GREZZO",
+                        block.get("raw_holds"), float(block["raw_prob"]),
+                        float(block.get("raw_deviation_from_input") or 0.0) * 100.0,
+                        float(block.get("prob_a") or 0.0),
+                        ("(residuo %+.2fpp)" % (100.0 * float(
+                            (block.get("calibration") or {}).get("residual") or 0.0))
+                         if block.get("calibration") else "")))
+    if block.get("expected_total_games") is not None:
+        lines.append("  E[game totali] %.2f" % float(block["expected_total_games"]))
     if block.get("markov") is not None:
         lines.append("  confronto col Poisson: markov %.4f vs poisson %.4f "
                      "(%+.2fpp)"
@@ -682,6 +1378,28 @@ def format_report(block: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_games_report(block: Dict[str, Any]) -> str:
+    """Report dei game del referto (e della base misurata, se presente)."""
+    if not block.get("ok"):
+        return "🎾 GAME dal referto — non disponibile: %s" % (block.get("reason")
+                                                              or "errore")
+    lines = ["🎾 GAME dal referto — %d partite (%s)"
+             % (int(block.get("sample") or 0), block.get("source") or "-")]
+    lines.append("  semantica %s | media %.2f game | mediana %.1f"
+                 % (block.get("semantics"), float(block.get("observed_mean") or 0.0),
+                    float(block.get("observed_median") or 0.0)))
+    if block.get("base_suggested") is not None:
+        lines.append("  BASE_HOLD attuale %.3f (prevede %.2f game) -> "
+                     "suggerita %.3f (scarto %+.2f)"
+                     % (float(block.get("base_current") or 0.0),
+                        float(block.get("predicted_mean_at_current") or 0.0),
+                        float(block["base_suggested"]),
+                        float(block.get("gap_games_at_current") or 0.0)))
+        lines.append("  probabilita' d'ingresso: %s | curva monotona: %s"
+                     % (block.get("probs_source"), block.get("monotone")))
+    return "\n".join(lines)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     as_json = "--json" in args
@@ -692,10 +1410,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return args[i + 1]
         return None
 
+    if "--games" in args or "--calibrate-base" in args:
+        block = (calibrate_base_hold() if "--calibrate-base" in args
+                 else ledger_games_stats())
+        print(json.dumps(block, indent=2, default=str) if as_json
+              else format_games_report(block))
+        return 0 if block.get("ok") else 1
+
     prob = _opt("--prob")
     if prob is None:
         print("uso: tennis_markov.py --prob 0.62 [--surface clay] "
-              "[--price 1.85] [--live '1-0,3-2,30-15'] [--compare] [--json]")
+              "[--price 1.85] [--live '1-0,3-2,30-15'] [--compare] [--json]\n"
+              "     tennis_markov.py --games | --calibrate-base [--json]")
         return 2
     try:
         prob_a = float(prob)

@@ -107,6 +107,7 @@ def _get_conn():
         pinnacle_quota REAL,
         closing_odds REAL,
         closing_source TEXT,
+        betfair_odds REAL,
         PRIMARY KEY (match_id, esito))''')
     clv_cols = [r[1] for r in c.execute("PRAGMA table_info(clv_history)")]
     if "pinnacle_quota" not in clv_cols:
@@ -125,6 +126,13 @@ def _get_conn():
         # `clv_tracker.capture_sx_closing`). Senza la fonte il CLV non e'
         # verificabile: due chiusure di venue diverse non sono confrontabili.
         c.execute("ALTER TABLE clv_history ADD COLUMN closing_source TEXT")
+    if "betfair_odds" not in clv_cols:
+        # SECONDO BENCHMARK (15/10/2026): la closing line di Betfair Exchange
+        # EU catturata a T-0, in una colonna PROPRIA. La fonte e' dichiarata
+        # dal nome della colonna (nessun `source` da ripetere): un valore qui
+        # e' per definizione la chiusura dell'exchange. Serve a chiedersi se
+        # l'edge batte DUE sharp indipendenti e non solo Pinnacle.
+        c.execute("ALTER TABLE clv_history ADD COLUMN betfair_odds REAL")
     c.execute('''CREATE TABLE IF NOT EXISTS cassa (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         data TEXT, partita TEXT, esito TEXT, quota REAL,
@@ -171,10 +179,19 @@ def _get_conn():
         price REAL, stake REAL, mode TEXT, status TEXT, bet_id TEXT,
         esito_finale TEXT, profit REAL,
         created_at TEXT, settled_at TEXT,
+        home TEXT, away TEXT, league TEXT, commence TEXT,
         UNIQUE(match_id, esito))''')
     _bet_cols = [r[1] for r in c.execute("PRAGMA table_info(bets)")]
     if "settled_at" not in _bet_cols:
         c.execute("ALTER TABLE bets ADD COLUMN settled_at TEXT")
+    # Identita' dell'evento SULLA PUNTATA (15/10/2026): la tabella `matches`
+    # viene POTATA dopo 2 giorni (`clear_old_matches`) mentre la puntata resta
+    # per sempre — la closing line e il CLV di una bet vecchia non trovavano
+    # piu' i nomi delle squadre e la misura si fermava al 67% di copertura.
+    # La riga del denaro torna autosufficiente (migrazione idempotente).
+    for _col in BET_EVENT_FIELDS:
+        if _col not in _bet_cols:
+            c.execute("ALTER TABLE bets ADD COLUMN %s TEXT" % _col)
     # Ledger delle DECISIONI (decision/, 14/09/2026): una riga per ogni
     # segnale passato nella catena Signal -> Risk -> Stake, col verdetto e il
     # motivo (machine-readable). E' la base del feedback engine: lega input,
@@ -237,6 +254,15 @@ def _dedupe_normalized_esito(c) -> int:
     return removed
 
 
+# Identita' dell'evento registrata SULLA PUNTATA (15/10/2026).
+# Perche' esiste: la tabella `matches` viene POTATA (`clear_old_matches`, 2
+# giorni) mentre una bet resta nel ledger per sempre; con i nomi squadra solo
+# sulla partita, la closing line di una puntata di una settimana prima non era
+# piu' calcolabile (copertura del CLV ferma al 67%). Unica fonte di verita':
+# CREATE TABLE, migrazione e `save_bet` leggono tutte da qui.
+BET_EVENT_FIELDS = ("home", "away", "league", "commence")
+
+
 def _create_ledger_table(c, table: str) -> None:
     """CREATE TABLE (IF NOT EXISTS) per i ledger con i vincoli UNIQUE.
 
@@ -261,6 +287,7 @@ def _create_ledger_table(c, table: str) -> None:
             price REAL, stake REAL, mode TEXT, status TEXT, bet_id TEXT,
             esito_finale TEXT, profit REAL,
             created_at TEXT, settled_at TEXT,
+            home TEXT, away TEXT, league TEXT, commence TEXT,
             UNIQUE(match_id, esito))''')
 
 
@@ -1158,13 +1185,34 @@ def _ensure_unique_constraints(c) -> None:
                     _create_ledger_table(c, table)
                     cur_cols = [r[1] for r in c.execute(
                         f"PRAGMA table_info({table})").fetchall()]
-                if bk_cols and bk_cols == cur_cols:
-                    bkl = ", ".join(bk_cols)
-                    c.execute(f"INSERT OR IGNORE INTO {table} ({bkl}) "
-                              f"SELECT {bkl} FROM {table}_old")
+                # CONTENIMENTO, non uguaglianza (16/10/2026).
+                # Prima si pretendeva `bk_cols == cur_cols`: bastava che la
+                # tabella nuova avesse UNA colonna in piu' perche' il recupero
+                # saltasse IN SILENZIO e le righe restassero in `_old` per
+                # sempre. Misurato: l'aggiunta delle quattro colonne di
+                # identita' evento a `bets` (`home`/`away`/`league`/`commence`)
+                # faceva fallire proprio il recupero della migrazione che stava
+                # girando — `test_migrazione_recupera_backup_interrotto` e'
+                # diventato rosso e ha colto la regressione.
+                # Regola: si recupera cio' che il backup CONTIENE. Se il
+                # backup ha una colonna che la tabella nuova non ha piu', il
+                # backup NON si distrugge (le righe restano li' e il motivo e'
+                # dichiarato): "mai perdere dati" vale piu' di un recupero
+                # completo.
+                bk_set, cur_set = set(bk_cols), set(cur_cols)
+                if bk_set and bk_set <= cur_set:
+                    shared = ", ".join(c for c in cur_cols if c in bk_set)
+                    c.execute(f"INSERT OR IGNORE INTO {table} ({shared}) "
+                              f"SELECT {shared} FROM {table}_old")
                     c.execute(f"DROP TABLE {table}_old")
                     logger.warning("tracker: recuperate righe da %s_old "
                                    "(migrazione precedente interrotta)", table)
+                elif bk_set:
+                    logger.warning(
+                        "tracker: recupero %s_old NON eseguito: il backup ha "
+                        "colonne assenti nella tabella nuova (%s). Backup "
+                        "CONSERVATO, nessun dato toccato.", table,
+                        ", ".join(sorted(bk_set - cur_set)))
             except sqlite3.OperationalError as e:
                 logger.warning("tracker: recupero %s_old rimandato: %s", table, e)
 
@@ -2038,24 +2086,36 @@ def predictions_summary(mercato=None, settled_since=None, statuses=None, *,
 
 # --- Puntate automatiche (auto_bet.py) ---
 def save_bet(match_id, mercato, esito, market_id=None, selection_id=None,
-             price=0.0, stake=0.0, mode="dry-run", status=None, bet_id=None):
+             price=0.0, stake=0.0, mode="dry-run", status=None, bet_id=None,
+             home=None, away=None, league=None, commence=None):
     """Registra (o aggiorna, se non chiusa) una puntata automatica.
 
     UNIQUE(match_id, esito): una sola puntata per esito anche se il job
     viene rilanciato; la puntata gia' saldata non viene toccata.
+
+    `home`/`away`/`league`/`commence` (15/10/2026) rendono la RIGA AUTOSUFFICIENTE:
+    la tabella `matches` viene potata dopo due giorni e senza questi campi la
+    closing line di una bet vecchia non era piu' calcolabile. Un salvataggio che
+    NON li passa non cancella quelli gia' registrati (COALESCE + NULLIF).
     """
     now = datetime.now().isoformat()
     conn = _get_conn(); c = conn.cursor()
     c.execute('''INSERT INTO bets (match_id, mercato, esito, market_id, selection_id,
-                                    price, stake, mode, status, bet_id, created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                    price, stake, mode, status, bet_id, created_at,
+                                    home, away, league, commence)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(match_id, esito) DO UPDATE SET
                    market_id=excluded.market_id, selection_id=excluded.selection_id,
                    price=excluded.price, stake=excluded.stake, mode=excluded.mode,
-                   status=excluded.status, bet_id=excluded.bet_id
+                   status=excluded.status, bet_id=excluded.bet_id,
+                   home=COALESCE(NULLIF(excluded.home,''), bets.home),
+                   away=COALESCE(NULLIF(excluded.away,''), bets.away),
+                   league=COALESCE(NULLIF(excluded.league,''), bets.league),
+                   commence=COALESCE(NULLIF(excluded.commence,''), bets.commence)
                  WHERE esito_finale IS NULL''',
               (match_id, mercato, esito, market_id, selection_id,
-               float(price), float(stake), mode, status, bet_id, now))
+               float(price), float(stake), mode, status, bet_id, now,
+               home, away, league, commence))
     conn.commit(); conn.close()
 
 
@@ -2477,7 +2537,7 @@ def mark_notified(match_id, date_str):
     conn.commit(); conn.close()
 
 def save_clv(match_id, esito, quota, signal_started=False, pinnacle_quota=None,
-             closing_odds=None, closing_source=None):
+             closing_odds=None, closing_source=None, betfair_odds=None):
     """Registra un campione CLV per una coppia match+esito.
 
     - Prima analisi del match (signal_started=True): la quota corrente diventa la
@@ -2493,21 +2553,27 @@ def save_clv(match_id, esito, quota, signal_started=False, pinnacle_quota=None,
       (`pinnacle_t0` da `closing_line`, `sx` da `clv_tracker.capture_sx_closing`).
       Senza la fonte il CLV non e' verificabile: chiusure di venue diverse non
       si confrontano fra loro.
+    - betfair_odds (opz., 15/10/2026): closing line del SECONDO benchmark
+      (Betfair Exchange EU) catturata nello stesso passaggio di `closing_line`.
+      La fonte e' dichiarata dal nome della colonna: un valore qui e' per
+      definizione la chiusura dell'exchange.
     """
     conn = _get_conn(); c = conn.cursor()
     now = datetime.now().isoformat()
     pin = pinnacle_quota if pinnacle_quota and pinnacle_quota > 0 else None
     close = closing_odds if closing_odds and closing_odds > 0 else None
     src = str(closing_source).strip() if closing_source else None
+    bf = betfair_odds if betfair_odds and betfair_odds > 0 else None
     c.execute("SELECT signal_quota, closing_quota, pinnacle_quota, closing_odds "
               "FROM clv_history WHERE match_id=? AND esito=?", (match_id, esito))
     row = c.fetchone()
     if row is None or signal_started:
         c.execute("INSERT OR REPLACE INTO clv_history "
                   "(match_id, esito, signal_quota, closing_quota, "
-                  " pinnacle_quota, closing_odds, closing_source, updated_at) "
-                  "VALUES (?,?,?,?,?,?,?,?)",
-                  (match_id, esito, quota, quota, pin, close, src, now))
+                  " pinnacle_quota, closing_odds, closing_source, "
+                  " betfair_odds, updated_at) "
+                  "VALUES (?,?,?,?,?,?,?,?,?)",
+                  (match_id, esito, quota, quota, pin, close, src, bf, now))
     else:
         # COALESCE sui valori opzionali: una scrittura senza `closing_odds`
         # NON cancella quella gia' catturata a T-0 (la routine gira una volta
@@ -2515,9 +2581,10 @@ def save_clv(match_id, esito, quota, signal_started=False, pinnacle_quota=None,
         c.execute("UPDATE clv_history SET closing_quota=?, updated_at=?, "
                   "pinnacle_quota=COALESCE(?, pinnacle_quota), "
                   "closing_odds=COALESCE(?, closing_odds), "
-                  "closing_source=COALESCE(?, closing_source) "
+                  "closing_source=COALESCE(?, closing_source), "
+                  "betfair_odds=COALESCE(?, betfair_odds) "
                   "WHERE match_id=? AND esito=?",
-                  (quota, now, pin, close, src, match_id, esito))
+                  (quota, now, pin, close, src, bf, match_id, esito))
     conn.commit(); conn.close()
 
 def clear_old_matches():

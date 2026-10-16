@@ -405,17 +405,39 @@ class TestServe:
             return 0.78, 0.74
 
         monkeypatch.setattr(tq, "hold_rates_from_prob", _fake)
-        got = tm.serve_probabilities(0.62, surface="hard")
+        got = tm.serve_probabilities(0.62, surface="hard", calibrate=False)
         assert seen["prob"] == 0.62
         assert got["hold_source"] == "prior_surface"
         assert got["hold_a"] == pytest.approx(0.78)
+        assert got["calibrated"] is False
+        # Con la calibrazione (DEFAULT) la coppia arriva dal fallback ma viene
+        # RISOLTA per riprodurre l'ingresso: `hold_a` non e' piu' il valore grezzo.
+        from tennis_quant import hold_rates_from_prob as _h
+        cal = tm.serve_probabilities(0.62, surface="hard")
+        raw_a, raw_b = _h(0.62)
+        assert cal["calibrated"] is True
+        assert cal["raw_holds"] == pytest.approx([raw_a, raw_b])
+        assert cal["hold_a"] != pytest.approx(0.78)
 
     def test_delta_superficie_applicato_al_fallback(self, monkeypatch):
         import tennis_quant as tq
         monkeypatch.setattr(tq, "hold_rates_from_prob", lambda p: (0.78, 0.78))
-        clay = tm.serve_probabilities(0.62, surface="clay")
-        grass = tm.serve_probabilities(0.62, surface="grass")
+        clay = tm.serve_probabilities(0.62, surface="clay", calibrate=False)
+        grass = tm.serve_probabilities(0.62, surface="grass", calibrate=False)
         assert clay["hold_a"] < 0.78 < grass["hold_a"]
+        # Con la calibrazione il delta NON trasforma il numero finale (viene
+        # riassorbito: l'obiettivo e' riprodurre l'ingresso) — l'effetto si legge
+        # in punti di probabilita'. Senza questo campo il delta sparirebbe in
+        # silenzio e passare `surface=` sembrerebbe non fare nulla.
+        clay_c = tm.serve_probabilities(0.62, surface="clay")
+        grass_c = tm.serve_probabilities(0.62, surface="grass")
+        assert clay_c["surface_offset_pp"] < 0.0 < grass_c["surface_offset_pp"]
+        assert clay_c["calibrated"] and grass_c["calibrated"]
+        f = tm.config()
+        assert tm.match_prob(clay_c["p_a"], clay_c["p_b"],
+                             best_of=f["best_of"]) == pytest.approx(0.62, abs=1e-6)
+        assert tm.match_prob(grass_c["p_a"], grass_c["p_b"],
+                             best_of=f["best_of"]) == pytest.approx(0.62, abs=1e-6)
 
     def test_hold_espliciti_non_vengono_corretti(self):
         """Un dato MISURATO non si corregge con un priore di superficie."""
@@ -435,9 +457,14 @@ class TestServe:
             return real_import(name, *a, **k)
 
         monkeypatch.setattr(builtins, "__import__", _fake_import)
-        got = tm.serve_probabilities(0.62, surface="hard")
+        got = tm.serve_probabilities(0.62, surface="hard", calibrate=False)
         assert 0.0 < got["p_a"] < 1.0
         assert got["hold_a"] == pytest.approx(0.80)
+        # ...e anche senza `tennis_quant` la calibrazione resta esatta: la media
+        # del fallback (0.80) e' un punto di partenza, non la risposta.
+        cal = tm.serve_probabilities(0.62, surface="hard")
+        assert cal["calibrated"] is True
+        assert cal["hold_a"] == pytest.approx(0.822, abs=2e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -568,3 +595,270 @@ class TestTripwire:
                              capture_output=True, text=True, timeout=120)
         assert out.returncode == 0, out.stderr
         assert out.stdout.strip() == "False"
+
+
+# ---------------------------------------------------------------------------
+# PONTE CALIBRATO (15/10/2026): il ponte derivato e' un CAMBIO DI VARIABILE
+# ---------------------------------------------------------------------------
+class TestPonteCalibrato:
+    GRID = (0.10, 0.25, 0.38, 0.50, 0.55, 0.62, 0.70, 0.75, 0.82, 0.90)
+
+    def test_riproduce_la_probabilita_di_ingresso(self):
+        """La catena applicata alla coppia calibrata riproduce l'ingresso.
+
+        E' l'intero scopo della calibrazione: se questo test cade, il ponte e'
+        tornato a essere una SECONDA STIMA (con un artefatto dentro) invece di un
+        cambio di variabile.
+        """
+        conf = tm.config()
+        for p in self.GRID:
+            cal = tm.calibrate_hold_pair(p)
+            assert cal["ok"] is True, p
+            assert cal["residual"] == pytest.approx(0.0, abs=1e-6), p
+            prob = tm.match_prob(tm.point_from_hold(cal["hold_a"]),
+                                 tm.point_from_hold(cal["hold_b"]),
+                                 best_of=conf["best_of"], tiebreak=conf["tiebreak"])
+            assert prob == pytest.approx(p, abs=1e-6), p
+
+    def test_coppia_dentro_il_box_e_ordinata(self):
+        for p in self.GRID:
+            cal = tm.calibrate_hold_pair(p)
+            assert tm.HOLD_MIN <= min(cal["hold_a"], cal["hold_b"])
+            assert max(cal["hold_a"], cal["hold_b"]) <= tm.HOLD_MAX
+            # chi e' favorito tiene di piu': il verso del differenziale segue la
+            # probabilita' (a p < 0.5 il favorito e' B, e la coppia si inverte).
+            if p > 0.5:
+                assert cal["dnet"] > 0.0 and cal["hold_a"] > cal["hold_b"]
+            elif p < 0.5:
+                assert cal["dnet"] < 0.0 and cal["hold_a"] < cal["hold_b"]
+            else:
+                assert cal["dnet"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_differenziale_monotono_nella_probabilita(self):
+        dns = [tm.calibrate_hold_pair(p)["dnet"] for p in self.GRID]
+        assert dns == sorted(dns)
+
+    def test_media_rispettata(self):
+        """La MEDIA (il livello) viene dal fallback, non si inventa: si risolve
+        solo il differenziale."""
+        for mean in (0.70, 0.80, 0.86):
+            cal = tm.calibrate_hold_pair(0.62, mean=mean)
+            assert cal["mean"] == pytest.approx(mean)
+            assert (cal["hold_a"] + cal["hold_b"]) / 2.0 == pytest.approx(mean, abs=1e-9)
+
+    def test_la_catena_e_monotona_in_dnet(self):
+        """Proprieta' su cui si fonda il risolutore (scansione + bisezione)."""
+        prev = -1.0
+        for step in range(41):
+            dn = -0.75 + 1.5 * step / 40.0
+            p, _ha, _hb = tm._chain_at_dnet(0.80, dn, best_of=3, tiebreak=True)
+            assert p >= prev - 1e-12, dn
+            prev = p
+
+    def test_artefatto_rimosso_di_un_ordine_di_grandezza(self):
+        """Il ponte GREZZO sbagliava di parecchi punti; quello calibrato no.
+
+        Caso reale misurato il 15/10: input 0.75 con superficie clay -> la catena
+        restituiva 0.636 (-11.4pp). Il residuo calibrato e' a livello macchina.
+        """
+        raw = tm.evaluate(prob_a=0.75, surface="clay", calibrate=False)
+        cal = tm.evaluate(prob_a=0.75, surface="clay")
+        assert raw["raw_deviation_from_input"] == pytest.approx(-0.114, abs=0.03)
+        assert cal["deviation_from_input"] == pytest.approx(0.0, abs=1e-6)
+        assert cal["calibration"]["residual"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_superficie_non_sparisce_in_silenzio(self):
+        """Con la calibrazione il delta non trasforma il numero: si LEGGE."""
+        grass = tm.surface_prob_offset(0.62, "grass")
+        clay = tm.surface_prob_offset(0.62, "clay")
+        hard = tm.surface_prob_offset(0.62, "hard")
+        assert grass["offset_pp"] > 0.0
+        assert clay["offset_pp"] < 0.0
+        assert hard["offset_pp"] == pytest.approx(0.0, abs=1e-9)
+        assert grass["offset_pp"] - hard["offset_pp"] == pytest.approx(
+            100.0 * (grass["prob_delta"] - grass["prob_neutral"]), abs=1e-9)
+
+    def test_coppia_misurata_non_si_calibra(self):
+        """Un dato da stat provider e' informazione, non una derivazione."""
+        got = tm.serve_probabilities(0.62, hold_a=0.85, hold_b=0.70)
+        assert got["calibrated"] is False
+        assert got["hold_a"] == 0.85 and got["hold_b"] == 0.70
+        assert got["hold_source"] == "provided"
+        assert got["calibration"] is None
+
+    def test_interruttore_e_default(self, monkeypatch):
+        assert tm.calibrate_default() is True
+        default = tm.serve_probabilities(0.62)
+        assert default["calibrated"] is True
+        monkeypatch.setenv("TENNIS_MARKOV_CALIBRATE", "0")
+        assert tm.calibrate_default() is False
+        assert tm.serve_probabilities(0.62)["calibrated"] is False
+        # l'argomento vince sull'env, in entrambe le direzioni
+        monkeypatch.setenv("TENNIS_MARKOV_CALIBRATE", "1")
+        assert tm.serve_probabilities(0.62, calibrate=False)["calibrated"] is False
+
+    def test_tolleranza_a_input_impossibili(self):
+        for bad in (0.0, 1.0, -0.3, 2.0, None, "x"):
+            cal = tm.calibrate_hold_pair(bad)
+            assert cal["ok"] is False and cal["reason"]
+
+    def test_bounded_fuori_dal_box(self):
+        """Un obiettivo estremo non e' raggiungibile: si dichiara, non si finge."""
+        cal = tm.calibrate_hold_pair(0.999, mean=0.80)
+        assert cal["ok"] is True
+        assert cal["bounded"] is True
+        assert abs(cal["residual"]) > 1e-3        # il residuo e' ESPOSTO
+        assert cal["prob"] <= 0.999
+
+    def test_cache_restituisce_una_copia(self):
+        tm._CAL_CACHE.clear()
+        first = tm.calibrate_hold_pair(0.62)
+        first["hold_a"] = -999.0                     # non deve inquinare la cache
+        again = tm.calibrate_hold_pair(0.62)
+        assert again["hold_a"] != -999.0
+        assert again["ok"] is True
+
+    def test_fail_safe_se_tennis_quant_e_rotto(self, monkeypatch):
+        import tennis_quant as tq
+        monkeypatch.setattr(tq, "hold_rates_from_prob",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+        tm._CAL_CACHE.clear()
+        cal = tm.calibrate_hold_pair(0.62)
+        assert cal["ok"] is True
+        assert cal["residual"] == pytest.approx(0.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# GRANDEZZE A LIVELLO DI GAME + validazione sul ledger
+# ---------------------------------------------------------------------------
+class TestGameEsatti:
+    def test_distribuzione_del_set_normalizzata(self):
+        dist = tm.set_outcome_distribution(0.62, 0.61, server="a")
+        assert sum(dist.values()) == pytest.approx(1.0, abs=1e-9)
+        for (winner, games), p in dist.items():
+            assert winner in ("a", "b") and p >= 0.0
+            assert games >= 6                      # nessun set si chiude sotto 6-4
+
+    def test_tiebreak_vale_tredici_game(self):
+        """A 6-6 il set finisce 7-6: 13 game, non 12."""
+        dist = tm.set_outcome_distribution(0.62, 0.61, server="a")
+        # la massa sul 7-6 esiste ed e' positiva (nessuna approssimazione a meta')
+        winner_prob = sum(p for (_w, _g), p in dist.items())
+        assert winner_prob == pytest.approx(1.0, abs=1e-9)
+        assert any(g == 13 for (_w, g) in dist)
+
+    def test_probabilita_di_set_parita_col_motore(self):
+        p_set = tm.set_prob(0.62, 0.61, server="a")
+        dist = tm.set_outcome_distribution(0.62, 0.61, server="a")
+        assert sum(p for (w, _g), p in dist.items() if w == "a") == \
+            pytest.approx(p_set, abs=1e-9)
+
+    def test_simmetria(self):
+        """Stesse tenute -> 0.5 e distribuzione normale."""
+        eg = tm.expected_total_games(0.80, 0.80)
+        assert eg["ok"] is True
+        assert eg["prob_a"] == pytest.approx(0.5, abs=1e-9)
+        assert eg["total_prob"] == pytest.approx(1.0, abs=1e-9)
+        assert eg["expected_total_games"] > 18.0
+
+    def test_piu_game_con_tenute_alte(self):
+        low = tm.expected_total_games(0.70, 0.70)
+        high = tm.expected_total_games(0.88, 0.88)
+        assert high["expected_total_games"] > low["expected_total_games"]
+
+    def test_best_of_5_ha_piu_game(self):
+        tre = tm.expected_total_games(0.80, 0.78, best_of=3)
+        cinque = tm.expected_total_games(0.80, 0.78, best_of=5)
+        assert cinque["expected_total_games"] > tre["expected_total_games"]
+
+    def test_senza_tiebreak_dichiarato_non_supportato(self):
+        with pytest.raises(ValueError):
+            tm.set_outcome_distribution(0.62, 0.61, tiebreak=False)
+        eg = tm.expected_total_games(0.80, 0.78, tiebreak=False)
+        assert eg["ok"] is False and eg["reason"]
+
+    def test_report_riporta_i_game_attesi(self):
+        block = tm.evaluate(prob_a=0.62)
+        assert block["expected_total_games"] is not None
+        assert "E[game totali]" in tm.format_report(block)
+
+
+class TestValidazioneSulLedger:
+    TENNIS_ROWS = [{"sh": 8, "sa": 12, "prob": 0.45},
+                   {"sh": 13, "sa": 11, "prob": 0.55},
+                   {"sh": 6, "sa": 13, "prob": 0.60},
+                   {"sh": 12, "sa": 10, "prob": 0.50}]
+    CALCIO_ROWS = [{"sh": 1, "sa": 2, "prob": 0.5},
+                   {"sh": 0, "sa": 0, "prob": 0.5},
+                   {"sh": 3, "sa": 1, "prob": 0.5}]
+
+    def test_semantica_game_riconosciuta(self):
+        stats = tm.ledger_games_stats(self.TENNIS_ROWS)
+        assert stats["ok"] is True
+        assert stats["semantics"] == "games"
+        assert stats["sample"] == 4
+        assert stats["observed_mean"] == pytest.approx(
+            (20 + 24 + 19 + 22) / 4.0)
+        assert stats["prob_source"] == "ledger"
+
+    def test_punteggi_da_calcio_rifiutati(self):
+        """0-7 gol non sono game: senza questo controllo la calibrazione
+        imparerebbe da un campione sbagliato in modo INVISIBILE."""
+        stats = tm.ledger_games_stats(self.CALCIO_ROWS)
+        assert stats["ok"] is False
+        assert stats["semantics"] == "unknown"
+        assert stats["reason"] == "punteggi_non_compatibili_con_i_game"
+
+    def test_campione_vuoto_o_illeggibile(self):
+        assert tm.ledger_games_stats([])["ok"] is False
+        assert tm.ledger_games_stats([{"sh": None, "sa": "x"}])["reason"] == \
+            "nessun_punteggio_utilizzabile"
+
+    def test_ledger_assente_non_solleva(self, tmp_path):
+        stats = tm.ledger_games_stats(db=str(tmp_path / "nope.db"))
+        assert stats["ok"] is False and stats["reason"] == "ledger_assente"
+
+    def test_previsione_media_monotona_nella_base(self):
+        probs = [0.45, 0.5, 0.55, 0.6]
+        low = tm.predicted_mean_games(probs, base=0.65)
+        high = tm.predicted_mean_games(probs, base=0.88)
+        assert low["ok"] and high["ok"]
+        assert high["mean_games"] > low["mean_games"]
+
+    def test_base_suggerita_dai_game_osservati(self):
+        cal = tm.calibrate_base_hold(rows=self.TENNIS_ROWS,
+                                     grid=(0.60, 0.70, 0.80, 0.90))
+        assert cal["ok"] is True
+        assert cal["semantics"] == "games"
+        assert cal["base_current"] is not None
+        assert cal["base_suggested"] is not None
+        assert cal["monotone"] is True
+        assert cal["probs_source"] == "ledger"
+        assert "E[game]" in cal["method"]
+
+    def test_base_alta_se_i_game_osservati_sono_tanti(self):
+        """Con tanti game servono tenute alte: la misura deve MUOVERSI."""
+        tanti = [{"sh": 20, "sa": 18, "prob": 0.5} for _ in range(4)]
+        pochi = [{"sh": 8, "sa": 6, "prob": 0.5} for _ in range(4)]
+        grid = (0.60, 0.70, 0.75, 0.80, 0.85, 0.90)
+        a = tm.calibrate_base_hold(rows=tanti, grid=grid)
+        b = tm.calibrate_base_hold(rows=pochi, grid=grid)
+        assert a["base_suggested"] > b["base_suggested"]
+
+    def test_su_calcio_non_calibra(self):
+        cal = tm.calibrate_base_hold(rows=self.CALCIO_ROWS)
+        assert cal["ok"] is False
+        assert cal["reason"] == "punteggi_non_compatibili_con_i_game"
+        assert cal["base_suggested"] is None
+
+    def test_report_e_cli(self, capsys):
+        text = tm.format_games_report(
+            tm.ledger_games_stats(self.TENNIS_ROWS))
+        assert "GAME dal referto" in text and "media" in text
+        assert "non disponibile" in tm.format_games_report(
+            {"ok": False, "reason": "x"})
+        assert tm.main(["--games", "--json"]) in (0, 1)
+        capsys.readouterr()
+        assert tm.main(["--calibrate-base", "--json"]) in (0, 1)
+        capsys.readouterr()
+        assert tm.main([]) == 2

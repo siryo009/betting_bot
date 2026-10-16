@@ -322,6 +322,13 @@ export default defineRailway(() => {
       CLOSING_LINE_PRE_MIN: preserve(),
       CLOSING_LINE_POST_MIN: preserve(),
       CLOSING_LINE_MAX_ROWS: preserve(),
+      // Harness ML (15/10/2026, `ml_harness.py`): walk-forward cronologico che
+      // confronta boosting/logistica/prior sulle feature storiche di
+      // `match_features`. Sola misura (zero ordini, zero crediti): queste env
+      // esistono perche' un `config apply` non deve distruggere la taratura.
+      MLH_FOLDS: preserve(),
+      MLH_MIN_TRAIN: preserve(),
+      MLH_SEED: preserve(),
       // Oracolo top-down (25/09/2026): `PINNACLE_CONSENSUS=0` (03/10/2026)
       // usa la SOLA Pinnacle de-vigata con Shin — Betfair e Matchbook fuori,
       // per togliere lag e rumore dal confronto. `TOP_DOWN_BYPASS` resta 0: il

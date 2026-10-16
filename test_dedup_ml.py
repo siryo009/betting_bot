@@ -188,6 +188,63 @@ def test_migrazione_recupera_backup_interrotto(monkeypatch, tmp_path):
     conn.close()
 
 
+def test_recupero_con_colonne_nuove_in_piu(monkeypatch, tmp_path):
+    """REGRESSIONE 16/10/2026: il backup ha MENO colonne della tabella nuova.
+
+    Il recupero pretendeva elenchi di colonne IDENTICI: bastava che la tabella
+    nuova avesse una colonna in piu' (qui le quattro di identita' evento
+    aggiunte a `bets`: `home`/`away`/`league`/`commence`) perche' il recupero
+    saltasse IN SILENZIO e le righe restassero in `_old` per sempre. E' il
+    caso che si presenta a OGNI cambio di schema con un backup pendente.
+    """
+    db = tmp_path / "legacy.db"
+    _legacy_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE predictions")
+    conn.execute("ALTER TABLE bets RENAME TO bets_old")
+    conn.execute("INSERT INTO bets_old (match_id, mercato, esito, price, stake) "
+                 "VALUES ('mY','1X2','1',2.0,5.0)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(tracker, "DB_PATH", db)
+    tracker.init_db()
+
+    conn = sqlite3.connect(db)
+    bets = conn.execute("SELECT match_id, home, league FROM bets").fetchall()
+    assert ("mY", None, None) in bets          # riga recuperata, colonne nuove vuote
+    names = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    assert "bets_old" not in names
+    conn.close()
+
+
+def test_backup_con_colonna_sparita_non_si_distrugge(monkeypatch, tmp_path,
+                                                     caplog):
+    """Controprova della stessa regola: se il backup ha una colonna che la
+    tabella nuova NON ha piu', il backup si CONSERVA (nessun dato toccato) e il
+    motivo e' dichiarato. Prima l'alternativa era distruggere in silenzio."""
+    db = tmp_path / "legacy.db"
+    _legacy_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE bets RENAME TO bets_old")
+    conn.execute("ALTER TABLE bets_old ADD COLUMN colonna_morta TEXT")
+    conn.execute("INSERT INTO bets_old (match_id, mercato, esito, price, stake, "
+                 "colonna_morta) VALUES ('mZ','1X2','1',2.0,5.0,'x')")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(tracker, "DB_PATH", db)
+    with caplog.at_level("WARNING"):
+        tracker.init_db()
+
+    conn = sqlite3.connect(db)
+    names = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    assert "bets_old" in names                 # backup CONSERVATO
+    assert conn.execute("SELECT match_id FROM bets_old").fetchall() == [("mZ",)]
+    conn.close()
+    assert any("colonne assenti" in r.message for r in caplog.records)
+
+
 def test_save_bet_nessun_duplicato_su_rerun(temp_db):
     """Doppio inserimento identico: una sola riga (ON CONFLICT aggiorna)."""
     from datetime import datetime, timedelta, timezone

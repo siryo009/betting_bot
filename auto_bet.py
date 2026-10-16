@@ -1299,7 +1299,8 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
                 save_bet(match_id=mid, mercato="1X2", esito=esito,
                          price=float(price or 0), stake=0.0,
                          mode="rejected-t60",
-                         status="PAYLOAD_REJECTED: " + " | ".join(errors))
+                         status="PAYLOAD_REJECTED: " + " | ".join(errors),
+                         **event_identity(pick))
             except Exception as e:
                 logger.warning("auto_bet: riga rifiuto T60 %s: %s", mid, e)
             continue
@@ -1342,7 +1343,7 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
                      selection_id=filled["selection_id"],
                      price=record["price"], stake=record["stake"],
                      mode="live", status=record["status"],
-                     bet_id=filled.get("bet_id"))
+                     bet_id=filled.get("bet_id"), **event_identity(pick))
         except Exception as e:
             logger.warning("auto_bet: salvataggio T60 live %s: %s", mid, e)
     if placed:
@@ -4215,6 +4216,26 @@ def _resting_place(prov, pick: dict, stake: float, price: float,
     return None
 
 
+def event_identity(pick: dict) -> dict:
+    """Identita' dell'evento per la riga `bets` (15/10/2026).
+
+    La tabella `matches` viene POTATA dopo due giorni (`clear_old_matches`)
+    mentre una puntata resta per sempre: senza home/away/league/commence
+    SULLA riga del denaro, la closing line di una bet vecchia non era piu'
+    calcolabile (copertura del CLV ferma al 67%).
+
+    UNICO punto di estrazione: i quattro campi si leggono dal PICK, cosi'
+    tutte le corsie (1X2, multi-mercato, tennis, gridiron, eSports) scrivono
+    gli stessi valori senza riscriverli a mano.
+    """
+    return {
+        "home": pick.get("home") or "",
+        "away": pick.get("away") or "",
+        "league": pick.get("league") or "",
+        "commence": pick.get("commence") or "",
+    }
+
+
 def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
     """Piazza un ordine REALE per il segnale e ritorna l'esito.
 
@@ -5354,7 +5375,7 @@ def run_today_bets(stake_eur: float | None = None,
                          price=matched_price, stake=matched_stake,
                          mode="live",
                          status=filled.get("status") or "FILLED_UNCONFIRMED",
-                         bet_id=filled.get("bet_id"))
+                         bet_id=filled.get("bet_id"), **event_identity(cand))
             except Exception as e:
                 logger.warning("auto_bet: salvataggio live %s: %s",
                                cand["match_id"], e)
@@ -5367,7 +5388,8 @@ def run_today_bets(stake_eur: float | None = None,
         try:
             save_bet(match_id=cand["match_id"], mercato=cand["mercato"],
                      esito=cand["esito_key"], market_id=None, selection_id=None,
-                     price=price, stake=pick_stake, mode="sim", status="SUCCESS")
+                     price=price, stake=pick_stake, mode="sim", status="SUCCESS",
+                     **event_identity(cand))
         except Exception as e:
             logger.warning("auto_bet: salvataggio sim %s: %s", cand["match_id"], e)
 

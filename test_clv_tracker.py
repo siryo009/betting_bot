@@ -598,3 +598,382 @@ class TestIaC:
         missing = {n for n in read if n.startswith(("CLV_",))
                    and f"{n}: preserve()" not in iac}
         assert not missing, missing
+
+
+# ---------------------------------------------------------------------------
+# 5. COPERTURA: l'identita' dell'evento vive SULLA RIGA DEL DENARO (15/10/2026)
+# ---------------------------------------------------------------------------
+# Difetto misurato in produzione: la tabella `matches` viene POTATA
+# (`clear_old_matches`, 2 giorni) mentre una puntata resta nel ledger per
+# sempre. La closing line di una bet di una settimana prima non aveva piu' i
+# nomi delle squadre -> il campione diventava "no_closing" e la copertura del
+# CLV si fermava al 67%. I test qui sotto difendono il fix: la riga della
+# puntata e' AUTOSUFFICIENTE, e il ripiego sulla partita resta per le righe
+# storiche.
+
+class TestIdentitaSullaRigaDelDenaro:
+
+    def _prune_match(self, match_id):
+        """Simula la potatura di `matches` (cio' che fa `clear_old_matches`)."""
+        conn = tracker._get_conn()
+        conn.execute("DELETE FROM matches WHERE id = ?", (match_id,))
+        conn.commit()
+        conn.close()
+
+    def test_bet_sopravvive_alla_potatura_della_partita(self, temp_db):
+        """SENZA il fix: riga `matches` cancellata -> campione perso."""
+        tracker.save_bet(match_id="sx-vecchia", mercato="1X2", esito="1",
+                         market_id="0xm", price=2.10, stake=2.0, mode="live",
+                         status="FULLY_FILLED", bet_id="0xb",
+                         home="Osasuna", away="Getafe", league="La Liga",
+                         commence="2026-10-05T19:00:00+00:00")
+        _set_closing("sx-vecchia", "1", 2.10, 1.95)
+        self._prune_match("sx-vecchia")
+        bundle = ct.collect()
+        assert bundle["totals"]["trades"] == 1
+        assert len(bundle["samples"]) == 1          # il campione NON si perde
+        assert bundle["excluded"] == {}
+        s = bundle["samples"][0]
+        assert s["home"] == "Osasuna" and s["away"] == "Getafe"
+        assert s["league"] == "La Liga"
+        assert s["clv"] == pytest.approx((2.10 / 1.95) - 1.0)
+
+    def test_nomi_squadra_servono_a_canonizzare_lesito(self, temp_db):
+        """Il nome squadra sulla riga rende canonizzabile un esito-name.
+
+        E' il motivo per cui i quattro campi non sono decorativi: senza nomi,
+        un esito `Osasuna` non si aggancia alla riga CLV canonica `1`.
+        """
+        tracker.save_bet(match_id="sx-nome", mercato="1X2", esito="Osasuna",
+                         market_id="0xm", price=1.90, stake=2.0, mode="live",
+                         status="FULLY_FILLED", bet_id="0xb",
+                         home="Osasuna", away="Getafe", league="La Liga",
+                         commence="2026-10-05T19:00:00+00:00")
+        _set_closing("sx-nome", "1", 1.90, 1.80)   # riga canonica `1`
+        self._prune_match("sx-nome")
+        bundle = ct.collect()
+        assert len(bundle["samples"]) == 1
+        assert bundle["samples"][0]["closing"] == pytest.approx(1.80)
+
+    def test_riga_storica_senza_identita_usa_il_ripiego(self, temp_db):
+        """Retrocompatibilita': le bet vecchie prendono i nomi da `matches`."""
+        _seed_bet(match_id="sx-storica", home="Roma", away="Lazio", esito="1",
+                  price=1.85)
+        _set_closing("sx-storica", "1", 1.85, 1.75)
+        s = ct.collect()["samples"][0]
+        assert s["home"] == "Roma" and s["away"] == "Lazio"
+        assert s["closing"] == pytest.approx(1.75)
+
+    def test_la_riga_del_denaro_vince_sulla_partita(self, temp_db):
+        """Se i due valori divergono, vale quello scritto dalla puntata.
+
+        Un nome aggiornato/riscritto in `matches` non deve cambiare l'identita'
+        di un ordine gia' eseguito: il Ledger del denaro e' la fonte.
+        """
+        tracker.save_match("sx-x", "Serie A", "Squadra Vecchia", "Altro",
+                           (datetime.now(timezone.utc)
+                            + timedelta(minutes=5)).isoformat())
+        tracker.save_bet(match_id="sx-x", mercato="1X2", esito="1",
+                         market_id="0xm", price=1.9, stake=1.0, mode="live",
+                         status="FULLY_FILLED", bet_id="0xb",
+                         home="Squadra Nuova", away="Avversario", league="Serie A",
+                         commence="2026-10-05T19:00:00+00:00")
+        _set_closing("sx-x", "1", 1.9, 1.8)
+        s = ct.collect()["samples"][0]
+        assert s["home"] == "Squadra Nuova"
+
+    def test_cattura_sx_funziona_su_partita_potata(self, temp_db):
+        """La cattura della chiusura SX usa la stessa identita' (LEFT JOIN)."""
+        tracker.save_bet(match_id="sx-open", mercato="1X2", esito="1",
+                         market_id="0xhash", selection_id=1, price=1.85,
+                         stake=1.0, mode="live", status="FULLY_FILLED",
+                         bet_id="0xb", home="Roma", away="Lazio",
+                         league="Serie A",
+                         commence=(datetime.now(timezone.utc)
+                                   + timedelta(minutes=3)).isoformat())
+        self._prune_match("sx-open")
+        got = ct.capture_sx_closing(price_lookup=lambda row: 1.77)
+        assert got["captured"] == 1
+        assert got["skipped"] == {}
+
+    def test_colonne_presenti_e_migrazione_idempotente(self, temp_db):
+        """La migrazione aggiunge i 4 campi anche su un DB nato prima."""
+        conn = tracker._get_conn()
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(bets)")]
+        conn.close()
+        assert set(tracker.BET_EVENT_FIELDS) <= set(cols)
+        assert tracker.BET_EVENT_FIELDS == ("home", "away", "league",
+                                            "commence")
+
+    def test_un_salvataggio_senza_identita_non_la_cancella(self, temp_db):
+        """COALESCE + NULLIF: l'UPDATE non azzera cio' che e' gia' registrato."""
+        tracker.save_bet(match_id="sx-k", mercato="1X2", esito="1",
+                         market_id="0xm", price=1.9, stake=1.0, mode="live",
+                         home="Roma", away="Lazio", league="Serie A",
+                         commence="2026-10-05T19:00:00+00:00")
+        tracker.save_bet(match_id="sx-k", mercato="1X2", esito="1",
+                         market_id="0xm", price=1.95, stake=1.0, mode="live")
+        conn = tracker._get_conn()
+        row = conn.execute("SELECT home, away, league, commence, price "
+                           "FROM bets WHERE match_id='sx-k'").fetchone()
+        conn.close()
+        assert row[0] == "Roma" and row[1] == "Lazio"
+        assert row[2] == "Serie A" and row[3] == "2026-10-05T19:00:00+00:00"
+        assert row[4] == pytest.approx(1.95)      # il prezzo invece si aggiorna
+
+
+class TestIdentitaDalPick:
+    """`auto_bet.event_identity` e' l'unico punto di estrazione dal pick."""
+
+    def test_estrazione_dai_pick_delle_corsie(self):
+        import auto_bet as ab
+        pick = {"home": "Roma", "away": "Lazio", "league": "Serie A",
+                "commence": "2026-10-05T19:00:00+00:00", "mercato": "1X2"}
+        assert ab.event_identity(pick) == {
+            "home": "Roma", "away": "Lazio", "league": "Serie A",
+            "commence": "2026-10-05T19:00:00+00:00"}
+
+    def test_pick_senza_campi_non_produce_none(self):
+        """Mai `None`: le colonne sono TEXT e le scrivono cosi' come sono."""
+        import auto_bet as ab
+        assert ab.event_identity({}) == {"home": "", "away": "",
+                                         "league": "", "commence": ""}
+        assert ab.event_identity({"home": None, "league": "  "})["home"] == ""
+        assert ab.event_identity({"home": None})["league"] == ""
+
+    def test_scrittura_live_del_giro_usa_la_identita(self):
+        """Il percorso che scrive le bet live la passa a `save_bet`."""
+        src = Path("auto_bet.py").read_text(encoding="utf-8")
+        assert src.count("**event_identity(") >= 4
+        assert "def event_identity(" in src
+
+
+# ---------------------------------------------------------------------------
+# 6. SECONDO BENCHMARK nel tracker: la conferma INDIPENDENTE (15/10/2026)
+# ---------------------------------------------------------------------------
+# Il CLV medio contro Pinnacle puo' essere un artefatto della singola fonte.
+# Quando esiste anche la chiusura dell'EXCHANGE (Betfair EX EU), il campione
+# porta DUE misure e il report dichiara in quanti casi i due sharp concordano.
+# Nessun requisito nuovo: senza benchmark il trade resta misurabile come prima.
+
+class TestSecondoBenchmark:
+
+    def _with_benchmark(self, match_id="sx-b", home="Osasuna", away="Getafe",
+                        esito="1", price=1.90, closing=1.80, bench=1.75):
+        tracker.save_bet(match_id=match_id, mercato="1X2", esito=esito,
+                         market_id="0xm", price=price, stake=2.0, mode="live",
+                         status="FULLY_FILLED", bet_id="0xb",
+                         home=home, away=away, league="La Liga",
+                         commence="2026-10-05T19:00:00+00:00")
+        tracker.save_clv(match_id, esito, price, closing_odds=closing,
+                         closing_source="pinnacle_t0", betfair_odds=bench)
+
+    def test_il_campione_porta_entrambe_le_misure(self, temp_db):
+        self._with_benchmark()
+        s = ct.collect()["samples"][0]
+        assert s["clv"] == pytest.approx((1.90 / 1.80) - 1.0)
+        assert s["benchmark"] == pytest.approx(1.75)
+        assert s["clv_benchmark"] == pytest.approx((1.90 / 1.75) - 1.0)
+        assert s["benchmark_source"] == ct.SOURCE_BENCHMARK
+
+    def test_senza_benchmark_il_campione_resta_misurabile(self, temp_db):
+        """Nessun benchmark a ledger: il CLV primario non cambia di una virgola."""
+        _seed_bet(match_id="sx-nb", price=1.90)
+        _set_closing("sx-nb", "1", 1.90, 1.80)
+        bundle = ct.collect()
+        s = bundle["samples"][0]
+        assert s["clv"] == pytest.approx((1.90 / 1.80) - 1.0)
+        assert s["benchmark"] is None and s["clv_benchmark"] is None
+        assert s["benchmark_source"] is None
+        m = ct.summarize(bundle["samples"])
+        assert m["benchmark"]["n"] == 0
+        assert m["benchmark"]["confirmed_both"] == 0
+        assert m["benchmark"]["source"] == ct.SOURCE_BENCHMARK
+
+    def test_metrics_contano_la_conferma_doppia(self, temp_db):
+        self._with_benchmark(match_id="sx-b1", esito="1", price=1.90,
+                             closing=1.80, bench=1.75)   # entrambi positivi
+        self._with_benchmark(match_id="sx-b2", home="Roma", away="Lazio",
+                             esito="1", price=1.70, closing=1.80,
+                             bench=1.85)                  # primario negativo
+        m = ct.summarize(ct.collect()["samples"])
+        b = m["benchmark"]
+        assert b["n"] == 2
+        assert b["confirmed_both"] == 1
+        assert b["confirmed_share"] == pytest.approx(0.5)
+        assert b["avg_clv"] == round(
+            (((1.90 / 1.75) - 1.0) + ((1.70 / 1.85) - 1.0)) / 2.0, 6)
+        assert b["share_positive"] == pytest.approx(0.5)
+
+    def test_un_benchmark_assente_non_declassa_gli_altri(self, temp_db):
+        """I campioni senza benchmark non entrano nella media del benchmark."""
+        self._with_benchmark(match_id="sx-c1", esito="1", bench=1.75)
+        _seed_bet(match_id="sx-c2", home="Roma", away="Lazio", esito="1",
+                  price=1.80)
+        _set_closing("sx-c2", "1", 1.80, 1.70)
+        m = ct.summarize(ct.collect()["samples"])
+        assert m["n"] == 2                       # entrambi misurati (primaria)
+        assert m["benchmark"]["n"] == 1          # uno solo ha l'exchange
+        assert m["benchmark"]["confirmed_both"] == 1
+
+    def test_save_clv_non_cancella_il_benchmark(self, temp_db):
+        """COALESCE anche sulla colonna del secondo benchmark."""
+        self._with_benchmark(match_id="sx-k", esito="1")
+        tracker.save_clv("sx-k", "1", 1.95)      # scrittura senza benchmark
+        conn = tracker._get_conn()
+        row = conn.execute("SELECT closing_odds, betfair_odds FROM clv_history "
+                           "WHERE match_id='sx-k'").fetchone()
+        conn.close()
+        assert row[0] == pytest.approx(1.80) and row[1] == pytest.approx(1.75)
+
+    def test_report_dichiara_la_fonte_e_la_conferma(self, temp_db):
+        self._with_benchmark()
+        text = ct.format_report(ct.report())
+        assert ct.SOURCE_BENCHMARK in text
+        assert "ENTRAMBI" in text
+
+    def test_report_senza_benchmark_non_inventa_una_conferma(self, temp_db):
+        _seed_bet(match_id="sx-nb2", price=1.90)
+        _set_closing("sx-nb2", "1", 1.90, 1.80)
+        text = ct.format_report(ct.report())
+        assert "conferma indipendente non e' disponibile" in text
+
+    def test_lesito_non_canonicale_non_rompe_il_benchmark(self, temp_db):
+        """Riga ostile nel campo benchmark: il campione resta, il valore no."""
+        tracker.save_bet(match_id="sx-ost", mercato="1X2", esito="1",
+                         market_id="0xm", price=1.9, stake=1.0, mode="live",
+                         home="Roma", away="Lazio", league="Serie A",
+                         commence="2026-10-05T19:00:00+00:00")
+        _set_closing("sx-ost", "1", 1.9, 1.8)
+        conn = tracker._get_conn()
+        conn.execute("UPDATE clv_history SET betfair_odds='abc' WHERE "
+                     "match_id='sx-ost'")
+        conn.commit()
+        conn.close()
+        s = ct.collect()["samples"][0]
+        assert s["clv"] == pytest.approx((1.9 / 1.8) - 1.0)
+        assert s["clv_benchmark"] is None
+
+    def test_il_loader_dello_sharp_e_generico(self):
+        """`sharp_odds_from_cache` esiste e `pinnacle_odds_from_cache` delega."""
+        import inspect
+        import pinnacle_oracle as po
+        assert hasattr(po, "sharp_odds_from_cache")
+        assert hasattr(po, "benchmark_odds_from_cache")
+        src = inspect.getsource(po.pinnacle_odds_from_cache)
+        assert "sharp_odds_from_cache(" in src      # nessuna copia del percorso
+        assert po.BENCHMARK_BOOK == "betfair_ex_eu"
+
+
+# ---------------------------------------------------------------------------
+# 12. SCHEMA DEGRADATO — "0 campioni" e "query rotta" sono diagnosi diverse
+# ---------------------------------------------------------------------------
+
+_OLD_BETS = """CREATE TABLE bets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT, mercato TEXT,
+    esito TEXT, market_id TEXT, selection_id INTEGER, price REAL, stake REAL,
+    mode TEXT, status TEXT, bet_id TEXT, esito_finale TEXT, profit REAL,
+    created_at TEXT, settled_at TEXT)"""
+_OLD_MATCHES = """CREATE TABLE matches (
+    id TEXT PRIMARY KEY, league TEXT, home_team TEXT, away_team TEXT,
+    commence_time TEXT)"""
+_OLD_CLV = """CREATE TABLE clv_history (
+    match_id TEXT, esito TEXT, signal_quota REAL, closing_quota REAL,
+    updated_at TEXT, pinnacle_quota REAL, closing_odds REAL,
+    closing_source TEXT, PRIMARY KEY (match_id, esito))"""
+
+
+def _legacy_db(tmp_path, *, with_bets=True, with_closing=True):
+    """Ledger come un deploy PRECEDENTE alla migrazione del 15/10/2026.
+
+    `bets` senza home/away/league/commence e `clv_history` senza
+    `betfair_odds`: e' lo stato REALE del ledger di produzione al momento della
+    prima misura (16/10/2026), dove una colonna assente faceva leggere
+    "0 trade live" a fronte di 67 puntate a ledger.
+    """
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute(_OLD_MATCHES)
+    conn.execute(_OLD_CLV)
+    if with_bets:
+        conn.execute(_OLD_BETS)
+    conn.execute("INSERT INTO matches VALUES (?,?,?,?,?)",
+                 ("sx-old", "Serie A", "Osasuna", "Getafe",
+                  (datetime.now(timezone.utc) + timedelta(minutes=8)).isoformat()))
+    if with_bets:
+        conn.execute("INSERT INTO bets (match_id, mercato, esito, market_id, "
+                     "selection_id, price, stake, mode, status, bet_id, "
+                     "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                     ("sx-old", "1X2", "1", "0xm", 1, 1.90, 1.5, "live",
+                      "FULLY_FILLED", "0xb",
+                      datetime.now(timezone.utc).isoformat()))
+    if with_closing:
+        conn.execute("INSERT INTO clv_history (match_id, esito, signal_quota, "
+                     "closing_odds, closing_source) VALUES (?,?,?,?,?)",
+                     ("sx-old", "1", 1.90, 1.80, "pinnacle_t0"))
+    conn.commit()
+    conn.close()
+    return path
+
+
+class TestSchemaDegradato:
+
+    def test_lo_schema_reale_viene_dichiarato(self, temp_db):
+        _seed_bet()
+        _set_closing("sx-1", "1", 1.90, 1.80)
+        got = ct.collect()["schema"]
+        assert set(got["bets_event_fields"]) == set(ct._BET_EVENT_COLS)
+        assert "betfair_odds" in got["clv_columns"]
+
+    def test_ledger_vecchio_misura_lo_stesso_grazie_a_matches(self, tmp_path):
+        """REGRESSIONE della prima misura in produzione (16/10/2026)."""
+        db = _legacy_db(tmp_path)
+        bundle = ct.collect(db=str(db))
+        assert bundle["query_errors"] == []
+        assert bundle["totals"]["trades"] == 1
+        assert len(bundle["samples"]) == 1
+        s = bundle["samples"][0]
+        assert s["clv"] == pytest.approx((1.90 / 1.80) - 1.0)
+        assert s["benchmark"] is None
+
+    def test_le_due_degradazioni_sono_dichiarate(self, tmp_path):
+        rep = ct.report(db=str(_legacy_db(tmp_path)))
+        text = " | ".join(rep["degraded"])
+        assert "NON sulla puntata" in text
+        assert "betfair_odds" in text
+        assert rep["schema"]["bets_event_fields"] == []
+
+    def test_il_report_dice_la_degradazione(self, tmp_path):
+        text = ct.format_report(ct.report(db=str(_legacy_db(tmp_path))))
+        assert "⚠️ identita' dell'evento NON sulla puntata" in text
+        assert "secondo benchmark non disponibile" in text
+
+    def test_senza_tabella_bets_la_query_rotta_e_dichiarata(self, tmp_path):
+        """`bets` assente NON si legge come "0 puntate": si legge come guasto."""
+        rep = ct.report(db=str(_legacy_db(tmp_path, with_bets=False)))
+        assert rep["query_errors"], "una tabella assente va dichiarata"
+        assert "no such table" in rep["query_errors"][0]
+        assert "query non eseguibile" in ct.format_report(rep)
+
+    def test_la_cattura_sx_regge_lo_schema_vecchio(self, tmp_path):
+        """`capture_sx_closing` costruisce la query sulle colonne esistenti."""
+        conn = sqlite3.connect(str(_legacy_db(tmp_path)))
+        out = ct.capture_sx_closing(conn=conn, price_lookup=lambda p: None)
+        conn.close()
+        assert out["checked"] == 1 and out["captured"] == 0
+
+    def test_le_query_si_costruiscono_sulle_colonne_esistenti(self):
+        """Tripwire: nessuna SELECT nominale sulle colonne migrabili."""
+        assert "_table_columns(" in SOURCE
+        assert "_bet_sql(" in SOURCE and "_open_bets_sql(" in SOURCE
+        assert "_clv_sql(" in SOURCE
+        for banned in ("_BET_SQL = (", "_OPEN_BET_SQL = (", "_CLV_SQL = ("):
+            assert banned not in SOURCE, banned
+
+    def test_il_fail_safe_conta_gli_errori(self, tmp_path):
+        """`_rows` continua a non sollevare, ma ora CONTA (mai un silenzio)."""
+        conn = sqlite3.connect(str(_legacy_db(tmp_path)))
+        errs = []
+        assert ct._rows(conn, "SELECT boh FROM non_esiste", errors=errs) == []
+        assert errs and "no such table" in errs[0]
+        conn.close()

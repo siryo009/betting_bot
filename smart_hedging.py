@@ -353,10 +353,17 @@ def _open_live_bets(now: Optional[datetime] = None) -> List[dict]:
     try:
         import tracker
         conn = tracker._get_conn()
+        # Identita' dell'evento: PRIMA dalla puntata (15/10/2026, la riga del
+        # denaro e' autosufficiente), con ripiego sulla partita per le righe
+        # storiche. LEFT JOIN: una puntata la cui riga `matches` e' stata
+        # POTATA (`clear_old_matches`) non deve sparire dalla copertura.
         rows = conn.execute(
             '''SELECT b.match_id, b.esito, b.price, b.stake, b.mode,
-                      m.home_team, m.away_team, m.commence_time, m.league
-                 FROM bets b JOIN matches m ON m.id = b.match_id
+                      COALESCE(NULLIF(b.home,''), m.home_team) AS home,
+                      COALESCE(NULLIF(b.away,''), m.away_team) AS away,
+                      COALESCE(NULLIF(b.commence,''), m.commence_time) AS kick,
+                      COALESCE(NULLIF(b.league,''), m.league) AS league
+                 FROM bets b LEFT JOIN matches m ON m.id = b.match_id
                 WHERE b.esito_finale IS NULL AND b.mode = 'live'
                   AND b.stake > 0
                 ORDER BY b.id DESC''').fetchall()
@@ -694,7 +701,11 @@ def _register_bets(prop: dict, ok_legs: List[dict]) -> None:
                      price=leg.get("odds") or 0.0,
                      stake=leg.get("stake") or 0.0,
                      mode="live", status=leg.get("status"),
-                     bet_id=leg.get("bet_id"))
+                     bet_id=leg.get("bet_id"),
+                     # Identita' dell'evento sulla riga del denaro: le gambe di
+                     # copertura restano leggibili dopo la potatura di `matches`.
+                     home=prop.get("home"), away=prop.get("away"),
+                     league=prop.get("league"), commence=prop.get("commence"))
     except Exception as e:
         logger.warning("smart_hedging: registrazione gambe fallita (%s)", e)
 

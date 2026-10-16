@@ -82,6 +82,17 @@ CLOSING_SOURCES: Tuple[Tuple[str, str], ...] = (
 #: Fonte scritta da `capture_sx_closing` (l'altro lato della closing line).
 SOURCE_SX = "sx"
 
+#: SECONDO BENCHMARK (15/10/2026): l'etichetta della chiusura dell'exchange
+#: (`clv_history.betfair_odds`, scritta da `closing_line`). Non entra in
+#: `CLOSING_SOURCES` — non e' un'alternativa alla chiusura primaria, e' una
+#: misura INDIPENDENTE della stessa cosa: un edge che batte due sharp di
+#: meccanismo diverso e' molto meno spiegabile con l'errore di una sola fonte.
+#: L'etichetta e' la stessa costante di `closing_line.SOURCE_BENCHMARK`:
+#: duplicata qui di proposito (come gli stati del ledger in `tracker`), con un
+#: tripwire che confronta le DUE tabelle di stringhe cosi' non possono divergere
+#: in silenzio.
+SOURCE_BENCHMARK: str = "betfair_t0"
+
 #: Sotto questo numero di campioni non si conclude nulla: STESSA soglia di
 #: `multi_market.MIN_RELIABLE_CLOSED` e di `significance.MIN_SAMPLES`.
 MIN_SAMPLES: int = int(getattr(_sig, "MIN_SAMPLES", 30) or 30)
@@ -272,27 +283,108 @@ def _connect(db: Optional[str] = None) -> Any:
     return _get_conn()
 
 
-def _rows(conn, sql: str, params: Sequence[Any] = ()) -> List[Any]:
+def _rows(conn, sql: str, params: Sequence[Any] = (),
+          *, errors: Optional[List[str]] = None) -> List[Any]:
     try:
         cur = conn.cursor()
         cur.execute(sql, tuple(params))
         return list(cur.fetchall())
     except Exception as exc:
         # Fail-safe dichiarato: un DB senza la tabella/colonna risponde "vuoto",
-        # ma il motivo resta leggibile nel log (mai indistinguibile da zero
-        # campioni).
+        # ma il motivo (dal 16/10/2026) viene anche CONTATO in `errors`, cosi'
+        # il report puo' dire "query non eseguibile" invece di "zero campioni".
+        # Non e' cosmesi: la prima misura sul ledger di produzione ha letto
+        # "0 trade live" a fronte di 67 puntate a ledger, perche' una colonna
+        # mancava — un guasto che si legge come un fatto manda a cercare il
+        # problema nella direzione sbagliata (stessa lezione del 20/10 e del
+        # 30/09: "0" e "illeggibile" sono diagnosi diverse).
         logger.debug("clv_tracker: query non eseguibile (%s)", exc)
+        if errors is not None:
+            errors.append(f"{type(exc).__name__}: {exc}")
         return []
 
 
-_BET_SQL = (
-    "SELECT b.match_id, b.mercato, b.esito, b.price, b.stake, b.mode, "
-    "       b.created_at, b.settled_at, b.esito_finale, b.market_id, "
-    "       b.selection_id, "
-    "       m.league, m.home_team, m.away_team, m.commence_time "
-    "FROM bets b LEFT JOIN matches m ON m.id = b.match_id "
-    "WHERE b.mode = 'live' AND b.price IS NOT NULL"
+def _table_columns(conn, table: str) -> set:
+    """Colonne REALI di una tabella: set VUOTO se la tabella non e' leggibile.
+
+    Serve a costruire le query sull'INTERSEZIONE delle colonne esistenti: su un
+    DB di un deploy precedente (migrazione non ancora applicata) una SELECT che
+    nomina una colonna assente fallisce in blocco, e il fail-safe di `_rows` la
+    trasformerebbe in "nessun dato".
+    """
+    return {str(r[1]) for r in _rows(conn, f"PRAGMA table_info({table})")}
+
+
+def _col_or_null(columns: set, name: str, alias: str) -> str:
+    """`NULLIF(<alias>.<col>,'')` se la colonna esiste, altrimenti `NULL`.
+
+    Il `COALESCE` che la usa ripiega sulla riga `matches`: e' la degradazione
+    dichiarata (copertura ridotta, mai un errore).
+    """
+    return f"NULLIF({alias}.{name},'')" if name in columns else "NULL"
+
+
+# Identita' dell'evento: PRIMA dalla puntata (15/10/2026: la riga del denaro e'
+# autosufficiente), con ripiego sulla partita per le righe storiche. E' il fix
+# che porta la copertura della closing line dai due terzi al totale: senza, una
+# bet di una settimana prima non aveva piu' i nomi squadra (`clear_old_matches`
+# pota `matches` dopo due giorni) e il CLV non era piu' calcolabile.
+#: Colonne di `bets` che tengono l'IDENTITA' DELL'EVENTO sulla riga del denaro
+#: (15/10/2026). Se mancano (DB di un deploy precedente) le query leggono da
+#: `matches` come prima e la degradazione viene DICHIARATA nel report.
+_BET_EVENT_COLS: Tuple[str, ...] = ("home", "away", "league", "commence")
+
+#: Colonne di `clv_history` non di chiave: ognuna puo' mancare su un ledger
+#: precedente alla migrazione e la query degrada a `NULL` invece di fallire
+#: (`betfair_odds`, il secondo benchmark, e' l'ultima arrivata).
+_CLV_OPTIONAL_COLS: Tuple[str, ...] = (
+    "signal_quota", "closing_quota", "pinnacle_quota", "closing_odds",
+    "closing_source", "updated_at", "betfair_odds",
 )
+
+
+def _bet_sql(columns: set) -> str:
+    """SELECT dei trade eseguiti, costruita sulle colonne che ESISTONO."""
+    league = _col_or_null(columns, "league", "b")
+    home = _col_or_null(columns, "home", "b")
+    away = _col_or_null(columns, "away", "b")
+    commence = _col_or_null(columns, "commence", "b")
+    return (
+        "SELECT b.match_id, b.mercato, b.esito, b.price, b.stake, b.mode, "
+        "       b.created_at, b.settled_at, b.esito_finale, b.market_id, "
+        "       b.selection_id, "
+        f"       COALESCE({league}, m.league) AS league, "
+        f"       COALESCE({home}, m.home_team) AS home, "
+        f"       COALESCE({away}, m.away_team) AS away, "
+        f"       COALESCE({commence}, m.commence_time) AS commence "
+        "FROM bets b LEFT JOIN matches m ON m.id = b.match_id "
+        "WHERE b.mode = 'live' AND b.price IS NOT NULL"
+    )
+
+
+def _open_bets_sql(columns: set) -> str:
+    """Come `_bet_sql`, per le puntate ancora APERTE (cattura a T-0)."""
+    home = _col_or_null(columns, "home", "b")
+    away = _col_or_null(columns, "away", "b")
+    commence = _col_or_null(columns, "commence", "b")
+    return (
+        "SELECT b.match_id, b.mercato, b.esito, b.price, b.market_id, "
+        "       b.selection_id, "
+        f"       COALESCE({home}, m.home_team) AS home, "
+        f"       COALESCE({away}, m.away_team) AS away, "
+        f"       COALESCE({commence}, m.commence_time) AS commence "
+        "FROM bets b LEFT JOIN matches m ON m.id = b.match_id "
+        "WHERE b.mode = 'live' AND b.esito_finale IS NULL "
+        "  AND b.market_id IS NOT NULL AND b.market_id != ''"
+    )
+
+
+def _clv_sql(columns: set) -> str:
+    """SELECT della chiusura di un match, con le colonne che ESISTONO."""
+    names = [c for c in _CLV_OPTIONAL_COLS if c in columns]
+    return "SELECT esito, " + ", ".join(names) + \
+        " FROM clv_history WHERE match_id = ?"
+
 
 _PRED_SQL = (
     "SELECT p.match_id, p.mercato, p.esito, p.quota, p.status, p.prob, "
@@ -302,13 +394,6 @@ _PRED_SQL = (
     "WHERE p.quota IS NOT NULL AND p.status IN "
     "('value', 'strong_value', 'moderate')"
 )
-
-_CLV_SQL = (
-    "SELECT esito, signal_quota, closing_quota, pinnacle_quota, closing_odds, "
-    "       closing_source, updated_at "
-    "FROM clv_history WHERE match_id = ?"
-)
-
 
 def _clv_index(conn, match_id: str, home: Any = "", away: Any = ""
                ) -> Dict[str, Dict[str, Any]]:
@@ -326,10 +411,21 @@ def _clv_index(conn, match_id: str, home: Any = "", away: Any = ""
     dichiarata qui sopra (bug trovato dai test del 13/10).
     """
     out: Dict[str, Dict[str, Any]] = {}
-    for row in _rows(conn, _CLV_SQL, (match_id,)):
-        rec = {"esito": row[0], "signal_quota": row[1], "closing_quota": row[2],
-               "pinnacle_quota": row[3], "closing_odds": row[4],
-               "closing_source": row[5], "updated_at": row[6],
+    # Le colonne si leggono dal DB: su un ledger precedente alla migrazione
+    # `betfair_odds` non esiste e la SELECT nominale farebbe fallire TUTTO
+    # (una chiusura assente si leggerebbe come "nessuna chiusura").
+    columns = _table_columns(conn, "clv_history")
+    names = [c for c in _CLV_OPTIONAL_COLS if c in columns]
+    for row in _rows(conn, _clv_sql(columns), (match_id,)):
+        values = dict(zip(names, list(row)[1:]))
+        rec = {"esito": row[0],
+               "signal_quota": values.get("signal_quota"),
+               "closing_quota": values.get("closing_quota"),
+               "pinnacle_quota": values.get("pinnacle_quota"),
+               "closing_odds": values.get("closing_odds"),
+               "closing_source": values.get("closing_source"),
+               "updated_at": values.get("updated_at"),
+               "betfair_odds": values.get("betfair_odds"),
                "home": home or "", "away": away or ""}
         # La chiave GREZZA c'e' sempre (una riga resta raggiungibile anche se
         # l'esito non e' canonizzabile); quella canonica si AGGIUNGE.
@@ -381,7 +477,9 @@ def collect(*, conn=None, db: Optional[str] = None, days: Optional[float] = None
                               "pending": [], "totals": {"trades": 0,
                                                         "signals": 0,
                                                         "scanned": 0},
+                              "schema": {}, "degraded": [], "query_errors": [],
                               "error": None}
+    errs: List[str] = []
     close_conn = False
     try:
         if conn is None:
@@ -389,9 +487,31 @@ def collect(*, conn=None, db: Optional[str] = None, days: Optional[float] = None
             close_conn = True
         now = now or datetime.now(timezone.utc)
         cutoff = now - timedelta(days=days) if days else None
+        bet_cols = _table_columns(conn, "bets")
+        clv_cols = _table_columns(conn, "clv_history")
+        bundle["schema"] = {
+            "bets_event_fields": [c for c in _BET_EVENT_COLS if c in bet_cols],
+            "clv_columns": sorted(clv_cols),
+        }
+        missing_event = [c for c in _BET_EVENT_COLS if c not in bet_cols]
+        if missing_event:
+            # Le query funzionano lo stesso (leggono da `matches`), ma la
+            # copertura dipende da una tabella che viene POTATA: chi legge il
+            # report deve saperlo prima di concludere "il CLV non e'
+            # calcolabile".
+            bundle["degraded"].append(
+                "identita' dell'evento NON sulla puntata (mancano " +
+                ", ".join(missing_event) + " su `bets`): la copertura della "
+                "closing line dipende da `matches`, che viene potata dopo 2 "
+                "giorni (la migrazione si applica al primo avvio col codice "
+                "nuovo)")
+        if "betfair_odds" not in clv_cols:
+            bundle["degraded"].append(
+                "secondo benchmark non disponibile su questo ledger: la "
+                "colonna `clv_history.betfair_odds` non esiste ancora")
 
         # --- 1a. I TRADE eseguiti (la direttiva: "quota d'acquisto effettiva")
-        for row in _rows(conn, _BET_SQL):
+        for row in _rows(conn, _bet_sql(bet_cols), errors=errs):
             (match_id, mercato, esito, price, _stake, mode, created_at,
              _settled_at, esito_finale, _market_id, _sel, league, home, away,
              _commence) = row
@@ -417,7 +537,7 @@ def collect(*, conn=None, db: Optional[str] = None, days: Optional[float] = None
         # --- 1b. I SEGNALI mai giocati (opzionale: misura del MODELLO)
         if include_signals:
             seen = {(s["match_id"], s["esito"]) for s in bundle["samples"]}
-            for row in _rows(conn, _PRED_SQL):
+            for row in _rows(conn, _PRED_SQL, errors=errs):
                 (match_id, mercato, esito, quota, _status, _prob, created_at,
                  _settled_at, esito_finale, league, home, away,
                  _commence) = row
@@ -444,6 +564,7 @@ def collect(*, conn=None, db: Optional[str] = None, days: Optional[float] = None
         logger.debug("clv_tracker: raccolta non completata (%s)", exc)
         bundle["error"] = str(exc)
     finally:
+        bundle["query_errors"] = errs
         if close_conn:
             try:
                 conn.close()
@@ -488,11 +609,21 @@ def _build_sample(conn, *, match_id: Any, mercato: Any, esito: Any,
         clv = _clv_raw(price, closing)
         if clv is None:
             return {"ok": False, "reason": "bad_closing"}
+        # SECONDO BENCHMARK (15/10/2026): la stessa quota d'acquisto contro la
+        # chiusura dell'EXCHANGE (Betfair EX EU), quando catturata. Non e' un
+        # requisito del campione: senza il benchmark il trade resta misurabile
+        # sulla fonte primaria (`clv` invariato) e il confronto lo dichiara.
+        bench_price = _as_float(rec.get("betfair_odds")) if rec else None
+        bench_price = bench_price if (bench_price and bench_price > 1.0) else None
         sample = {
             "match_id": str(match_id), "mercato": str(mercato or ""),
             "esito": key, "price": round(price, 6),
             "closing": round(closing, 6), "closing_source": source,
             "clv": clv, "clv_vig_free": None,
+            "benchmark": (round(bench_price, 6) if bench_price else None),
+            "clv_benchmark": (_clv_raw(price, bench_price)
+                              if bench_price else None),
+            "benchmark_source": SOURCE_BENCHMARK if bench_price else None,
             "sport": sport_of(mercato, league), "league": str(league or ""),
             "home": str(home or ""), "away": str(away or ""),
             "origin": origin, "closed": bool(closed),
@@ -582,6 +713,8 @@ def summarize(samples: Sequence[Dict[str, Any]], *, alpha: float = 0.05
     """
     vals: List[float] = []
     vf: List[float] = []
+    bench: List[float] = []
+    both = 0
     for s in samples or []:
         if not isinstance(s, dict):
             continue                       # riga ostile: ignorata, mai un crash
@@ -591,6 +724,11 @@ def summarize(samples: Sequence[Dict[str, Any]], *, alpha: float = 0.05
         w = _as_float(s.get("clv_vig_free"))
         if w is not None:
             vf.append(w)
+        b = _as_float(s.get("clv_benchmark"))
+        if b is not None:
+            bench.append(b)
+            if v is not None and v > 0 and b > 0:
+                both += 1
     block: Dict[str, Any] = {
         "n": len(vals), "min_samples": MIN_SAMPLES,
         "alpha": alpha, "scipy": bool(_sig and _sig.available()),
@@ -608,6 +746,20 @@ def summarize(samples: Sequence[Dict[str, Any]], *, alpha: float = 0.05
         "by_source": _bucket(samples, "closing_source"),
         "by_sport": _bucket(samples, "sport"),
         "by_market": _bucket(samples, "mercato"),
+        # SECONDO BENCHMARK (15/10/2026). `n` e' il numero di campioni per cui
+        # esiste ANCHE la chiusura dell'exchange: se e' piccolo la conferma
+        # indipendente non e' disponibile, e il report lo dice invece di
+        # spacciare la fonte primaria per un doppio controllo.
+        "benchmark": {
+            "source": SOURCE_BENCHMARK,
+            "n": len(bench),
+            "avg_clv": (round(sum(bench) / len(bench), 6) if bench else None),
+            "median_clv": (round(median(bench), 6) if bench else None),
+            "share_positive": (round(sum(1 for x in bench if x > 0) / len(bench), 6)
+                               if bench else None),
+            "confirmed_both": both,
+            "confirmed_share": (round(both / len(bench), 6) if bench else None),
+        },
     }
     if not vals:
         block["note"] = ("nessun campione misurabile: servono trade eseguiti e "
@@ -690,6 +842,9 @@ def report(*, conn=None, db: Optional[str] = None, days: Optional[float] = None,
         "samples": bundle.get("samples") or [],
         "metrics": metrics,
         "include_signals": bool(include_signals),
+        "schema": bundle.get("schema") or {},
+        "degraded": bundle.get("degraded") or [],
+        "query_errors": bundle.get("query_errors") or [],
         "error": bundle.get("error"),
     }
 
@@ -706,6 +861,13 @@ def format_report(rep: Optional[Dict[str, Any]] = None, *,
                  f"{tot.get('trades', 0)} trade live"
                  + (f" (+{tot.get('signals', 0)} segnali)" if rep.get("include_signals")
                     else ""))
+    # Una query fallita e una degradazione di schema NON si leggono come "zero
+    # campioni": sono due diagnosi diverse e vanno dette PRIMA del verdetto.
+    if rep.get("query_errors"):
+        lines.append("⚠️ query non eseguibile: " +
+                     "; ".join(str(e) for e in rep["query_errors"][:3]))
+    for reason in rep.get("degraded") or []:
+        lines.append(f"⚠️ {reason}")
     if m.get("avg_clv") is not None:
         avg = m["avg_clv"] * 100.0
         ci = m.get("ci95")
@@ -726,6 +888,19 @@ def format_report(rep: Optional[Dict[str, Any]] = None, *,
     src = _shared(m, "by_source", "fonte ")
     if src:
         lines.append(f"Per fonte: {src}")
+    bm = m.get("benchmark") or {}
+    if bm.get("n"):
+        lines.append(
+            f"Secondo benchmark ({bm.get('source')}): CLV "
+            f"*{(bm.get('avg_clv') or 0) * 100.0:+.2f}%* su {bm['n']} campioni "
+            f"| positivi {(bm.get('share_positive') or 0) * 100.0:.1f}% "
+            f"| confermati da ENTRAMBI gli sharp: "
+            f"{bm.get('confirmed_both')}/{bm['n']} "
+            f"({(bm.get('confirmed_share') or 0) * 100.0:.1f}%)")
+    elif n:
+        lines.append(f"Secondo benchmark ({bm.get('source')}): nessun campione "
+                     "con la chiusura dell'exchange — la conferma indipendente "
+                     "non e' disponibile (la colonna si riempie a T-0)")
     for key, label in (("by_sport", "Per sport: "), ("by_market", "Per mercato: ")):
         row = _shared(m, key, "")
         if row:
@@ -762,15 +937,6 @@ def format_report(rep: Optional[Dict[str, Any]] = None, *,
 # ---------------------------------------------------------------------------
 # 4. CATTURA della closing line su SX Bet (il lato che mancava)
 # ---------------------------------------------------------------------------
-
-_OPEN_BET_SQL = (
-    "SELECT b.match_id, b.mercato, b.esito, b.price, b.market_id, "
-    "       b.selection_id, m.home_team, m.away_team, m.commence_time "
-    "FROM bets b LEFT JOIN matches m ON m.id = b.match_id "
-    "WHERE b.mode = 'live' AND b.esito_finale IS NULL "
-    "  AND b.market_id IS NOT NULL AND b.market_id != ''"
-)
-
 
 def _sx_price(provider: Any, market_id: str, selection_id: Any
               ) -> Optional[float]:
@@ -834,7 +1000,8 @@ def capture_sx_closing(*, provider: Any = None, price_lookup=None,
         if conn is None:
             conn = _connect()
             close_conn = True
-        rows = _rows(conn, _OPEN_BET_SQL)
+        rows = _rows(conn, _open_bets_sql(_table_columns(conn, "bets")),
+                     errors=out.setdefault("query_errors", []))
     except Exception as exc:
         logger.debug("clv_tracker: cattura SX non avviata (%s)", exc)
         return out

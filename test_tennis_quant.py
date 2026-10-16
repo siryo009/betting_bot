@@ -533,3 +533,111 @@ class TestReport:
 
     def test_formato_spento(self):
         assert "SPENTO" in tq.format_report({"enabled": False})
+
+
+# ---------------------------------------------------------------------------
+# LA COMPONENTE DI SERVIZIO E' UNA CATENA ESATTA (15/10/2026)
+# ---------------------------------------------------------------------------
+class TestCatenaEsattaNelMotore:
+    """Il Poisson sui break e' un'APPROSSIMAZIONE: qui e' misurata e sostituita.
+
+    Misura sui dati reali (stesse tenute, 15/10/2026): la catena esatta sta fino
+    a **7.5pp** sopra il Poisson sui break sui favoriti (0.85/0.70 -> 0.8426 vs
+    0.7678) e fino a -7.2pp sugli sfavoriti (0.75/0.88 -> 0.1711 vs 0.2433),
+    coincidendo solo a 0.5 (dove per costruzione il pareggio non esiste). Il
+    bias era invisibile perche' SPARIVA nella simmetria.
+    """
+
+    def test_motore_dichiarato(self, tmp_path):
+        elo = _elo_with(tmp_path)
+        v = tq.evaluate(team_a="A", team_b="B", price_a=1.60, price_b=2.40,
+                        sharp_probs={"1": 0.70, "2": 0.30}, elo=elo,
+                        surface="hard", bankroll=30.0,
+                        enclosure_check=_free_enclosure)
+        assert v["serve_engine"] == "markov_chain"
+        assert v["serve_delta_pp"] == pytest.approx(
+            100.0 * (v["p_serve"] - v["p_poisson"]), abs=1e-6)
+
+    def test_catena_e_poisson_divergono_sulle_stesse_tenute(self, tmp_path):
+        elo = _elo_with(tmp_path)
+        v = tq.evaluate(team_a="A", team_b="B", price_a=1.60, price_b=2.40,
+                        sharp_probs={"1": 0.70, "2": 0.30}, elo=elo,
+                        serve_stats=(0.85, 0.70), surface="hard",
+                        bankroll=30.0, enclosure_check=_free_enclosure)
+        assert v["p_serve"] == pytest.approx(0.8426, abs=2e-4)
+        assert v["p_poisson"] == pytest.approx(0.7678, abs=2e-3)
+        assert v["serve_delta_pp"] > 7.0
+
+    def test_intrinsic_usa_p_serve_non_il_poisson(self, tmp_path):
+        elo = _elo_with(tmp_path)
+        v = tq.evaluate(team_a="A", team_b="B", price_a=1.60, price_b=2.40,
+                        sharp_probs={"1": 0.70, "2": 0.30}, elo=elo,
+                        serve_stats=(0.85, 0.70), surface="hard",
+                        bankroll=30.0, enclosure_check=_free_enclosure)
+        atteso = tq.combine_probabilities(v["p_elo"], v["p_serve"])
+        assert v["p_intrinsic"] == pytest.approx(atteso, abs=1e-5)
+        # ...e non e' la combinazione col Poisson (che sarebbe piu' bassa)
+        assert v["p_intrinsic"] != pytest.approx(
+            tq.combine_probabilities(v["p_elo"], v["p_poisson"]), abs=1e-4)
+
+    def test_fallback_dichiarato_se_la_catena_non_risponde(self, tmp_path,
+                                                           monkeypatch):
+        import tennis_markov as tmk
+        monkeypatch.setattr(tmk, "exact_serve_prob",
+                            lambda *a, **k: {"ok": False, "prob": None})
+        elo = _elo_with(tmp_path)
+        v = tq.evaluate(team_a="A", team_b="B", price_a=1.60, price_b=2.40,
+                        sharp_probs={"1": 0.70, "2": 0.30}, elo=elo,
+                        surface="hard", bankroll=30.0,
+                        enclosure_check=_free_enclosure)
+        assert v["serve_engine"] == "poisson_hold_break"
+        assert v["p_serve"] == pytest.approx(v["p_poisson"])
+        assert v["serve_delta_pp"] == pytest.approx(0.0, abs=1e-9)
+
+    def test_catena_che_solleva_non_rompe_il_verdetto(self, tmp_path,
+                                                     monkeypatch):
+        import tennis_markov as tmk
+        monkeypatch.setattr(tmk, "exact_serve_prob",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+        elo = _elo_with(tmp_path)
+        v = tq.evaluate(team_a="A", team_b="B", price_a=1.60, price_b=2.40,
+                        sharp_probs={"1": 0.70, "2": 0.30}, elo=elo,
+                        surface="hard", bankroll=30.0,
+                        enclosure_check=_free_enclosure)
+        assert v["ok"] is True
+        assert v["serve_engine"] == "poisson_hold_break"
+
+    def test_gate_invariato_dal_motore(self, tmp_path, monkeypatch):
+        """Il gate resta 'entrambi confermano': cambia il NUMERO, non la soglia."""
+        import tennis_markov as tmk
+        monkeypatch.setattr(tmk, "exact_serve_prob",
+                            lambda *a, **k: {"ok": True, "prob": 0.99})
+        elo = _elo_with(tmp_path)
+        v = tq.evaluate(team_a="A", team_b="B", price_a=1.60, price_b=2.40,
+                        sharp_probs={"1": 0.40, "2": 0.60}, elo=elo,
+                        surface="hard", bankroll=30.0,
+                        enclosure_check=_free_enclosure)
+        assert v["ev_intrinsic"] > v["ev_min"]
+        assert v["ev_sharp"] < v["ev_min"]
+        assert v["both_confirm"] is False        # lo sharp non conferma
+
+    def test_hold_from_prob_resta_la_fonte_delle_tenute(self, tmp_path,
+                                                        monkeypatch):
+        """La catena non inventa i tassi: li riceve da `hold_rates_from_prob`."""
+        seen = {}
+
+        def _fake(p, **k):
+            seen["prob"] = p
+            return 0.86, 0.72
+
+        monkeypatch.setattr(tq, "hold_rates_from_prob", _fake)
+        elo = _elo_with(tmp_path)
+        v = tq.evaluate(team_a="A", team_b="B", price_a=1.60, price_b=2.40,
+                        sharp_probs={"1": 0.70, "2": 0.30}, elo=elo,
+                        surface="hard", bankroll=30.0,
+                        enclosure_check=_free_enclosure)
+        # `p_elo` nel verdetto e' arrotondato a 6 decimali: si confronta a
+        # quella precisione (un abs=1e-9 misurava l'arrotondamento, non il wiring).
+        assert seen["prob"] == pytest.approx(v["p_elo"], abs=1e-6)
+        assert v["hold_a"] == pytest.approx(0.86)
+        assert v["hold_b"] == pytest.approx(0.72)

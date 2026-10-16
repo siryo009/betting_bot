@@ -46,19 +46,32 @@ def temp_db(monkeypatch, tmp_path):
 
 @pytest.fixture()
 def sharp(monkeypatch):
-    """Cache sharp FINTA: nessuna rete, controllo totale dei prezzi."""
-    calls: dict = {"args": [], "ret": None}
+    """Cache sharp FINTA: nessuna rete, controllo totale dei prezzi.
+
+    `calls["ret"]` = quote della fonte PRIMARIA (Pinnacle), `calls["bench"]` =
+    quote del SECONDO benchmark (Betfair EX EU). Il benchmark e' assente per
+    default: i test che non lo riguardano restano identici a prima.
+    """
+    calls: dict = {"args": [], "ret": None, "bench": None, "books": []}
+
+    def _one(odds, book):
+        return None if odds is None else {"odds": dict(odds), "ts": 1.0,
+                                          "sport_key": "test", "book": book}
 
     def fake(home, away, sport_key=None, *, cache_dir=None, now=None,
              outcomes=("1", "X", "2")):
         calls["args"].append({"home": home, "away": away,
                               "outcomes": tuple(outcomes), "now": now})
-        ret = calls["ret"]
-        return None if ret is None else {"odds": dict(ret),
-                                         "ts": 1.0, "sport_key": "test"}
+        return _one(calls["ret"], "pinnacle")
+
+    def fake_any(home, away, *, book="pinnacle", sport_key=None, cache_dir=None,
+                 now=None, outcomes=("1", "X", "2")):
+        calls["books"].append(book)
+        return _one(calls["ret"] if book == "pinnacle" else calls["bench"], book)
 
     import pinnacle_oracle
     monkeypatch.setattr(pinnacle_oracle, "pinnacle_odds_from_cache", fake)
+    monkeypatch.setattr(pinnacle_oracle, "sharp_odds_from_cache", fake_any)
     return calls
 
 
@@ -413,3 +426,119 @@ class TestSaveClvColonna:
         row = tracker._get_conn().execute(
             "SELECT closing_odds FROM clv_history WHERE match_id='sx-9'")
         assert row.fetchone()[0] is None
+
+
+# ---------------------------------------------------------------------------
+# 6. SECONDO BENCHMARK: la chiusura di Betfair Exchange EU (15/10/2026)
+# ---------------------------------------------------------------------------
+# Perche' esiste: il CLV si misura contro un benchmark, e due benchmark
+# INDIPENDENTI valgono piu' di uno. Pinnacle e' un book (margine, posizionamento
+# proprio), Betfair Exchange EU e' un exchange P2P: un edge che batte ENTRAMBI
+# e' molto meno spiegabile con l'errore di una singola fonte. La quota finisce
+# in una colonna PROPRIA (`clv_history.betfair_odds`), e un benchmark ASSENTE
+# non deve mai declassare il campione primario.
+
+class TestSecondoBenchmark:
+
+    def test_cattura_scrive_entrambe_le_chiusure(self, temp_db, sharp):
+        sharp["ret"] = {"1": 1.62, "X": 3.60, "2": 4.80}
+        sharp["bench"] = {"1": 1.58, "X": 3.75, "2": 5.10}
+        _seed_live_bet(minutes=3.0)
+        got = cl.capture_closing_lines()
+        assert got["captured"] == 1 and got["benchmark"] == 1
+        assert got["rows"][0]["betfair_odds"] == pytest.approx(1.58)
+        conn = tracker._get_conn()
+        row = conn.execute("SELECT closing_odds, closing_source, betfair_odds "
+                           "FROM clv_history WHERE match_id='sx-2' AND "
+                           "esito='1'").fetchone()
+        conn.close()
+        assert row[0] == pytest.approx(1.62)          # primaria: Pinnacle
+        assert row[1] == cl.SOURCE_PINNACLE
+        assert row[2] == pytest.approx(1.58)          # benchmark: exchange
+
+    def test_benchmark_assente_non_declassa_il_campione(self, temp_db, sharp):
+        """Senza Betfair in cache si registra SOLO Pinnacle (fail-open)."""
+        sharp["ret"] = {"1": 1.62, "X": 3.60, "2": 4.80}
+        sharp["bench"] = None
+        _seed_live_bet(minutes=3.0)
+        got = cl.capture_closing_lines()
+        assert got["captured"] == 1 and got["benchmark"] == 0
+        assert got["rows"][0]["betfair_odds"] is None
+        conn = tracker._get_conn()
+        row = conn.execute("SELECT closing_odds, betfair_odds FROM clv_history "
+                           "WHERE match_id='sx-2'").fetchone()
+        conn.close()
+        assert row[0] == pytest.approx(1.62) and row[1] is None
+
+    def test_solo_benchmark_non_basta_per_il_campione(self, temp_db, sharp):
+        """Una chiusura primaria assente resta `no_sharp_cache`."""
+        sharp["ret"] = None
+        sharp["bench"] = {"1": 1.58, "X": 3.75, "2": 5.10}
+        _seed_live_bet(minutes=3.0)
+        got = cl.capture_closing_lines()
+        assert got["captured"] == 0
+        assert got["skipped"] == {"no_sharp_cache": 1}
+
+    def test_benchmark_completato_dopo_il_primo_t0(self, temp_db, sharp):
+        """Betfair pubblica tardi: la colonna si completa al giro successivo."""
+        sharp["ret"] = {"1": 1.62, "X": 3.60, "2": 4.80}
+        sharp["bench"] = None
+        _seed_live_bet(minutes=3.0)
+        assert cl.capture_closing_lines()["benchmark"] == 0
+        sharp["bench"] = {"1": 1.58, "X": 3.75, "2": 5.10}
+        got = cl.capture_closing_lines()
+        assert got["skipped"] == {"already_captured": 1}   # primaria intoccata
+        assert got["benchmark"] == 1                       # benchmark completato
+        conn = tracker._get_conn()
+        row = conn.execute("SELECT closing_odds, betfair_odds FROM clv_history "
+                           "WHERE match_id='sx-2'").fetchone()
+        conn.close()
+        assert row[0] == pytest.approx(1.62)     # il T-0 primario NON si riscrive
+        assert row[1] == pytest.approx(1.58)
+
+    def test_il_benchmark_non_si_riscrive(self, temp_db, sharp):
+        """Idempotenza anche sulla colonna del benchmark."""
+        sharp["ret"] = {"1": 1.62, "X": 3.60, "2": 4.80}
+        sharp["bench"] = {"1": 1.58, "X": 3.75, "2": 5.10}
+        _seed_live_bet(minutes=3.0)
+        cl.capture_closing_lines()
+        sharp["bench"] = {"1": 1.40, "X": 4.00, "2": 5.50}
+        got = cl.capture_closing_lines()
+        assert got["benchmark"] == 0
+        conn = tracker._get_conn()
+        row = conn.execute("SELECT betfair_odds FROM clv_history WHERE "
+                           "match_id='sx-2'").fetchone()
+        conn.close()
+        assert row[0] == pytest.approx(1.58)     # resta il PRIMO valore
+
+    def test_benchmark_chiede_la_fonte_giusta(self, temp_db, sharp):
+        """La lettura del benchmark usa `BENCHMARK_BOOK`, non Pinnacle."""
+        import pinnacle_oracle
+        sharp["ret"] = {"1": 1.62, "X": 3.60, "2": 4.80}
+        sharp["bench"] = {"1": 1.58, "X": 3.75, "2": 5.10}
+        _seed_live_bet(minutes=3.0)
+        cl.capture_closing_lines()
+        assert pinnacle_oracle.BENCHMARK_BOOK in sharp["books"]
+
+    def test_mercato_a_linea_non_usa_il_benchmark(self, temp_db, sharp):
+        """OU/AH non sono testa-a-testa: si salta PRIMA di leggere i benchmark."""
+        tracker.save_match("sx-ou", "Serie A", "Roma", "Lazio",
+                           (datetime.now(timezone.utc)
+                            + timedelta(minutes=3)).isoformat())
+        tracker.save_prediction("sx-ou", "OU", "Over 2.5", 1.90, 0.55, 0.05,
+                                status="value", league="Serie A")
+        got = cl.capture_closing_lines()
+        assert got["skipped"] == {"unsupported_market": 1}
+        assert sharp["books"] == []          # nessuna lettura di cache
+
+    def test_etichetta_del_benchmark_coerente(self):
+        """`closing_line` e `clv_tracker` dichiarano la STESSA fonte."""
+        import clv_tracker as ct
+        assert ct.SOURCE_BENCHMARK == cl.SOURCE_BENCHMARK == "betfair_t0"
+
+    def test_il_report_del_benchmark_e_leggibile(self, temp_db, sharp):
+        sharp["ret"] = {"1": 1.62, "X": 3.60, "2": 4.80}
+        sharp["bench"] = {"1": 1.58, "X": 3.75, "2": 5.10}
+        _seed_live_bet(minutes=3.0)
+        got = cl.capture_closing_lines()
+        assert "betfair_odds" in got["rows"][0]

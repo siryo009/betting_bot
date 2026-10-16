@@ -11,9 +11,10 @@ Questo modulo fa quella sola cosa, e la fa in sola LETTURA dalla cache quote
 (`pinnacle_oracle`, **zero crediti**, nessuna rete, nessun ordine):
 
 1. trova le righe APERTE con kickoff ormai imminente (finestra T-10..T+5);
-2. legge la quota GREZZA di Pinnacle dall'ultima cache disponibile;
-3. la scrive in `clv_history.closing_odds` (`tracker.save_clv`), senza
-   sovrascrivere un campione gia' catturato;
+2. legge la quota GREZZA di Pinnacle dall'ultima cache disponibile e — nello
+   stesso passaggio — quella del secondo benchmark (Betfair Exchange EU);
+3. le scrive in `clv_history.closing_odds` e `clv_history.betfair_odds`
+   (`tracker.save_clv`), senza sovrascrivere un campione gia' catturato;
 4. `beat_pct` misura la percentuale di beat: `(quota_ordine / closing) - 1`,
    delegando a `market_calib.clv_raw` (la formula vive li', mai ricopiata).
 
@@ -34,8 +35,9 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "SOURCE_PINNACLE", "beat_pct", "candidates", "capture_closing_lines",
-    "format_report", "post_minutes", "pre_minutes", "report", "sharp_closing",
+    "SOURCE_BENCHMARK", "SOURCE_PINNACLE", "beat_pct", "benchmark_closing",
+    "candidates", "capture_closing_lines", "format_report", "post_minutes",
+    "pre_minutes", "report", "sharp_closing",
 ]
 
 #: Motivi machine-readable di un salto (mai prosa, mai un silenzio):
@@ -50,6 +52,12 @@ SKIP_REASONS = ("no_sharp_cache", "unsupported_market", "already_captured",
 #: (`SOURCE_SX`) lo cattura `clv_tracker.capture_sx_closing`: la fonte viaggia
 #: col campione, altrimenti due chiusure di venue diverse non si confrontano.
 SOURCE_PINNACLE = "pinnacle_t0"
+
+#: Provenienza del valore scritto in `clv_history.betfair_odds` (15/10/2026):
+#: il SECONDO benchmark, l'exchange. La colonna e' dedicata, quindi la fonte
+#: e' dichiarata dal nome — la costante serve a chi REPORTA il confronto
+#: (`clv_tracker`) per non scrivere la stringa a mano in due posti.
+SOURCE_BENCHMARK = "betfair_t0"
 
 #: Finestra di cattura rispetto al kickoff (minuti): si parte `PRE` minuti
 #: prima e si tollera fino a `POST` minuti dopo (la routine gira ogni pochi
@@ -122,10 +130,16 @@ _OPEN_PRED = (
     "WHERE p.esito_finale IS NULL "
     "  AND p.status IN ('value', 'strong_value', 'moderate')"
 )
+# Le puntate portano l'identita' dell'evento SULLA riga (15/10/2026): il
+# LEFT JOIN + COALESCE serve le righe storiche e non perde una bet la cui riga
+# `matches` e' stata POTATA (`clear_old_matches`, 2 giorni) — senza, la closing
+# line di quelle bet non veniva piu' catturata.
 _OPEN_BETS = (
     "SELECT b.match_id, b.mercato, b.esito, b.price, "
-    "       m.home_team, m.away_team, m.commence_time "
-    "FROM bets b JOIN matches m ON m.id = b.match_id "
+    "       COALESCE(NULLIF(b.home,''), m.home_team) AS home, "
+    "       COALESCE(NULLIF(b.away,''), m.away_team) AS away, "
+    "       COALESCE(NULLIF(b.commence,''), m.commence_time) AS commence "
+    "FROM bets b LEFT JOIN matches m ON m.id = b.match_id "
     "WHERE b.mode = 'live' "
     "  AND (b.esito_finale IS NULL OR TRIM(b.esito_finale) = '')"
 )
@@ -204,9 +218,16 @@ def _canonical(home: str, away: str, market: str, esito: str) -> Optional[str]:
         return None
 
 
-def sharp_closing(home: str, away: str, market: str, esito: str, *,
-                  now: Optional[datetime] = None) -> Optional[float]:
-    """Quota Pinnacle di chiusura per l'esito, dalle cache. None se assente."""
+def _sharp_closing(home: str, away: str, market: str, esito: str, *,
+                   book: Optional[str] = None,
+                   now: Optional[datetime] = None) -> Optional[float]:
+    """Quota di chiusura di UNA fonte sharp per l'esito. None se assente.
+
+    UNICO punto di lettura: `book=None` -> Pinnacle (fonte primaria),
+    `book=BENCHMARK_BOOK` -> Betfair Exchange EU (secondo benchmark).
+    Due copie della stessa lettura divergerebbero al primo ritocco del
+    percorso cache (lezione del 12/09 sugli estrattori duplicati).
+    """
     outcomes = _outcomes_for(market)
     if outcomes is None:
         return None
@@ -215,8 +236,14 @@ def sharp_closing(home: str, away: str, market: str, esito: str, *,
         return None
     try:
         import pinnacle_oracle as po
-        got = po.pinnacle_odds_from_cache(home, away, outcomes=outcomes,
-                                          now=(now.timestamp() if now else None))
+        if book is None:
+            got = po.pinnacle_odds_from_cache(
+                home, away, outcomes=outcomes,
+                now=(now.timestamp() if now else None))
+        else:
+            got = po.sharp_odds_from_cache(
+                home, away, book=book, outcomes=outcomes,
+                now=(now.timestamp() if now else None))
     except Exception as exc:
         logger.debug("closing_line: sharp non leggibile per %s-%s (%s)",
                      home, away, exc)
@@ -228,6 +255,30 @@ def sharp_closing(home: str, away: str, market: str, esito: str, *,
     except (TypeError, ValueError):
         return None
     return price if price > 1.0 else None
+
+
+def sharp_closing(home: str, away: str, market: str, esito: str, *,
+                  now: Optional[datetime] = None) -> Optional[float]:
+    """Quota PINNACLE di chiusura per l'esito, dalle cache. None se assente."""
+    return _sharp_closing(home, away, market, esito, now=now)
+
+
+def benchmark_closing(home: str, away: str, market: str, esito: str, *,
+                      now: Optional[datetime] = None) -> Optional[float]:
+    """Quota di chiusura del SECONDO BENCHMARK (Betfair Exchange EU).
+
+    Catturata nello stesso passaggio della primaria e in una colonna PROPRIA
+    (`betfair_odds`): il CLV puo' cosi' essere verificato contro due sharp
+    indipendenti. `None` quando la fonte non e' nella cache — un benchmark
+    assente non e' un benchmark a zero, e non deve mai declassare il campione
+    primario (fail-open sull'assenza, come il validatore del consenso).
+    """
+    try:
+        import pinnacle_oracle as po
+        book = po.BENCHMARK_BOOK
+    except Exception:
+        return None
+    return _sharp_closing(home, away, market, esito, book=book, now=now)
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +316,25 @@ def _existing(conn, match_id: str, esito: str) -> tuple[bool, Optional[float]]:
     return True, (value if value and value > 1.0 else None)
 
 
+def _existing_benchmark(conn, match_id: str, esito: str) -> bool:
+    """True se la chiusura del SECONDO benchmark e' gia' a ledger.
+
+    Fail-CLOSED sul dubbio (illeggibile -> True: non si riscrive).
+    """
+    try:
+        got = conn.execute(
+            "SELECT betfair_odds FROM clv_history WHERE match_id=? AND esito=?",
+            (match_id, esito)).fetchone()
+    except Exception:
+        return True
+    if got is None or got[0] is None:
+        return False
+    try:
+        return float(got[0]) > 1.0
+    except (TypeError, ValueError):
+        return False
+
+
 def capture_closing_lines(*, conn=None, now: Optional[datetime] = None) -> dict:
     """Cattura la closing line di Pinnacle a T-0 per le righe aperte.
 
@@ -272,7 +342,7 @@ def capture_closing_lines(*, conn=None, now: Optional[datetime] = None) -> dict:
     errore su una riga non ferma le altre e non solleva mai al chiamante.
     """
     out: dict[str, Any] = {"checked": 0, "captured": 0, "skipped": {},
-                           "rows": []}
+                           "benchmark": 0, "rows": []}
     now = now or datetime.now(timezone.utc)
     try:
         if conn is None:
@@ -298,6 +368,17 @@ def capture_closing_lines(*, conn=None, now: Optional[datetime] = None) -> dict:
             reason = ("unsupported_market"
                       if _outcomes_for(row["mercato"]) is None
                       else "no_sharp_cache")
+        # SECONDO BENCHMARK (15/10/2026): la chiusura dell'exchange, letta nello
+        # STESSO passaggio. Un benchmark assente NON declassa il campione
+        # primario: senza Betfair in cache si registra solo Pinnacle.
+        bench = None
+        if not reason:
+            try:
+                bench = benchmark_closing(row["home"], row["away"],
+                                          row["mercato"], row["esito"], now=now)
+            except Exception as exc:
+                logger.debug("closing_line: benchmark non letto per %s (%s)",
+                             row["match_id"], exc)
         if not reason:
             try:
                 from tracker import save_clv
@@ -305,17 +386,29 @@ def capture_closing_lines(*, conn=None, now: Optional[datetime] = None) -> dict:
                 if prev is not None:
                     # Campione GIA' preso a T-0: non si riscrive (idempotenza).
                     reason = "already_captured"
+                    # Ma il SECONDO benchmark si puo' ancora completare: Betfair
+                    # pubblica piu' tardi di Pinnacle, e senza questo la colonna
+                    # resterebbe vuota per sempre su quel campione. Si scrive
+                    # SOLO il benchmark (COALESCE: la chiusura primaria non si
+                    # tocca).
+                    if bench is not None and not _existing_benchmark(
+                            conn, row["match_id"], row["esito"]):
+                        save_clv(row["match_id"], row["esito"], row["price"],
+                                 betfair_odds=bench)
+                        out["benchmark"] += 1
                 elif not exists:
                     # Seme del campione: la quota del segnale e' quella presa
                     # dall'ordine (non c'e' un'analisi a monte da cui leggerla).
                     save_clv(row["match_id"], row["esito"], row["price"],
                              signal_started=True, pinnacle_quota=closing,
                              closing_odds=closing,
-                             closing_source=SOURCE_PINNACLE)
+                             closing_source=SOURCE_PINNACLE,
+                             betfair_odds=bench)
                 else:
                     save_clv(row["match_id"], row["esito"], row["price"],
                              pinnacle_quota=closing, closing_odds=closing,
-                             closing_source=SOURCE_PINNACLE)
+                             closing_source=SOURCE_PINNACLE,
+                             betfair_odds=bench)
             except Exception as exc:
                 logger.debug("closing_line: scrittura fallita (%s)", exc)
                 reason = "write_error"
@@ -323,9 +416,13 @@ def capture_closing_lines(*, conn=None, now: Optional[datetime] = None) -> dict:
             out["skipped"][reason] = out["skipped"].get(reason, 0) + 1
             continue
         out["captured"] += 1
+        if bench is not None:
+            out["benchmark"] += 1
         out["rows"].append({**{k: v for k, v in row.items() if k != "kickoff"},
                             "kickoff": row["kickoff"].isoformat(),
                             "closing_odds": round(closing, 6),
+                            "betfair_odds": (round(bench, 6)
+                                             if bench is not None else None),
                             "beat_pct": beat_pct(row["price"], closing)})
     return out
 

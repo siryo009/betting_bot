@@ -123,8 +123,17 @@ class TestEdgeAnalysis:
         # I bucket sono DERIVATI dalle soglie reali della strategia: un test
         # con edge fissi (0.08/0.04/0.01) scadeva in silenzio al primo cambio
         # di soglia (verificato il 21/09, quando il minimo e' passato a +2pp).
+        # I bucket 'value' e 'strong' esistono solo se le due soglie sono
+        # ORDINATE: dichiarato, cosi' un futuro allineamento delle costanti si
+        # legge subito invece di far fallire il conteggio (16/10/2026).
+        assert MARKET_EDGE_MODERATE < MARKET_EDGE_STRONG, (
+            "senza MODERATE < STRONG non esiste il bucket 'value'")
         over_strong = MARKET_EDGE_STRONG + 0.03
-        in_value = MARKET_EDGE_MODERATE + 0.01
+        # Punto MEDIO fra le due soglie. Prima era `MODERATE + 0.01`, che con
+        # STRONG a MODERATE+0.01 (soglie del 14/10) cadeva ESATTAMENTE sulla
+        # soglia strong: bucket strong a 2, value a 0 — due bucket su tre
+        # misurati dalla stessa riga (16/10/2026).
+        in_value = (MARKET_EDGE_MODERATE + MARKET_EDGE_STRONG) / 2.0
         under_min = MARKET_EDGE_MODERATE - 0.01
         # 3 previsioni con edge diverso
         tracker.save_result("m0", "L", "A", "B", 2, 0,
