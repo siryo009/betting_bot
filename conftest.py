@@ -390,7 +390,28 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     _psz.reset_caches()
     if "test_portfolio_sizing" not in request.node.nodeid:
         monkeypatch.setenv("PORTFOLIO_SIZING", "off")
+    # DIXON-COLES (16/10/2026, `dixon_coles.py` + `bot.dixon_coles_job`): lo
+    # stato del rho stimato vive sul VOLUME, quindi un test che promuove un rho
+    # scriverebbe nel file di PRODUZIONE. Peggio: `apply_fitted` cambia il
+    # parametro del MOTORE (globale di `poisson_engine`) e un test che lo
+    # applica cambierebbe le probabilita' di TUTTI i test successivi dello
+    # stesso processo (stessa lezione della cache di prontezza OU, 26/09).
+    # Stato nella tmp + interruttore di applicazione spento: il file dedicato
+    # (`test_dixon_coles`) lo riaccende esplicitamente, e il rho del motore
+    # viene comunque riportato al default di codice dopo ogni test.
+    monkeypatch.setenv("DIXON_COLES_STATE",
+                       str(tmp_path / "dixon_coles_rho.json"))
+    if "test_dixon_coles" not in request.node.nodeid:
+        monkeypatch.setenv("DIXON_COLES_APPLY", "0")
+    import poisson_engine as _pe
+    # Il default NON si scrive a mano: si memorizza il valore di codice la
+    # prima volta e si ripristina quello (una copia del numero qui sarebbe una
+    # seconda verita' sul modello).
+    if not hasattr(_pe, "_RHO_DEFAULT"):
+        _pe._RHO_DEFAULT = _pe.RHO
+    _pe.RHO = _pe._RHO_DEFAULT
     yield
+    _pe.RHO = _pe._RHO_DEFAULT
     _psz.reset_caches()
     _ld.reset_cache()
     _oracle_skips.reset_dedup()

@@ -12637,3 +12637,134 @@ effetto sul denaro **zero** finche' non si passa `PORTFOLIO_SIZING=enforce`
 riduzione sarebbe stata applicata, come la shadow mode della catena `decision/`.
 Prossimo passo naturale: leggere i log `portfolio_sizing [SHADOW]` per qualche
 giorno e decidere il passaggio a `enforce`.
+
+---
+
+### Dixon-Coles nel motore predittivo: rho STIMATO + time-decay + gate di calibrazione (16/10/2026)
+
+Direttiva del proprietario: portare nel motore del calcio la correzione
+**Dixon-Coles** dei punteggi bassi (0-0, 1-1) e la **pesatura temporale**
+(time-decay) sulla forma recente, con i test di validazione PRIMA di qualunque
+effetto sul denaro.
+
+**IL PUNTO DI PARTENZA (misurato, non assunto)**: la matematica richiesta c'era
+gia' da sempre e vive in un posto solo — la griglia Dixon-Coles con `rho` e'
+`poisson_engine._probs_grid` (vettorizzata dal 29/09) e il time-decay e' quello
+dei rating (`rating_engine._weight`, mezza vita `HALF_LIFE_DAYS` = 100gg).
+Mancavano DUE cose: **il parametro era una costante scritta a mano**
+(`RHO = -0.15`) e **nessun blocco leggeva la stima** dai dati reali.
+
+**1) `dixon_coles.py` — la stima, senza una seconda formula.**
+- la griglia resta quella del motore: si passa un `rho` diverso per la durata
+  del calcolo con il context manager `poisson_engine.rho_value(...)`, che
+  **ripristina sempre** (anche se il blocco solleva);
+- il time-decay e' lo STESSO dei rating: `dixon_coles.time_weight` delega a
+  `rating_engine._weight` quando la mezza vita e' quella di default (due
+  meccanismi di decadimento = due idee diverse di "recente");
+- verosimiglianza **pesata nel tempo** con massima verosimiglianza su griglia +
+  secondo passaggio fine: la correzione tocca SOLO le quattro celle (0,0) (0,1)
+  (1,0) (1,1), quindi per ogni partita si precalcolano le quattro pmf e il
+  totale della griglia e il costo per punto e' O(n) invece di O(n·K²);
+- sola LETTURA del ledger (`mode=ro`), zero rete, zero crediti, zero ordini
+  (tripwire ast-based nei test: il controllo giudica il CODICE, non la prosa).
+
+**2) BUG REALE trovato sui dati di PRODUZIONE (16/10).** `f11` era uno
+**scalare** mentre `f00`/`f01`/`f10` erano array: appena UNA partita usciva di
+validita' la maschera `f11[valid]` sollevava
+`TypeError: 'float' object is not subscriptable` e la stima moriva
+(`errore_stima`) su 17.621 match reali. La griglia di produzione parte da
+`rho = -0.30`, dove un favorito forte rende la cella 0-1 non valida: il caso
+non era teorico. Fix: `np.full(np.shape(lam_h), ...)`. Regressione coperta da
+`test_stima_su_campione_con_favoriti_forti` + `test_maschera_parziale_esclude_solo_le_invalide`.
+
+**3) LA MISURA CHE HA CAMBIATO LA DECISIONE — la verosimiglianza NON e' il
+criterio del denaro (container AMS, ledger reale).**
+
+| rho | log-verosimiglianza | Brier 1X2 (holdout) |
+|---|---|---|
+| **-0.30** | **-957.3 (massimo)** | 0.5506 |
+| -0.20 | -1010.1 | 0.5466 |
+| -0.15 (default di codice) | -1024.8 | 0.5451 |
+| **0.00 (Poisson puro)** | -1052.7 | **0.5425 (migliore)** |
+
+Il rho che **massimizza** la verosimiglianza dei punteggi esatti e' anche
+quello che **peggiora la calibrazione dei mercati** (1X2), e il denaro sta sui
+mercati. Da qui il **GATE DI CALIBRAZIONE** (`holdout_verdict`): il rho stimato
+si applica solo se il Brier 1X2 **fuori campione** (30% piu' recente,
+`DIXON_COLES_HOLDOUT_SHARE`, min 50 match) non peggiora rispetto al **default di
+codice** E rispetto a **rho = 0**. Misura reale del giro end-to-end: **rho
+stimato -0.28**, log-L **+69.5** vs default, ma **Brier 0.5248 vs 0.5172**
+(default) e 0.5112 (rho 0) -> verdetto `non_migliora_default`, `safe: False`
+(fuori banda), **`applied: False`**, motore al default **-0.15**,
+**0 cambi al denaro**. La stima si salva comunque (e' la misura), il modello
+non si tocca.
+
+**4) LA PROMOZIONE (`promote()`), fail-closed in QUATTRO punti** (ognuno con un
+test): (a) **stima fallita** -> non si salva, perche' il job gira ogni giorno e
+un giorno senza dati non deve cancellare la stima buona gia' sul volume;
+(b) **salvataggio fallito** -> non si applica (si installa cio' che sopravvive al
+redeploy, non cio' che era in memoria); (c) **gate di calibrazione** (default ON,
+`DIXON_COLES_CALIB_GATE=0` per confronti); (d) **interruttore esplicito**
+(`DIXON_COLES_APPLY`, default **OFF**) + **banda di sicurezza**
+(`[-0.25, 0.02]`: fuori banda il valore e' un dato da guardare, non un parametro
+da installare). `changed` e' la condizione della notifica: un rho identico ogni
+giorno non e' una notizia.
+
+**5) IL JOB (`bot.dixon_coles_job`)**: giornaliero alle **05:20 UTC** E al
+**boot (45s)** — l'applicazione e' un globale di **processo**, quindi un
+redeploy riporta il motore al default: senza il giro al boot il modello girerebbe
+in silenzio sul default fino al giorno dopo (la deriva silenziosa che il progetto
+evita: il log dichiara SEMPRE il rho del motore, anche quando non si applica).
+Costo: **zero crediti, zero rete** (legge `match_results` locale).
+`DIXON_COLES_ENABLED=0` spegne il job.
+
+**6) DEFAULT UNICO DEL MODELLO (fix dello stesso giorno).** `fit_rho` e
+`holdout_verdict` confrontavano la stima con un **`-0.15` scritto a mano**: una
+SECONDA definizione del default di `poisson_engine`. Nuovi
+`poisson_engine.DEFAULT_RHO` (il default di CODICE) e `poisson_engine.default_rho()`
+(accessor), con `RHO = DEFAULT_RHO` come parametro EFFETTIVO; `dixon_coles.default_rho()`
+deve quello. Il riferimento resta il default di **codice** anche dopo una
+promozione: se seguisse il valore installato, un secondo fit misurerebbe il
+miglioramento contro il parametro appena applicato (circolo vizioso: il gate non
+potrebbe piu' accorgersi di un peggioramento). Tripwire:
+`TestDefaultUnico` (3 test: derivazione, confronto che segue il modello,
+promozione che non sposta il riferimento).
+
+**7) ENV** (tutte `preserve()` in `.railway/railway.ts`, blocco accanto a
+`DRAWDOWN_REBALANCE_*`): `DIXON_COLES_ENABLED`, `DIXON_COLES_APPLY`,
+`DIXON_COLES_STATE`, `DIXON_COLES_DAYS`, `DIXON_COLES_MAX_MATCHES`,
+`DIXON_COLES_MAX_GOALS`, `DIXON_COLES_RHO_MIN/RHO_MAX/RHO_STEP`,
+`DIXON_COLES_REFINE_STEP`, `DIXON_COLES_SAFE_MIN/SAFE_MAX`,
+`DIXON_COLES_HALF_LIFE_DAYS`, `DIXON_COLES_CALIB_GATE`,
+`DIXON_COLES_CALIB_MIN_GAIN`, `DIXON_COLES_HOLDOUT_SHARE`,
+`DIXON_COLES_MIN_HOLDOUT`. ⚠️ **Nessuna e' impostata su Railway**: valgono i
+default di codice (stima giornaliera ON, applicazione **OFF**), quindi in
+produzione il comportamento e' quello misurato e il modello resta a -0.15.
+
+**8) TEST E VERIFICHE.** `test_dixon_coles.py` **88 verdi, TUTTI OFFLINE**
+(ledger temporaneo, `expected_goals` iniettato, stato in tmp via env): parita'
+con la griglia VERA del modello (la stima deve essere quella del modello in
+produzione), recupero di un rho noto su dati simulati DAL modello, maschera
+parziale, banda di sicurezza, gate di calibrazione (accetta chi migliora,
+rifiuta chi peggiora, fail-closed su campione piccolo), promozione e fail-closed,
+job e anti-spam, IaC e tripwire (nessuna scrittura sul ledger, nessuna rete,
+nessun ordine, nessuna griglia ricopiata, import leggero). Regressioni verdi:
+**229** (M6: risk_parity, drawdown_rebalancer, portfolio_sizing, copula_portfolio
+— **Fase 3 e Fase 4 di `portfolio_sizing` gia' consegnate il 15/10 e promosse in
+SHADOW il 16/10**, vedi la sezione `portfolio_sizing`), **318** (bot, auto_bet x2,
+capital_enclosure, money_decimal, t60_breakers, exposure_gate, order_watch),
+**31** (railway_drift_check, secret_hygiene), **198** (agent_hierarchy,
+chief_shadow_wiring, advisor_agent, agent_kelly, aggressive_kelly,
+decision_pipeline), `test_poisson_engine` + `test_poisson_vectorized` verdi
+(`poisson_engine.py` toccato solo per `DEFAULT_RHO`/`default_rho()`).
+`verify_guardrails.py`: **A–J TUTTI BLOCCANO** (exit 0). `compileall` OK,
+**0 marker di conflitto**.
+
+⚠️ **STATO OPERATIVO**: `DIXON_COLES_APPLY` non impostata -> il job **misura e
+salva** ogni giorno (serie storica del rho sul volume in
+`data/decision/dixon_coles_rho.json`) e il motore resta al default. Accendere
+l'applicazione e' una decisione del proprietario: cambierebbe le probabilita' di
+**tutte** le corsie (EV compresi), e allo stato misurato il gate di calibrazione
+la rifiuterebbe comunque. Prossimo passo naturale: accumulare la serie del rho e
+rileggere il verdetto di calibrazione quando il ledger ha piu' chiusure (il
+campione del 16/10 era di 118 match di holdout).

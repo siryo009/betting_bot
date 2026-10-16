@@ -24,12 +24,26 @@ def prob_score(home_goals: int, away_goals: int, lam_h: float, lam_a: float) -> 
     return poisson_pmf(home_goals, lam_h) * poisson_pmf(away_goals, lam_a)
 
 
-RHO = -0.15  # Correzione Dixon-Coles (draw correlation)
+DEFAULT_RHO = -0.15  # Correzione Dixon-Coles (draw correlation) — il DEFAULT
+RHO = DEFAULT_RHO    # parametro EFFETTIVO (puo' essere promosso da `dixon_coles`)
 
 
 def current_rho() -> float:
     """RHO effettivo del modello (diagnostica e moduli che lo STIMANO)."""
     return RHO
+
+
+def default_rho() -> float:
+    """RHO di CODICE, quello che il modello usa se nessuno lo promuove.
+
+    Esiste perche' chi VALUTA un rho stimato deve confrontarlo col default del
+    modello, non con un numero scritto a mano: la log-verosimiglianza (`fit_rho`)
+    e il gate di calibrazione (`holdout_verdict`) usavano `-0.15` letterale, cioe'
+    una SECONDA definizione del default. Il giorno in cui il default cambia,
+    confronti scritti a mano misurerebbero un miglioramento contro un parametro
+    che il modello non usa piu'.
+    """
+    return DEFAULT_RHO
 
 
 @contextlib.contextmanager
@@ -38,7 +52,7 @@ def rho_value(rho):
 
     Esiste perche' il modello vive in UN solo posto: `dixon_coles.fit_rho`
     stima il parametro sui dati reali, ma la griglia dei punteggi resta questa
-    — nessuna seconda formula. Il valore di DEFAULT (`RHO = -0.15`) NON cambia
+    — nessuna seconda formula. Il valore di DEFAULT (`RHO = DEFAULT_RHO`) NON cambia
     e viene SEMPRE ripristinato, anche se il blocco solleva: un errore dentro
     la stima non deve lasciare il modello con un parametro di prova.
     """

@@ -3070,6 +3070,66 @@ async def clv_tracker_job(context: ContextTypes.DEFAULT_TYPE = None):
         logger.warning("clv_tracker_job: notifica non inviata (%s)", e)
 
 
+async def dixon_coles_job(context: ContextTypes.DEFAULT_TYPE = None):
+    """PROMOZIONE del rho Dixon-Coles (16/10/2026): stima -> salva -> applica.
+
+    Direttiva del proprietario: portare nel motore predittivo la correzione
+    Dixon-Coles dei punteggi bassi (0-0, 1-1) e il time-decay sulla forma
+    recente. La MATEMATICA non cambia: il motore e' Dixon-Coles dal primo
+    giorno, la griglia dei punteggi vive in `poisson_engine` e il decadimento
+    temporale nei rating (`rating_engine`). Mancava il BLOCCO CHE LEGGE la
+    stima — `dixon_coles.promote()` — e questo job e' il suo orologio.
+
+    Perche' un job e non un valore scritto a mano: rho e' un parametro STIMATO
+    sui risultati reali, e la stima pesa le partite con il time-decay dei
+    rating (mezza vita `rating_engine.HALF_LIFE_DAYS`), quindi piu' il ledger
+    cresce piu' il parametro e' informato.
+
+    Costo: **zero crediti, zero rete** (legge `match_results` in locale).
+    L'applicazione al modello resta vincolata a `DIXON_COLES_APPLY=1` + banda
+    di sicurezza: a interruttore spento il job continua a stimare e a SALVARE
+    la stima (che e' la misura) e il modello resta al default. Fail-safe
+    totale: un errore non ferma nulla, `DIXON_COLES_ENABLED=0` spegne il job.
+    Notifica agli admin SOLO quando il valore APPLICATO cambia (anti-spam per
+    valore): un rho identico ogni giorno non e' una notizia.
+    """
+    if os.getenv("DIXON_COLES_ENABLED", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return
+    try:
+        import dixon_coles
+    except Exception as e:                                    # pragma: no cover
+        logger.debug("dixon_coles_job: modulo non disponibile (%s)", e)
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        out = await loop.run_in_executor(None, dixon_coles.promote)
+    except Exception as e:                                    # pragma: no cover
+        logger.warning("dixon_coles_job: promozione fallita (%s)", e)
+        return
+    # Il log e' la SERIE della stima: sempre, anche quando non si applica.
+    logger.info("dixon_coles_job: %s", dixon_coles.format_promotion(out))
+    if not out.get("changed"):
+        return
+    try:
+        from tracker import is_notified, mark_notified
+        slot = "rho:%s" % out.get("rho")
+        if is_notified("DIXON_COLES", slot):
+            return
+    except Exception as e:                                    # pragma: no cover
+        logger.debug("dixon_coles_job: anti-spam non leggibile (%s)", e)
+        slot = None
+    try:
+        text = ("📐 Dixon-Coles: rho del modello aggiornato\n%s"
+                % dixon_coles.format_promotion(out))
+        for chat_id in _admin_chat_ids():
+            await context.bot.send_message(chat_id=chat_id, text=text)
+        if slot:
+            mark_notified("DIXON_COLES", slot)
+    except Exception as e:                                    # pragma: no cover
+        logger.warning("dixon_coles_job: notifica non inviata (%s)", e)
+
+
 async def market_shadow_job(context: ContextTypes.DEFAULT_TYPE):
     """Telemetria OMbra sui mercati SX NON calcistici (01/10/2026).
 
@@ -3908,6 +3968,19 @@ def main() -> None:
         # del giorno dopo; il retrain e' idempotente e non tocca l'API.
         job_queue.run_daily(retrain_ensemble_job, time=time(hour=5, minute=45))
         job_queue.run_once(retrain_ensemble_job, when=20)  # retrain al boot
+        # PROMOZIONE Dixon-Coles (16/10/2026): ogni giorno stima rho sui
+        # `match_results` reali con lo STESSO time-decay dei rating e — solo se
+        # `DIXON_COLES_APPLY=1` e il valore e' nella banda di sicurezza — lo
+        # installa nel motore. Zero crediti, zero rete (legge il ledger
+        # locale); con l'interruttore spento resta una MISURA giornaliera.
+        # `DIXON_COLES_ENABLED=0` spegne il job.
+        job_queue.run_daily(dixon_coles_job, time=time(hour=5, minute=20))
+        # Promozione ANCHE al boot (45s): il rho applicato e' un globale di
+        # PROCESSO, quindi un redeploy lo riporta al default di codice — senza
+        # questo giro il modello girerebbe in silenzio sul default fino alle
+        # 05:20 del giorno dopo (la classe di deriva silenziosa che il progetto
+        # evita: il log del giro dice sempre quale rho sta usando il motore).
+        job_queue.run_once(dixon_coles_job, when=45)
         # Drift watchdog (09/09): monitoraggio CONTINUO in background della
         # calibrazione rolling ogni 6h. Alerta admin+iscritti SOLO quando il
         # drift e' rilevato (anti-spam: massimo 1 alert/24h a drift

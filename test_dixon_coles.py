@@ -14,6 +14,7 @@ Due prove che contano piu' di tutte:
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import math
 import sqlite3
@@ -60,6 +61,28 @@ def _eg_const(lam=(1.6, 1.1)):
     return lambda home, away: lam
 
 
+def _eg_mixed(lam_big=(4.0, 3.5), lam_small=(1.4, 1.3)):
+    """`expected_goals` per un campione MISTO: favoriti forti + partite normali.
+
+    Serve a esercitare la maschera PARZIALE di `log_likelihood`: sulla griglia
+    di produzione (che parte da rho -0.30) un favorito con lam 4.0 rende la
+    cella 0-1 non valida (`1 + lam*rho = -0.2`) mentre le partite normali
+    restano valide — esattamente il caso che su dati reali ha fatto fallire la
+    stima (bug del 16/10/2026: `f11` era uno scalare e la maschera lo
+    indicizzava).
+    """
+    return lambda home, away: lam_big if str(home).startswith("BIG") else lam_small
+
+
+def _mixed_matches(n=20):
+    """20 partite con lam 4.0 (che a rho -0.30 escono) + 20 con lam 1.4."""
+    rows = [{"home": "BIG%d" % i, "away": "A", "score_home": 1,
+             "score_away": 0, "weight": 1.0} for i in range(n)]
+    rows += [{"home": "SM%d" % i, "away": "A", "score_home": 1,
+              "score_away": 0, "weight": 1.0} for i in range(n)]
+    return rows
+
+
 def _simulate(true_rho, n=4000, lam=(1.6, 1.2), seed=11):
     """Punteggi campionati DAL modello con `true_rho` (nessun modello nuovo)."""
     rng = np.random.default_rng(seed)
@@ -99,7 +122,7 @@ def _isolate(monkeypatch, tmp_path):
                  "DIXON_COLES_RHO_MAX", "DIXON_COLES_RHO_STEP",
                  "DIXON_COLES_REFINE_STEP", "DIXON_COLES_SAFE_MIN",
                  "DIXON_COLES_SAFE_MAX", "DIXON_COLES_HALF_LIFE_DAYS",
-                 "DIXON_COLES_APPLY", dc.RHO_FILE_ENV):
+                 "DIXON_COLES_APPLY", "DIXON_COLES_ENABLED", dc.RHO_FILE_ENV):
         monkeypatch.delenv(name, raising=False)
     # Lo stato su volume va nella tmp passando dall'ENV (come in produzione):
     # cosi' il percorso reale di `state_path()` resta quello esercitato.
@@ -224,6 +247,33 @@ class TestParita:
         terms = dc.match_terms([], expected_goals_fn=_eg_const())
         assert dc.log_likelihood(terms, -0.15) == float("-inf")
 
+    def test_maschera_parziale_esclude_solo_le_invalide(self):
+        """Meta' campione non valido a rho -0.30: le valide restano nel conto.
+
+        Regressione del bug del 16/10/2026 (`f11` scalare -> TypeError sulla
+        maschera parziale): senza questo caso il difetto resta invisibile
+        perche' la suite copriva solo "tutte invalide".
+        """
+        mixed = _mixed_matches()
+        terms = dc.match_terms(mixed, expected_goals_fn=_eg_mixed())
+        got = dc.log_likelihood(terms, -0.30)
+        assert isinstance(got, float) and math.isfinite(got)
+        # Le partite con lam 4.0 sono davvero fuori validita' a rho -0.30...
+        assert 1.0 + 4.0 * -0.30 <= 0
+        # ...quindi il valore e' ESATTAMENTE quello delle sole partite valide
+        # (mai un fattore negativo "riparato" a zero: sarebbero rimaste dentro
+        # con un contributo finto).
+        only_small = [m for m in mixed if m["home"].startswith("SM")]
+        ref = dc.log_likelihood(
+            dc.match_terms(only_small, expected_goals_fn=_eg_mixed()), -0.30)
+        assert got == pytest.approx(ref, rel=1e-12)
+
+    def test_ogni_punto_della_griglia_non_solleva(self):
+        """La griglia di PRODUZIONE (-0.30..0.05) attraversata per intero."""
+        terms = dc.match_terms(_mixed_matches(), expected_goals_fn=_eg_mixed())
+        for r in np.arange(-0.30, 0.055, 0.01):
+            assert isinstance(dc.log_likelihood(terms, float(r)), float), r
+
     def test_partita_fuori_griglia_scartata(self):
         matches = [{"home": "H", "away": "A", "score_home": 15, "score_away": 0,
                     "weight": 1.0}]
@@ -287,6 +337,18 @@ class TestStima:
         fit = dc.fit_rho(_matches(1000), expected_goals_fn=_eg_const())
         assert fit["ok"] is True
         assert fit["elapsed_s"] < 30.0
+
+    def test_stima_su_campione_con_favoriti_forti(self):
+        """Regressione di PRODUZIONE (16/10/2026): la stima moriva a rho -0.30.
+
+        Con un favorito forte nel campione la griglia tocca punti in cui una
+        cella non e' valida: `fit_rho` deve restituire comunque una stima (non
+        `errore_stima`, che era il risultato su 17.621 match reali).
+        """
+        fit = dc.fit_rho(_mixed_matches(), expected_goals_fn=_eg_mixed())
+        assert fit["ok"] is True and fit["reason"] == "ok"
+        assert -0.30 <= fit["rho"] <= 0.05
+        assert fit["n_used"] >= 20          # le partite valide sono state usate
 
     def test_il_modello_non_viene_lasciato_modificato(self):
         before = pe.RHO
@@ -416,6 +478,446 @@ class TestApplicazione:
 # ---------------------------------------------------------------------------
 # Probabilita' raffinate
 # ---------------------------------------------------------------------------
+class TestCalibrazione:
+    """Il gate che allinea la stima al criterio del DENARO (Brier 1X2).
+
+    La misura del 16/10/2026 sul ledger reale: il rho che massimizza la
+    verosimiglianza dei punteggi esatti (-0.30) PEGGIORA il Brier 1X2 (0.5506
+    contro 0.5451 del default, 0.5425 di rho 0). Questi test difendono sia il
+    calcolo sia la regola (fail-closed).
+    """
+
+    def _draws(self, n=120, score=(1, 1), lam=(1.3, 1.3)):
+        return [{"home": "H", "away": "A", "score_home": score[0],
+                 "score_away": score[1], "weight": 1.0, "days_ago": i * 0.5}
+                for i in range(n)]
+
+    def _wins(self, n=120, lam=(1.0, 1.0)):
+        return [{"home": "H", "away": "A", "score_home": 3,
+                 "score_away": 1, "weight": 1.0, "days_ago": i * 0.5}
+                for i in range(n)]
+
+    def test_brier_coincide_col_modello(self):
+        matches = self._draws(40, score=(1, 0))
+        got = dc.brier_1x2(matches, -0.10, expected_goals_fn=_eg_const((1.6, 1.2)))
+        manual = 0.0
+        with pe.rho_value(-0.10):
+            p1, px, p2 = pe.prob_1x2(1.6, 1.2)
+        manual = ((p1 - 1.0) ** 2 + px ** 2 + p2 ** 2)
+        assert got == pytest.approx(manual)
+
+    def test_brier_normalizzato_sui_pesi(self):
+        a = dc.brier_1x2(self._draws(60), -0.15, expected_goals_fn=_eg_const())
+        weighted = [dict(m, weight=3.0) for m in self._draws(60)]
+        b = dc.brier_1x2(weighted, -0.15, expected_goals_fn=_eg_const())
+        assert a == pytest.approx(b)                 # media pesata, non somma
+
+    def test_brier_senza_campione_e_none(self):
+        assert dc.brier_1x2([], -0.15, expected_goals_fn=_eg_const()) is None
+        bad = [{"home": "H", "away": "A", "score_home": None,
+                "score_away": None, "weight": 1.0}]
+        assert dc.brier_1x2(bad, -0.15, expected_goals_fn=_eg_const()) is None
+
+    def test_verdetto_accetta_chi_migliora(self):
+        # Un campione di PAREGGI: un rho piu' negativo alza la probabilita' del
+        # pareggio e quindi migliora il Brier (e' il caso reale al contrario).
+        v = dc.holdout_verdict(self._draws(), -0.30,
+                               expected_goals_fn=_eg_const((1.3, 1.3)))
+        assert v["ok"] is True and v["reason"] == "ok"
+        assert v["gain_vs_default"] > 0
+        # 30% di 120 = 36, ma il minimo (`MIN_HOLDOUT` 50) prevale
+        assert v["n_holdout"] == 50
+
+    def test_verdetto_rifiuta_chi_peggiora(self):
+        v = dc.holdout_verdict(self._draws(), 0.05,
+                              expected_goals_fn=_eg_const((1.3, 1.3)))
+        assert v["ok"] is False
+        assert v["reason"] in ("non_migliora_default", "non_migliora_rho_zero")
+
+    def test_verdetto_fail_closed_su_campione_piccolo(self):
+        v = dc.holdout_verdict(self._draws(20), -0.20,
+                               expected_goals_fn=_eg_const((1.3, 1.3)))
+        assert v["ok"] is False and v["reason"] == "holdout_insufficiente"
+        v0 = dc.holdout_verdict([], -0.20, expected_goals_fn=_eg_const())
+        assert v0["ok"] is False and v0["reason"] == "campione_insufficiente"
+
+    def test_verdetto_senza_lam_utilizzabili(self):
+        v = dc.holdout_verdict(self._draws(120), -0.20,
+                               expected_goals_fn=lambda h, a: (float("nan"), 1.0))
+        assert v["ok"] is False and v["reason"] == "brier_non_calcolabile"
+
+    def test_verifica_ignora_l_ordine_del_campione(self):
+        """Il banco di prova sono i match PIU' RECENTI, non i primi della lista."""
+        recenti_negativi = [{"home": "H", "away": "A", "score_home": 1,
+                             "score_away": 1, "weight": 1.0, "days_ago": 0.1}
+                            for _ in range(80)]
+        vecchi_positivi = [{"home": "H", "away": "A", "score_home": 3,
+                            "score_away": 1, "weight": 1.0, "days_ago": 300.0}
+                           for _ in range(80)]
+        a = dc.holdout_verdict(recenti_negativi + vecchi_positivi, -0.30,
+                               expected_goals_fn=_eg_const((1.3, 1.3)))
+        b = dc.holdout_verdict(vecchi_positivi + recenti_negativi, -0.30,
+                               expected_goals_fn=_eg_const((1.3, 1.3)))
+        assert a["brier_fitted"] == pytest.approx(b["brier_fitted"])
+        assert a["ok"] == b["ok"] is True
+
+    def test_gate_chiamato_col_rho_stimato_e_blocca(self, monkeypatch):
+        """Promozione COMPLETA col gate che rifiuta: si salva, non si applica.
+
+        E' il comportamento misurato il 16/10 sul ledger di produzione (stima
+        al bordo della griglia, calibrazione 1X2 che peggiora): modello al
+        default, misura salvata. Il verdetto e' INIETTATO per fissare la
+        POLITICA del percorso (chiamato col rho stimato, blocca, non applica);
+        la direzione matematica del verdetto ha i suoi test sopra.
+        """
+        monkeypatch.setenv("DIXON_COLES_APPLY", "1")
+        seen = {}
+
+        def _fake_verdict(matches, rho, **kw):
+            seen["rho"] = rho
+            seen["n"] = len(matches)
+            return {"ok": False, "reason": "non_migliora_default",
+                    "n_holdout": 120, "brier_fitted": 0.5506,
+                    "brier_default": 0.5451, "brier_zero": 0.5425,
+                    "gain_vs_default": -0.0055}
+
+        monkeypatch.setattr(dc, "holdout_verdict", _fake_verdict)
+        data = _simulate(-0.08, n=4000)
+        out = dc.promote(matches=data)
+        assert out["ok"] is True and out["saved"] is True
+        assert out["applied"] is False
+        assert out["apply_reason"] == "calibrazione:non_migliora_default"
+        assert out["calibration"]["brier_fitted"] == pytest.approx(0.5506)
+        assert seen["rho"] == pytest.approx(out["rho"])
+        assert seen["n"] == len(data)          # verifica sullo stesso campione
+        assert pe.RHO == -0.15                  # modello intatto
+        assert out["engine_rho"] == pytest.approx(-0.15)
+        assert dc.load_fit()["ok"] is True      # la misura resta
+
+    def test_gate_lascia_passare_chi_migliora_davvero(self, monkeypatch):
+        """Campione generato dal modello con rho -0.20: il Brier migliora -> si applica.
+
+        Il campione dei pareggi NON serve qui: la stima su un campione
+        degenerato cade al bordo della griglia (`-0.30`) e la BANDA di
+        sicurezza la fermerebbe prima della calibrazione — il percorso reale
+        passa da entrambe le guardie, quindi il test usa un caso in banda.
+        """
+        monkeypatch.setenv("DIXON_COLES_APPLY", "1")
+        out = dc.promote(matches=_simulate(-0.20, n=4000, lam=(1.4, 1.2)),
+                         expected_goals_fn=_eg_const((1.4, 1.2)))
+        cal = out["calibration"]
+        assert cal is not None and cal["ok"] is True
+        assert cal["brier_fitted"] < cal["brier_default"]
+        assert out["safe"] is True                    # in banda: applicabile
+        assert out["applied"] is True and out["changed"] is True
+        assert pe.RHO == pytest.approx(out["rho"])
+
+    def test_gate_spegnevole_da_env(self, monkeypatch):
+        monkeypatch.setenv("DIXON_COLES_APPLY", "1")
+        monkeypatch.setenv("DIXON_COLES_CALIB_GATE", "0")
+        out = dc.promote(matches=_simulate(-0.08, n=4000))
+        assert out["calibration"] is None             # gate non interpellato
+        assert out["applied"] is True                 # resta la banda di sicurezza
+
+
+class TestDefaultUnico:
+    """Il default del modello vive in UN solo posto (`poisson_engine`).
+
+    `fit_rho` (log-L di riferimento) e `holdout_verdict` (Brier di riferimento)
+    confrontavano il rho stimato con un `-0.15` SCRITTO A MANO: due definizioni
+    dello stesso default. Il giorno in cui il default cambia, confronti scritti
+    a mano misurerebbero un miglioramento contro un parametro che il modello non
+    usa piu' — e il gate potrebbe accettare un rho che peggiora la calibrazione
+    VERA. Qui si difende la derivazione.
+    """
+
+    def test_il_default_viene_dal_modello(self):
+        assert dc.default_rho() == pytest.approx(pe.DEFAULT_RHO)
+        assert pe.default_rho() == pytest.approx(pe.DEFAULT_RHO)
+        # Il parametro EFFETTIVO nasce dal default (nessuna seconda verita')
+        # e senza promozioni applicate coincide con esso.
+        if pe.current_rho() == pytest.approx(pe.DEFAULT_RHO):
+            assert pe.current_rho() == pytest.approx(dc.default_rho())
+
+    def test_il_confronto_segue_il_default_del_modello(self, monkeypatch):
+        """Se il default del MODELLO cambia, il riferimento della stima cambia con lui."""
+        matches = _matches(120)
+        base = dc.fit_rho(matches, expected_goals_fn=_eg_const())
+        monkeypatch.setattr(pe, "DEFAULT_RHO", -0.02)
+        moved = dc.fit_rho(matches, expected_goals_fn=_eg_const())
+        assert base["default_rho"] == pytest.approx(-0.15)
+        assert moved["default_rho"] == pytest.approx(-0.02)
+        assert moved["loglik_default"] != pytest.approx(base["loglik_default"])
+        # Il verdetto di calibrazione usa lo STESSO riferimento.
+        terms = dc.match_terms(matches, expected_goals_fn=_eg_const())
+        assert moved["loglik_default"] == pytest.approx(
+            dc.log_likelihood(terms, -0.02))
+
+    def test_la_promozione_non_sposta_il_riferimento(self, monkeypatch):
+        """Applicare un rho NON cambia il default di CODICE del modello.
+
+        Dopo una promozione `poisson_engine.RHO` e' il valore installato: se il
+        riferimento della stima lo seguisse, un secondo fit misurerebbe il
+        miglioramento contro il parametro appena applicato (circolo vizioso: il
+        gate non potrebbe piu' accorgersi di un peggioramento).
+        """
+        monkeypatch.setenv("DIXON_COLES_APPLY", "1")
+        out = dc.promote(matches=_simulate(-0.20, n=4000),
+                         expected_goals_fn=_eg_const((1.4, 1.2)))
+        assert out["applied"] is True
+        assert pe.RHO == pytest.approx(out["rho"])
+        assert pe.DEFAULT_RHO == pytest.approx(-0.15)
+        assert dc.default_rho() == pytest.approx(-0.15)
+
+
+class TestPromozione:
+    """`promote()`: fit -> salvataggio -> applicazione, in quest'ordine.
+
+    E' il percorso che il job di produzione usa ogni giorno: qui si verifica che
+    ogni passo possa solo FERMARE il successivo (fail-closed) e che
+    l'applicazione cambi davvero le probabilita' del MOTORE (non un oggetto
+    in memoria).
+    """
+
+    def test_promuove_e_cambia_il_motore(self, monkeypatch):
+        # Campione GENERATO DAL MODELLO con un rho lontano dal default: la
+        # stima lo ritrova e la calibrazione 1X2 (fuori campione) migliora
+        # davvero, quindi il gate di calibrazione lascia passare.
+        lam = (1.6, 1.2)
+        before = pe.prob_1x2(*lam)
+        monkeypatch.setenv("DIXON_COLES_APPLY", "1")
+        out = dc.promote(matches=_simulate(-0.20, n=4000, lam=lam))
+        assert out["ok"] is True and out["reason"] == "ok"
+        assert out["saved"] is True and out["applied"] is True
+        assert out["changed"] is True                 # era -0.15
+        assert out["previous"] == pytest.approx(-0.15)
+        # Il MOTORE ha davvero il nuovo parametro...
+        assert pe.RHO == pytest.approx(out["rho"])
+        assert dc.engine_rho() == pytest.approx(out["rho"])
+        assert out["engine_rho"] == pytest.approx(out["rho"])
+        # ...e le probabilita' sono cambiate (l'applicazione non e' un no-op).
+        after = pe.prob_1x2(*lam)
+        assert after != before
+        assert sum(after) == pytest.approx(1.0)
+        # La stima e' finita sul VOLUME (cio' che sopravvive al redeploy).
+        assert dc.load_fit()["rho"] == pytest.approx(out["rho"])
+
+    def test_interruttore_spento_salva_ma_non_applica(self):
+        out = dc.promote(matches=_simulate(-0.08, n=4000))
+        assert out["ok"] is True and out["saved"] is True
+        assert out["applied"] is False
+        assert out["apply_reason"] == "interruttore_off"
+        assert out["changed"] is False
+        assert pe.RHO == -0.15                        # modello intatto
+        assert out["engine_rho"] == pytest.approx(-0.15)
+        assert dc.load_fit()["ok"] is True            # la misura resta
+
+    def test_fuori_banda_salva_e_non_applica(self, monkeypatch):
+        monkeypatch.setenv("DIXON_COLES_APPLY", "1")
+        # Gate di calibrazione spento: qui si sta esercitando la BANDA, e senza
+        # questo il motivo riportato sarebbe quello della calibrazione (che nel
+        # percorso viene prima dell'applicazione).
+        monkeypatch.setenv("DIXON_COLES_CALIB_GATE", "0")
+        monkeypatch.setenv("DIXON_COLES_SAFE_MIN", "-0.02")
+        monkeypatch.setenv("DIXON_COLES_SAFE_MAX", "-0.01")
+        out = dc.promote(matches=_simulate(-0.08, n=4000))
+        assert out["ok"] is True and out["saved"] is True
+        assert out["applied"] is False
+        assert out["apply_reason"] == "fuori_banda_di_sicurezza"
+        assert out["safe"] is False
+        assert pe.RHO == -0.15
+
+    def test_stima_fallita_non_cancella_quella_buona(self, monkeypatch):
+        good = dc.promote(matches=_simulate(-0.08, n=4000))
+        assert good["ok"] is True
+        before = dc.load_fit()
+        bad = dc.promote(matches=_matches(4))          # campione insufficiente
+        assert bad["ok"] is False
+        assert bad["reason"].startswith("stima_non_riuscita")
+        assert bad["saved"] is False
+        # La stima buona e' ancora li': un giorno senza dati non deve
+        # cancellare il parametro in uso.
+        assert dc.load_fit()["rho"] == pytest.approx(before["rho"])
+        assert pe.RHO == -0.15                         # e il motore e' intatto
+
+    def test_salvataggio_impossibile_non_applica(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DIXON_COLES_APPLY", "1")
+        blocker = tmp_path / "file"
+        blocker.write_text("x", encoding="utf-8")
+        out = dc.promote(matches=_simulate(-0.08, n=4000),
+                         path=blocker / "sub" / "rho.json")
+        assert out["ok"] is True and out["saved"] is False
+        assert out["applied"] is False
+        assert out["apply_reason"] == "salvataggio_non_riuscito"
+        assert pe.RHO == -0.15
+
+    def test_secondo_giro_stesso_dato_non_e_un_cambio(self, monkeypatch):
+        monkeypatch.setenv("DIXON_COLES_APPLY", "1")
+        matches = _simulate(-0.20, n=4000)
+        first = dc.promote(matches=matches)
+        assert first["changed"] is True
+        second = dc.promote(matches=matches)
+        assert second["applied"] is True and second["changed"] is False
+        assert pe.RHO == pytest.approx(first["rho"])
+
+    def test_ledger_vuoto_non_solleva(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dc, "_db_path", lambda: str(tmp_path / "mai.db"))
+        monkeypatch.setenv("DIXON_COLES_APPLY", "1")
+        out = dc.promote()
+        assert out["ok"] is False and out["saved"] is False
+        assert out["n_matches"] == 0
+        assert pe.RHO == -0.15
+
+    def test_engine_rho_mai_un_eccezione(self):
+        assert isinstance(dc.engine_rho(), float)
+
+    def test_report_promozione_dichiara_motore_e_esito(self):
+        applied = dc.format_promotion(
+            {"ok": True, "rho": -0.11, "n_matches": 900, "n_used": 880,
+             "half_life": 100.0, "applied": True, "previous": -0.15,
+             "engine_rho": -0.11, "improvement": 12.0})
+        assert "-0.1100" in applied and "APPLICATO" in applied
+        assert "motore ora -0.1100" in applied
+        skipped = dc.format_promotion(
+            {"ok": True, "rho": -0.11, "n_matches": 900, "n_used": 880,
+             "half_life": 100.0, "applied": False,
+             "apply_reason": "interruttore_off", "engine_rho": -0.15})
+        assert "non applicato" in skipped and "-0.15" in skipped
+        failed = dc.format_promotion({"ok": False, "reason": "stima_non_riuscita:x",
+                                      "n_matches": 3, "engine_rho": -0.15})
+        assert "nessuna promozione" in failed
+
+    def test_cli_promote_su_ledger(self, tmp_path, monkeypatch, capsys):
+        rows = [{"home": "H%d" % i, "away": "A%d" % i,
+                 "score_home": i % 3, "score_away": (i + 1) % 3}
+                for i in range(120)]
+        monkeypatch.setattr(dc, "_db_path", lambda: _temp_db(tmp_path, rows))
+        assert dc.main(["--promote", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True and payload["saved"] is True
+
+    def test_cli_promote_senza_dati_esce_1(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(dc, "_db_path", lambda: str(tmp_path / "mai.db"))
+        assert dc.main(["--promote"]) == 1
+        assert "nessuna promozione" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Cablaggio nel bot (job) e nella IaC
+# ---------------------------------------------------------------------------
+class _FakeBot:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, chat_id, text):
+        self.sent.append((chat_id, text))
+
+
+class _FakeContext:
+    def __init__(self):
+        self.bot = _FakeBot()
+
+
+def _job_out(**over):
+    out = {"ok": True, "rho": -0.11, "n_matches": 900, "n_used": 880,
+           "half_life": 100.0, "applied": True, "previous": -0.15,
+           "engine_rho": -0.11, "apply_reason": "ok", "changed": True,
+           "improvement": 12.0}
+    out.update(over)
+    return out
+
+
+class TestCablaggioBot:
+    """Il blocco di promozione e' COLLEGATO: senza job sarebbe codice morto."""
+
+    @pytest.fixture()
+    def bot_src(self):
+        return Path("bot.py").read_text(encoding="utf-8")
+
+    def test_job_registrato_e_giornaliero(self, bot_src):
+        assert "async def dixon_coles_job" in bot_src
+        assert "run_daily(dixon_coles_job" in bot_src
+        # Anche al BOOT: il rho applicato e' un globale di processo e un
+        # redeploy lo azzererebbe fino alle 05:20 (deriva silenziosa).
+        assert "run_once(dixon_coles_job" in bot_src
+
+    def test_job_solo_admin_e_anti_spam_per_valore(self, bot_src):
+        body = bot_src.split("async def dixon_coles_job")[1].split(
+            "async def market_shadow_job")[0]
+        assert "_admin_chat_ids()" in body            # mai gli iscritti
+        assert "is_notified(\"DIXON_COLES\"" in body
+        assert '"rho:%s"' in body                    # anti-spam per VALORE
+        assert 'if not out.get("changed")' in body    # notifica solo sul cambio
+
+    def test_job_logga_sempre(self, monkeypatch):
+        import bot as bot_mod
+        monkeypatch.setattr(dc, "promote", lambda **kw: _job_out(changed=False,
+                                                                 applied=False))
+        monkeypatch.setattr(bot_mod, "_admin_chat_ids", lambda: [1])
+        ctx = _FakeContext()
+        asyncio.run(bot_mod.dixon_coles_job(ctx))
+        assert ctx.bot.sent == []                     # nessun cambio -> niente spam
+
+    def test_job_notifica_sul_cambio(self, monkeypatch):
+        import bot as bot_mod
+        import tracker
+        monkeypatch.setattr(dc, "promote", lambda **kw: _job_out())
+        monkeypatch.setattr(bot_mod, "_admin_chat_ids", lambda: [111, 222])
+        marked = []
+        monkeypatch.setattr(tracker, "is_notified", lambda *a: False)
+        monkeypatch.setattr(tracker, "mark_notified",
+                            lambda *a: marked.append(a))
+        ctx = _FakeContext()
+        asyncio.run(bot_mod.dixon_coles_job(ctx))
+        assert len(ctx.bot.sent) == 2                 # tutti gli admin
+        assert "Dixon-Coles" in ctx.bot.sent[0][1]
+        assert marked and marked[0][1] == "rho:-0.11"
+
+    def test_job_spento_da_env(self, monkeypatch):
+        import bot as bot_mod
+        monkeypatch.setenv("DIXON_COLES_ENABLED", "0")
+        calls = []
+        monkeypatch.setattr(dc, "promote", lambda **kw: calls.append(1) or {})
+        asyncio.run(bot_mod.dixon_coles_job(_FakeContext()))
+        assert calls == []
+
+    def test_job_errore_non_crasha(self, monkeypatch):
+        import bot as bot_mod
+        def boom(**kw):
+            raise RuntimeError("stima rotta")
+        monkeypatch.setattr(dc, "promote", boom)
+        asyncio.run(bot_mod.dixon_coles_job(_FakeContext()))  # non solleva
+
+
+class TestIaC:
+    """Le env devono stare in `preserve()`: un `config apply` non le distrugge."""
+
+    def test_env_dichiarate(self):
+        iac = Path(".railway/railway.ts").read_text(encoding="utf-8")
+        for name in ("DIXON_COLES_ENABLED", "DIXON_COLES_APPLY",
+                     "DIXON_COLES_STATE", "DIXON_COLES_DAYS",
+                     "DIXON_COLES_MAX_MATCHES", "DIXON_COLES_MAX_GOALS",
+                     "DIXON_COLES_RHO_MIN", "DIXON_COLES_RHO_MAX",
+                     "DIXON_COLES_RHO_STEP", "DIXON_COLES_REFINE_STEP",
+                     "DIXON_COLES_SAFE_MIN", "DIXON_COLES_SAFE_MAX",
+                     "DIXON_COLES_HALF_LIFE_DAYS"):
+            assert f"{name}: preserve()" in iac, name
+
+    def test_ogni_env_letta_e_dichiarata(self):
+        import re
+        iac = Path(".railway/railway.ts").read_text(encoding="utf-8")
+        src = _code_only(dc.__file__)
+        read = set(re.findall(
+            r"_env_(?:float|int|bool)\(\s*['\"]([A-Z0-9_]+)['\"]", src))
+        read |= set(re.findall(
+            r"os\.getenv\(\s*['\"]([A-Z0-9_]+)['\"]", src))
+        read |= {dc.RHO_FILE_ENV}
+        wanted = {n for n in read
+                  if n.startswith("DIXON_") or n == dc.RHO_FILE_ENV}
+        missing = {n for n in wanted if f"{n}: preserve()" not in iac}
+        assert not missing, missing
+
+
 class TestRefine:
     def test_delega_alla_griglia_del_modello(self):
         got = dc.refine_probabilities(1.6, 1.1, rho=-0.05)

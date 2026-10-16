@@ -28,14 +28,19 @@ della griglia, la probabilita' dell'esito osservato si legge da quelle cinque
 quantita' — nessuna griglia ricostruita per punto. La verosimiglianza e'
 `sum_i w_i * log p_i(rho)` con `w_i` dal time-decay.
 
-DIREZIONE DEL MODULO (come il resto della roadmap): **misura e propone, non
-cambia la produzione da solo**. Il rho stimato viene salvato su volume e
-riportato; l'applicazione al modello e' OPT-IN (`DIXON_COLES_APPLY=1`) e
-comunque vincolata a una banda di sicurezza: un rho fuori banda e' un dato da
-guardare, non un parametro da installare (fail-closed: resta il default).
-Motivo dichiarato: dal 22/09 la strategia e' CONGELATA — un cambio di
-probabilita' del modello cambia gli EV di tutte le corsie, quindi e' una
-decisione del proprietario, non un effetto collaterale di un'integrazione.
+DIREZIONE DEL MODULO: il rho stimato viene salvato su volume e riportato;
+l'applicazione al modello e' OPT-IN (`DIXON_COLES_APPLY=1`) e comunque
+vincolata a una banda di sicurezza: un rho fuori banda e' un dato da guardare,
+non un parametro da installare (fail-closed: resta il default). Perche' resta
+opt-in anche adesso che il blocco di promozione ESISTE: dal 22/09 la strategia
+e' congelata — un cambio di probabilita' del modello cambia gli EV di tutte le
+corsie, quindi accendere l'applicazione e' una decisione del proprietario, non
+un effetto collaterale del job.
+
+IL BLOCCO CHE LEGGE LA STIMA (16/10/2026): `promote()` e' l'unico punto
+d'ingresso del percorso fit -> salvataggio -> applicazione (usato dal job
+`bot.dixon_coles_job` e dalla CLI `--promote`). Con l'interruttore spento il
+ciclo gira lo stesso e la stima resta MISURA: nessuna corsia cambia.
 
 Confini (tripwire nei test): sola LETTURA del ledger (`mode=ro`), zero rete,
 zero crediti, **zero ordini**, nessuna scrittura sul ledger, nessuna soglia di
@@ -43,6 +48,7 @@ strategia nel sorgente, `import dixon_coles` non carica `auto_bet`/`bot`.
 
 CLI:
     venv/bin/python dixon_coles.py --fit [--days N] [--json] [--save]
+    venv/bin/python dixon_coles.py --promote [--days N] [--json]
     venv/bin/python dixon_coles.py --status
 """
 from __future__ import annotations
@@ -132,6 +138,21 @@ def config() -> Dict[str, Any]:
         "half_life": _env_float("DIXON_COLES_HALF_LIFE_DAYS", 0.0, minimum=0.0),
         "apply": _env_bool("DIXON_COLES_APPLY", False),
     }
+
+
+def default_rho() -> float:
+    """Il default del modello (UNA definizione: quella di `poisson_engine`).
+
+    La stima e il gate di calibrazione confrontano sempre col DEFAULT DI CODICE,
+    non col valore installato in questo momento: altrimenti, dopo una
+    promozione, un secondo fit misurerebbe il miglioramento contro il parametro
+    appena applicato invece che contro il riferimento del modello.
+    """
+    try:
+        import poisson_engine
+        return float(getattr(poisson_engine, "DEFAULT_RHO", poisson_engine.RHO))
+    except Exception:                                         # pragma: no cover
+        return -0.15
 
 
 def state_path() -> Path:
@@ -354,6 +375,10 @@ def log_likelihood(terms: Dict[str, Any], rho: float) -> float:
     QUELLA partita dal conteggio e lo dichiara nel valore di ritorno indiretto
     (`-inf` se tutte le partite diventano invalide): non si corregge un fattore
     negativo in silenzio.
+
+    ⚠️ La maschera parziale (alcune partite valide, altre no) e' il caso che la
+    stima attraversa DAVVERO sulla griglia di produzione: va coperta dai test,
+    non solo il caso estremo "tutte invalide".
     """
     idx = terms["index"]
     if not idx:
@@ -364,7 +389,7 @@ def log_likelihood(terms: Dict[str, Any], rho: float) -> float:
     f00 = 1.0 - lam_h * lam_a * rho
     f01 = 1.0 + lam_h * rho
     f10 = 1.0 + lam_a * rho
-    f11 = 1.0 - rho
+    f11 = np.full(np.shape(lam_h), 1.0 - rho, dtype=float)
     if np.any(f00 <= 0) or np.any(f01 <= 0) or np.any(f10 <= 0) or \
             np.any(f11 <= 0):
         # Un fattore <= 0 renderebbe la cella non valida: la partita esce dal
@@ -378,6 +403,11 @@ def log_likelihood(terms: Dict[str, Any], rho: float) -> float:
                           terms["p10"][k], terms["p11"][k])
     p_obs, totals = terms["p_obs"][k], terms["totals"][k]
     weights = terms["weights"][k]
+    # NOTA (16/10/2026): `f11` e' un ARRAY, non uno scalare. Con un solo
+    # scalare la maschera qui sopra (`f11[valid]`) sollevava
+    # `TypeError: 'float' object is not subscriptable` appena UNA partita
+    # andava fuori validita' — e la stima moriva su dati reali (la griglia di
+    # produzione parte da rho -0.30, dove un favorito forte la invalida).
     corr = observed_cell_factor(terms, rho, index=k)
     # Probabilita' NON normalizzata della griglia corretta: le quattro celle
     # corrette piu' il resto, che la correzione non tocca.
@@ -444,8 +474,9 @@ def fit_rho(matches: Sequence[Dict[str, Any]], *,
                     "loglik": best_ll, "reason": "ok",
                     "grid_best": round(best_rho, 6),
                     "n_points": int(len(grid) + len(fine))})
-        default_ll = log_likelihood(terms, -0.15)
+        default_ll = log_likelihood(terms, default_rho())
         out["loglik_default"] = default_ll
+        out["default_rho"] = default_rho()
         if math.isfinite(default_ll) and math.isfinite(best_ll):
             out["improvement"] = best_ll - default_ll
         out["safe"] = bool(float(conf["safe_min"]) <= best_rho <=
@@ -529,6 +560,291 @@ def apply_fitted(*, path: Optional[Path] = None) -> Dict[str, Any]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# 2-bis) GATE DI CALIBRAZIONE: la verosimiglianza NON e' il criterio del denaro
+# ---------------------------------------------------------------------------
+# MISURA DEL 16/10/2026 sul ledger reale (392 match, container AMS):
+#   rho          log-lik      Brier 1X2
+#   -0.30        -957.27      0.5506        <- massimo della verosimiglianza
+#   -0.20       -1010.05      0.5466
+#   -0.15 (default) -1024.79  0.5451
+#    0.00       -1052.71      0.5425        <- Brier MIGLIORE
+# Osservato: 1 52.6% | X 21.6% | 2 25.9% — il modello al default prevede GIA'
+# il 25.3% di pareggi, quindi un rho piu' negativo (che alza il pareggio)
+# PEGGIORA la calibrazione. La verosimiglianza dei punteggi esatti premia la
+# correzione delle celle basse, ma il denaro sta sui mercati (1X2, OU, AH):
+# massimizzare una cosa e migliorare l'altra sono due domande diverse.
+#
+# Da qui il gate: il rho stimato viene APPLICATO solo se migliora (o almeno non
+# peggiora) il Brier 1X2 FUORI CAMPIONE — valutato su una parte recente di
+# match che non partecipa alla scelta del valore.
+HOLD_OUT_SHARE = 0.30         # quota piu' recente usata per la verifica
+MIN_HOLDOUT = 50              # sotto questo campione la verifica non conclude
+DEFAULT_CALIB_TOL = 0.0       # guadagno minimo richiesto (0 = "non peggiore")
+
+
+def brier_1x2(matches: Sequence[Dict[str, Any]], rho: float, *,
+              expected_goals_fn=None, max_goals: Optional[int] = None) -> Optional[float]:
+    """Brier 1X2 PESATO (time-decay) alle probabilita' del MOTORE per un rho.
+
+    La probabilita' viene da `poisson_engine.prob_1x2` con il `rho` passato e
+    RIPRISTINATO dal context manager del modello: qui non si ricostruisce
+    nessuna griglia e nessuna formula. Pesa col `weight` (time-decay dei
+    rating) e normalizza sulla somma dei pesi, cosi' il valore e' confrontabile
+    fra campioni diversi. `None` se non c'e' niente di misurabile.
+    """
+    import poisson_engine as pe
+    if expected_goals_fn is None:
+        expected_goals_fn = pe.expected_goals
+    max_goals = int(max_goals or config()["max_goals"])
+    cache: Dict[Tuple[str, str], Tuple[float, float]] = {}
+    num = 0.0
+    den = 0.0
+    with pe.rho_value(float(rho)):
+        for m in matches or []:
+            try:
+                sh, sa = int(m["score_home"]), int(m["score_away"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if sh < 0 or sa < 0 or sh > max_goals or sa > max_goals:
+                continue
+            key = (str(m.get("home") or ""), str(m.get("away") or ""))
+            if key not in cache:
+                try:
+                    lam_h, lam_a = expected_goals_fn(*key)
+                except Exception:
+                    lam_h = lam_a = float("nan")
+                cache[key] = (float(lam_h), float(lam_a))
+            lam_h, lam_a = cache[key]
+            if not (math.isfinite(lam_h) and math.isfinite(lam_a)) or \
+                    lam_h <= 0 or lam_a <= 0:
+                continue
+            p1, px, p2 = pe.prob_1x2(lam_h, lam_a, max_goals=max_goals)
+            w = float(m.get("weight") or 0.0)
+            if w <= 0:
+                continue
+            y1 = 1.0 if sh > sa else 0.0
+            yx = 1.0 if sh == sa else 0.0
+            y2 = 1.0 if sh < sa else 0.0
+            num += w * ((p1 - y1) ** 2 + (px - yx) ** 2 + (p2 - y2) ** 2)
+            den += w
+    return (num / den) if den > 0 else None
+
+
+def holdout_verdict(matches: Sequence[Dict[str, Any]], rho: float, *,
+                    expected_goals_fn=None) -> Dict[str, Any]:
+    """Il rho stimato MIGLIORA la calibrazione 1X2 fuori campione?
+
+    Verifica walk-forward senza look-ahead: la parte PIU' RECENTE dei match
+    (`HOLD_OUT_SHARE`) fa da banco di prova; il confronto e' contro il default
+    del modello E contro rho = 0 (Poisson puro), cosi' un valore che peggiora
+    entrambi viene rifiutato invece di essere installato "perche' piu' probabile".
+
+    Fail-closed: campione di verifica troppo piccolo, Brier non calcolabile o
+    guadagno sotto `DIXON_COLES_CALIB_MIN_GAIN` -> `ok = False` (e il modello
+    resta al default).
+    """
+    conf = config()
+    share = _env_float("DIXON_COLES_HOLDOUT_SHARE", HOLD_OUT_SHARE,
+                       minimum=0.05, maximum=0.95)
+    min_holdout = _env_int("DIXON_COLES_MIN_HOLDOUT", MIN_HOLDOUT, minimum=10)
+    tol = _env_float("DIXON_COLES_CALIB_MIN_GAIN", DEFAULT_CALIB_TOL)
+    ordered = sorted(matches or [],
+                     key=lambda m: float(m.get("days_ago") or 0.0))
+    n = len(ordered)
+    out: Dict[str, Any] = {"ok": False, "reason": None, "n_holdout": 0,
+                           "brier_fitted": None, "brier_default": None,
+                           "brier_zero": None, "gain_vs_default": None,
+                           "share": share, "min_gain": tol}
+    if n < 2:
+        out["reason"] = "campione_insufficiente"
+        return out
+    k = max(min_holdout, int(round(n * share)))
+    if k >= n:                     # serve almeno una riga fuori dal banco
+        k = n - 1
+    if k < min_holdout:
+        out["reason"] = "holdout_insufficiente"
+        return out
+    holdout = ordered[:k]          # i piu' recenti
+    out["n_holdout"] = k
+    b_fit = brier_1x2(holdout, float(rho), expected_goals_fn=expected_goals_fn)
+    b_def = brier_1x2(holdout, default_rho(), expected_goals_fn=expected_goals_fn)
+    b_zero = brier_1x2(holdout, 0.0, expected_goals_fn=expected_goals_fn)
+    out.update({"brier_fitted": b_fit, "brier_default": b_def,
+                "brier_zero": b_zero})
+    if b_fit is None or b_def is None or b_zero is None:
+        out["reason"] = "brier_non_calcolabile"
+        return out
+    out["gain_vs_default"] = b_def - b_fit
+    if b_fit > b_def + tol:
+        out["reason"] = "non_migliora_default"
+        return out
+    if b_fit > b_zero + tol:
+        out["reason"] = "non_migliora_rho_zero"
+        return out
+    out["ok"] = True
+    out["reason"] = "ok"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 3-bis) PROMOZIONE: fit -> salvataggio -> applicazione (UN punto d'ingresso)
+# ---------------------------------------------------------------------------
+def engine_rho() -> Optional[float]:
+    """RHO effettivo del motore in questo istante (diagnostica, mai eccezioni).
+
+    Serve al riepilogo della promozione: il log deve dire il rho del MOTORE
+    anche quando l'applicazione non avviene, altrimenti "non applicato" resta
+    una frase senza il dato che conta.
+    """
+    try:
+        import poisson_engine
+        return float(poisson_engine.current_rho())
+    except Exception:                                         # pragma: no cover
+        return None
+
+
+def promote(*, path: Optional[Path] = None,
+            matches: Optional[Sequence[Dict[str, Any]]] = None,
+            now: Optional[datetime] = None,
+            expected_goals_fn=None) -> Dict[str, Any]:
+    """Ciclo completo nel percorso di produzione: stima, salva, (se autorizzato) applica.
+
+    I tre passi restano separati sotto (`fit_rho`/`save_fit`/`apply_fitted`)
+    perche' ognuno ha anche un uso proprio (diagnostica, CLI `--fit`), ma la
+    PROMOZIONE li incatena in quest'ordine e nessuno puo' applicare un rho che
+    non sia stato stimato su questi dati.
+
+    Fail-closed in quattro punti (ciascuno coperto da un test):
+    1. **stima fallita** (campione insufficiente, griglia non valida, errore del
+       modello) -> NON si salva: il job gira tutti i giorni e un giorno senza
+       dati non deve cancellare la stima buona gia' sul volume;
+    2. **salvataggio fallito** -> niente applicazione: si applica cio' che e' sul
+       VOLUME (cio' che sopravvive al redeploy), non cio' che era in memoria;
+    3. **gate di calibrazione** (`holdout_verdict`, `DIXON_COLES_CALIB_GATE`
+       default ON) -> il rho stimato si applica solo se il Brier 1X2 FUORI
+       CAMPIONE non peggiora rispetto al default e a rho 0. E' la correzione
+       del 16/10/2026: misurato sul ledger reale, il rho che massimizza la
+       verosimiglianza dei punteggi (-0.30) PEGGIORA la calibrazione dei
+       mercati (0.5506 contro 0.5451) — e il denaro sta sui mercati;
+    4. **applicazione** -> le tre guardie di `apply_fitted` (interruttore
+       esplicito, stima ok, banda di sicurezza).
+
+    `changed` dice se il giro ha CAMBIATO il rho del motore: e' la condizione
+    con cui il job notifica (un valore identico ogni giorno non e' una notizia).
+    """
+    t0 = time.time()
+    conf = config()
+    target = Path(path or state_path())
+    out: Dict[str, Any] = {
+        "ok": False, "reason": None, "rho": None, "previous": None,
+        "engine_rho": engine_rho(), "n_matches": 0, "n_used": 0,
+        "improvement": None, "safe": None, "half_life": half_life_days(),
+        "days": int(conf["days"]), "saved": False, "applied": False,
+        "apply_reason": None, "changed": False, "path": str(target),
+        "calibration": None, "elapsed_s": None,
+    }
+    try:
+        data = list(matches) if matches is not None else load_matches(now=now)
+        out["n_matches"] = len(data)
+        out["expected_goals_injected"] = expected_goals_fn is not None
+        fit = fit_rho(data, expected_goals_fn=expected_goals_fn)
+        out["rho"] = fit.get("rho")
+        out["n_used"] = int(fit.get("n_used") or 0)
+        out["improvement"] = fit.get("improvement")
+        out["safe"] = fit.get("safe")
+        if not fit.get("ok"):
+            out["reason"] = "stima_non_riuscita:%s" % (fit.get("reason") or "?")
+            return out
+        out["ok"] = True
+        out["reason"] = "ok"
+        out["saved"] = bool(save_fit(fit, path=target))
+        if not out["saved"]:
+            out["apply_reason"] = "salvataggio_non_riuscito"
+            return out
+        # Interruttore PRIMA di qualunque lavoro: se non si applica, il motivo
+        # da riportare e' quello (e la verifica di calibrazione non serve —
+        # il job gira ogni giorno su dati che cambiano, non si spreca il fit
+        # del Brier quando la risposta e' gia' "non si applica").
+        if not conf["apply"]:
+            out["apply_reason"] = "interruttore_off"
+            return out
+        # GATE DI CALIBRAZIONE (16/10/2026): la verosimiglianza dei punteggi
+        # esatti NON e' il criterio del denaro. Misurato sul ledger reale, il
+        # rho che massimizza la log-lik (-0.30) PEGGIORA il Brier 1X2 (0.5506
+        # contro 0.5451 del default e 0.5425 di rho 0): applicarlo sarebbe un
+        # peggioramento della calibrazione mascherato da "stima migliore".
+        if _env_bool("DIXON_COLES_CALIB_GATE", True):
+            verdict = holdout_verdict(data, float(fit["rho"]),
+                                      expected_goals_fn=expected_goals_fn)
+            out["calibration"] = verdict
+            if not verdict.get("ok"):
+                out["apply_reason"] = "calibrazione:%s" % (verdict.get("reason"),)
+                logger.info("dixon_coles: rho %.4f non applicato — calibrazione "
+                            "%s (Brier %.4f vs default %.4f su %s match)",
+                            float(fit["rho"]), verdict.get("reason"),
+                            verdict.get("brier_fitted") or float("nan"),
+                            verdict.get("brier_default") or float("nan"),
+                            verdict.get("n_holdout"))
+                return out
+        applied = apply_fitted(path=target)
+        out["applied"] = bool(applied.get("applied"))
+        out["apply_reason"] = applied.get("reason")
+        out["previous"] = applied.get("previous")
+        try:
+            out["changed"] = bool(out["applied"] and out["previous"] is not None
+                                  and abs(float(out["previous"])
+                                          - float(fit["rho"])) > 1e-9)
+        except (TypeError, ValueError):
+            out["changed"] = False
+    except Exception as e:                                    # pragma: no cover
+        logger.warning("dixon_coles: promozione non riuscita (%s)", e)
+        out["reason"] = "errore_promozione"
+    finally:
+        out["engine_rho"] = engine_rho()
+        out["elapsed_s"] = round(time.time() - t0, 3)
+    return out
+
+
+def format_promotion(out: Dict[str, Any]) -> str:
+    """Riga UNICA (log + Telegram) del giro di promozione: dichiara l'esito vero.
+
+    Senza il rho del motore nella riga, "non applicato" e "applicato" sarebbero
+    indistinguibili da fuori — ed e' esattamente il dubbio che questo modulo
+    deve togliere a chi legge il log.
+    """
+    data = out or {}
+    if not data.get("ok"):
+        return ("📐 DIXON-COLES: nessuna promozione (%s) | match %s | motore rho %s"
+                % (data.get("reason") or "?", data.get("n_matches"),
+                   data.get("engine_rho")))
+    text = ("📐 DIXON-COLES: rho stimato %.4f su %s match (%s usati, mezza vita "
+            "%.0fgg)"
+            % (float(data.get("rho") or 0.0), data.get("n_matches"),
+               data.get("n_used"), float(data.get("half_life") or 0.0)))
+    if data.get("applied"):
+        text += " | APPLICATO (era %s, motore ora %.4f)" % (
+            data.get("previous"), float(data.get("engine_rho") or 0.0))
+    else:
+        text += " | non applicato (%s), motore resta %s" % (
+            data.get("apply_reason") or "?", data.get("engine_rho"))
+    if data.get("improvement") is not None:
+        text += " | log-L %+.1f vs default" % float(data["improvement"])
+    cal = data.get("calibration") or {}
+    if cal:
+        text += " | calibrazione 1X2: Brier %s vs default %s (%s)" % (
+            _fmt(cal.get("brier_fitted")), _fmt(cal.get("brier_default")),
+            cal.get("reason"))
+    return text
+
+
+def _fmt(value: Any, digits: int = 4) -> str:
+    try:
+        return ("%." + str(digits) + "f") % float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def refine_probabilities(lam_h: float, lam_a: float, *,
                          rho: Optional[float] = None) -> Dict[str, float]:
     """(p1, pX, p2) con un rho specifico — DELEGA alla griglia del modello.
@@ -560,9 +876,10 @@ def format_report(fit: Optional[Dict[str, Any]] = None, *,
         lines.append("  ⚠️ nessuna stima disponibile (%s)"
                      % ((data or {}).get("reason") or "?"))
     else:
-        lines.append("  rho stimato %.4f (default del modello -0.15) | "
+        lines.append("  rho stimato %.4f (default del modello %s) | "
                      "%d match usati su %d"
-                     % (float(data["rho"]), int(data.get("n_used") or 0),
+                     % (float(data["rho"]), _fmt(default_rho(), 2),
+                        int(data.get("n_used") or 0),
                         int(data.get("n_matches") or 0)))
         if data.get("improvement") is not None:
             lines.append("  guadagno di verosimiglianza %+.1f (log-L pesata)"
@@ -585,6 +902,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(data, indent=2, default=str) if as_json
               else format_report(data))
         return 0
+    if "--promote" in args:
+        days = None
+        for i, a in enumerate(args):
+            if a == "--days" and i + 1 < len(args):
+                try:
+                    days = int(float(args[i + 1]))
+                except (TypeError, ValueError):
+                    days = None
+        data = load_matches(days=days)
+        out = promote(matches=data)
+        print(json.dumps(out, indent=2, default=str) if as_json
+              else format_promotion(out))
+        return 0 if out.get("ok") else 1
     if "--fit" in args or not args:
         days = None
         for i, a in enumerate(args):
@@ -600,7 +930,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(fit, indent=2, default=str) if as_json
               else format_report(fit))
         return 0
-    print("uso: dixon_coles.py [--fit [--days N] [--save]] [--status] [--json]")
+    print("uso: dixon_coles.py [--fit [--days N] [--save]] [--promote [--days N]]"
+          " [--status] [--json]")
     return 2
 
 

@@ -337,6 +337,41 @@ riduzione dichiarata a log; ENFORCE = ordine ridotto; riduzione sotto ticket =
 riduzione sarebbe stata applicata, esattamente come la shadow mode della catena
 `decision/`.
 
+## 3-sexies. La PROMOZIONE del rho Dixon-Coles: `dixon_coles.promote()` (16/10/2026)
+
+La parte "rho stimato" del **modulo 1** era una misura scollegata dal motore:
+la matematica Dixon-Coles c'era da sempre (`poisson_engine`, `rho` = costante
+scritta a mano) e il time-decay pure (`rating_engine._weight`), ma **nessun
+blocco leggeva la stima dai dati reali**. `dixon_coles.promote()` e' quel blocco,
+nel percorso `fit -> salva -> (se autorizzato) applica`.
+
+**La misura ha cambiato la decisione (ledger reale, container AMS).** La
+verosimiglianza dei punteggi esatti e la calibrazione dei MERCATI non ordinano
+lo stesso rho:
+
+| rho | log-L | Brier 1X2 (holdout) |
+|---|---|---|
+| -0.30 | **-957.3 (massimo)** | 0.5506 |
+| -0.15 (default) | -1024.8 | 0.5451 |
+| **0.00** | -1052.7 | **0.5425 (migliore)** |
+
+Da qui il **gate di calibrazione**: il rho stimato si applica solo se il Brier
+1X2 **fuori campione** (30% piu' recente) non peggiora contro il default di
+codice e contro `rho = 0`. Sul giro end-to-end il verdetto e' stato
+`non_migliora_default` -> **motore al default, 0 cambi al denaro**, stima
+salvata come serie storica.
+
+**Default del modello in UN solo posto**: `poisson_engine.DEFAULT_RHO` (default
+di CODICE) + `DEFAULT_RHO` come base di `RHO` (parametro effettivo). La stima e
+il gate confrontano col default di codice anche dopo una promozione: seguire il
+valore installato renderebbe il gate incapace di accorgersi di un peggioramento.
+
+**Reversibilita'**: `DIXON_COLES_APPLY` (default OFF) accende l'applicazione,
+`DIXON_COLES_ENABLED=0` spegne il job, `DIXON_COLES_CALIB_GATE=0` disattiva il
+gate (sconsigliato), banda di sicurezza via `DIXON_COLES_SAFE_MIN/MAX`.
+
+---
+
 ## 4. Roadmap per modulo (ordine consigliato, per costo/beneficio)
 
 L'ordine non e' quello della richiesta: e' quello che **non tocca il denaro
@@ -511,8 +546,8 @@ soglie da configurare, e i cap che mostra li legge dai moduli che li applicano.
 
 | modulo | stato | prossimo passo |
 |---|---|---|
-| 6 — Portfolio theory | **Fase 1 FATTA** (misura) + **Fase 2 FATTA** (`copula_portfolio` in ENFORCE nel percorso ordini LIVE) | `allocate()` (allocazione ottima con vincolo di coda) |
-| 1 — ML/feature | **Fase 1 FATTA** (28 feature, 10 sopra soglia su 17k partite) | misura di Brier walk-forward **prima** di toccare `FEATURE_NAMES` |
+| 6 — Portfolio theory | **Fase 1 FATTA** (misura) + **Fase 2 FATTA** (`copula_portfolio` in ENFORCE) + **Fase 3/4 FATTE e promosse in SHADOW** (`risk_parity`, `drawdown_rebalancer` via `portfolio_sizing`, § 3-quinquies) | `PORTFOLIO_SIZING=enforce` dopo aver letto i log shadow |
+| 1 — ML/feature | **Fase 1 FATTA** (28 feature, 10 sopra soglia su 17k partite) + **rho Dixon-Coles promosso in misura** (`dixon_coles.promote()`, § 3-sexies) | misura di Brier walk-forward **prima** di toccare `FEATURE_NAMES`; serie del rho prima di `DIXON_COLES_APPLY=1` |
 | 3 — Bayesiano | empirico-bayesiano presente | `bayes_ratings.py` con incertezza, parita' + Brier |
 | 2 — Line movement | **completo** | M2-2: segmentazione CLV steam/non-steam |
 | 5 — Markov tennis | ELO+Poisson presenti | aprire il motore quando esiste una fonte spw/rpw |

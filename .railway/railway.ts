@@ -251,6 +251,33 @@ export default defineRailway(() => {
       DRAWDOWN_REBALANCE_MIN_MULTIPLIER: preserve(),
       DRAWDOWN_REBALANCE_MIN_TICKET_USDC: preserve(),
       DRAWDOWN_REBALANCE_TTL_S: preserve(),
+      // DIXON-COLES (16/10/2026, `dixon_coles.py`): stima di `rho` con
+      // time-decay sui `match_results` reali + promozione nel motore.
+      // `DIXON_COLES_ENABLED` spegne il job, `DIXON_COLES_APPLY` accende
+      // l'applicazione al modello (default OFF: accenderla cambia le
+      // probabilita' di TUTTE le corsie, quindi e' una decisione esplicita).
+      // `DIXON_COLES_STATE` e' il file sul volume dove vive la stima.
+      DIXON_COLES_ENABLED: preserve(),
+      DIXON_COLES_APPLY: preserve(),
+      DIXON_COLES_STATE: preserve(),
+      DIXON_COLES_DAYS: preserve(),
+      DIXON_COLES_MAX_MATCHES: preserve(),
+      DIXON_COLES_MAX_GOALS: preserve(),
+      DIXON_COLES_RHO_MIN: preserve(),
+      DIXON_COLES_RHO_MAX: preserve(),
+      DIXON_COLES_RHO_STEP: preserve(),
+      DIXON_COLES_REFINE_STEP: preserve(),
+      DIXON_COLES_SAFE_MIN: preserve(),
+      DIXON_COLES_SAFE_MAX: preserve(),
+      DIXON_COLES_HALF_LIFE_DAYS: preserve(),
+      // GATE DI CALIBRAZIONE (16/10/2026): il rho stimato si applica solo se
+      // il Brier 1X2 FUORI CAMPIONE non peggiora. Sul ledger reale il valore
+      // che massimizza la verosimiglianza (-0.30) peggiora la calibrazione:
+      // senza questo gate la "stima migliore" sarebbe stata un danno.
+      DIXON_COLES_CALIB_GATE: preserve(),
+      DIXON_COLES_CALIB_MIN_GAIN: preserve(),
+      DIXON_COLES_HOLDOUT_SHARE: preserve(),
+      DIXON_COLES_MIN_HOLDOUT: preserve(),
       ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),
       T60_MAX_STAKE_USDC: preserve(),
