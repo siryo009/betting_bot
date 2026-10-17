@@ -53,6 +53,14 @@ export default defineRailway(() => {
       // l'operatore puo' tarare path e soglie senza redeploy di codice.
       CREDIT_CALLS_LOG: preserve(),
       ORACLE_SKIP_LOG: preserve(),
+      // Fill rate PER PICK (17/10/2026): un evento per OGNI tentativo di
+      // ordine reale (`auto_bet._live_fill`). Serve la misura che i log del
+      // container non possono dare (retention di minuti) e che l'exchange non
+      // espone (nessuno storico ordini): il giro ripete lo stesso pick ogni
+      // 60s, quindi il metrico "riempiti / invii" NON e' la probabilita' di
+      // eseguire — lo e' "pick riempiti / pick tentati".
+      FILL_RATE_ENABLED: preserve(),
+      FILL_RATE_LOG: preserve(),
       TELEMETRY_ROTATE_ENABLED: preserve(),
       LOG_ROTATE_MAX_MB: preserve(),
       LOG_ROTATE_AFTER_DAYS: preserve(),

@@ -361,6 +361,13 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     monkeypatch.setenv("RESTING_STATE", str(tmp_path / "resting_orders.json"))
     if "test_resting_orders" not in request.node.nodeid:
         monkeypatch.setenv("RESTING_ORDERS", "0")
+    # FILL RATE PER PICK (17/10/2026, `fill_rate.py`): `_live_fill` registra un
+    # evento per OGNI tentativo. Il log va nella tmp (mai sul volume) e la
+    # telemetria e' spenta fuori dal file dedicato, cosi' i test che misurano
+    # altro non lasciano righe in `data/execution/order_attempts.jsonl`.
+    monkeypatch.setenv("FILL_RATE_LOG", str(tmp_path / "order_attempts.jsonl"))
+    if "test_fill_rate" not in request.node.nodeid:
+        monkeypatch.setenv("FILL_RATE_ENABLED", "0")
     # RUSH FINALE del torneo (13/10/2026, `rush_final.py`): l'interruttore e'
     # ON di default e la finestra (17-20/10) e' una DATA DI CALENDARIO — senza
     # isolamento, dal 17/10 in avanti ogni test che passa da `run_today_bets` o

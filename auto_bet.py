@@ -4371,7 +4371,32 @@ def event_identity(pick: dict) -> dict:
 
 
 def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
-    """Piazza un ordine REALE per il segnale e ritorna l'esito.
+    """Piazza un ordine REALE e REGISTRA il tentativo (fill rate per PICK).
+
+    Wrapper sottile su `_live_fill_impl`. Questo e' l'UNICO punto da cui passa
+    un ordine reale (corsia storica, dispatch T-60, catena chief, hedging),
+    quindi e' l'unico posto in cui il fill rate puo' essere misurato **per
+    pick** invece che per invio: il giro ripete lo stesso pick ogni 60s, e
+    senza questa registrazione ogni retry sembra un tentativo fallito
+    (il metrico "riempiti / POST" del 25/09-02/10 diceva 5,5% mentre il
+    denominatore vero sono i PICK).
+
+    La registrazione e' fail-safe (`fill_rate.record_attempt` non solleva mai)
+    e NON cambia il valore di ritorno: il percorso del denaro resta identico.
+    """
+    trace: dict = {}
+    res = _live_fill_impl(pick, stake, floor, trace)
+    try:
+        import fill_rate
+        fill_rate.record_attempt(pick, stake, floor, res, trace)
+    except Exception:                                            # pragma: no cover
+        logger.debug("auto_bet: fill_rate non disponibile", exc_info=True)
+    return res
+
+
+def _live_fill_impl(pick: dict, stake: float, floor: float,
+                    trace: dict | None = None) -> dict | None:
+    """Piazza un ordine REALE per il segnale e ritorna l'esito (vedi wrapper).
 
     Flusso (fail-closed, nessuna eccezione verso il chiamante):
     1. engine reale (provider da env, mai DryRun);
@@ -4582,6 +4607,11 @@ def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
         order = prov.place_limit_order(market_id, sel, "BACK",
                                        float(floor), float(stake))
     except Exception as e:
+        # Esito IGNOTO per la telemetria: l'ordine puo' essere arrivato
+        # all'exchange prima del guasto, quindi non si classifica come "salto"
+        # (fill_rate: un `error` resta nel denominatore dei tentativi).
+        if trace is not None:
+            trace["outcome"] = "error"
         logger.warning("auto_bet: ordine reale %s fallito (%s vs %s): %s",
                        market_id, pick["home"], pick["away"], e)
         return None

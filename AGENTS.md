@@ -13219,3 +13219,100 @@ convenzione delle quote LORDE (`f = (p*o - q)/o`), che a quota 1.8 e' ~2.5x il
 Kelly dei libri (`(p*o - 1)/(o - 1)`). E' **preesistente e coerente in tutto il
 progetto** (`adaptive_staking`, schedina, backtest): NON e' stata toccata qui —
 cambiarla sposta ogni stake del sistema e va deciso a parte.
+
+### Fill rate PER PICK: nasce la telemetria, e la misura dice l'opposto del metrico storico (17/10/2026)
+
+**Direttiva del proprietario**: misurare il fill rate reale degli ordini dopo il
+fix della quota di libro (commit `4fbab93`, 09/10), **per pick e non per
+tentativo**. La risposta onesta richiedeva due cose: capire se il dato fosse
+recuperabile, e renderlo recuperabile se non lo era.
+
+**1) IL DATO NON ERA RECUPERABILE — verificato, non ipotizzato.**
+- **Nessuno storico ordini sull'exchange**: 7 endpoint provati dal container
+  (`/trades` 404, `/user/trades` 400 "address must be a valid address",
+  `/fills` 404, `/user/fills` 400, `/orders/history` 404, `/user/orders-v3` 400,
+  `/orders-v3?status=CANCELLED` -> restituisce solo gli ordini APERTI, `[]`).
+  SX non espone un registro dei tentativi (accettati/cancellati).
+- **Nessun log storico**: `railway logs --lines 5000` copre solo la vita del
+  container (ripartito 01:36 del 17/10: **26 minuti**), `--since/--until` su
+  12/10, 14/10 e 16/10 restituisce **0 righe**, e l'agente dei log
+  (`ssh -T get-logs@railway.new`) risponde ancora *"You don't have the required
+  role (viewer)"*.
+- Nel ledger c'era solo `bets` (i RIEMPIMENTI, per scelta: un ordine non
+  eseguito non e' denaro). `liquidity_monitor` registra gli scarti per
+  profondita', non le cancellazioni IOC.
+→ Conclusione: **o si strumentava, o si continuava a misurare il numero
+sbagliato**. La direttiva ha quindi portato a un modulo nuovo, non a una query.
+
+**2) `fill_rate.py` (NUOVO, 50 test verdi, tutti OFFLINE).** Un evento JSONL per
+OGNI tentativo, scritto da `auto_bet._live_fill`; aggregazione **per pick** con
+`(match_id, esito)` (fallback su `market_id`); lettore condiviso
+(`telemetry_logs.iter_events`, rotazione `.gz` inclusa).
+- **La distinzione che rende utile la metrica**: `ATTEMPT_OUTCOMES`
+  (`filled`/`partial`/`no_fill`/`no_bet_id`/`resting_open`/`error`) formano il
+  DENOMINATORE; `skipped` (nessun POST: mercato non risolto, prezzo sotto il
+  floor, profondita' insufficiente) **non e' un tentativo fallito** e non
+  abbassa il fill rate per un motivo che col riempimento non c'entra.
+- Campione sotto **30 invii** = `reliable=False` (stessa soglia di
+  `significance.MIN_SAMPLES`): nessun numero viene letto come verita' prima.
+- `from_log()` misura un **estratto di log** salvato (`railway logs > file`):
+  riconosce anche il percorso RESTING (`ordine RESTING ... riempito SUBITO`,
+  `ORDINE RESTING aperto`, `resting_orders: RIEMPIMENTO`) con **dedup a 10
+  secondi** per `(mercato, tipo)` — il resting logga DUE volte lo stesso ordine,
+  un retry vero arriva al ciclo successivo (60s).
+- **Un bug reale trovato dai test**: `from_log("testo multi-riga")` provava
+  `Path.exists()` sul testo -> `OSError: File name too long` inghiottito come
+  `error`, quindi la misura usciva senza numeri. Ora il percorso si prova solo
+  se l'input puo' esserlo (niente newline, < 400 char) + test di regressione.
+
+**3) IL PUNTO DI AGGANCIO.** `_live_fill` e' diventato un **wrapper** su
+`_live_fill_impl` (3 righe: crea la trace, delega, registra). Questo copre in
+un colpo TUTTI i chiamanti — corsia storica, dispatch T-60, catena chief,
+`smart_hedging` (che risolve `auto_bet._live_fill` a runtime) — senza
+reimplementare niente e **senza cambiare il valore di ritorno** (test
+dedicati). Il solo punto dove il solo valore di ritorno e' ambiguo (eccezione
+del provider: l'ordine puo' essere arrivato) marca `trace["outcome"]="error"`,
+cosi' resta nel denominatore invece di sembrare un salto.
+
+**4) LA MISURA (container AMS, sola lettura, 17/10 02:29 UTC).**
+- **Riempimenti reali**: 74 live totali, **47 post-fix** (09/10 23:48 -> ora),
+  47 pick distinti (ogni pick si riempie una volta). Per giorno: 10/10 6,
+  11/10 8, 12/10 11, 13/10 **1** (era armato lo stop settimanale), 14/10 11,
+  15/10 2, 16/10 6, 17/10 2. Per corsia: **TENNIS 21, 1X2 26**; stake medio
+  **3,05**.
+- **Finestra di log disponibile (26 min, reale)**: 2 POST, **1 pick tentato,
+  1 riempito -> fill rate per pick 100%** (era un riempimento IMMEDIATO via
+  RESTING dopo un book sottile: `liquidita' 5.00 < richiesta 20.00` come taker).
+- **Conversione per pick dell'era** (proxy, dichiarato): 253 righe giocabili
+  nate dopo il fix, 99 con kickoff passato -> **11 con un ordine = 11,1%**.
+  ⚠️ **Questo NON e' un fill rate**: il denominatore contiene pick che non hanno
+  MAI visto un POST. Il dettaglio lo dimostra: **OU 0/58 e AH 0/22** (corsie
+  fail-closed: oracolo a linea spento dal 07/10 e griglia SX/Pinnacle che non si
+  interseca) e, per i pick 1X2 non riempiti, `oracle_skips.jsonl` registra
+  `no_oracle/MISSING_MARKET` con azione **`not_recoverable`** — cioe' il gate non
+  ha nemmeno pagato la fetch e **nessun ordine e' partito**. Escludendo OU/AH:
+  **1X2 6/8 (75%) e TENNIS 5/11 (45%)** — che restano un LIMITE INFERIORE del
+  fill rate vero, perche' includono ancora pick mai tentati.
+
+**5) PERCHE' CONTA (numeri storici).** Il metrico che questa telemetria
+sostituisce diceva **7 riempiti su 221 POST (5,5%)** fra il 25/09 e il 02/10, e
+veniva letto come "il bot non esegue". Il giro ripete lo stesso pick ogni 60s:
+un pick che si riempie al 15o tentativo produce 14 POST a vuoto e **un ordine**.
+Il test di riferimento (`TestPerPickNonPerInvio`) fissa lo scenario: 15 invii,
+1 pick, **fill rate per pick 100%** contro **per invio 6,67%**.
+
+**6) Env / isolamento.** `FILL_RATE_ENABLED` (default ON) e `FILL_RATE_LOG`
+(`DATA_DIR/execution/order_attempts.jsonl`) in `preserve()` di
+`.railway/railway.ts`; `conftest.py` mette il log nella tmp e **spegne la
+telemetria fuori da `test_fill_rate`**, cosi' i test che misurano altro non
+lasciano righe sul volume.
+**CLI**: `venv/bin/python fill_rate.py [--days N] [--json] [--log FILE]`.
+
+**7) Stato**: `verify_guardrails.py` **A-J tutti bloccano** (exit 0),
+regressioni verdi (auto_bet x3, capital_enclosure, exposure_gate, order_watch,
+t60, smart_hedging, agent_hierarchy, resting_orders, chief_shadow, rush,
+liquidity_monitor, secret_hygiene) e 50 test del modulo nuovo.
+⚠️ **Da leggere fra qualche giorno**: `fill_rate.py --days 7` sul container dara'
+il primo numero per-pick statisticamente sensato (servono >= 30 invii); il
+numero da guardare e' `fill_rate_per_pick`, mentre `attempts_per_pick` dice
+quanto costa in invii un riempimento (se sale, il book si e' assottigliato).
