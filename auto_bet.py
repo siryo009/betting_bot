@@ -4370,6 +4370,30 @@ def event_identity(pick: dict) -> dict:
     }
 
 
+def _market_bet_open(market_id, selection_id) -> bool:
+    """True se esiste una puntata APERTA sullo stesso mercato/selection.
+
+    GUARDIA DEL DOPPIONE (14/10/2026). La stessa partita arriva al bot con ID
+    DIVERSI a seconda della corsia (the-odds-api e `sx-*`), quindi il dedup
+    per (match_id, esito) — quello del 12/10 — non puo' vedere che si tratta
+    dello STESSO mercato dell'exchange. Caso reale: bet #73 `sx-L20471322`
+    (4.98 USDC) e bet #74 `7a8f8a07…` (2.79 USDC) sullo STESSO
+    `market_id 0x0d356b2e…`/`selection 1`, nella stessa tornata: 7.77 USDC su
+    un solo esito invece di ~5.
+
+    Fail-closed sulla lettura impossibile (True): un doppio ordine costa
+    denaro reale due volte.
+    """
+    try:
+        import tracker as _t
+        return bool(_t.bet_exists_open_market(market_id, selection_id))
+    except Exception as e:
+        logger.warning("auto_bet: dedup di mercato illeggibile per %s/%s "
+                       "(%s): nessun ordine (fail-closed)",
+                       market_id, selection_id, e)
+        return True
+
+
 def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
     """Piazza un ordine REALE e REGISTRA il tentativo (fill rate per PICK).
 
@@ -4546,6 +4570,21 @@ def _live_fill_impl(pick: dict, stake: float, floor: float,
                     pick["away"], pick["esito_key"])
         return None
     market_id, sel = mkt["market_id"], mkt["selection_id"]
+
+    # GUARDIA DEL DOPPIONE (14/10/2026): l'identita' vera della puntata e'
+    # (market_id, selection_id), non (match_id, esito) — vedi
+    # `_market_bet_open`. Sta PRIMA del controllo di prezzo e del percorso
+    # RESTING: un secondo ordine sullo stesso lato e' un doppio esposto,
+    # qualunque sia la forma (taker o resting).
+    if _market_bet_open(market_id, sel):
+        if trace is not None:
+            trace["outcome"] = "skipped_duplicate_market"
+        logger.warning("auto_bet: %s (%s vs %s, %s) ha GIA' una puntata "
+                       "APERTA sullo stesso mercato/selection: nessun "
+                       "secondo ordine (fail-closed)",
+                       market_id, pick.get("home"), pick.get("away"),
+                       pick.get("esito_key"))
+        return None
 
     best = None
     try:

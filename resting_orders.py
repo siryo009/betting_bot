@@ -305,6 +305,18 @@ def place(prov, *, pick: Dict[str, Any], stake: float, price: float,
         if (str(r.get("match_id") or ""), str(r.get("esito") or "")) == key:
             out["reason"] = "duplicate"
             return out
+        # Stesso MERCATO con match_id diverso (la stessa partita arriva con
+        # l'ID di the-odds-api da una corsia e con `sx-*` dall'altra): il
+        # dedup per match_id non lo vede. Caso reale del 14/10: due ordini
+        # sullo stesso market/selection. L'identita' vera e' questa.
+        try:
+            same_market = (str(r.get("market_id") or "") == str(market_id or "")
+                           and int(r.get("selection_id")) == int(selection_id))
+        except (TypeError, ValueError):
+            same_market = False
+        if same_market and str(market_id or ""):
+            out["reason"] = "duplicate_market"
+            return out
 
     dl = deadline_ts(pick.get("commence"), now=now, cfg=cfg)
     if dl <= now.timestamp() + 60.0:

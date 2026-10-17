@@ -321,6 +321,26 @@ class TestPlace:
         assert res["reason"] == "duplicate"
         assert prov.place_calls == []
 
+    def test_duplicato_stesso_mercato_con_match_id_diverso(self):
+        """14/10/2026: la stessa partita arriva con l'ID di the-odds-api da
+        una corsia e con `sx-*` dall'altra. Il dedup per match_id non lo
+        vede, l'identita' vera e' (market_id, selection_id)."""
+        _seed_open(order_id="a", match_id="sx-L1", esito="1")
+        prov = _Prov(order=_Order())
+        res = ro.place(prov, pick=_pick(match_id="7a8f8a079740c8d4b39c9"),
+                       stake=2.0, price=1.70,
+                       market_id="0xmid", selection_id=1)
+        assert res["reason"] == "duplicate_market"
+        assert prov.place_calls == []
+
+    def test_altro_mercato_dello_stesso_evento_resta_ammesso(self):
+        _seed_open(order_id="a", match_id="sx-L1", esito="1")
+        prov = _Prov(order=_Order(status="SUBMITTED"))
+        res = ro.place(prov, pick=_pick(match_id="7a8f8a079740c8d4b39c9"),
+                       stake=2.0, price=1.70,
+                       market_id="0xtie", selection_id=1)
+        assert res["placed"] is True
+
     def test_deadline_troppo_vicina(self):
         prov = _Prov(order=_Order())
         res = ro.place(prov, pick=_pick(commence=_kickoff(0.005)), stake=2.0,

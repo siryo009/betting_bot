@@ -13316,3 +13316,55 @@ liquidity_monitor, secret_hygiene) e 50 test del modulo nuovo.
 il primo numero per-pick statisticamente sensato (servono >= 30 invii); il
 numero da guardare e' `fill_rate_per_pick`, mentre `attempts_per_pick` dice
 quanto costa in invii un riempimento (se sale, il book si e' assottigliato).
+
+### 🔴 Doppio ordine reale sullo STESSO mercato (bet #73 + #74) — guardia `(market_id, selection_id)` (15/10/2026)
+
+**Trovato mentre si misurava il fill rate** (sola lettura del ledger + log
+`orders-v3`): la sera del 14/10 sono partiti **due ordini REALI sullo stesso
+esito, a 0,7 secondi di distanza**:
+
+| bet | `match_id` | stake | prezzo | `market_id` / selection |
+|---|---|---|---|---|
+| #73 | `sx-L20471322` | **4,98** | 1,9417 | `0x0d356b2e…` / **1** |
+| #74 | `7a8f8a079740c8d4b39c995cdd304e0c` | **2,79** | 1,937 | `0x0d356b2e…` / **1** |
+
+**7,77 USDC esposti su un solo esito invece di ~5**, e il totale del giro
+superava il cap per-ordine (3,58 a quell'equity) proprio perche' nessuno
+vedeva il doppione.
+
+**Causa**: la STESSA partita arriva al board con **due identita' diverse** — la
+riga di `fixture_engine` porta il `match_id` di the-odds-api, quella SX
+`sx-<eventId>` — e il dedup cross-corsia del 12/10 confronta
+`(match_id, esito)`: due chiavi diverse, nessun duplicato visto. Entrambi i
+pick sono poi passati da `_live_fill`, che ha risolto **lo stesso mercato**
+dell'exchange e ha mandato due POST. L'identita' VERA di una puntata su un
+exchange e' `(market_id, selection_id)`, non `(match_id, esito)`.
+
+**Fix (tre punti, tutti fail-closed).**
+1. `tracker.bet_exists_open_market(market_id, selection_id)`: True se esiste
+   una puntata **APERTA** su quel mercato/lato. Su lettura impossibile
+   risponde **True** (nessun ordine: un doppio costa denaro due volte, un
+   ordine mancato costa un'opportunita').
+2. `auto_bet._market_bet_open()` + guardia in `_live_fill_impl` **subito dopo**
+   la risoluzione del mercato, PRIMA del controllo di prezzo e del percorso
+   RESTING (un secondo ordine sullo stesso lato e' un doppio in qualunque
+   forma). Il verdetto finisce in `fill_rate` come
+   `skipped_duplicate_market`, quindi la telemetria distingue "saltato" da
+   "mai tentato".
+3. `resting_orders.place()`: dedup anche per `(market_id, selection_id)`
+   (nuovo motivo `duplicate_market`) oltre a quello per `(match_id, esito)`.
+
+**Cosa NON cambia**: il retry legittimo resta intatto — la guardia scatta solo
+se una riga del ledger e' **ancora aperta**, e un tentativo non riempito non
+scrive nessuna riga (il pick continua a essere ritentato ogni 60s, che e' il
+meccanismo che ha reso il fill-rate per-attempt fuorviante). Un secondo
+ingresso sullo stesso mercato lo stesso giorno e' ammesso solo se il primo e'
+stato **salvato** (chiuso).
+
+**Test**: `test_auto_bet_live.TestGuardiaMercatoDuplicato` (4: stesso mercato
+con `match_id` diverso -> 0 POST; mercato **chiuso** -> l'ordine parte; altro
+esito dello stesso evento -> parte; lettura rotta -> 0 POST) +
+`test_resting_orders` (`duplicate_market` con `match_id` diverso, altro mercato
+ammesso). Verdi: `test_resting_orders` + `test_auto_bet_live` (137),
+`test_auto_bet` + `test_capital_enclosure` + `test_order_watch` (106),
+`test_t60_breakers` + `test_exposure_gate` + `test_bets` (72).

@@ -852,6 +852,83 @@ class TestLiveFill:
         assert res is not None and res["ok"] is False
         assert res["status"] == "FAILURE"
 
+
+def _seed_bet_market(market_id="m-home", selection_id=1, esito="1",
+                     match_id="altra-corsia", closed=False):
+    """Riga `bets` come la lascia un ordine reale (per il dedup di mercato)."""
+    tracker.save_bet(match_id, "1X2", esito, market_id=market_id,
+                     selection_id=selection_id, price=1.94, stake=4.98,
+                     mode="live", status="FULLY_FILLED", bet_id="0xdup")
+    if closed:
+        conn = tracker._get_conn()
+        conn.execute("UPDATE bets SET esito_finale='won', profit=1.20 "
+                     "WHERE match_id=? AND esito=?", (match_id, esito))
+        conn.commit(); conn.close()
+
+
+class TestGuardiaMercatoDuplicato:
+    """14/10/2026: due ordini REALI sullo STESSO mercato (bet #73 e #74).
+
+    La stessa partita arriva con l'ID di the-odds-api da una corsia e con
+    `sx-*` dall'altra: il dedup per (match_id, esito) non puo' vederla.
+    L'identita' vera di una puntata su un exchange e' (market_id,
+    selection_id) e se una riga e' ancora APERTA non si ordina di nuovo.
+    """
+
+    # Helper condivisi con la classe dell'harness (nessuna copia): le test
+    # preesistenti di questa classe li usano come `self._...`.
+    _Prov = TestLiveFill._Prov
+    _setup = TestLiveFill._setup
+    _pick = TestLiveFill._pick
+
+    def test_secondo_ordine_stesso_mercato_bloccato(self, monkeypatch,
+                                                    temp_db):
+        prov = TestLiveFill._Prov(best=None, order=None)
+        TestLiveFill._setup(self, monkeypatch, prov)
+        _seed_bet_market()
+        res = auto_bet._live_fill(TestLiveFill._pick(self), stake=2.79,
+                                  floor=1.65)
+        assert res is None
+        assert prov.place_calls == []
+
+    def test_ordine_su_mercato_chiuso_ammesso(self, monkeypatch, temp_db):
+        import execution_engine as ee
+        order = ee.OrderResult(True, "0x9", "FULLY_FILLED", 1.65, 1.70,
+                               5.0, 12.0)
+        prov = TestLiveFill._Prov(best=None, order=order)
+        TestLiveFill._setup(self, monkeypatch, prov)
+        _seed_bet_market(closed=True)
+        res = auto_bet._live_fill(TestLiveFill._pick(self), stake=5.0,
+                                  floor=1.65)
+        assert res and res["ok"] is True
+        assert len(prov.place_calls) == 1
+
+    def test_altro_mercato_dello_stesso_evento_non_blocca(self, monkeypatch,
+                                                          temp_db):
+        import execution_engine as ee
+        order = ee.OrderResult(True, "0x9", "FULLY_FILLED", 1.65, 1.70,
+                               5.0, 12.0)
+        prov = TestLiveFill._Prov(best=None, order=order)
+        TestLiveFill._setup(self, monkeypatch, prov)
+        _seed_bet_market(market_id="m-tie")     # altro esito dello stesso match
+        res = auto_bet._live_fill(TestLiveFill._pick(self), stake=5.0,
+                                  floor=1.65)
+        assert res and res["ok"] is True
+        assert len(prov.place_calls) == 1
+
+    def test_lettura_rotta_fail_closed(self, monkeypatch, temp_db):
+        prov = TestLiveFill._Prov(best=None, order=None)
+        TestLiveFill._setup(self, monkeypatch, prov)
+
+        def boom(*a, **k):
+            raise RuntimeError("db non leggibile")
+
+        monkeypatch.setattr(tracker, "bet_exists_open_market", boom)
+        res = auto_bet._live_fill(TestLiveFill._pick(self), stake=5.0,
+                                  floor=1.65)
+        assert res is None
+        assert prov.place_calls == []
+
     def test_mercato_ambiguo_salta(self, monkeypatch):
         # Due eventi candidati (stessi nomi, kickoff diversi): ambiguo -> skip
         c1 = _sx_catalogue()

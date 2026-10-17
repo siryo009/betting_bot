@@ -2128,6 +2128,39 @@ def bet_exists_open(match_id, esito):
     return r is not None
 
 
+def bet_exists_open_market(market_id, selection_id):
+    """True se esiste una puntata APERTA sullo stesso mercato/selection.
+
+    L'identita' VERA di una puntata su un exchange e' (market_id,
+    selection_id), non (match_id, esito): la stessa partita arriva al bot con
+    ID DIVERSI a seconda della corsia (uno di the-odds-api, uno `sx-*`),
+    quindi il dedup per match_id non puo' vederla. Il 14/10/2026 sono partiti
+    DUE ordini reali sullo stesso `market_id`/`selection_id` (4.98 + 2.79
+    USDC sullo stesso esito) proprio per questo.
+
+    FAIL-CLOSED: su lettura impossibile risponde True (nessun ordine). Un
+    doppio ordine costa denaro reale due volte; un ordine mancato costa
+    un'opportunita'.
+    """
+    if not market_id:
+        return False
+    try:
+        mid = str(market_id)
+        sel = int(selection_id)
+    except (TypeError, ValueError):
+        return False
+    try:
+        conn = _get_conn(); c = conn.cursor()
+        r = c.execute("SELECT 1 FROM bets WHERE market_id=? AND selection_id=? "
+                      "AND esito_finale IS NULL", (mid, sel)).fetchone()
+        conn.close()
+    except Exception:
+        logger.warning("tracker: dedup di mercato illeggibile per %s/%s "
+                       "(fail-closed)", market_id, selection_id)
+        return True
+    return r is not None
+
+
 def get_bets(day=None, closed=None, limit=200):
     conn = _get_conn(); c = conn.cursor()
     q = "SELECT match_id, mercato, esito, market_id, selection_id, price, stake, " \
