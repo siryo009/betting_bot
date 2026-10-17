@@ -18,7 +18,7 @@ Idempotente: aggiunge il filtro una sola volta.
 import logging
 import os
 import re
-from typing import Mapping
+from typing import Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -162,22 +162,146 @@ def _apply_to_root() -> None:
                 h.addFilter(flt)
 
 
+# Pacchetti di renderer di log che le librerie terze installano sul ROOT logger
+# e che NON devono sopravvivere in produzione.
+#
+# Caso reale misurato il 17/10/2026 in produzione: `import soccerdata` (che
+# `live_intel` importa pigramente) installa sul root logger un
+# `rich.logging.RichHandler` — e due `RotatingFileHandler` propri. Quando il
+# renderer rich deve formattare i messaggi LUNGHI del bot (timeout del wallet,
+# riepilogo della closing line) va in `RecursionError`: il logging di Python
+# stampa "--- Logging error ---" e la riga viene PERSA. In produzione se ne
+# vedevano 2 in ~7 minuti, e a sparire erano proprio i log che servono al
+# monitoraggio (il bot non si ferma, ma la diagnosi diventa cieca).
+FOREIGN_HANDLER_PACKAGES: tuple[str, ...] = ("rich",)
+
+
+# Formato standard del progetto (unica definizione: prima era scritto inline
+# in `basicConfig` e ripetuto qui per l'handler ripristinato dalla guardia).
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+#: Livello che il PROGETTO ha configurato (aggiornato da `setup`). Serve alla
+#: guardia: se una libreria alza il livello del root (soccerdata lo imposta da
+#: `SOCCERDATA_LOGLEVEL`, default INFO) i nostri INFO spariscono e vanno
+#: riportati a questo valore.
+_OWNED_LEVEL: int = logging.INFO
+
+
+#: Marcatore dell'handler di stdout del progetto. La guardia riconosce cosi'
+#: l'handler "nostro" senza dipendere dal suo modulo (un `StreamHandler` e' un
+#: `StreamHandler` anche quando lo crea una libreria).
+_OWNED_ATTR = "_qv_owned"
+
+
+def _ensure_owned_handler(level: Optional[int] = None):
+    """Garantisce un handler di stdout del PROGETTO sul root logger.
+
+    Una libreria che riconfigura il logging (soccerdata lo fa con
+    `logging.config.dictConfig`) **sostituisce** gli handler del root: da quel
+    momento il bot scriverebbe solo sui file della libreria e perderebbe
+    formato e filtro dei segreti. Qui l'handler viene ripristinato.
+
+    Non crea duplicati: se esiste gia' un handler marcato lo riusa, e se il
+    root ha handler non-file (quelli di `basicConfig`, pytest, o il `_Capture`
+    di `verify_guardrails.py`) li ADOTTA invece di aggiungerne un altro — e'
+    cio' che tiene valida la promessa "setup non aggiunge un secondo handler".
+    """
+    root = logging.getLogger()
+    owned = [h for h in root.handlers if getattr(h, _OWNED_ATTR, False)]
+    if not owned:
+        candidati = [h for h in root.handlers
+                     if not getattr(h, "baseFilename", None)]
+        if candidati:
+            for h in candidati:
+                try:
+                    setattr(h, _OWNED_ATTR, True)
+                except Exception:
+                    pass
+            owned = candidati
+        else:
+            nuovo = logging.StreamHandler()
+            nuovo.setFormatter(logging.Formatter(LOG_FORMAT))
+            setattr(nuovo, _OWNED_ATTR, True)
+            root.addHandler(nuovo)
+            owned = [nuovo]
+    wanted = _OWNED_LEVEL if level is None else level
+    # Solo verso il BASSO (piu' verboso): una libreria che alza il livello a
+    # WARNING/ERROR farebbe sparire i nostri INFO.
+    if root.level > wanted:
+        root.setLevel(wanted)
+    return owned[0]
+
+
+def strip_foreign_handlers(level: Optional[int] = None) -> int:
+    """Rimuove dal ROOT logger gli handler di librerie terze e RIMETTE il nostro.
+
+    Due regole, entrambe misurate sul campo (17/10/2026):
+      1. DENYLIST per pacchetto (`rich`): il `RichHandler` che soccerdata
+         installa sul root va in `RecursionError` sui messaggi lunghi e la
+         riga di log viene PERSA. NON e' un "cancella tutto tranne i miei":
+         un handler legittimo aggiunto dopo `setup()` (il `_Capture` di
+         `verify_guardrails.py`) resta al suo posto.
+      2. HANDLER SU FILE: il progetto non ne installa MAI sul root (verificato:
+         l'unico logging su file e' quello di `buffer`/telemetria, che non
+         passa dal root). Quelli di soccerdata scrivevano TUTTI i log del bot
+         in `~/soccerdata/logs/info.log` (misurato in produzione: 175 KB con
+         1.657 righe di `auto_bet`/`gridiron_lane` e ZERO valori mascherati,
+         perche' aggiunti dopo il bootstrap senza il filtro).
+
+    Poi garantisce l'handler di stdout del progetto (`_ensure_owned_handler`) e
+    riattacca il filtro dei segreti a cio' che sopravvive: da qui in poi nessun
+    handler sul root puo' scrivere una credenziale in chiaro.
+
+    Fail-safe: non solleva mai. Ritorna il numero di handler rimossi, cosi' il
+    chiamante puo' dichiararlo invece di ripulire in silenzio.
+    """
+    removed = 0
+    try:
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            try:
+                package = (type(handler).__module__ or "").split(".")[0]
+            except Exception:
+                continue                      # handler ostile: si lascia stare
+            if package in FOREIGN_HANDLER_PACKAGES:
+                try:
+                    root.removeHandler(handler)
+                    removed += 1
+                except Exception:
+                    pass
+                continue
+            if getattr(handler, "baseFilename", None):
+                try:
+                    root.removeHandler(handler)
+                    removed += 1
+                except Exception:
+                    pass
+        _ensure_owned_handler(level)
+        _apply_to_root()
+    except Exception:
+        pass
+    return removed
+
+
 def setup(level: int = logging.INFO) -> None:
     """Configura il logging sicuro per l'entrypoint. Da chiamare al bootstrap.
 
     - root handler con formato standard + SensitiveDataFilter
     - libreria httpx (e affini) a WARNING: niente URL col token a INFO
     """
+    global _OWNED_LEVEL
+    _OWNED_LEVEL = level
     flt = _get_filter()
     flt.refresh()
     root = logging.getLogger()
+    # PRIMA di configurare: un RichHandler gia' presente (libreria importata
+    # prima del bootstrap) non deve essere scambiato per un handler del
+    # progetto e adottato.
+    strip_foreign_handlers(level)
     if not root.handlers:
-        logging.basicConfig(
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            level=level,
-        )
-    else:
-        root.setLevel(level)
+        logging.basicConfig(format=LOG_FORMAT, level=level)
+    root.setLevel(level)
+    _ensure_owned_handler(level)
     _apply_to_root()
     # httpx logga a INFO ogni richiesta con URL completo (che per Telegram
     # include il token): a WARNING sparisce. I messaggi httpx che passano
@@ -193,6 +317,9 @@ def setup(level: int = logging.INFO) -> None:
     # WARNING restano visibili: "skipped: maximum number of running
     # instances" e gli errori di job sono segnali reali, non rumore.
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
+    # Copre il caso in cui una libreria terza abbia gia' importato/modificato il
+    # logging PRIMA del bootstrap (`import soccerdata` -> dictConfig sul root).
+    strip_foreign_handlers(level)
 
 
 def refresh_secrets() -> None:

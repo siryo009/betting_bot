@@ -171,6 +171,29 @@ def _network_deadline():
         socket.setdefaulttimeout(previous)
 
 
+def _import_soccerdata():
+    """Import PIGRO di soccerdata + igiene del logging (unico punto).
+
+    `import soccerdata` installa sul ROOT logger un `rich.logging.RichHandler`
+    (e due RotatingFileHandler propri). Il renderer rich va in
+    `RecursionError` sui messaggi lunghi del bot e la riga di log viene PERSA:
+    misurato in produzione il 17/10/2026 ("--- Logging error --- ...
+    RecursionError"). La policy sta in `secure_logging.strip_foreign_handlers`
+    — qui c'e' solo la chiamata, subito dopo l'import che la rende necessaria,
+    cosi' l'ordine non puo' essere dimenticato in un secondo punto d'uso.
+
+    Fail-safe: senza `secure_logging` (o se la pulizia fallisce) l'import resta
+    valido e il provider funziona come prima.
+    """
+    import soccerdata as sd
+    try:
+        import secure_logging
+        secure_logging.strip_foreign_handlers()
+    except Exception:
+        pass
+    return sd
+
+
 def _cache_read(kind: str, key: str) -> Optional[dict]:
     """Legge la cache di un provider (dict `{ts, data}`), mai un'eccezione."""
     try:
@@ -362,7 +385,7 @@ def soccer_team_stats(team: str, league: str) -> Optional[TeamStats]:
         data = cached.get("data") or {}
         return TeamStats(provider="fbref", **data) if data else None
     try:
-        import soccerdata as sd  # import pigro
+        sd = _import_soccerdata()
 
         last_err = ""
         for season in _seasons():
@@ -455,7 +478,7 @@ def _clubelo_snapshot():
         if age_s <= ttl_s:
             return _CLUBELO.get("data")
         try:
-            import soccerdata as sd  # import pigro
+            sd = _import_soccerdata()
 
             with _network_deadline():
                 snap = sd.ClubElo().read_by_date()

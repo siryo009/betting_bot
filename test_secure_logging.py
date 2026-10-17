@@ -143,3 +143,200 @@ def test_filtro_su_handler_root_non_duplicato():
         n = sum(isinstance(f, secure_logging.SensitiveDataFilter)
                 for f in h.filters)
         assert n <= 1
+
+
+# ---------------------------------------------------------------------------
+# Handler di librerie terze sul root logger (fix 17/10/2026)
+# ---------------------------------------------------------------------------
+
+
+def _rich_like_handler():
+    """Handler che DICHIARA il proprio modulo come `rich.logging`.
+
+    E' la forma esatta dell'handler che `import soccerdata` installa sul root
+    (verificato: `rich.logging.RichHandler`), senza dipendere da rich.
+    """
+    cls = type("RichHandler", (logging.Handler,), {"__module__": "rich.logging"})
+    return cls()
+
+
+def test_strip_rimuove_l_handler_rich_installato_da_una_libreria():
+    """`import soccerdata` installa un RichHandler sul root: va rimosso.
+
+    Il renderer rich va in `RecursionError` sui messaggi lunghi del bot e la
+    riga di log viene PERSA (2 occorrenze in ~7 minuti in produzione, proprio
+    sui log del monitoraggio).
+    """
+    setup()
+    root = logging.getLogger()
+    h = _rich_like_handler()
+    root.addHandler(h)
+    assert h in root.handlers
+    assert secure_logging.strip_foreign_handlers() == 1
+    assert h not in root.handlers
+    # Il nostro handler di bootstrap resta al suo posto: si toglie il renderer
+    # di libreria, non il logging del progetto.
+    assert len(root.handlers) >= 1
+
+
+def test_strip_non_tocca_gli_handler_legittimi_aggiunti_dopo_setup():
+    """Denylist per PACCHETTO, non "cancella tutto tranne i miei".
+
+    `verify_guardrails.py` aggiunge un `_Capture` al root DOPO `setup()`: una
+    regola basata sull'identita' avrebbe rimosso anche quello, rompendo la
+    diagnostica.
+    """
+    setup()
+    root = logging.getLogger()
+    keep = logging.StreamHandler()          # modulo `logging`, non terzo
+    root.addHandler(keep)
+    try:
+        secure_logging.strip_foreign_handlers()
+        assert keep in root.handlers
+    finally:
+        root.removeHandler(keep)
+
+
+def test_strip_riattacca_il_filtro_ai_sopravvissuti():
+    """Un handler aggiunto dopo il bootstrap non porta il filtro dei segreti.
+
+    I due RotatingFileHandler di soccerdata scrivono su disco TUTTI i log del
+    bot: senza questo passaggio ci finirebbero i messaggi non mascherati.
+    """
+    setup()
+    root = logging.getLogger()
+    late = logging.StreamHandler()          # nessun SensitiveDataFilter
+    root.addHandler(late)
+    try:
+        secure_logging.strip_foreign_handlers()
+        assert any(isinstance(f, SensitiveDataFilter) for f in late.filters)
+    finally:
+        root.removeHandler(late)
+
+
+def test_strip_idempotente_e_fail_safe():
+    """Due chiamate non fanno danno e un handler ostile non solleva mai."""
+    setup()
+    root = logging.getLogger()
+    assert secure_logging.strip_foreign_handlers() == 0
+
+    class _BoomMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__module__":
+                raise RuntimeError("modulo illeggibile")
+            return super().__getattribute__(name)
+
+    class _Ostile(logging.Handler, metaclass=_BoomMeta):
+        pass
+
+    ostile = _Ostile()
+    root.addHandler(ostile)
+    try:
+        assert secure_logging.strip_foreign_handlers() == 0   # non solleva
+        assert ostile in root.handlers                        # e non lo tocca
+    finally:
+        root.removeHandler(ostile)
+
+
+def test_setup_ripulisce_un_richhandler_gia_presente():
+    """Caso "soccerdata importato PRIMA del bootstrap": setup() ripulisce."""
+    root = logging.getLogger()
+    h = _rich_like_handler()
+    root.addHandler(h)
+    setup()
+    assert h not in root.handlers
+
+
+def test_denylist_dichiarata_contiene_rich():
+    assert "rich" in secure_logging.FOREIGN_HANDLER_PACKAGES
+
+
+def test_strip_rimuove_gli_handler_su_file_di_libreria(tmp_path):
+    """`import soccerdata` scrive TUTTI i log del bot in `~/soccerdata/logs`.
+
+    Misurato in produzione: `info.log` 175 KB con 1.657 righe di
+    `auto_bet`/`gridiron_lane` e ZERO valori mascherati (handler aggiunti dopo
+    il bootstrap, senza SensitiveDataFilter).
+    """
+    setup()
+    root = logging.getLogger()
+    fh = logging.FileHandler(tmp_path / "soccerdata-info.log")
+    try:
+        secure_logging.strip_foreign_handlers()
+        assert fh not in root.handlers
+    finally:
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+
+def test_guardia_ripristina_l_handler_dopo_una_riconfigurazione():
+    """Il caso reale: `logging.config.dictConfig` di una libreria svuota il root.
+
+    soccerdata lo esegue all'import e poi mette un RichHandler al posto del
+    console: senza il ripristino il bot perdeva formato E filtro dei segreti.
+    """
+    import logging.config
+
+    setup()
+    root = logging.getLogger()
+    logging.config.dictConfig({
+        "version": 1,
+        "disable_existing_loggers": False,
+        "handlers": {"console": {"class": "logging.StreamHandler",
+                                  "stream": "ext://sys.stdout"}},
+        "root": {"handlers": ["console"], "level": "INFO"},
+    })
+    assert not any(getattr(h, secure_logging._OWNED_ATTR, False)
+                   for h in root.handlers)
+    root.handlers[0] = _rich_like_handler()          # come fa soccerdata
+    assert secure_logging.strip_foreign_handlers() == 1
+    owned = [h for h in root.handlers
+             if getattr(h, secure_logging._OWNED_ATTR, False)]
+    assert len(owned) == 1                          # UN handler di progetto
+    assert owned[0].formatter._fmt == secure_logging.LOG_FORMAT
+    assert any(isinstance(f, SensitiveDataFilter) for f in owned[0].filters)
+
+
+def test_guardia_riabbassa_il_livello_alzato_da_una_libreria():
+    """soccerdata imposta il root da `SOCCERDATA_LOGLEVEL`: se sale, i nostri
+    INFO sparirebbero (`auto_bet` logga a INFO)."""
+    setup()
+    root = logging.getLogger()
+    root.setLevel(logging.ERROR)
+    secure_logging.strip_foreign_handlers()
+    assert root.level == logging.INFO
+    # ...ma un livello piu' VERBOSO richiesto da noi resta: si corregge solo
+    # verso il basso, mai si stringe.
+    secure_logging.setup(level=logging.DEBUG)
+    secure_logging.strip_foreign_handlers()
+    assert logging.getLogger().level == logging.DEBUG
+    secure_logging.setup(level=logging.INFO)
+
+
+def test_tripwire_il_progetto_non_installa_handler_su_file():
+    """La regola "file handler sul root = di libreria" regge solo se il progetto
+    non ne crea mai uno: verificato su tutti i sorgenti (AST, non grep, cosi'
+    i commenti non contano)."""
+    import ast
+    from pathlib import Path
+
+    colpevoli = []
+    for p in sorted(Path(__file__).parent.glob("*.py")):
+        # I test sono esclusi: simulare l'handler di una libreria richiede di
+        # crearne uno. La regola riguarda i moduli di PRODUZIONE.
+        if p.name.startswith("test_"):
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") in (
+                    "FileHandler", "RotatingFileHandler",
+                    "TimedRotatingFileHandler", "WatchedFileHandler"):
+                colpevoli.append(f"{p.name}:{n.lineno}")
+    assert colpevoli == [], (
+        "il progetto usa un file handler sul root: la regola della guardia "
+        f"lo rimuoverebbe — {colpevoli}")

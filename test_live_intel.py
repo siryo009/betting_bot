@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 import socket
 import sqlite3
@@ -814,3 +815,95 @@ class TestDataAgentIntel:
             capture_output=True, text=True,
             cwd=str(Path(live_intel.__file__).parent))
         assert out.stdout.split("HEAVY:")[1].strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# Igiene del logging dopo l'import di soccerdata (fix 17/10/2026)
+# ---------------------------------------------------------------------------
+
+
+def _rich_like_handler():
+    """La forma esatta dell'handler che `import soccerdata` mette sul root."""
+    cls = type("RichHandler", (logging.Handler,), {"__module__": "rich.logging"})
+    return cls()
+
+
+class TestIgieneLoggingSoccerdata:
+    """`import soccerdata` sporca il ROOT logger: il modulo lo ripulisce.
+
+    Misurato in produzione il 17/10/2026: 2 "--- Logging error ---" con
+    `RecursionError` in ~7 minuti, causati dal `rich.logging.RichHandler` che
+    soccerdata installa sul root dei log del bot; il renderer ricorreva sui
+    messaggi lunghi (timeout del wallet, riepilogo closing line) e la riga
+    veniva PERSA proprio nei log che servono al monitoraggio.
+    """
+
+    def test_import_soccerdata_rimuove_l_handler_rich(self, monkeypatch):
+        import logging as _logging
+
+        root = _logging.getLogger()
+        h = _rich_like_handler()
+        root.addHandler(h)
+        try:
+            monkeypatch.setitem(sys.modules, "soccerdata",
+                                types.SimpleNamespace(marker=True))
+            sd = live_intel._import_soccerdata()
+            assert sd.marker is True           # l'import resta valido
+            assert h not in root.handlers      # il renderer di libreria sparisce
+        finally:
+            if h in root.handlers:
+                root.removeHandler(h)
+
+    def test_import_soccerdata_chiama_la_guardia(self, monkeypatch):
+        import secure_logging
+
+        calls = []
+        monkeypatch.setitem(sys.modules, "soccerdata", types.SimpleNamespace())
+        monkeypatch.setattr(secure_logging, "strip_foreign_handlers",
+                            lambda: calls.append(1) or 0)
+        live_intel._import_soccerdata()
+        assert calls == [1]
+
+    def test_guardia_rotta_non_rompe_il_provider(self, monkeypatch):
+        """Fail-safe: senza `secure_logging` l'import deve funzionare lo stesso."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _boom(name, *a, **kw):
+            if name == "secure_logging":
+                raise ImportError("modulo assente")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setitem(sys.modules, "soccerdata",
+                            types.SimpleNamespace(marker=True))
+        monkeypatch.setattr(builtins, "__import__", _boom)
+        assert live_intel._import_soccerdata().marker is True
+
+    def test_tripwire_nessun_import_grezzo_fuori_dalla_guardia(self):
+        """L'ordine import -> pulizia non puo' essere dimenticato altrove.
+
+        `live_intel` deve avere UN solo punto che importa soccerdata (l'helper),
+        altrimenti un secondo uso installerebbe di nuovo il RichHandler. Il
+        controllo e' AST-based: la prosa che NOMINA l'import (docstring) non
+        deve contare come un import vero.
+        """
+        src = Path(live_intel.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        helper = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef)
+                      and n.name == "_import_soccerdata")
+        imports = [n.lineno for n in ast.walk(tree)
+                   if isinstance(n, ast.Import)
+                   and any(a.name == "soccerdata" for a in n.names)]
+        assert len(imports) == 1, "l'import di soccerdata deve stare solo qui"
+        assert helper.lineno < imports[0] <= helper.end_lineno
+        guardie = [n.lineno for n in ast.walk(tree)
+                   if isinstance(n, ast.Attribute)
+                   and n.attr == "strip_foreign_handlers"]
+        assert len(guardie) == 1, "una sola chiamata, subito dopo l'import"
+        assert helper.lineno < guardie[0] <= helper.end_lineno
+        usi = [n.lineno for n in ast.walk(tree)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "_import_soccerdata"]
+        assert len(usi) == 2, "attesi FBref + ClubElo"
