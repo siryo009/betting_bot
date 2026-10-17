@@ -13130,3 +13130,92 @@ container): subito dopo il deploy `PRAGMA table_info` **non le mostrava
 ancora** — un probe che concludesse "la migrazione non e' passata" sbaglierebbe
 diagnosi (verificato: dopo la chiamata esplicita le quattro colonne ci sono e il
 backfill ha scritto senza errori).
+
+### 🔴 INCIDENTE E FIX: raffica 429 sulla lettura del saldo + verifica di operativita' (17/10/2026, notte)
+
+**1) L'INCIDENTE (misurato in produzione, non ipotizzato).** Nel processo del bot
+sono comparse **309 letture fallite del wallet** con `429 Too Many Requests` su
+`/user/balance-v3` in pochi minuti (00:39 **142**, 00:40 27, 00:41 **140**) piu'
+**6 `RecursionError`**: circa **100 richieste HTTP al minuto** sullo stesso saldo.
+`auto_bet._live_wallet_snapshot` non aveva NE' cache NE' coalescenza e veniva
+chiamata da ~15 percorsi (ciclo 60s, un candidato per volta, catena chief, layer
+torneo/rush, job, web_api).
+
+**Perche' non era solo rumore**: con la lettura fallita il bankroll non veniva
+determinato e il giro **ripiegava sulla cassa simulata**, cioe' su una base di
+misura DIVERSA — la stessa classe di bug del falso stop-loss del 21/09 (cassa
+20,00 contro equity 33,55) e del capitale gonfiato del 14/10.
+
+**2) IL FIX (commit `b906524`, deploy `4f3b09ce` SUCCESS).** Nel punto UNICO di
+lettura, tre proprieta' (`LIVE_WALLET_TTL_S` 20s, `LIVE_WALLET_MIN_INTERVAL_S`
+6s, `LIVE_WALLET_STALE_MAX_S` 120s, `LIVE_WALLET_WARN_TTL_S` 60s — tutte
+`preserve()` in IaC):
+1. **TTL di riuso** (20s): tutti i chiamanti dello stesso ciclo vedono lo STESSO
+   capitale (prima potevano dimensionare su letture diverse dello stesso wallet);
+2. **coalescenza** (6s): nemmeno il percorso d'ordine (`force=True`, usato da
+   `refresh_live_stakes`) puo' martellare l'exchange;
+3. **lettura fallita -> istantanea recente** (<= 120s) invece del cambio di base;
+   senza istantanea `None` (fail-closed: mai la cassa simulata). Avviso anti-spam
+   (1 per `WARN_TTL`): durante una raffica il log resta leggibile.
+`wallet_cache_stats()` / `reset_wallet_cache()` per telemetria e isolamento
+(`conftest.py` azzera la cache — e' stato di modulo, la stessa lezione della
+cache di prontezza OU del 26/09 — e fissa le quattro soglie ai default).
+
+**Prova DIRETTA sul container (dopo il deploy)**: **100 chiamate con
+`force=True` -> 1 lettura HTTP** (0.010 HTTP/chiamante, 0.33s), 99 riusi, 0
+fallimenti; simulando un 429 la funzione **riusa l'istantanea** (`stale=True`,
+equity 41.51) con il messaggio *"uso l'istantanea di 30s fa invece di cambiare
+base di misura"*. Nei log del container: **0 `429`, 0 letture fallite, 0
+`RecursionError`, 0 `ERROR`**.
+
+**Test**: `test_wallet_cache.py` **NUOVO, 30 verdi, TUTTI OFFLINE** (provider
+finto, `_now` esplicito: TTL/coalescenza/con `force`, istantanea stantia e
+scaduta, fail-closed senza cache, anti-spam, env impossibili, contatori,
+isolamento, tripwire IaC, prova "50 chiamanti in 10s = 1 HTTP" e "30 forzate in
+21s <= 4 HTTP"). Aggiornati di proposito alla firma nuova: `test_auto_bet_live`
+(`_stub_wallet`), `test_capital_enclosure` (2 doppi) e `verify_guardrails.py`
+(8 doppi + `reset_wallet_cache()` in `_reset_state`, perche' la diagnostica fa
+oscillare il wallet fra scenari). `verify_guardrails.py`: **A-J TUTTI BLOCCANO**.
+
+**3) VERIFICA DI OPERATIVITA' (container AMS, sola lettura) — esito delle
+quattro voci richieste.**
+- **Ciclo H24**: gia' ATTIVO e molto piu' frequente di "ogni 3 ore" — `auto_bet`
+  e `t60_job` **ogni 60s**, `sx_signals`/`multi_market`/`hedge` **ogni 15'**,
+  `line_oracle` 30', `tennis_oracle` 10', `gridiron_lane` 3h, `tennis_lane` 6h,
+  analisi quote 3 volte al giorno (06:00/14:00/20:00 IT), settlement watchdog 4h,
+  `closing_line`/`resting_orders` 5'. Kill switch `live`, `provider_ready: true`,
+  nessuno stop (giornaliero 5% e settimanale 12% **non armati**), CB2 (25 USDC)
+  non armato, settlement **non in pausa**.
+- **Gate +EV**: `EV_MIN` 1.5% / `EV_MIN_CORE` 1.0% / `EV_MIN_LIQUID` 0.5%,
+  edge min 1pp (strong 2pp), fascia 1.20-2.00, `FAVOURITES_ONLY` + prob. di
+  mercato >= 0.50, gate top-down Pinnacle fail-closed. Ledger: **72 ordini reali
+  (68 chiusi, 36 vinti), 72/72 con `bet_id` dell'exchange** (nessun "successo"
+  inventato), 48 candidati giocabili aperti di cui **1 in finestra** al momento
+  del controllo (Liga MX, EV +13.3%).
+- **Money management**: cap per ordine 12% dell'equity (**4.98** su 41.51),
+  recinto aperto **70%**, cap totale del giorno **60%**, correlazione **30%**,
+  stop giornaliero **5%**, stop settimanale **12%**, CB2 **25 USDC**. Wallet:
+  disponibile 32.2436 + escrow 9.27 = **equity 41.5136** (lo stesso valore del
+  riferimento dello stop giornaliero: base `live_equity`).
+- **Settlement**: `settlement_paused: false`, politica `solo-puntate`,
+  **`overdue_orphans` 0**, `estimated_credits` 0, 4 bet aperte e 108 previsioni
+  in telemetria. Dataset: **1.970 previsioni chiuse**, 68 bet live chiuse,
+  `match_results` 17.644, `team_ratings` 703, **258 campioni CLV**; ensemble
+  riaddestrato al boot (peso 0.4365), **drift `ok`** (Brier rolling 0.1723 vs
+  baseline 0.2097).
+
+**4) STAKING: DECISIONE DEL PROPRIETARIO ESECUITA.** L'env
+`ORDER_FIXED_STAKE_USDC` era **1.50** -> il motore Kelly frazionario era spento
+(`aggressive_live_active() = False`, verificato). Su scelta esplicita
+(*"Kelly frazionario, cap 12%"*) l'env e' stata portata a **0** (redeploy
+`2d888f41` SUCCESS) e `KELLY_MAX_STAKE_PCT` resta **0.12**. Misura sui pick
+reali (equity 41.51): **k dinamico 0.192-0.237** (banda 0.15-0.25) e stake
+**3.36-4.23 USDC** — cioe' **~1.5-2.8x** l'importo fisso precedente (1.50, x1.5
+di torneo = 2.25). Il tetto per ordine (4.98 = 12%) **morde quasi sempre**: e' il
+cap, oggi, il vero controllo di taglia; il k dinamico differenzia solo i pick a
+EV basso (EV +2.0% -> 3.92).
+⚠️ **Nota dichiarata sulla formula**: `value_filter.kelly_fraction` usa la
+convenzione delle quote LORDE (`f = (p*o - q)/o`), che a quota 1.8 e' ~2.5x il
+Kelly dei libri (`(p*o - 1)/(o - 1)`). E' **preesistente e coerente in tutto il
+progetto** (`adaptive_staking`, schedina, backtest): NON e' stata toccata qui —
+cambiarla sposta ogni stake del sistema e va deciso a parte.

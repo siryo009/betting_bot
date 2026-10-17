@@ -308,6 +308,16 @@ class TestConfigurazione:
         monkeypatch.setenv("LIVE_WALLET_STALE_MAX_S", "  ")
         assert auto_bet.wallet_stale_max_s() == pytest.approx(120.0)
 
+    def test_soglie_dichiarate_nella_iac(self):
+        """Le env lette dal modulo devono essere `preserve()` in IaC: senza la
+        dichiarazione un `railway config apply` distrugge cio' che l'operatore
+        imposta e le soglie tornano ai default **in silenzio** (lezione del
+        28/09 sulle env perse dal `config pull`)."""
+        src = Path(".railway/railway.ts").read_text()
+        for nome in ("LIVE_WALLET_TTL_S", "LIVE_WALLET_MIN_INTERVAL_S",
+                     "LIVE_WALLET_STALE_MAX_S", "LIVE_WALLET_WARN_TTL_S"):
+            assert f"{nome}: preserve()" in src, f"{nome} non dichiarata in IaC"
+
     def test_reset_azzera_snap_e_contatori(self, monkeypatch, temp_db):
         prov = _Prov(30.0)
         _engine(monkeypatch, prov)

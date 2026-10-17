@@ -174,6 +174,20 @@ export default defineRailway(() => {
       KELLY_MAX_STAKE_PCT: preserve(),
       KELLY_MIN_TICKET_USDC: preserve(),
       KELLY_AGGRESSIVE_ENABLED: preserve(),
+      // CACHE DELLA LETTURA DEL SALDO (17/10/2026, `auto_bet._live_wallet_snapshot`):
+      // il punto UNICO che legge il wallet reale. Il 17/10 una raffica di 429 su
+      // `/user/balance-v3` (~100 richieste/minuto da ~15 percorsi) ha fatto
+      // fallire 309 letture e ha spinto il giro verso la CASSA SIMULATA, cioe'
+      // verso una base di misura diversa (la classe del falso stop del 21/09).
+      // `LIVE_WALLET_TTL_S` = riuso dell'istantanea entro il ciclo (20s),
+      // `LIVE_WALLET_MIN_INTERVAL_S` = intervallo minimo fra due HTTP anche per
+      // il percorso d'ordine (6s), `LIVE_WALLET_STALE_MAX_S` = eta' massima
+      // dell'istantanea usabile dopo una lettura fallita (120s),
+      // `LIVE_WALLET_WARN_TTL_S` = anti-spam dell'avviso (60s).
+      LIVE_WALLET_TTL_S: preserve(),
+      LIVE_WALLET_MIN_INTERVAL_S: preserve(),
+      LIVE_WALLET_STALE_MAX_S: preserve(),
+      LIVE_WALLET_WARN_TTL_S: preserve(),
       // Tre agenti (04/10/2026): Analisi (Steam Velocity + Juice/overround,
       // freschezza delle osservazioni) e Cervello (EV dinamico su liquidita'
       // e volatilita' + Portfolio Shield anti-correlazione).
