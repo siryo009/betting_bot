@@ -407,7 +407,9 @@ class TestChiefExecution:
         assert out[0]["stake"] == 99.0
         # ...e' il cap dinamico (5% di 100 = 5.00 dal 13/10/2026) a limitarlo
         # prima dell'ordine, non il vecchio tetto assoluto da 1.50.
-        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: {
+        # La firma VERA e' `(force=False, *, _now=None)` (17/10/2026, cache
+        # della lettura): il doppio deve accettarla.
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda *a, **kw: {
             "available": 100.0, "exposure": 0.0, "equity": 100.0})
         kept, _ = auto_bet.refresh_live_stakes(list(out))
         assert len(kept) == 1
@@ -425,7 +427,7 @@ class TestChiefExecution:
         assert out[0]["lane"] == "chief"
         # E la corsia dichiarata NON viene ri-dimensionata dal Kelly: lo stake
         # della Finanza arriva INTATTO al controllo del ticket minimo.
-        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: {
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda *a, **kw: {
             "available": 100.0, "exposure": 0.0, "equity": 100.0})
         kept, _ = auto_bet.refresh_live_stakes(list(out))
         assert len(kept) == 1

@@ -121,6 +121,24 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # Capitale dell'ultimo giro (usato da `cap_order_stake` quando il bankroll
     # non e' passato): lo stato e' di PROCESSO e sopravviverebbe fra i test.
     monkeypatch.setattr("auto_bet._LAST_BANKROLL", 0.0)
+    # CACHE DEL WALLET (17/10/2026, fix della raffica 429 su
+    # `/user/balance-v3`): `_live_wallet_snapshot` riusa la lettura entro
+    # `LIVE_WALLET_TTL_S` e, su lettura fallita, torna l'istantanea recente.
+    # Entrambe le proprieta' vivono in STATO DI MODULO: fra i test farebbero
+    # leggere l'istantanea del test PRECEDENTE (o, peggio, una stantia al posto
+    # di un errore che il test vuole misurare) — stessa lezione della cache di
+    # prontezza OU (26/09). Si azzera sempre, prima e dopo, e le soglie sono
+    # fissate ai default di codice perche' un `.env` dell'operatore non renda i
+    # test dipendenti dall'ambiente.
+    monkeypatch.setenv("LIVE_WALLET_TTL_S", "20")
+    monkeypatch.setenv("LIVE_WALLET_MIN_INTERVAL_S", "6")
+    monkeypatch.setenv("LIVE_WALLET_STALE_MAX_S", "120")
+    monkeypatch.setenv("LIVE_WALLET_WARN_TTL_S", "60")
+    try:
+        import auto_bet as _ab_w
+        _ab_w.reset_wallet_cache()
+    except Exception:
+        pass
     # Parametri del motore Kelly: fissati ai default di codice, cosi' un `.env`
     # dell'operatore non rende i test dipendenti dall'ambiente.
     # Direttiva 04/10/2026 (punto 2): banda dinamica 0.15-0.25 e ticket 1.00
@@ -411,6 +429,11 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
         _pe._RHO_DEFAULT = _pe.RHO
     _pe.RHO = _pe._RHO_DEFAULT
     yield
+    try:
+        import auto_bet as _ab_w2
+        _ab_w2.reset_wallet_cache()
+    except Exception:
+        pass
     _pe.RHO = _pe._RHO_DEFAULT
     _psz.reset_caches()
     _ld.reset_cache()

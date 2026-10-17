@@ -209,6 +209,11 @@ def _reset_state() -> None:
     # invece del guardrail in esame (osservato il 04/10: D e C4 a zero per
     # il kill switch armato da C2). Ogni scenario parte da uno stato pulito.
     auto_bet.t60_clear_kill()
+    # CACHE DEL WALLET (17/10/2026): e' stato di MODULO con un TTL di 20s, e la
+    # diagnostica fa oscillare il wallet fra scenari (38 -> 4 -> 1.20 -> 60).
+    # Senza il reset uno scenario leggerebbe l'istantanea del precedente e
+    # misurerebbe un capitale che non e' il suo.
+    auto_bet.reset_wallet_cache()
     try:
         auto_bet.BANKROLL_HISTORY_FILE.unlink()
     except FileNotFoundError:
@@ -310,7 +315,7 @@ def main() -> int:
     # Il cap si misura sull'EQUITY (fix stop-loss/equity del 15/09): sul solo
     # disponibile il cap sarebbe 12% di 36 = 4.32, non 4.56.
     _wallet_reale = {"available": 36.0, "exposure": 2.0, "equity": 38.0}
-    auto_bet._live_wallet_snapshot = lambda: dict(_wallet_reale)
+    auto_bet._live_wallet_snapshot = lambda *a, **kw: dict(_wallet_reale)
     calls = {"fill": 0, "stake": 0.0}
     _real_live_fill = auto_bet._live_fill   # ripristinata nello scenario E
     _cfg = aggressive_config()
@@ -342,7 +347,7 @@ def main() -> int:
     # sotto il ticket e l'ordine NON parte (mai un ordine piu' piccolo).
     _reset_state()
     _piccolo = 4.00     # cap 12% = 0.48 < ticket 1.00
-    auto_bet._live_wallet_snapshot = lambda: {
+    auto_bet._live_wallet_snapshot = lambda *a, **kw: {
         "available": _piccolo, "exposure": 0.0, "equity": _piccolo}
     # (il ticket morde: lo stake Kelly cappato sta sotto la soglia)
     calls.update({"fill": 0, "stake": 0.0})
@@ -358,7 +363,7 @@ def main() -> int:
     # mai un importo diverso dalla direttiva per farlo passare.
     auto_bet.FIXED_STAKE_USDC = 1.50
     _libero = 1.20
-    auto_bet._live_wallet_snapshot = lambda: {
+    auto_bet._live_wallet_snapshot = lambda *a, **kw: {
         "available": _libero, "exposure": 38.0 - _libero, "equity": 38.0}
     _reset_state()
     calls.update({"fill": 0, "stake": 0.0})
@@ -372,7 +377,7 @@ def main() -> int:
     auto_bet.FIXED_STAKE_USDC = 0.0
     # C4 — Controprova: il Kelly dinamico torna attivo appena l'importo fisso
     # e' spento (un solo punto di precedenza: `aggressive_live_active`).
-    auto_bet._live_wallet_snapshot = lambda: {
+    auto_bet._live_wallet_snapshot = lambda *a, **kw: {
         "available": 36.0, "exposure": 2.0, "equity": 38.0}
     _reset_state()
     calls.update({"fill": 0, "stake": 0.0})
@@ -432,7 +437,7 @@ def main() -> int:
     # con p_true 0.20 (EV sempre negativo) NESSUNO passa: il gate oracolo
     # filtra davvero. g-legacy resta fuori per LEGA, non per quota.
     auto_bet._execution_mode = lambda allow_sim=True: "live"
-    auto_bet._live_wallet_snapshot = lambda: {
+    auto_bet._live_wallet_snapshot = lambda *a, **kw: {
         "available": 36.0, "exposure": 2.0, "equity": 38.0}
     auto_bet.T60_EXECUTION_ONLY = False      # il T-60 e' dello scenario G
     _saved_hard = auto_bet.STAKE_CAP_HARD
@@ -683,7 +688,7 @@ def main() -> int:
     # sbagliato.
     n_pieni = int(cap_h // per_order_h)
     auto_bet._execution_mode = lambda allow_sim=True: "live"
-    auto_bet._live_wallet_snapshot = lambda: {
+    auto_bet._live_wallet_snapshot = lambda *a, **kw: {
         "available": equity_h, "exposure": 0.0, "equity": equity_h}
     calls_h = {"fill": 0}
 
@@ -741,7 +746,7 @@ def main() -> int:
     # invece di essere ridotto: lo scenario misurerebbe il ticket, non il gate.
     equity_i = 60.0
     auto_bet._execution_mode = lambda allow_sim=True: "live"
-    auto_bet._live_wallet_snapshot = lambda: {
+    auto_bet._live_wallet_snapshot = lambda *a, **kw: {
         "available": equity_i, "exposure": 0.0, "equity": equity_i}
     auto_bet.T60_EXECUTION_ONLY = False
     calls_i = {"fill": 0, "stakes": []}
@@ -834,7 +839,7 @@ def main() -> int:
     base_j = 1.50                 # importo FISSO legacy: stake deterministico
     mult_j = 0.80                 # 1.50 x 0.80 = 1.20 >= ticket (1.00)
     auto_bet._execution_mode = lambda allow_sim=True: "live"
-    auto_bet._live_wallet_snapshot = lambda: {
+    auto_bet._live_wallet_snapshot = lambda *a, **kw: {
         "available": equity_j, "exposure": 0.0, "equity": equity_j}
     auto_bet.T60_EXECUTION_ONLY = False
     # Stake deterministico: il motore Kelly (1.68 su equity 60) darebbe numeri

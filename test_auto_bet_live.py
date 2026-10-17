@@ -129,8 +129,11 @@ def _stub_wallet(monkeypatch, available, exposure=0.0):
     disponibile): il test controlla ESPLICITAMENTE anche l'esposizione, che e'
     la grandezza che il fix dello stop-loss deve tenere in conto.
     """
+    # La firma VERA e' `(force=False, *, _now=None)` (17/10/2026, cache +
+    # coalescenza della lettura): il doppio deve accettarla, altrimenti
+    # `refresh_live_stakes` (che chiama `force=True`) solleverebbe TypeError.
     monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                        lambda: _wallet(available, exposure))
+                        lambda *a, **kw: _wallet(available, exposure))
 
 
 def _sx_catalogue(home="Osasuna", away="Getafe", ts=None):

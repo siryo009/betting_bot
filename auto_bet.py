@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 from config import DATA_DIR
@@ -2402,7 +2403,10 @@ def refresh_live_stakes(candidates: list[dict]) -> tuple[list[dict], dict]:
     ignoto non autorizza ordini reali).
     """
     info: dict = {"ok": False, "reason": "", "skipped": 0}
-    snap = _live_wallet_snapshot()
+    # `force=True`: e' il percorso che dimensiona un ordine REALE, quindi non
+    # si accontenta del TTL di riuso (la coalescenza resta, vedi
+    # `_live_wallet_snapshot`).
+    snap = _live_wallet_snapshot(force=True)
     if snap is None:
         info["reason"] = "wallet_non_leggibile"
         logger.warning("auto_bet: saldo wallet non leggibile prima degli "
@@ -3861,8 +3865,124 @@ def _provider_ready() -> bool:
         return False
 
 
-def _live_wallet_snapshot() -> "dict | None":
+# ---------------------------------------------------------------------------
+# CACHE + THROTTLE della lettura del wallet (17/10/2026)
+# ---------------------------------------------------------------------------
+# SX Bet risponde 429 su `/user/balance-v3` se la si interroga troppo: misurato
+# in produzione, ~300 fallimenti in 3 minuti (00:39 142, 00:40 27, 00:41 140)
+# con 6 `RecursionError`. La lettura non aveva NE' cache NE' coalescenza e
+# veniva chiamata da ~15 percorsi (ciclo 60s, un candidato per volta, catena
+# chief, layer torneo/rush, job, web_api).
+#
+# Il costo non era solo il rumore nei log: con la lettura fallita il bankroll
+# non veniva determinato e il giro ripiegava sulla CASSA SIMULATA, cioe' su una
+# base di misura DIVERSA — la classe di bug che il 21/09 ha armato un falso
+# stop-loss e che il 14/10 ha dimensionato ordini su un capitale gonfiato.
+#
+# Qui c'e' l'unico punto di lettura, con tre proprieta':
+#   1. TTL di riuso (`LIVE_WALLET_TTL_S`, 20s): tutti i chiamanti dello stesso
+#      ciclo vedono lo STESSO capitale (prima potevano dimensionare su letture
+#      diverse dello stesso wallet);
+#   2. coalescenza (`LIVE_WALLET_MIN_INTERVAL_S`, 6s): nemmeno il percorso
+#      d'ordine (`force=True`) puo' martellare l'exchange;
+#   3. lettura fallita -> si resta sull'ultima istantanea RECENTE
+#      (`LIVE_WALLET_STALE_MAX_S`, 120s) invece di cambiare base di misura;
+#      senza istantanea si torna None (fail-closed, come prima).
+_WALLET_CACHE: dict = {"ts": 0.0, "snap": None, "http_ts": 0.0, "stale_ts": 0.0,
+                       "http_calls": 0, "reused": 0, "failed": 0, "stale_used": 0}
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """Secondi da env; valore assente o impossibile -> default dichiarato."""
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        return max(float(raw), 0.0)
+    except (TypeError, ValueError):
+        logger.warning("auto_bet: %s non numerico (%r), uso il default %.0fs",
+                       name, raw, default)
+        return float(default)
+
+
+def wallet_cache_ttl_s() -> float:
+    """TTL di riuso della lettura del wallet (`LIVE_WALLET_TTL_S`, 20s)."""
+    return _env_seconds("LIVE_WALLET_TTL_S", 20.0)
+
+
+def wallet_min_interval_s() -> float:
+    """Intervallo minimo fra due letture HTTP (`LIVE_WALLET_MIN_INTERVAL_S`)."""
+    return _env_seconds("LIVE_WALLET_MIN_INTERVAL_S", 6.0)
+
+
+def wallet_stale_max_s() -> float:
+    """Eta' massima di un'istantanea usabile dopo una lettura fallita."""
+    return _env_seconds("LIVE_WALLET_STALE_MAX_S", 120.0)
+
+
+def wallet_warn_ttl_s() -> float:
+    """Anti-spam degli avvisi di lettura fallita (`LIVE_WALLET_WARN_TTL_S`)."""
+    return _env_seconds("LIVE_WALLET_WARN_TTL_S", 60.0)
+
+
+def reset_wallet_cache() -> None:
+    """Azzera cache e contatori (isolamento dei test, diagnostica)."""
+    _WALLET_CACHE.update({"ts": 0.0, "snap": None, "http_ts": 0.0,
+                          "stale_ts": 0.0, "http_calls": 0, "reused": 0,
+                          "failed": 0, "stale_used": 0})
+
+
+def wallet_cache_stats() -> dict:
+    """Contatori della cache (telemetria: quante HTTP e quante riusate)."""
+    return dict(_WALLET_CACHE)
+
+
+def _remember_wallet(snap: dict, now: float) -> None:
+    """Registra l'istantanea appena letta (unica scrittura della cache)."""
+    _WALLET_CACHE.update({"ts": now, "http_ts": now, "snap": dict(snap),
+                          "http_calls": int(_WALLET_CACHE["http_calls"]) + 1})
+
+
+def _wallet_failure(exc: Exception, now: float) -> "dict | None":
+    """Lettura fallita: istantanea recente, altrimenti None (fail-closed).
+
+    Mai il ripiego su un'ALTRA base di misura: senza istantanea il chiamante
+    userebbe la cassa simulata e la guardia misurerebbe un capitale diverso.
+    L'avviso e' anti-spam (`LIVE_WALLET_WARN_TTL_S`): durante una raffica di
+    429 il log resta leggibile invece di diventare 100 righe identiche al
+    minuto.
+    """
+    _WALLET_CACHE["failed"] = int(_WALLET_CACHE["failed"]) + 1
+    snap = _WALLET_CACHE.get("snap")
+    age = now - float(_WALLET_CACHE.get("ts") or 0.0)
+    fresh_warn = (now - float(_WALLET_CACHE.get("stale_ts") or 0.0)) > wallet_warn_ttl_s()
+    if snap is not None and age <= wallet_stale_max_s():
+        _WALLET_CACHE["stale_used"] = int(_WALLET_CACHE["stale_used"]) + 1
+        if fresh_warn:
+            _WALLET_CACHE["stale_ts"] = now
+            logger.warning("auto_bet: lettura saldo wallet fallita (%s): uso "
+                           "l'istantanea di %.0fs fa (equity %.2f) invece di "
+                           "cambiare base di misura", exc, age,
+                           float(snap.get("equity") or 0.0))
+        else:
+            logger.debug("auto_bet: lettura saldo wallet fallita (%s), "
+                         "istantanea riusata", exc)
+        return dict(snap, cached=True, stale=True, error=str(exc)[:120])
+    if fresh_warn:
+        _WALLET_CACHE["stale_ts"] = now
+        logger.warning("auto_bet: lettura saldo wallet fallita: %s", exc)
+    else:
+        logger.debug("auto_bet: lettura saldo wallet fallita: %s", exc)
+    return None
+
+
+def _live_wallet_snapshot(force: bool = False,
+                          *, _now: float | None = None) -> "dict | None":
     """Istantanea del wallet reale: disponibile, in gioco ed EQUITY (USDC).
+
+    `force=True` (percorso d'ordine, `refresh_live_stakes`) salta il TTL di
+    riuso ma NON la coalescenza: anche un ordine accetta l'istantanea se una
+    lettura HTTP e' avvenuta meno di `LIVE_WALLET_MIN_INTERVAL_S` fa.
 
     Ritorna `{"available", "exposure", "equity"}` oppure None se il wallet
     non e' leggibile (dry-run, errore di rete, credenziali assenti): in quel
@@ -3900,6 +4020,18 @@ def _live_wallet_snapshot() -> "dict | None":
     stima e' PRUDENTE (equity = solo disponibile): lo stop-loss puo' scattare
     un po' prima, mai dopo — resta la direzione fail-closed.
     """
+    now = time.time() if _now is None else float(_now)
+    cached = _WALLET_CACHE.get("snap")
+    age = now - float(_WALLET_CACHE.get("ts") or 0.0)
+    # 1) riuso entro il TTL: tutti i chiamanti dello stesso ciclo, stessa base.
+    if cached is not None and not force and age <= wallet_cache_ttl_s():
+        _WALLET_CACHE["reused"] = int(_WALLET_CACHE["reused"]) + 1
+        return dict(cached, cached=True, stale=False)
+    # 2) coalescenza: vale anche per il percorso d'ordine.
+    if cached is not None and (now - float(_WALLET_CACHE.get("http_ts") or 0.0)
+                               ) < wallet_min_interval_s():
+        _WALLET_CACHE["reused"] = int(_WALLET_CACHE["reused"]) + 1
+        return dict(cached, cached=True, stale=False)
     try:
         import execution_engine as ee
         engine = ee.ExecutionEngine()
@@ -3939,14 +4071,16 @@ def _live_wallet_snapshot() -> "dict | None":
                          "%.2f (%d ordini) — uso il ledger (il campo SX non e' "
                          "affidabile sulle posizioni riempite)",
                          provider_exposure, exposure, ledger_count)
-        return {"available": available, "exposure": exposure,
+        snap = {"available": available, "exposure": exposure,
                 "provider_exposure": provider_exposure,
                 "exposure_source": source,
                 "open_orders": ledger_count if ledger_count >= 0 else None,
-                "equity": available + exposure}
+                "equity": available + exposure,
+                "cached": False, "stale": False}
+        _remember_wallet(snap, now)
+        return snap
     except Exception as e:
-        logger.warning("auto_bet: lettura saldo wallet fallita: %s", e)
-        return None
+        return _wallet_failure(e, now)
 
 
 def _execution_mode(allow_sim: bool = True) -> str:
