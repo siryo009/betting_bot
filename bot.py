@@ -1993,32 +1993,36 @@ async def credit_watchdog_job(context: ContextTypes.DEFAULT_TYPE = None):
         logger.info("credit_watchdog: remaining=%d (%d sports cached)",
                     remaining, n_sports)
 
-        # Alert thresholds
-        if remaining <= 5:
-            text = f"\u26a0\ufe0f **CREDITI CRITICI**\n\n" \
-                   f"Il piano the-odds-api ha solo **{remaining}** crediti rimasti.\n" \
-                   f"Probabile stop quote nelle prossime ore.\n" \
-                   f"Sport con dati: {n_sports}\n" \
-                   f"\u23f0 Reset piano: 01/10/2026"
+        # Soglie assolute (17/10/2026: riscritte su TABELLA e con la data di
+        # reset REALE — prima dicevano "01/10/2026" per sempre, un testo che
+        # mente proprio nel messaggio che deve far intervenire). Dal 17/10 il
+        # proprietario fa il TOP-UP MANUALE quando i crediti stanno per
+        # finire, quindi la fascia 100-50 e' quella che serve davvero.
+        from odds_api import CREDITS_RESET, days_to_reset
+        _reset_txt = (f"{CREDITS_RESET} (fra {days_to_reset()} giorni)")
+        _tiers = (
+            (5, "\u26a0\ufe0f **CREDITI CRITICI**",
+             "Probabile stop quote nelle prossime ore (hard stop a 5: "
+             "nessuna chiamata HTTP)."),
+            (10, "\ud83d\udd34 **Crediti bassi**",
+             "Rotazione ridotta alle 3 leghe di emergenza."),
+            (20, "\ud83d\udfe0 **Crediti sotto la soglia**",
+             "Le prossime chiamate potrebbero fallire."),
+            (50, "\ud83d\udfe1 **Crediti in calo**",
+             "Rotazione ridotta alle leghe core."),
+            (120, "\ud83d\udd0b **Prepara il top-up**",
+             "Il profilo \"massima potenza\" consuma ~40-50 crediti/giorno: "
+             "ricarica prima di scendere sotto 20."),
+        )
+        for _cap, _title, _note in _tiers:
+            if remaining > _cap:
+                continue
+            text = (f"{_title}\n\n"
+                    f"Remaining: **{remaining}** crediti ({n_sports} sport)\n"
+                    f"{_note}\n"
+                    f"\u23f0 Reset piano: {_reset_txt}")
             await _send_report_to_recipients(context, text)
-        elif remaining <= 10:
-            text = f"\ud83d\udd34 **Crediti bassi**\n\n" \
-                   f"Remaining: **{remaining}** crediti ({n_sports} sport)\n" \
-                   f"Fascia di allarme attiva. Ridurre rotazione non-core.\n" \
-                   f"\u23f0 Reset: 01/10/2026"
-            await _send_report_to_recipients(context, text)
-        elif remaining <= 20:
-            text = f"\ud83d\udfe0 **Crediti sotto la soglia**\n\n" \
-                   f"Remaining: **{remaining}** crediti ({n_sports} sport)\n" \
-                   f"Sotto MIN_REMAINING ({remaining} < 20).\n" \
-                   f"Attenzione: le prossime chiamate API potrebbero fallire."
-            await _send_report_to_recipients(context, text)
-        elif remaining <= 50:
-            text = f"\ud83d\udfe1 **Crediti in calo**\n\n" \
-                   f"Remaining: **{remaining}** crediti ({n_sports} sport)\n" \
-                   f"Consumo ~6/giorno. Reset 01/10.\n" \
-                   f"Monitorare: {remaining} / 6 = ~{remaining//6} giorni rimasti."
-            await _send_report_to_recipients(context, text)
+            break
 
         # --- RITMO DI CONSUMO (15/09): la soglia assoluta tace sopra 50 e
         # --- avvisa quando il budget e' gia' compromesso. Il ritmo MISURATO
@@ -3991,7 +3995,10 @@ def main() -> None:
         # Credit watchdog (09/09): monitoraggio ogni 6h.
         # Alerta admin+iscritti sotto le soglie (50, 20, 10, 5).
         # Zero API cost: legge solo le cache toa_*.json.
-        job_queue.run_repeating(credit_watchdog_job, interval=6 * 3600,
+        # 17/10/2026: ogni ORA (era 6h) — col profilo "massima potenza" e il
+        # top-up manuale del proprietario il residuo va visto in tempo, non
+        # sei ore dopo (zero costi: legge solo le cache locali).
+        job_queue.run_repeating(credit_watchdog_job, interval=3600,
                                 first=300)
         # Monitor scarti liquidita' SX (11/09): ogni 6h legge il log degli
         # scarti per book sottile (scan/order/partial) e allerta admin+

@@ -13368,3 +13368,74 @@ esito dello stesso evento -> parte; lettura rotta -> 0 POST) +
 ammesso). Verdi: `test_resting_orders` + `test_auto_bet_live` (137),
 `test_auto_bet` + `test_capital_enclosure` + `test_order_watch` (106),
 `test_t60_breakers` + `test_exposure_gate` + `test_bets` (72).
+
+### Massima potenza operativa: budget aperti, rotazione 2gg, watchdog orario (17/10/2026)
+
+**Direttiva del proprietario**: nessuna restrizione di budget sulle chiamate
+esterne, top-up **manuale** dei crediti quando stanno per finire, massima
+intensità su oracolo sharp, calibrazione della monetizzazione, verifica che i
+job girino a pieno regime, deploy.
+
+**⚠️ LA PREMESSA "500/giorno" NON E' LA REALTA' DEL PIANO**: the-odds-api free
+e' **500 crediti/MESE** (reset 01/11). Misura al momento della direttiva:
+**292 residui**, ritmo **47,8/giorno** (finestra 39h) contro **20,9/giorno
+sostenibili** → esaurimento previsto **23/10**. Col top-up manuale accettato,
+il profilo e' stato RIAPERTO di proposito: e' una scelta dichiarata, non un
+errore di budget. Restano in piedi **le due reti di sicurezza**:
+`should_query_sport` (sotto 50/30/15 crediti la rotazione si riduce da sola) e
+l'**hard stop a 5 crediti** (sotto, zero HTTP: evita la raffica di 429).
+
+**1) ROTAZIONE — le leghe GIOCABILI tornano a 2 giorni** (`odds_api.
+SPORTS_INTERVAL_DAYS`): e' la misura del 25/09 (le odds nascono 1-3 giorni
+prima del kickoff; a 7gg la rotazione non le cattura). Coppe europee e
+Serie A/La Liga a **3gg**, il resto del mondo a **14gg** (era 30).
+Costo del profilo: **15,2 crediti/giorno** di rotazione (456/mese) misurato
+dalla formula del test. `ODDS_DAILY_BUDGET` default 12 → **40**.
+⚠️ Due trappole trovate aggiornando la tabella: (a) `UEFA Nations League` e
+`Africa Cup of Nations` avevano una **seconda voce** piu' avanti nel dict (in
+Python l'ultima vince) e restavano a 7 — ora 2; (b) l'invariante "profilo ≤
+460/mese" **non descrive piu' la produzione**: `test_budget_mensile_piano_free`
+e' stato riscritto per misurare il consumo GIORNALIERO (15-55/giorno per la
+rotazione, ≤ 80 totale) **e** a pretendere che le reti di sicurezza esistano
+ancora (`should_query_sport`). Non e' un'asserzione indebolita: e' la politica
+nuova, scritta nel test perche' un cambio futuro debba passare da li'.
+
+**2) ORACOLO E BENCHMARK SHARP — budget per percorso (env, tutte in
+`preserve()`).**
+
+| percorso | prima | ora | costo/chiamata |
+|---|---|---|---|
+| h2h (1X2, on-demand in finestra) | 10/giorno | **40** | 1 cr |
+| linea OU/AH (follow-the-money) | 8/giorno | **12** | 3 cr |
+| football USA (torneo) | 24 cr / 8 req | **60 cr / 16 req** | 3 cr |
+| TTL oracolo gridiron | 720' | **150'** | — |
+| TTL oracolo tennis | 1080' | **360'** | — |
+| verifica periodica settlement | 72h | **12h** | 2 cr/lega |
+
+Il tetto h2h a 40 scioglie il collo di bottiglia misurato il 17/10: 29 pick 1X2
+aperti con **159 scarti `no_oracle/MISSING_MARKET`** (non recuperabili: Pinnacle
+non prezza la partita) e **18 `STALE_CACHE`** (questi SI' recuperabili: ora
+hanno budget). Il tetto a linea resta basso **di proposito**: 3 cr/chiamata,
+misurati **0 ordini in tutta l'era** (griglia SX a passi di 0,5 vs linea
+main/quarter di Pinnacle).
+
+**3) MONETIZZAZIONE — `ADAPTIVE_WEIGHTING=1` (acceso).** Il moltiplicatore di
+stake per lega dal **CLV rolling 30gg** era implementato e spento: ora pesa.
+Può solo RIDURRE (floor 0.5, min 8 campioni): concentra il capitale dove il CLV
+misurato e' positivo e taglia dove e' negativo — e' la calibrazione con
+EVIDENZA (CLV +5,03%, 28/31 campioni positivi al 14/10), non un allentamento
+alla cieca di EV/fascia. **Soglie invariate** (EV 1,5%, edge 1pp, fascia
+1,20-2,00, cap per ordine 12%, ticket 1,00): allargarle non e' sostenuto da
+nessuna misura — il 1X2 giocabile pre-11/09 sta a **-21,64%** e il tennis
+2,00-2,50 a **-15,1%**.
+
+**4) WATCHDOG CREDITI ogni ORA (era 6h)** e riscritto su tabella con la data di
+reset **REALE** (`CREDITS_RESET`, prima i messaggi dicevano "01/10/2026" per
+sempre — un testo che mente proprio quando deve far intervenire). Nuova fascia
+**≤ 120 crediti: "prepara il top-up"**, che e' il promemoria operativo del
+proprietario. Zero costi: legge le cache locali.
+
+**Verifica**: `test_odds_api` (rotazione 2gg, costo giornaliero, staggger),
+`test_bot`, `test_adaptive_weighting` verdi; `compileall` OK. Numeri del
+profilo dopo il deploy: guardare `/api/credits` (`rate_per_day`) e
+`credit_diagnose.py --days 1` (attribuzione per percorso).

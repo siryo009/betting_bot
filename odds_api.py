@@ -978,9 +978,9 @@ SPORTS_INTERVAL_DAYS = {
 #    "Scottish Premiership": 2, "Superliga Danimarca": 2,
 #    "Swiss Super League": 2,
 #    "UEFA Nations League": 2, "Africa Cup of Nations": 2,
-    # Nazionali CORE dal 29/09/2026 (il gate le ammette: mai dormienti a
-    # 30gg, lezione del 24/09).
-    "UEFA Nations League": 7, "Africa Cup of Nations": 7,
+    # Nazionali CORE dal 29/09/2026 (il gate le ammette: mai dormienti,
+    # lezione del 24/09). Dal 17/10 seguono le ammesse: 2gg.
+    "UEFA Nations League": 2, "Africa Cup of Nations": 2,
     # ogni 3 giorni: leghe NON ammesse ma con mercato liquido (telemetria/CLV)
     "Serie A": 7, "La Liga": 7,
     # ⚠️ 30/09/2026 — ROTAZIONE TAGLIATA A 7 GIORNI (decisa dal proprietario
@@ -1002,36 +1002,46 @@ SPORTS_INTERVAL_DAYS = {
     #   "Scottish Premiership": 2, "Superliga Danimarca": 2,
     #   "Swiss Super League": 2, "UEFA Nations League": 2,
     #   "Africa Cup of Nations": 2, "Serie A": 3, "La Liga": 3,
-    "Premier League": 7, "Bundesliga": 7, "Turkey Super Lig": 7,
-    "Ligue 1": 7, "Eredivisie": 7, "EFL Championship": 7, "Serie B": 7,
-    "MLS": 7, "Brasileirao": 7, "Liga MX": 7, "Saudi Pro League": 7,
-    "Allsvenskan": 7, "Argentina Primera": 7, "Austrian Bundesliga": 7,
-    "Eliteserien": 7, "J1 League": 7, "K League 1": 7,
-    "Scottish Premiership": 7, "Superliga Danimarca": 7,
-    "Swiss Super League": 7,
-    # ogni 7 giorni: coppe europee (restano nel profilo 25/09)
-    "Champions League": 7, "Europa League": 7,
-    # ogni 30 giorni (dormienti): coppe nazionali, campionati secondari,
-    # resto del mondo e nazionali
-    "Conference League": 30, "Coppa Italia": 30, "Copa del Rey": 30,
-    "Coupe de France": 30, "DFB Pokal": 30, "FA Cup": 30, "EFL Cup": 30,
-    "Primeira Liga": 30, "Veikkausliiga": 30,
-    "A-League": 30,
-    "Chile Primera": 30, "Copa Libertadores": 30,
-    "Copa Sudamericana": 30, "Ligue 2": 30, "Bundesliga 2": 30,
-    "La Liga 2": 30, "League One": 30, "League Two": 30,
-    "Belgian First Div": 30, "Greek Super League": 30,
-    "Polish Ekstraklasa": 30,
-    "Russian Premier League": 30, "3. Liga": 30, "Brazil Serie B": 30,
-    "Sweden Superettan": 30, "China Super League": 30,
-    "League of Ireland": 30, "Frauen-Bundesliga": 30,
-    "FIFA Club World Cup": 30, "UCL Qualification": 30,
-    "UEFA Women's Champions League": 30,
-    "Copa America": 30, "CONCACAF Leagues Cup": 30,
-    "FIFA World Cup": 30, "FIFA World Cup Qualifiers Europe": 30,
-    "FIFA World Cup Qualifiers S.America": 30, "FIFA Women's World Cup": 30,
-    "UEFA Euro": 30, "UEFA Euro Qualifiers": 30,
-    "CONCACAF Gold Cup": 30,
+    # ⚠️ 17/10/2026 — PROFILO "MASSIMA POTENZA" (direttiva del proprietario:
+    # nessuna restrizione di budget sulle chiamate esterne, top-up manuale dei
+    # crediti quando stanno per finire). Le leghe GIOCABILI tornano a **2
+    # giorni**: e' la misura del 25/09 (le odds nascono 1-3 giorni prima del
+    # kickoff, a 7gg la rotazione non le cattura). Il tetto del piano free
+    # (460/mese) NON e' piu' il vincolo del profilo — resta la rete di
+    # sicurezza `should_query_sport` (sotto 50/30/15 crediti la rotazione si
+    # riduce da sola) e l'hard stop a 5 crediti.
+    "Premier League": 2, "Bundesliga": 2, "Turkey Super Lig": 2,
+    "Ligue 1": 2, "Eredivisie": 2, "EFL Championship": 2, "Serie B": 2,
+    "MLS": 2, "Brasileirao": 2, "Liga MX": 2, "Saudi Pro League": 2,
+    "Allsvenskan": 2, "Argentina Primera": 2, "Austrian Bundesliga": 2,
+    "Eliteserien": 2, "J1 League": 2, "K League 1": 2,
+    "Scottish Premiership": 2, "Superliga Danimarca": 2,
+    "Swiss Super League": 2,
+    # coppe europee e leghe liquide non giocabili: ogni 3 giorni (telemetria
+    # e CLV, prima erano 7/30)
+    "Champions League": 3, "Europa League": 3,
+    "Serie A": 3, "La Liga": 3,
+    # ogni 14 giorni (erano 30): copertura dei campionati secondari che le
+    # corsie torneo/probation possono giocare
+    "Conference League": 14, "Coppa Italia": 14, "Copa del Rey": 14,
+    "Coupe de France": 14, "DFB Pokal": 14, "FA Cup": 14, "EFL Cup": 14,
+    "Primeira Liga": 14, "Veikkausliiga": 14,
+    "A-League": 14,
+    "Chile Primera": 14, "Copa Libertadores": 14,
+    "Copa Sudamericana": 14, "Ligue 2": 14, "Bundesliga 2": 14,
+    "La Liga 2": 14, "League One": 14, "League Two": 14,
+    "Belgian First Div": 14, "Greek Super League": 14,
+    "Polish Ekstraklasa": 14,
+    "Russian Premier League": 14, "3. Liga": 14, "Brazil Serie B": 14,
+    "Sweden Superettan": 14, "China Super League": 14,
+    "League of Ireland": 14, "Frauen-Bundesliga": 14,
+    "FIFA Club World Cup": 14, "UCL Qualification": 14,
+    "UEFA Women's Champions League": 14,
+    "Copa America": 14, "CONCACAF Leagues Cup": 14,
+    "FIFA World Cup": 14, "FIFA World Cup Qualifiers Europe": 14,
+    "FIFA World Cup Qualifiers S.America": 14, "FIFA Women's World Cup": 14,
+    "UEFA Euro": 14, "UEFA Euro Qualifiers": 14,
+    "CONCACAF Gold Cup": 14,
 }
 
 # Cap giornaliero di chiamate odds. Le leghe in eccedenza vengono rinviate al
@@ -1043,7 +1053,7 @@ SPORTS_INTERVAL_DAYS = {
 # loro partite PERSE — era l'ultimo pezzo rimasto del buco "zero candidati".
 # Il tetto mensile vero resta quello del piano free (460), verificato da
 # `test_budget_mensile_piano_free`.
-DAILY_QUERY_BUDGET = int(os.getenv("ODDS_DAILY_BUDGET", "12"))
+DAILY_QUERY_BUDGET = int(os.getenv("ODDS_DAILY_BUDGET", "40"))
 
 
 def interval_for_sport(sport_key: str) -> int:

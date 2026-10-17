@@ -52,20 +52,21 @@ def test_rotazione_crediti():
     """Ogni lega ha un intervallo esplicito e il costo mensile sta nel
     piano free the-odds-api (500 crediti/mese)."""
     from odds_api import interval_for_sport, SPORTS_INTERVAL_DAYS
-    # Profilo 30/09/2026: rotazione TAGLIATA a 7gg per le leghe ammesse
-    # (deciso dal proprietario per far entrare l'oracolo a linea nel budget:
-    # vedi il blocco SPORTS_INTERVAL_DAYS) + follow-the-money dedicato. Era
-    # 2gg (profilo 25/09). Il resto resta dormiente (es. Copa America 30gg).
-    assert interval_for_sport("soccer_epl") == 7
-    assert interval_for_sport("soccer_turkey_super_league") == 7
-    assert interval_for_sport("soccer_conmebol_copa_america") == 30
+    # Profilo 17/10/2026 "MASSIMA POTENZA" (direttiva del proprietario:
+    # nessuna restrizione di budget, top-up manuale dei crediti): le leghe
+    # giocabili tornano a 2gg (misura del 25/09: a 7gg la rotazione non
+    # cattura le odds, pubblicate 1-3 giorni prima). Il resto del mondo sta a
+    # 14gg (era 30).
+    assert interval_for_sport("soccer_epl") == 2
+    assert interval_for_sport("soccer_turkey_super_league") == 2
+    assert interval_for_sport("soccer_conmebol_copa_america") == 14
     # ⚠️ 29/09/2026 — LE NAZIONALI SONO PASSATE A CORE. Fino al 28/09 questa
     # riga asseriva `== 30` (dormiente) ed era corretta: UEFA Nations League
     # NON era una lega ammessa. Da quando il gate la ammette, tenerla a 30gg
     # sarebbe il difetto del 24/09 (una lega giocabile mai interrogata = zero
     # candidati qualunque soglia). Ora segue gli intervalli delle ammesse.
-    assert interval_for_sport("soccer_uefa_nations_league") == 7
-    assert interval_for_sport("soccer_africa_cup_of_nations") == 7
+    assert interval_for_sport("soccer_uefa_nations_league") == 2
+    assert interval_for_sport("soccer_africa_cup_of_nations") == 2
     # ogni lega in SPORTS_MAP deve avere un intervallo ESPLICITO
     # (niente default silenziosi: prima "Chile Primera" finiva a 1 = 30/mese)
     for league, key in SPORTS_MAP.items():
@@ -96,44 +97,47 @@ def test_leghe_ammesse_mai_dormienti():
     import value_filter as vf
     for lg in list(vf.STRATEGY_LEAGUES) + sorted(vf.PROBATION_LEAGUES):
         assert lg in SPORTS_INTERVAL_DAYS, f"{lg} senza intervallo"
-        # 30/09/2026 — ROTAZIONE TAGLIATA A 7GG (decisa dal proprietario per
-        # far entrare l'oracolo a linea totals/spreads nel budget crediti):
-        # era 2 (max sostenibile con la sola ricerca). Le odds nascono 1-3
-        # giorni prima del kickoff: a 7gg una lega interrogata il giorno X
-        # vede le partite fino a X+7 e NON perde il weekend X+4 (il difetto
-        # del 24/09 nasceva dalla COMBINAZIONE finestra 7gg + rotazione 30gg,
-        # non dalla rotazione 7gg in se'). L'uguaglianza e' voluta: ogni
-        # cambio del profilo deve passare da qui (e da test_budget_mensile).
-        assert SPORTS_INTERVAL_DAYS[lg] == 7, (
-            f"{lg} e' a {SPORTS_INTERVAL_DAYS[lg]}gg: il profilo crediti del "
-            "30/09 (rotazione 7gg + oracolo a linea) prevede le ammesse a 7gg")
+        # 17/10/2026 — PROFILO "MASSIMA POTENZA": le ammesse tornano a 2gg.
+        # Le odds nascono 1-3 giorni prima del kickoff, quindi a 7gg la
+        # rotazione non le cattura (difetto misurato il 25/09). L'uguaglianza
+        # a 2 e' voluta: ogni cambio del profilo deve passare da qui e dal
+        # test del costo (test_budget_mensile_piano_free).
+        assert SPORTS_INTERVAL_DAYS[lg] == 2, (
+            f"{lg} e' a {SPORTS_INTERVAL_DAYS[lg]}gg: il profilo 17/10 "
+            "(massima potenza) prevede le leghe giocabili a 2gg")
 
 
 def test_budget_mensile_piano_free():
-    """Costo mensile TOTALE (rotazione ricerca + oracolo a linea) <= 460
-    crediti (500 del piano free, con margine per /scores e trigger manuali).
+    """Costo del profilo di rotazione: ora si misura in GIORNI, non in mese.
 
-    Dal 30/09/2026 il profilo comprende ANCHE il follow-the-money dell'
-    oracolo a linea: 2 crediti extra per lega con pick OU/AH in gioco,
-    stimati da `line_oracle.budget_credits_per_day` (default di codice 12
-    leghe/giorno = 24 crediti = 720/mese teorici, MA il budget e' un tetto
-    non un target: il consumo reale segue i pick in gioco, ~59 righe/giorno
-    storiche -> ~118 crediti/mese). Qui si conta il costo ATTUALE: rotazione
-    a intervalli reali + oracolo stimato dal default, e si pretende che il
-    totale stia nel tetto con margine per /scores (che NON e' in questo
-    numero)."""
-    from odds_api import interval_for_sport
+    ⚠️ POLITICA CAMBIATA IL 17/10/2026 (direttiva del proprietario: "nessuna
+    restrizione di budget sulle chiamate esterne, i crediti li aggiungo io
+    manualmente"). Il vecchio invariante (profilo <= 460 crediti/mese, cioe'
+    dentro il piano free) NON descrive piu' la produzione: le leghe giocabili
+    stanno a 2gg proprio perche' e' il ritmo che cattura le odds.
+
+    L'invariante che conta ora e' operativo — il consumo giornaliero di
+    ROTAZIONE deve restare in una fascia che il top-up manuale copre — mentre
+    la difesa contro l'esaurimento NON e' piu' il profilo statico bensi' la
+    degradazione automatica `should_query_sport` (sotto 50/30/15 crediti) e
+    l'hard stop a 5: qui si verifica che esistano ancora, perche' senza di
+    loro "nessuna restrizione" diventerebbe un bot cieco a meta' mese.
+    """
+    from odds_api import interval_for_sport, should_query_sport
     cost = sum(30.0 / interval_for_sport(key) for key in SPORTS_MAP.values())
+    daily_rotation = cost / 30.0
     try:
         import line_oracle
         oracle_daily = line_oracle.budget_credits_per_day()
     except Exception:                                        # pragma: no cover
         oracle_daily = 9.0
-    total = cost + oracle_daily * 30.0
-    assert cost <= 460, f"rotazione {cost:.0f} oltre il budget free"
-    assert total <= 460, (
-        f"costo totale {total:.0f} (rotazione {cost:.0f} + oracolo "
-        f"{oracle_daily * 30.0:.0f}) oltre il tetto 460")
+    daily = daily_rotation + oracle_daily
+    assert 15.0 <= daily_rotation <= 55.0, (
+        f"rotazione {daily_rotation:.1f}/giorno fuori dalla fascia del "
+        f"profilo massima potenza (15-55)")
+    assert daily <= 80.0, f"costo oracolo+rotazione {daily:.0f}/giorno assurdo"
+    # rete di sicurezza contro l'esaurimento (NON rimossa dal 17/10)
+    assert callable(should_query_sport)
 
 
 def test_roster_coppe_coprono_le_top():
@@ -335,13 +339,15 @@ def test_stagger_non_anticipa_le_leghe_30gg(monkeypatch, tmp_path):
     monkeypatch.setattr(odds_api.time, "time", lambda: now)
 
     key = "soccer_conmebol_copa_america"
-    assert odds_api.interval_for_sport(key) == 30
+    # Dal 17/10 il "resto del mondo" sta a 14gg (era 30): resta comunque
+    # fuori dalla regola di fase (che vale solo per intervallo <= 7).
+    assert odds_api.interval_for_sport(key) == 14
     _write_cache(tmp_path, key, now - 2 * 86400)  # eta' 2 giorni
     assert odds_api.is_sport_due(key) is False
     # anche sul giorno di fase (se cadesse oggi) non scatta: niente anticipo
-    phase = odds_api._rotation_phase(key, 30)
+    phase = odds_api._rotation_phase(key, 14)
     day = int(now // 86400)
-    if day % 30 == phase:
+    if day % 14 == phase:
         _write_cache(tmp_path, key, now - 86400)
         assert odds_api.is_sport_due(key) is False
 
