@@ -13543,3 +13543,54 @@ Le altre corsie sono coperte: `run_today_bets` registra la base in FASE 2
 (`refresh_live_stakes` -> `set_last_bankroll(equity)`) e in `run_today_bets`
 stesso, e il smart hedging passa da `_live_fill` nello stesso processo dove
 `auto_bet_job` (60s, `first=60`) precede `hedge_job` (15', `first=210`).
+
+### Upgrade di Ubuntu -> venv rotto in silenzio (18/10/2026)
+
+**Sintomo**: `venv/bin/python -m pytest` → `No module named pytest`; `import
+numpy` → `No module named numpy`. Nessun errore all'avvio, nessun messaggio:
+semplicemente OGNI comando del progetto smette di funzionare.
+
+**Causa radice**: `venv/bin/python3` e' un **symlink a `/usr/bin/python3`**
+(fatto da `python3 -m venv`), non una copia dell'interprete. L'upgrade di Ubuntu
+ha portato il sistema da **Python 3.12 a 3.14** e ha RIMOSSO `python3.12`:
+il venv ha continuato a puntare a `/usr/bin/python3` (= 3.14) mentre i suoi
+pacchetti restavano in `venv/lib/python3.12/site-packages` -> 348 pacchetti su
+disco ma **zero importabili**. `pyvenv.cfg` dichiarava ancora `3.12.3`.
+
+**Diagnosi in 10 secondi** (da fare PRIMA di reinstallare a caso):
+```bash
+venv/bin/python -V                       # 3.14 -> il venv non e' piu' 3.12
+ls -1 venv/lib                          # python3.12 -> i pacchetti non sono letti
+ls -l venv/bin/python3                  # symlink a /usr/bin/python3
+dpkg -l | grep -c python3.12            # 0 -> l'interprete non c'e' piu'
+```
+
+**Riparazione (eseguita, 3 minuti, senza toccare il codice)**:
+```bash
+pipx install uv                                  # uv non c'era, pipx si'
+uv python install 3.12                           # CPython 3.12.15 standalone (~8s)
+mv venv venv-py312-rotto-$(date +%Y%m%d)         # backup, mai cancellare prima
+uv venv --python 3.12 venv
+VIRTUAL_ENV=$PWD/venv uv pip install -r requirements.txt
+```
+⚠️ `uv pip install` **senza** `VIRTUAL_ENV` risponde "No virtual environment
+found" (cerca `.venv`, non `venv`) e, con la pipe, l'exit status si perde: qui
+la regola `pipefail` ha evitato di prendere per buono un errore.
+**Perche' 3.12 e non 3.14**: il container gira `python:3.12-slim`; reinstallare
+su 3.14 avrebbe introdotto drift di interprete fra locale e produzione proprio
+nei test che devono predire il comportamento del deploy.
+
+**Verifica post-riparazione**: Python **3.12.15**, numpy 2.5.4, scipy 1.18.1,
+pandas 3.0.6, sklearn 1.9.1, xgboost 3.4.1, pytest 9.1.1; `import tracker,
+auto_bet, bot, web_api, decision, agents` OK; **69 test** (`test_team_names` +
+`test_event_cap`), **63** (`test_significance`, stack numerico) e **49**
+(`test_auto_bet_live`, percorso denaro) verdi. DB locali: `data/quotaverace.db`
+(360 KB, 16 tabelle) e `data/tennis_sandbox/ledger.db` (24 KB) con
+`quick_check`/`integrity_check` = **ok**, nessun sidecar WAL/journal.
+`data/training_dataset.csv` assente = atteso (si rigenera on demand).
+
+**Regola permanente**: dopo un upgrade del sistema operativo il PRIMO comando e'
+`venv/bin/python -V` + `venv/bin/python -m pytest --version`. Una venv il cui
+`python3` e' un symlink all'interprete di sistema e' **legata alla versione**:
+aggiornare Ubuntu senza ricrearla la rompe in modo silenzioso. `venv-*/` e'
+ora in `.gitignore` (il backup non deve finire in un commit).
