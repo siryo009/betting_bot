@@ -187,6 +187,20 @@ class TestClaim:
         # Con `now` corrente il claim e' scaduto (TTL 60s) e viene purgato.
         assert auto_bet._event_guard("0xabc", 1, 2.0, 26.92)["allowed"] is True
 
+    def test_clear_svuota_i_claim(self, db):
+        """`clear_event_claims` e' lo stato pulito degli strumenti di diagnosi.
+
+        Serve a `verify_guardrails.py`: un claim lasciato da uno scenario
+        farebbe misurare al successivo il CAP per evento invece del guardrail
+        in esame (rosso osservato il 18/10 sullo scenario E).
+        """
+        assert auto_bet._event_guard("0xabc", 1, 2.0, 26.92)["allowed"]
+        assert tracker.event_exposure("0xabc", 1)["pending"] > 0
+        assert tracker.clear_event_claims() >= 1
+        assert tracker.event_exposure("0xabc", 1)["pending"] == 0
+        # Dopo lo svuotamento l'evento e' di nuovo prenotabile.
+        assert auto_bet._event_guard("0xabc", 1, 2.0, 26.92)["allowed"]
+
     def test_claim_id_idempotente_nel_rilascio(self, db):
         res = tracker.claim_event_stake("0xabc", 1, 1.0, 100.0)
         assert tracker.release_event_claim(res["claim_id"]) is True

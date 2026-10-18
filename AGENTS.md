@@ -13517,3 +13517,10 @@ tennis 3,18 @1,95 e MLS 3,23 @1,99, entrambi FULLY_FILLED).
 `capital_enclosure`, `order_watch`, `exposure_gate`, `t60_breakers`) eseguiti
 in LOTTI (il lotto unico supera il timeout della shell: 4 run separati, tutti
 verdi). `compileall` OK, 0 marker di conflitto.
+**`verify_guardrails.py` A-J TUTTI BLOCCANO** (exit 0). ⚠️ Il primo giro dopo il
+deploy era **rosso su E (liquidita')**: la controprova usava stake 5,00 su
+un'equity di 33,55, cioe' sopra il **cap per evento** 4,03 — veniva respinta dal
+nuovo guardrail e lo scenario leggeva il cap invece della liquidita'. Corretto
+DERIVANDO lo stake dal cap (`EQUITY` dichiarata in un posto solo) e svuotando i
+claim fra gli scenari (`tracker.clear_event_claims`, nuovo: un claim persistente
+con TTL avrebbe fatto misurare al guardrail successivo il cap del precedente).

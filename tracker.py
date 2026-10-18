@@ -2233,6 +2233,27 @@ def purge_event_claims(now=None) -> int:
         return 0
 
 
+def clear_event_claims() -> int:
+    """Svuota la tabella dei claim (diagnostica/test: stato pulito).
+
+    NON va usata in produzione durante un giro: un claim in corso rappresenta
+    un ordine in volo, e cancellarlo riaprirebbe la porta al doppio ordine che
+    la tabella esiste per impedire. Serve agli strumenti che fanno oscillare il
+    capitale (es. `verify_guardrails.py`), dove un claim lasciato da uno
+    scenario farebbe misurare al successivo il guardrail sbagliato (stessa
+    lezione del CB2 armato dallo scenario C2 il 04/10).
+    """
+    try:
+        conn = _get_conn()
+        cur = conn.execute("DELETE FROM event_claims")
+        n = cur.rowcount or 0
+        conn.commit(); conn.close()
+        return int(n)
+    except Exception as e:
+        logger.debug("tracker: clear dei claim fallito (%s)", e)
+        return 0
+
+
 def event_exposure(market_id, selection_id, *, include_claims=True) -> dict:
     """Stake GIA' impegnato su un evento-mercato (puntate aperte + claim).
 

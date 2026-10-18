@@ -147,6 +147,11 @@ auto_bet._top_down_load = lambda home, away: {
 
 tracker.init_db()
 
+#: Equity di riferimento della diagnostica (USDC). Dichiarata in un solo posto:
+#: i tetti DERIVATI (per ordine, per evento, recinto) si calcolano da qui, cosi'
+#: uno scenario non eredita il capitale lasciato da quello precedente.
+EQUITY = 33.55
+
 BOLD = "\033[1m"
 DIM = "\033[2m"
 GREEN = "\033[32m"
@@ -214,6 +219,15 @@ def _reset_state() -> None:
     # Senza il reset uno scenario leggerebbe l'istantanea del precedente e
     # misurerebbe un capitale che non e' il suo.
     auto_bet.reset_wallet_cache()
+    # CAP PER EVENTO (17/10/2026): i claim sono PERSISTENTI e con TTL. Uno
+    # scenario che lascia un claim sullo stesso mercato/lato farebbe misurare
+    # al successivo il CAP invece del guardrail in esame (rosso osservato il
+    # 18/10: lo scenario E non vedeva partire la controprova).
+    try:
+        import tracker as _tr
+        _tr.clear_event_claims()
+    except Exception:
+        pass
     try:
         auto_bet.BANKROLL_HISTORY_FILE.unlink()
     except FileNotFoundError:
@@ -512,9 +526,19 @@ def main() -> int:
                                               "selection_id": 1}
     pick = {"match_id": "g-valid", "home": "Osasuna", "away": "Getafe",
             "esito_key": "1", "mercato": "1X2", "commence": _start()}
-    stake, floor = 5.0, 1.65
+    floor = 1.65
+    # CAP PER EVENTO (17/10/2026): il tetto per evento (12% dell'equity) vive
+    # PRIMA dell'ordine e respingerebbe uno stake da 5.00 su un capitale di
+    # ~33.55 (cap 4.03): la controprova non partirebbe e lo scenario
+    # leggerebbe il cap invece della liquidita'. Si DERIVA lo stake dal cap e
+    # si fissa il capitale dello scenario, senza ereditarlo dal precedente
+    # (stessa lezione dello scenario H col recinto).
+    auto_bet.set_last_bankroll(EQUITY)
+    _cap = auto_bet.event_stake_cap(EQUITY)
+    stake = min(5.0, round(_cap, 4)) if _cap > 0 else 5.0
     need = auto_bet.required_depth(stake)
-    print(f"  {DIM}stake {stake:.2f} USDC -> richiesti "
+    print(f"  {DIM}equity {EQUITY:.2f} -> cap per evento "
+          f"{_cap:.2f} USDC; stake {stake:.2f} -> richiesti "
           f"max({stake:.2f} x {auto_bet.SX_DEPTH_MULTIPLIER:.1f}, "
           f"{auto_bet.MIN_EXEC_DEPTH_USDC:.1f}) = {need:.2f} USDC al floor "
           f"{floor:.2f}{RESET}")
