@@ -13439,3 +13439,73 @@ proprietario. Zero costi: legge le cache locali.
 `test_bot`, `test_adaptive_weighting` verdi; `compileall` OK. Numeri del
 profilo dopo il deploy: guardare `/api/credits` (`rate_per_day`) e
 `credit_diagnose.py --days 1` (attribuzione per percorso).
+
+### Riconciliazione finanziaria + cap per evento (17/10/2026, P1-P5)
+
+**Origine**: il proprietario ha notato un **residuo di -2,26 USDC** fra equity e
+P/L del ledger e un **ordine da 7,77 USDC (18,5% dell'equity) dove il cap
+per-ordine e' 12%**. Cinque interventi, tutti con test offline; **stato al
+18/10/2026 00:40 UTC: nel working tree, NON deployati** (eccezione: `06598bf`,
+`f222562`, `b906524` sono su `main`).
+
+**P1 — CAP PER EVENTO (`auto_bet._event_guard` + `tracker.event_claims`).**
+La stessa partita arriva con **due `match_id`** (uno `sx-*`, uno the-odds-api):
+il dedup per `(match_id, esito)` non la vede. Caso reale **Norwich-Portsmouth**:
+`#73 sx-L20471322` 4,98 + `#74 7a8f8a07…` 2,79 sullo **stesso**
+`market_id 0x0d356b2e…`/`selection 1`, a **0,7 secondi** di distanza. La guardia
+del 14/10 (`_market_bet_open`) copre il caso SEQUENZIALE (riga gia' scritta), non
+due valutazioni simultanee: serve un **claim atomico** (`BEGIN IMMEDIATE`) per
+evento-mercato, con scadenza (un processo morto non blocca l'evento per sempre).
+Chiave = `(market_id, selection_id)` — l'identita' vera su un exchange, non il
+`match_id`; senza identita' `total = inf` -> nessun ordine (fail-closed).
+
+**P2 — AUDIT CONTINUO DURANTE GLI STOP (`stop_audit`).** Con uno stop attivo
+`run_today_bets` usciva **senza registrare nulla**: la serie di equity ha un
+**buco di 19h** (17/10 02:44 -> 22:17) proprio durante il crollo, e la
+riconciliazione non aveva campioni per attribuire la perdita. Ora ogni uscita
+da un blocco (kill switch, daily, weekly, CB2, soglia morbida) scrive un
+campione (max 1/ora) + una riga JSONL `data/execution/stop_audit.jsonl`.
+
+**P3 — IDENTITA' EVENTO (`event_identity.py`, sola lettura).** Chiave canonica
+`<casa>|<trasferta>|<data UTC>` (kickoff senza fuso -> `None`: mai indovinare) e
+audit dei duplicati. **Misura in produzione (14 giorni): 791 partite, 155 con
+id duplicati (19,6%), 76 cluster con previsioni doppie, 3 con puntate reali**
+(Norwich-Portsmouth 7,77 — il doppio ordine; Eintracht-Koln 2,25; Tijuana-Puebla
+2,25). Lo stesso doppio id produce due righe in `matches`/`match_results`.
+
+**P4 — RICONCILIAZIONE (`equity_reconciler.py`, sola lettura).** Misura
+`equity(fine) - equity(inizio) - P/L del ledger = residuo` e lo classifica senza
+correggere nulla. **Due difetti del parser trovati dal primo giro in
+produzione**: (a) `created_at`/`settled_at` sono scritti **naive**
+(`datetime.now().isoformat()`), quindi un parser rigoroso rendeva il ledger
+INVISIBILE ("settled 0, profit 0.00" e un residuo fantasma di **-14,59**); ora
+si assume UTC con l'assunzione CONTATA e dichiarata; (b) il file di stop NON ha
+la chiave `value` (il valore sta dentro `reason`) -> la perdita "misurata" era
+tutto il capitale. Esito reale: **equity 41,5136 -> 26,9201 (-14,5936), ledger
+-12,33 (6 settlement: 1 vinta, 5 perse), residuo -2,2636 NON spiegato**. Il
+residuo era **identico (2,2536) alle 03:11**, l'istante in cui il daily stop si
+e' armato: e' un'uscita di cassa avvenuta fra 02:44 e 03:11, non un evento
+tardivo. `stop_timeline`: 41,5136 - 1,26 (settlement 03:10:39) - 2,25 = **38,00
+= equity misurata** dallo stop, quindi **l'armamento non era un falso positivo**.
+⚠️ **La causa precisa del residuo non e' dimostrabile**: SX Bet non espone lo
+storico ordini (`/orders-v3` solo aperti, `/orders` 400 "OrderBook V2 no longer
+supported", `/user/orders` 400 "address must be valid"). L'ipotesi coerente e'
+un riempimento sul mercato duplicato non finito a ledger; **nessuna scrittura di
+correzione** (far quadrare il ledger a mano sarebbe un falso).
+
+**P5 — SOGLIA MORBIDA CB2 (`cb2_soft_floor_status`).** Blocca le NUOVE puntate
+quando l'equity si avvicina al muro patrimoniale (25 USDC), lasciando margine ai
+settlement aperti; non tocca la soglia del CB2 e si spegne con
+`CB2_SOFT_FLOOR_USDC=0`.
+
+**Stato operativo al 18/10 00:40 UTC**: equity **26,9201** (disponibile, 0 in
+gioco); **daily stop armato** fino alle **03:11** del 18/10, **weekly stop
+armato** fino alle **22:17** (drawdown 35,15% dal picco 41,5136); CB2 non
+armato. Il bot e' quindi fermo per due blocchi legittimi.
+**Test**: `test_event_cap` (cap per evento, claim atomico, concorrenza),
+`test_stop_audit`, `test_event_identity`, `test_equity_reconciler` —
+**102 verdi** sui quattro file nuovi; **536** di regressione (`auto_bet` x2,
+`bot`, `tournament`, `gridiron_lane`, `resting_orders`, `aggressive_kelly`,
+`capital_enclosure`, `order_watch`, `exposure_gate`, `t60_breakers`) eseguiti
+in LOTTI (il lotto unico supera il timeout della shell: 4 run separati, tutti
+verdi). `compileall` OK, 0 marker di conflitto.

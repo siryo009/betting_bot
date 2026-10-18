@@ -313,7 +313,7 @@ def _snapshot(available=50.0, exposure=0.0):
 
 class TestRefreshLiveStakes:
     def test_wallet_non_leggibile_fail_closed(self, monkeypatch):
-        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: None)
+        monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda **kw: None)
         kept, info = auto_bet.refresh_live_stakes([{"stake": 5.0}])
         assert kept == []
         assert info["ok"] is False
@@ -321,7 +321,7 @@ class TestRefreshLiveStakes:
 
     def test_ri_kelly_fresco_col_saldo(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=100.0))
+                            lambda **kw: _snapshot(available=100.0))
         cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
                  "price": 1.66, "stake": 1.0}]
         kept, info = auto_bet.refresh_live_stakes(cand)
@@ -334,7 +334,7 @@ class TestRefreshLiveStakes:
 
     def test_il_capitale_fresco_alimenta_il_compounding(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=200.0))
+                            lambda **kw: _snapshot(available=200.0))
         cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
                  "price": 1.66, "stake": 1.0}]
         kept, _ = auto_bet.refresh_live_stakes(cand)
@@ -345,7 +345,7 @@ class TestRefreshLiveStakes:
     def test_cap_di_portafoglio_non_viene_ri_kelly(self, monkeypatch):
         """corr_cap/total_cap decidono SE e QUANTO: il Kelly non li scavalca."""
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=100.0))
+                            lambda **kw: _snapshot(available=100.0))
         cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
                  "price": 1.66, "stake": 9.0, "corr_cap": True}]
         kept, _ = auto_bet.refresh_live_stakes(cand)
@@ -360,7 +360,7 @@ class TestRefreshLiveStakes:
         `chief_trade` lo stake si mantiene e si passa al ticket minimo.
         """
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=100.0))
+                            lambda **kw: _snapshot(available=100.0))
         cand = [{"match_id": "m1", "esito_key": "1", "price": 1.66,
                  "stake": 3.70, "lane": "chief", "chief_trade": True}]
         kept, _ = auto_bet.refresh_live_stakes(cand)
@@ -372,7 +372,7 @@ class TestRefreshLiveStakes:
         """La regola dell'08/10 non scavalca il ticket: resta il controllo
         sul capitale fresco, solo senza il ricalcolo sovrascrittore."""
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=100.0))
+                            lambda **kw: _snapshot(available=100.0))
         cand = [{"match_id": "m1", "esito_key": "1", "price": 1.66,
                  "stake": 0.50, "lane": "chief", "chief_trade": True}]
         kept, info = auto_bet.refresh_live_stakes(cand)
@@ -383,7 +383,7 @@ class TestRefreshLiveStakes:
         la applica per intero: ogni chiave dichiarata preserva lo stake, mentre
         una chiave NON dichiarata torna a passare dal Kelly."""
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=100.0))
+                            lambda **kw: _snapshot(available=100.0))
         for key in auto_bet.STAKE_DECIDED_KEYS:
             cand = [{"match_id": "m1", "esito_key": "1", "price": 1.66,
                      "stake": 9.0, key: True}]
@@ -403,7 +403,7 @@ class TestRefreshLiveStakes:
 
     def test_scarta_sotto_il_ticket(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=10.0))   # raw 0.72 < ticket
+                            lambda **kw: _snapshot(available=10.0))   # raw 0.72 < ticket
         cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
                  "price": 1.66, "stake": 1.0}]
         kept, info = auto_bet.refresh_live_stakes(cand)
@@ -411,7 +411,7 @@ class TestRefreshLiveStakes:
 
     def test_setta_l_ultimo_bankroll_per_il_tetto(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=100.0))
+                            lambda **kw: _snapshot(available=100.0))
         auto_bet.set_last_bankroll(0.0)
         auto_bet.refresh_live_stakes([])
         assert auto_bet._LAST_BANKROLL == 100.0
@@ -419,7 +419,7 @@ class TestRefreshLiveStakes:
     def test_cap_non_calcolabile_fail_closed(self, monkeypatch):
         """Cassa libera zero: nessun ordine, mai un cap inventato."""
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
-                            lambda: _snapshot(available=0.0))
+                            lambda **kw: _snapshot(available=0.0))
         kept, info = auto_bet.refresh_live_stakes([{"stake": 1.0}])
         assert kept == [] and info["reason"] == "cap_non_calcolabile"
 

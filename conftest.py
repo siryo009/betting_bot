@@ -121,6 +121,24 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # Capitale dell'ultimo giro (usato da `cap_order_stake` quando il bankroll
     # non e' passato): lo stato e' di PROCESSO e sopravviverebbe fra i test.
     monkeypatch.setattr("auto_bet._LAST_BANKROLL", 0.0)
+    # CAP PER EVENTO (17/10/2026): la guardia VERA si esercita in
+    # `test_event_cap.py` (math del tetto, claim atomico, concorrenza) e sul
+    # percorso d'ordine reale. Gli altri test seminano stake espliciti (5.0,
+    # 20.0...) su wallet finti piccoli: con il cap reale (12% dell'equity)
+    # ogni ordine verrebbe respinto e l'asserzione leggerebbe il cap invece
+    # della grandezza in esame. Si isola la FUNZIONE, mai la soglia.
+    if "test_event_cap" not in request.node.nodeid:
+        monkeypatch.setattr(
+            "auto_bet._event_guard",
+            lambda *a, **k: {"allowed": True, "reason": "isolated",
+                             "claim_id": None})
+    # AUDIT DEGLI STOP (17/10/2026): il JSONL vive sul volume — nei test va
+    # nella tmp, e il throttle (stato di MODULO) si azzera fra i test.
+    monkeypatch.setattr("auto_bet.STOP_AUDIT_LOG", tmp_path / "stop_audit.jsonl")
+    monkeypatch.setattr("auto_bet._LAST_AUDIT", {})
+    # Soglia morbida CB2: spenta di default, i test che la esercitano la
+    # accendono esplicitamente (test_stop_audit / test_cb2_soft_floor).
+    monkeypatch.setattr("auto_bet.CB2_SOFT_FLOOR_USDC", 0.0)
     # CACHE DEL WALLET (17/10/2026, fix della raffica 429 su
     # `/user/balance-v3`): `_live_wallet_snapshot` riusa la lettura entro
     # `LIVE_WALLET_TTL_S` e, su lettura fallita, torna l'istantanea recente.

@@ -5,6 +5,7 @@ import math
 import sqlite3
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -202,6 +203,10 @@ def _get_conn():
     # per quota, chiave (partita, mercato, linea, esito). Nasce vuoto e lo
     # riempie l'ingestione delle quote (gateway `MarketQuotesGateway`).
     _ensure_market_quotes_table(c)
+    # Claim di stake per EVENTO (17/10/2026): tabella del cap per evento, con
+    # la verifica ATOMICA che impedisce a due ordini simultanei di superare il
+    # limite sullo stesso mercato/lato (vedi `claim_event_stake`).
+    _ensure_event_claims_table(c)
     # Migrazione: colonna surface nella tabella signals (09/09)
     # per supportare il tracking delle superfici nel modulo tennis.
     sig_cols = [r[1] for r in c.execute("PRAGMA table_info(signals)")]
@@ -2159,6 +2164,240 @@ def bet_exists_open_market(market_id, selection_id):
                        "(fail-closed)", market_id, selection_id)
         return True
     return r is not None
+
+
+# ---------------------------------------------------------------------------
+# CAP PER EVENTO + CLAIM ATOMICO (17/10/2026)
+# ---------------------------------------------------------------------------
+# Perche' esiste (misurato in produzione il 17/10/2026): la stessa partita e'
+# arrivata al bot con DUE `match_id` diversi (uno `sx-*`, uno di the-odds-api)
+# e sono partiti due ordini reali sullo STESSO `market_id`/`selection_id`
+# (4.98 + 2.79 = 7.77 USDC su un solo esito, il 18,5% dell'equity contro un
+# cap per-ordine del 12%). `bet_exists_open_market` copre il caso sequenziale
+# (una riga gia' scritta), NON il caso in cui due valutazioni della stessa
+# tornata arrivano insieme: li' serve un CLAIM scritto nello stesso istante
+# della verifica, in una transazione `BEGIN IMMEDIATE` (le due si serializzano
+# sul lock di scrittura di SQLite: la seconda vede il claim della prima).
+#
+# La chiave e' l'identita' VERA della puntata su un exchange: market + lato.
+# Senza identita' la funzione risponde "non ammesso" (fail-closed): un doppio
+# ordine costa denaro due volte, un ordine mancato costa un'opportunita'.
+
+def event_key_for(market_id, selection_id):
+    """Chiave canonica dell'evento-mercato, oppure None se l'identita' e' ignota.
+
+    `None` NON e' un errore da correggere: e' l'informazione che manca. Il
+    chiamante deve trattarlo come "non verificabile" e non ordinare.
+    """
+    mid = str(market_id or "").strip().lower()
+    if not mid:
+        return None
+    try:
+        sel = int(selection_id)
+    except (TypeError, ValueError):
+        return None
+    return "%s:%d" % (mid, sel)
+
+
+def _ensure_event_claims_table(c) -> None:
+    """Tabella dei CLAIM (prenotazioni) di stake per evento.
+
+    Una riga = uno stake promesso a un ordine in corso. Scade
+    (`expires_at`): un processo morto a meta' ordine non deve bloccare
+    l'evento per sempre.
+    """
+    c.execute('''CREATE TABLE IF NOT EXISTS event_claims (
+        claim_id TEXT PRIMARY KEY,
+        event_key TEXT NOT NULL,
+        stake REAL NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        owner TEXT)''')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_event_claims_key
+                 ON event_claims(event_key, expires_at)''')
+
+
+def purge_event_claims(now=None) -> int:
+    """Rimuove i claim scaduti e ritorna quanti ne ha tolti (fail-safe)."""
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        now = now or _dt.now(_tz.utc)
+        conn = _get_conn()
+        cur = conn.execute("DELETE FROM event_claims WHERE expires_at <= ?",
+                           (now.isoformat(),))
+        n = cur.rowcount or 0
+        conn.commit(); conn.close()
+        return int(n)
+    except Exception as e:
+        logger.debug("tracker: purge claim fallita (%s)", e)
+        return 0
+
+
+def event_exposure(market_id, selection_id, *, include_claims=True) -> dict:
+    """Stake GIA' impegnato su un evento-mercato (puntate aperte + claim).
+
+    - `committed`: somma degli stake delle puntate LIVE aperte con lo STESSO
+      `market_id`/`selection_id`, qualunque sia il `match_id` (e' il punto:
+      due corsie possono avere id di partita diversi e lo stesso mercato);
+    - `pending`: claim in corso non ancora scaduti (ordini in volo);
+    - `total`: la somma che il cap deve rispettare.
+
+    Le righe `mode='sim'` NON contano: la cassa simulata non immobilizza
+    capitale reale. Fail-closed: su lettura impossibile `total` vale `inf`
+    (il chiamante non ordina) — un errore di lettura non e' un'autorizzazione.
+    """
+    key = event_key_for(market_id, selection_id)
+    out = {"event_key": key, "committed": 0.0, "pending": 0.0,
+           "total": 0.0, "count": 0, "claims": 0, "error": None}
+    if key is None:
+        out.update({"total": float("inf"), "error": "identity_unknown"})
+        return out
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(stake), 0), COUNT(*) FROM bets "
+            "WHERE market_id IS NOT NULL AND LOWER(TRIM(market_id))=? "
+            "AND selection_id=? AND esito_finale IS NULL AND mode='live'",
+            (str(market_id).strip().lower(), int(selection_id))).fetchone()
+        out["committed"] = float(row[0] or 0.0)
+        out["count"] = int(row[1] or 0)
+        if include_claims:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(stake), 0), COUNT(*) FROM event_claims "
+                "WHERE event_key=? AND expires_at > ?",
+                (key, now.isoformat())).fetchone()
+            out["pending"] = float(row[0] or 0.0)
+            out["claims"] = int(row[1] or 0)
+        conn.close()
+    except Exception as e:
+        logger.warning("tracker: esposizione di evento illeggibile per %s "
+                       "(fail-closed): %s", key, e)
+        out.update({"total": float("inf"), "error": "read_error"})
+        return out
+    out["total"] = out["committed"] + out["pending"]
+    return out
+
+
+def claim_event_stake(market_id, selection_id, stake, cap, *, ttl_s=300,
+                      owner="", now=None, extra_pending=0.0) -> dict:
+    """Prenota `stake` su un evento-mercato se resta entro `cap` (ATOMICO).
+
+    La verifica e la prenotazione avvengono nella STESSA transazione
+    `BEGIN IMMEDIATE`: due thread/processi che ordinano insieme si
+    serializzano sul lock di scrittura, quindi il secondo VEDE il claim del
+    primo e viene respinto se la somma supera il tetto. Senza transazione
+    entrambi leggerebbero lo stesso totale e insieme lo sfonderebbero (e' il
+    bug del 17/10: 0,7s di distanza).
+
+    Ritorna {allowed, reason, claim_id, committed, pending, total, cap,
+    projected, event_key}. `allowed=False` -> il chiamante NON ordina.
+    Fail-closed su qualunque incertezza (identita' ignota, errore DB).
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    now = now or _dt.now(_tz.utc)
+    key = event_key_for(market_id, selection_id)
+    try:
+        stake = float(stake)
+        cap = float(cap)
+    except (TypeError, ValueError):
+        return {"allowed": False, "reason": "bad_inputs", "claim_id": None,
+                "event_key": key}
+    if key is None:
+        return {"allowed": False, "reason": "identity_unknown",
+                "claim_id": None, "event_key": None}
+    if stake <= 0:
+        return {"allowed": False, "reason": "bad_stake", "claim_id": None,
+                "event_key": key}
+    if cap <= 0:
+        # Tetto non calcolabile (capitale ignoto): nessuna prenotazione.
+        return {"allowed": False, "reason": "cap_unknown", "claim_id": None,
+                "event_key": key}
+    ttl = max(int(ttl_s or 0), 30)
+    claim_id = uuid.uuid4().hex
+    conn = None
+    try:
+        conn = _get_conn()
+        # La connessione puo' avere una transazione implicita aperta dalle
+        # migrazioni: si chiude prima di prendere il controllo esplicito.
+        conn.commit()
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM event_claims WHERE expires_at <= ?",
+                     (now.isoformat(),))
+        row = conn.execute(
+            "SELECT COALESCE(SUM(stake), 0) FROM bets "
+            "WHERE market_id IS NOT NULL AND LOWER(TRIM(market_id))=? "
+            "AND selection_id=? AND esito_finale IS NULL AND mode='live'",
+            (str(market_id).strip().lower(), int(selection_id))).fetchone()
+        committed = float(row[0] or 0.0)
+        row = conn.execute(
+            "SELECT COALESCE(SUM(stake), 0) FROM event_claims "
+            "WHERE event_key=? AND expires_at > ?",
+            (key, now.isoformat())).fetchone()
+        pending = float(row[0] or 0.0)
+        # Stake gia' impegnato FUORI dal ledger (ordini RESTING vivi: escrow
+        # sull'exchange senza riga in `bets` finche' non si riempiono). Il
+        # chiamante lo misura e lo passa: se restasse fuori, il cap per evento
+        # potrebbe essere sfondato da un ordine parcheggiato.
+        try:
+            pending += max(float(extra_pending or 0.0), 0.0)
+        except (TypeError, ValueError):
+            pending += 0.0
+        projected = committed + pending + stake
+        if projected > cap + 1e-9:
+            conn.execute("ROLLBACK")
+            return {"allowed": False, "reason": "event_cap",
+                    "claim_id": None, "event_key": key,
+                    "committed": round(committed, 4),
+                    "pending": round(pending, 4),
+                    "total": round(committed + pending, 4),
+                    "cap": round(cap, 4),
+                    "projected": round(projected, 4)}
+        expires = now + _td(seconds=ttl)
+        conn.execute(
+            "INSERT INTO event_claims (claim_id, event_key, stake, created_at, "
+            "expires_at, owner) VALUES (?,?,?,?,?,?)",
+            (claim_id, key, stake, now.isoformat(), expires.isoformat(),
+             str(owner or "")))
+        conn.execute("COMMIT")
+        return {"allowed": True, "reason": "ok", "claim_id": claim_id,
+                "event_key": key, "committed": round(committed, 4),
+                "pending": round(pending, 4),
+                "total": round(committed + pending, 4),
+                "cap": round(cap, 4), "projected": round(projected, 4),
+                "expires_at": expires.isoformat()}
+    except Exception as e:
+        try:
+            if conn is not None:
+                conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        logger.warning("tracker: claim di evento fallito per %s "
+                       "(fail-closed, nessun ordine): %s", key, e)
+        return {"allowed": False, "reason": "claim_error", "claim_id": None,
+                "event_key": key}
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def release_event_claim(claim_id) -> bool:
+    """Rilascia un claim (ordine non piazzato). Idempotente, fail-safe."""
+    if not claim_id:
+        return False
+    try:
+        conn = _get_conn()
+        conn.execute("DELETE FROM event_claims WHERE claim_id=?", (str(claim_id),))
+        conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        logger.debug("tracker: rilascio claim %s fallito (%s)", claim_id, e)
+        return False
 
 
 def get_bets(day=None, closed=None, limit=200):

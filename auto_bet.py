@@ -47,6 +47,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from config import DATA_DIR
 
@@ -182,6 +183,48 @@ OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.70"))
 # (qui non si ricopia). Uno `ORDER_MAX_STAKE_USDC` esplicito > 0 RESTA un
 # tetto assoluto (retro-compatibilita' per diagnostica e test): vince lui.
 ORDER_MAX_STAKE_USDC = float(os.getenv("ORDER_MAX_STAKE_USDC", "0.0"))
+
+# --- CAP MASSIMO PER EVENTO (17/10/2026) -----------------------------------
+# Perche' esiste: il 17/10/2026 sono partiti DUE ordini reali sullo STESSO
+# mercato SX (Norwich-Portsmouth, `1`) perche' la stessa partita era nel board
+# con due `match_id` diversi (uno `sx-*`, uno di the-odds-api): 4.98 + 2.79 =
+# **7.77 USDC su un solo esito**, cioe' il 18,5% dell'equity contro un cap
+# per-ordine del 12%. Il cap per ORDINE non vede la somma; questo la vede.
+#
+# La chiave NON e' la partita ma l'identita' VERA della puntata su un
+# exchange: `(market_id, selection_id)`. Due righe di ledger con `match_id`
+# diversi e lo stesso mercato/lato sono la stessa scommessa, ed e' esattamente
+# il caso che il dedup per match_id non puo' vedere.
+#
+# Il controllo e' ATOMICO (`tracker.claim_event_stake`, transazione
+# `BEGIN IMMEDIATE`): due ordini simultanei si serializzano e il secondo vede
+# la prenotazione del primo, quindi non possono sfondare il tetto insieme.
+# Se l'identita' dell'evento e' INCERTA (manca `market_id` o `selection_id`)
+# l'ordine NON parte (fail-closed): un doppio ordine costa denaro due volte.
+MAX_STAKE_PER_EVENT_PCT = float(
+    os.getenv("MAX_STAKE_PER_EVENT_PCT", "0.12"))
+EVENT_CLAIM_TTL_SEC = float(os.getenv("EVENT_CLAIM_TTL_SEC", "300"))
+
+# --- AUDIT CONTINUO DURANTE GLI STOP (17/10/2026) --------------------------
+# Un breaker che ferma le puntate NON deve fermare il monitoraggio
+# finanziario: misurato oggi un buco di 19h nei campioni di equity (02:44 ->
+# 22:17) proprio durante il crollo. `stop_audit` scrive su JSONL (volume)
+# timestamp, equity, disponibile, esposizione, P/L realizzato del giorno,
+# stato dei tre breaker e motivo del blocco, e registra il campione di equity
+# che alimenta lo stop settimanale.
+STOP_AUDIT_LOG = Path(os.getenv("STOP_AUDIT_LOG", "")) if os.getenv(
+    "STOP_AUDIT_LOG", "") else DATA_DIR / "execution" / "stop_audit.jsonl"
+STOP_AUDIT_MIN_SEC = float(os.getenv("STOP_AUDIT_MIN_SEC", "300"))
+
+# --- PROTEZIONE PATRIMONIALE: soglia MORBIDA sopra il CB2 (17/10/2026) -----
+# Il CB2 arresta il sistema a `T60_KILL_WALLET_USDC` (25 USDC) e da li' serve
+# un intervento manuale (`/t60reset`). Con equity 26.92 quel muro era a 1.92
+# USDC: una singola bet persa lo arma. Questa guardia blocca le NUOVE puntate
+# quando l'equity scende sotto `CB2_SOFT_FLOOR_USDC`, lasciando margine per i
+# settlement delle posizioni gia' aperte.
+# 0 = disattivata (default di codice): la policy si accende con una env,
+# senza redeploy e senza toccare la soglia del CB2 (che NON si abbassa).
+CB2_SOFT_FLOOR_USDC = float(os.getenv("CB2_SOFT_FLOOR_USDC", "0") or 0.0)
 # --- STAKE FISSO (direttiva 28/09/2026, SUPERATA il 04/10/2026) -----------
 # L'importo fisso per ordine e' DISATTIVATO di default (`0.0`): la size degli
 # ordini reali e' il Kelly frazionario (k 0.15-0.25) col cap dinamico 5% e
@@ -3787,6 +3830,194 @@ def clear_weekly_stop() -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# AUDIT CONTINUO DURANTE GLI STOP (17/10/2026)
+# ---------------------------------------------------------------------------
+# Misura che ha motivato il modulo: il 17/10 la serie di equity ha un buco di
+# **19 ore** (campioni 02:44 -> 22:17) proprio mentre il conto perdeva 14,59
+# USDC, perche' `run_today_bets` esce sullo stop PRIMA di registrare il
+# campione. Un arresto e' un evento finanziario: va tracciato con gli stessi
+# numeri con cui si prende una decisione (equity, disponibile, esposizione,
+# P/L realizzato, stato dei breaker), non solo con una riga ERROR.
+
+#: Ultimo audit scritto per motivo (per il throttle).
+_LAST_AUDIT: dict[str, str] = {}
+
+
+def _realized_pl_today(now=None) -> float | None:
+    """P/L realizzato del giorno UTC (somma dei `profit` saldati oggi).
+
+    `None` = non leggibile: si dichiara il vuoto invece di scrivere 0.0, che
+    sarebbe indistinguibile da "nessun profitto" (lezione dei tool di
+    diagnostica: un dato assente non e' uno zero).
+
+    Il confronto e' su `datetime(settled_at)`: le date del ledger sono testo
+    ISO con la 'T' e un confronto fra stringhe con SQLite e' sbagliato
+    (lezione del 17/09/2026).
+    """
+    try:
+        from tracker import _get_conn
+        now = now or datetime.now(timezone.utc)
+        start = now.replace(hour=0, minute=0, second=0,
+                            microsecond=0).isoformat()
+        conn = _get_conn()
+        # Solo `mode='live'`: il P/L della CASSA SIMULATA non e' denaro e
+        # mescolarlo al monitoraggio patrimoniale renderebbe illeggibile
+        # proprio la voce che serve durante un arresto.
+        row = conn.execute(
+            "SELECT COALESCE(SUM(profit), 0), COUNT(*) FROM bets "
+            "WHERE mode='live' AND esito_finale IS NOT NULL "
+            "AND settled_at IS NOT NULL "
+            "AND datetime(settled_at) >= datetime(?)", (start,)).fetchone()
+        conn.close()
+        return float(row[0] or 0.0) if row else None
+    except Exception as e:
+        logger.debug("auto_bet: P/L realizzato illeggibile (%s)", e)
+        return None
+
+
+def _breaker_snapshot() -> dict:
+    """Istantanea dei breaker per l'audit (ogni sonda e' fail-safe)."""
+    out: dict = {}
+    try:
+        d = daily_stop_status(); out["daily"] = {"stopped": d.get("stopped"),
+            "until": d.get("until") or d.get("stopped_until")}
+    except Exception:
+        out["daily"] = None
+    try:
+        w = weekly_stop_status(); out["weekly"] = {"stopped": w.get("stopped"),
+            "until": w.get("until"), "drawdown_pct": w.get("drawdown_pct"),
+            "peak": w.get("peak")}
+    except Exception:
+        out["weekly"] = None
+    try:
+        k = t60_kill_switch_status()
+        out["cb2"] = {"triggered": k.get("triggered"),
+                      "reason": k.get("reason")}
+    except Exception:
+        out["cb2"] = None
+    try:
+        ks = kill_switch_status()
+        out["kill_switch"] = {"effective": ks.get("effective"),
+                              "provider_ready": ks.get("provider_ready")}
+    except Exception:
+        out["kill_switch"] = None
+    return out
+
+
+def stop_audit(reason: str, *, bankroll: float | None = None,
+               available: float | None = None,
+               exposure: float | None = None,
+               basis_key: str = "live_equity", mode: str | None = None,
+               force: bool = False, extra: dict | None = None,
+               record_sample: bool = True) -> dict:
+    """Scrive l'audit di un arresto e NON interrompe il monitoraggio.
+
+    Fa due cose, entrambe fail-safe (mai eccezioni al chiamante):
+    1. registra il CAMPIONE di equity (`record_bankroll_sample`, max 1/ora):
+       cosi' la serie del drawdown settimanale continua anche a puntate
+       ferme — era il buco del 17/10;
+    2. appende una riga JSONL con timestamp, equity (grezza e riconciliata),
+       disponibile, esposizione, ordini aperti, P/L realizzato del giorno,
+       stato dei breaker e motivo del blocco.
+
+    Throttle: una riga ogni `STOP_AUDIT_MIN_SEC` per MOTIVO (il giro gira ogni
+    60s) salvo `force=True`, che si usa sulle transizioni (primo innesco).
+    Il campione di equity ha un suo throttle interno (1/ora): non vengono
+    scritti 1440 campioni al giorno.
+    """
+    now = datetime.now(timezone.utc)
+    out: dict = {"written": False, "reason": reason, "ts": now.isoformat()}
+    try:
+        sample = None
+        if record_sample and bankroll and float(bankroll) > 0:
+            sample = record_bankroll_sample(float(bankroll),
+                                            basis_key=basis_key, now=now)
+        equity = float(bankroll) if bankroll else None
+        if sample and sample.get("value"):
+            equity = float(sample["value"])
+        open_stake, open_count = _open_live_snapshot()
+        row = {
+            "ts": now.isoformat(),
+            "reason": reason,
+            "mode": mode or _execution_mode(),
+            "equity": (None if equity is None else round(equity, 4)),
+            "equity_raw": (None if bankroll is None else round(float(bankroll), 4)),
+            "available": (None if available is None else round(float(available), 4)),
+            "exposure": (None if exposure is None else round(float(exposure), 4)),
+            "open_stake_ledger": (None if open_stake in (float("inf"), None)
+                                  else round(float(open_stake), 4)),
+            "open_orders": open_count,
+            "realized_pl_today": _realized_pl_today(now),
+            "basis_key": basis_key,
+            "breakers": _breaker_snapshot(),
+            "sample": {k: v for k, v in (sample or {}).items()
+                       if k in ("recorded", "samples", "value")},
+            "caps": {
+                "per_order": round(order_ceiling(bankroll), 4) if bankroll else None,
+                "per_event": round(event_stake_cap(bankroll), 4) if bankroll else None,
+                "open_exposure_pct": OPEN_EXPOSURE_CAP_PCT,
+                "total_exposure_pct": TOTAL_EXPOSURE_CAP_PCT,
+            },
+        }
+        if extra:
+            row["extra"] = extra
+        out["row"] = row
+        last = _LAST_AUDIT.get(reason)
+        last_dt = _parse_iso_utc(last) if last else None
+        fresh = (last_dt is None
+                 or (now - last_dt).total_seconds() >= STOP_AUDIT_MIN_SEC)
+        if not (force or fresh):
+            return out
+        STOP_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(STOP_AUDIT_LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, default=str) + "\n")
+        _LAST_AUDIT[reason] = now.isoformat()
+        out["written"] = True
+    except Exception as e:
+        # La telemetria non deve MAI fermare il portafoglio.
+        logger.debug("auto_bet: stop_audit fallito per %s (%s)", reason, e)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# PROTEZIONE PATRIMONIALE: soglia MORBIDA sopra il CB2
+# ---------------------------------------------------------------------------
+
+def cb2_soft_floor_status(equity: float | None) -> dict:
+    """True se l'equity e' dentro la fascia di PROSSIMITA' al CB2.
+
+    Il CB2 (`T60_KILL_WALLET_USDC`) e' un muro: armato, il sistema si ferma e
+    serve `/t60reset` manuale. Con equity 26.92 e muro a 25.00 il margine era
+    **1.92 USDC**, meno di una bet. Questa guardia ferma le NUOVE puntate prima
+    del muro lasciando margine ai settlement delle posizioni aperte.
+
+    `CB2_SOFT_FLOOR_USDC = 0` (default) la disattiva: e' una policy che si
+    accende con una env, senza toccare la soglia del CB2 (che non si abbassa).
+    Fail-closed: equity non leggibile -> bloccato (stessa direzione del CB2).
+    """
+    floor = float(CB2_SOFT_FLOOR_USDC or 0.0)
+    hard = float(T60_KILL_WALLET_USDC)
+    out = {"configured": floor > 0, "floor": floor, "hard": hard,
+           "equity": None, "blocked": False, "reason": ""}
+    if floor <= 0:
+        return out
+    try:
+        eq = float(equity)
+    except (TypeError, ValueError):
+        out.update({"blocked": True,
+                    "reason": "equity non leggibile: nessuna puntata "
+                              "(fail-closed sulla prossimita' del CB2)"})
+        return out
+    out["equity"] = round(eq, 4)
+    if eq <= floor:
+        out["blocked"] = True
+        out["reason"] = ("equity %.2f <= soglia di prossimita' %.2f "
+                         "(CB2 a %.2f): nuove puntate sospese, margine "
+                         "riservato ai settlement" % (eq, floor, hard))
+    return out
+
+
 def check_weekly_stop(bankroll, basis: str = "bankroll",
                       basis_key: "str | None" = None,
                       now=None) -> dict:
@@ -4370,6 +4601,170 @@ def event_identity(pick: dict) -> dict:
     }
 
 
+#: Percentuale di fallback del cap per evento. Un valore <= 0 nell'env NON
+#: disattiva la guardia: si torna al default (una protezione sul denaro non si
+#: spegne con una variabile sbagliata, stessa regola di `cap_order_stake`).
+MAX_STAKE_PER_EVENT_DEFAULT_PCT = 0.12
+
+
+def event_cap_pct() -> float:
+    """Percentuale del cap per evento, con fallback dichiarato sul default."""
+    try:
+        pct = float(MAX_STAKE_PER_EVENT_PCT)
+    except (TypeError, ValueError):
+        pct = 0.0
+    if pct <= 0 or pct > 1:
+        if pct <= 0:
+            logger.warning("auto_bet: MAX_STAKE_PER_EVENT_PCT=%s non valido, "
+                           "uso il default %.0f%% (la guardia non si spegne)",
+                           MAX_STAKE_PER_EVENT_PCT,
+                           MAX_STAKE_PER_EVENT_DEFAULT_PCT * 100)
+        return MAX_STAKE_PER_EVENT_DEFAULT_PCT
+    return pct
+
+
+def event_stake_cap(bankroll: float | None = None) -> float:
+    """Tetto di stake per EVENTO in USDC = equity x MAX_STAKE_PER_EVENT_PCT.
+
+    UNICA definizione del tetto per evento (il valore non si ricopia nei
+    chiamanti). `0.0` = non calcolabile (capitale ignoto) e il chiamante NON
+    ordina: un cap che vale zero non e' un'autorizzazione, e' un'informazione
+    mancante.
+    """
+    try:
+        equity = float(bankroll if bankroll is not None else _LAST_BANKROLL)
+    except (TypeError, ValueError):
+        return 0.0
+    if equity <= 0:
+        return 0.0
+    return round(equity * event_cap_pct(), 6)
+
+
+def _resting_pending(market_id, selection_id) -> float:
+    """Stake degli ordini RESTING vivi sullo stesso mercato/lato (0.0 su errore).
+
+    Un ordine RESTING immobilizza escrow sull'exchange ma non ha una riga in
+    `bets` finche' non si riempie: senza questo addendo il cap per evento
+    potrebbe essere sfondato da un ordine parcheggiato.
+    """
+    try:
+        import resting_orders as _ro
+        total = 0.0
+        for row in _ro.open_orders() or []:
+            if str(row.get("market_id") or "") != str(market_id or ""):
+                continue
+            try:
+                if int(row.get("selection_id")) != int(selection_id):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            total += float(row.get("stake") or 0.0)
+        return total
+    except Exception:                                        # pragma: no cover
+        return 0.0
+
+
+def _event_guard(market_id, selection_id, stake, bankroll: float | None = None,
+                 *, owner: str = "") -> dict:
+    """Cap per evento: prenota `stake` se il totale resta entro il tetto.
+
+    E' l'UNICO punto in cui si applica `MAX_STAKE_PER_EVENT_PCT` sul percorso
+    degli ordini reali. Delega la parte atomica a `tracker.claim_event_stake`
+    (transazione `BEGIN IMMEDIATE`): cosi' due ordini simultanei sullo stesso
+    mercato non possono superare il tetto insieme (17/10/2026: 0,7s di
+    distanza, 4.98 + 2.79 USDC sullo stesso esito).
+
+    `allowed=True` -> il chiamante ordina e DEVE rilasciare il claim
+    (`tracker.release_event_claim`) se l'ordine non si riempie. Su `False` il
+    motivo e' machine-readable: `identity_unknown` (nessun `market_id`/
+    `selection_id`: identita' incerta, si blocca), `event_cap` (tetto
+    raggiunto), `cap_unknown` (capitale ignoto), `claim_error` (DB).
+
+    Fail-closed totale: qualunque dubbio vale "non ordinare".
+    """
+    try:
+        stake = float(stake)
+    except (TypeError, ValueError):
+        return {"allowed": False, "reason": "bad_stake", "claim_id": None}
+    cap = event_stake_cap(bankroll)
+    if cap <= 0:
+        logger.warning("auto_bet: cap per evento non calcolabile (equity "
+                       "ignota): nessun ordine (fail-closed)")
+        return {"allowed": False, "reason": "cap_unknown", "claim_id": None,
+                "cap": 0.0}
+    try:
+        import tracker as _t
+    except Exception as e:                                   # pragma: no cover
+        logger.warning("auto_bet: tracker non disponibile per il cap per "
+                       "evento (%s): nessun ordine", e)
+        return {"allowed": False, "reason": "tracker_unavailable",
+                "claim_id": None}
+    res = _t.claim_event_stake(
+        market_id, selection_id, stake, cap,
+        ttl_s=EVENT_CLAIM_TTL_SEC, owner=owner,
+        extra_pending=_resting_pending(market_id, selection_id))
+    res["cap"] = round(cap, 6)
+    if not res.get("allowed"):
+        logger.warning(
+            "auto_bet: CAP PER EVENTO — ordine NON inviato su %s/%s "
+            "(motivo %s, stake %.2f, gia' impegnato %.2f + claim %.2f, tetto "
+            "%.2f = %g%% dell'equity)",
+            market_id, selection_id, res.get("reason"), stake,
+            float(res.get("committed") or 0.0),
+            float(res.get("pending") or 0.0), cap, event_cap_pct() * 100)
+    return res
+
+
+def _release_event_claim(claim_id) -> None:
+    """Rilascia il claim di un ordine NON piazzato (fail-safe, mai eccezioni).
+
+    Va chiamato su TUTTI i percorsi che non lasciano denaro impegnato
+    sull'exchange (skip, errore, ordine non riempito). Su un ordine riempito
+    il claim resta fino alla scadenza (TTL): in quella finestra la riga `bets`
+    viene scritta dal chiamante e prende il suo posto nel conteggio.
+    """
+    if not claim_id:
+        return
+    try:
+        import tracker as _t
+        _t.release_event_claim(claim_id)
+    except Exception as e:                                   # pragma: no cover
+        logger.debug("auto_bet: rilascio claim %s fallito (%s)", claim_id, e)
+
+
+def _resting_with_cap(prov, pick: dict, stake: float, price: float,
+                      market_id: str, sel: int, why: str):
+    """Ordine RESTING che rispetta ANCHE il cap per evento.
+
+    Perche' serve un wrapper: un ordine RESTING immobilizza escrow
+    sull'exchange **senza una riga in `bets`** finche' non si riempie, quindi
+    il cap per evento non lo vedrebbe passare dal percorso taker (dove il
+    claim viene preso subito prima del POST).
+
+    Il claim qui e' TENUTO solo per l'istante della prenotazione: appena
+    l'ordine entra nel registro `resting_orders` la sua stake entra nel
+    conteggio tramite `_resting_pending` (che il claim gia' somma come
+    `extra_pending`), quindi tenerlo ancora sarebbe un doppio conteggio che
+    blocca ordini legittimi. Su un RIEMPIMENTO IMMEDIATO il claim resta fino
+    al TTL: in quella finestra il chiamante scrive la riga a ledger, che
+    prende il suo posto (stessa regola del percorso taker).
+    """
+    ev = _event_guard(market_id, sel, float(stake), _LAST_BANKROLL,
+                      owner=str(pick.get("match_id") or ""))
+    if not ev.get("allowed"):
+        return None
+    claim = ev.get("claim_id")
+    try:
+        res = _resting_place(prov, pick, stake, price, market_id, sel, why)
+    except Exception as e:                                   # pragma: no cover
+        logger.warning("auto_bet: resting con cap %s fallito (%s)",
+                       market_id, e)
+        res = None
+    if res is None or res.get("resting"):
+        _release_event_claim(claim)
+    return res
+
+
 def _market_bet_open(market_id, selection_id) -> bool:
     """True se esiste una puntata APERTA sullo stesso mercato/selection.
 
@@ -4636,11 +5031,26 @@ def _live_fill_impl(pick: dict, stake: float, floor: float,
         # PREZZO del segnale resta quello giusto. Un ordine RESTING al floor
         # aspetta la controparte invece di morire: e' esattamente l'edge che
         # il taker stava buttando via.
-        _r = _resting_place(prov, pick, stake, floor, market_id, sel,
-                            "book_sottile")
+        _r = _resting_with_cap(prov, pick, stake, floor, market_id, sel,
+                               "book_sottile")
         if _r is not None:
             return _r
         return None
+
+    # --- CAP PER EVENTO (17/10/2026): prenotazione ATOMICA subito PRIMA
+    # dell'ordine. Sta qui (e non prima dei controlli di prezzo/liquidita')
+    # perche' il claim va tenuto il minor tempo possibile: la finestra critica
+    # e' quella tra la verifica del totale e l'arrivo dell'ordine, dove due
+    # valutazioni simultanee leggevano lo stesso "zero aperto" e insieme
+    # sfondavano il tetto (Norwich-Portsmouth: 4.98 + 2.79 su un solo esito).
+    _ev = _event_guard(market_id, sel, float(stake), _LAST_BANKROLL,
+                       owner=str(pick.get("match_id") or ""))
+    if not _ev.get("allowed"):
+        if trace is not None:
+            trace["outcome"] = "skipped_event_cap"
+            trace["event_guard"] = _ev.get("reason")
+        return None
+    _claim = _ev.get("claim_id")
 
     try:
         order = prov.place_limit_order(market_id, sel, "BACK",
@@ -4649,6 +5059,7 @@ def _live_fill_impl(pick: dict, stake: float, floor: float,
         # Esito IGNOTO per la telemetria: l'ordine puo' essere arrivato
         # all'exchange prima del guasto, quindi non si classifica come "salto"
         # (fill_rate: un `error` resta nel denominatore dei tentativi).
+        _release_event_claim(_claim)
         if trace is not None:
             trace["outcome"] = "error"
         logger.warning("auto_bet: ordine reale %s fallito (%s vs %s): %s",
@@ -4659,6 +5070,9 @@ def _live_fill_impl(pick: dict, stake: float, floor: float,
                      if order.price_matched else float(floor))
     matched_stake = float(order.size_matched or 0.0)
     if not order.ok or matched_stake <= 0:
+        # Nessun denaro impegnato: il claim torna libero (altrimenti l'evento
+        # resterebbe "prenotato" per il TTL senza che esista un ordine).
+        _release_event_claim(_claim)
         logger.warning("auto_bet: ordine reale %s non riempito (%s vs %s, "
                        "%s): %s", market_id, pick["home"], pick["away"],
                        order.status, order.error or "nessun match")
@@ -4671,8 +5085,8 @@ def _live_fill_impl(pick: dict, stake: float, floor: float,
         # e' ambiguo e non va mai raddoppiato.
         if matched_stake <= 0 and \
                 str(order.status or "").upper() != "FAILURE":
-            _r = _resting_place(prov, pick, stake, floor, market_id, sel,
-                                str(order.status or "CANCELLED"))
+            _r = _resting_with_cap(prov, pick, stake, floor, market_id, sel,
+                                   str(order.status or "CANCELLED"))
             if _r is not None:
                 return _r
         return {"ok": False, "market_id": market_id,
@@ -4774,6 +5188,9 @@ def run_today_bets(stake_eur: float | None = None,
         # Kill-switch /autobet off oppure fail-closed senza provider reale.
         logger.error("auto_bet: modalita' 'off' (kill-switch o fail-closed): "
                      "nessuna puntata")
+        # AUDIT (17/10/2026): anche un arresto da kill-switch lascia traccia
+        # (senza campione: qui non si e' nemmeno letto il wallet).
+        stop_audit("kill_switch", mode=mode, record_sample=False, force=True)
         return []
 
     # Carica adaptive staking (lazy)
@@ -4853,6 +5270,17 @@ def run_today_bets(stake_eur: float | None = None,
         logger.error("auto_bet: STOP-LOSS GIORNALIERO attivo fino a %s "
                      "(%s) — nessuna puntata", stop.get("until"),
                      stop.get("reason") or "perdita giornaliera")
+        # AUDIT CONTINUO (17/10/2026): il blocco NON interrompe il monitoraggio
+        # finanziario — campione di equity (max 1/ora) + riga JSONL con tutti
+        # i numeri. Prima di oggi qui si usciva senza registrare nulla: la
+        # serie ha un buco di 19h proprio durante il crollo.
+        stop_audit("daily_stop", bankroll=_bankroll,
+                   available=_wallet_balance, exposure=_wallet_exposure,
+                   basis_key=_stop_basis_key, mode=mode,
+                   force=bool(stop.get("just_triggered")),
+                   extra={"until": stop.get("until"),
+                          "loss_pct": stop.get("loss_pct"),
+                          "start_bankroll": stop.get("start_bankroll")})
         return []
 
     # --- CIRCUIT BREAKER SETTIMANALE (26/09): drawdown ROLLING 7g >= 12%.
@@ -4864,6 +5292,13 @@ def run_today_bets(stake_eur: float | None = None,
                      "(drawdown %.1f%% dal picco %s) — nessuna puntata",
                      weekly.get("until"), weekly.get("drawdown_pct") or 0.0,
                      weekly.get("peak"))
+        stop_audit("weekly_stop", bankroll=_bankroll,
+                   available=_wallet_balance, exposure=_wallet_exposure,
+                   basis_key=_stop_basis_key, mode=mode,
+                   force=bool(weekly.get("just_triggered")),
+                   extra={"until": weekly.get("until"),
+                          "drawdown_pct": weekly.get("drawdown_pct"),
+                          "peak": weekly.get("peak")})
         return []
 
     # --- CB2: KILL SWITCH PATRIMONIALE T-60 (17/09) — autorita' SUPERIORE a
@@ -4877,12 +5312,35 @@ def run_today_bets(stake_eur: float | None = None,
         logger.error("auto_bet: T60 KILL SWITCH attivo (%s) — processo "
                      "arrestato: nessuna puntata",
                      t60_kill_switch_status().get("reason") or "soglia wallet")
+        stop_audit("cb2", bankroll=_bankroll, available=_wallet_balance,
+                   exposure=_wallet_exposure, basis_key=_stop_basis_key,
+                   mode=mode, force=True,
+                   extra={"reason": t60_kill_switch_status().get("reason")})
         return []
     if mode == "live":
         if t60_check_wallet_kill(_wallet_equity):
             _t60_emergency_alert(
                 t60_kill_switch_status().get("reason") or "soglia wallet")
+            stop_audit("cb2", bankroll=_bankroll, available=_wallet_balance,
+                       exposure=_wallet_exposure, basis_key=_stop_basis_key,
+                       mode=mode, force=True,
+                       extra={"reason": t60_kill_switch_status().get("reason")})
             return []
+
+    # --- SOGLIA MORBIDA CB2 (17/10/2026): ferma le NUOVE puntate quando
+    # l'equity si avvicina al muro patrimoniale, lasciando margine ai
+    # settlement delle posizioni aperte. Non tocca la soglia del CB2 e non
+    # resetta nulla: e' solo un blocco anticipato (deterministico e
+    # reversibile via env `CB2_SOFT_FLOOR_USDC`).
+    soft = cb2_soft_floor_status(_wallet_equity if mode == "live" else _bankroll)
+    if soft.get("blocked"):
+        logger.error("auto_bet: SOGLIA MORBIDA CB2 — %s", soft.get("reason"))
+        stop_audit("cb2_soft_floor", bankroll=_bankroll,
+                   available=_wallet_balance, exposure=_wallet_exposure,
+                   basis_key=_stop_basis_key, mode=mode, force=True,
+                   extra={"soft_floor": soft.get("floor"),
+                          "hard_floor": soft.get("hard")})
+        return []
 
     # --- RECINTO DI ESPOSIZIONE APERTA (27/09/2026): tetto sul CAPITALE
     # immobilizzato nelle puntate reali ancora aperte. Complementare (non
@@ -4897,6 +5355,11 @@ def run_today_bets(stake_eur: float | None = None,
     if _exposure_blocked:
         logger.error("auto_bet: RECINTO ESPOSIZIONE APERTA — %s",
                      exposure_state.get("reason"))
+        stop_audit("exposure_cap", bankroll=_bankroll,
+                   available=_wallet_balance, exposure=_wallet_exposure,
+                   basis_key=_stop_basis_key, mode=mode,
+                   extra={"open_stake": exposure_state.get("open_stake"),
+                          "cap": exposure_state.get("cap")})
     elif mode == "live":
         logger.info("auto_bet: esposizione aperta %.2f/%.2f USDC su %s ordini "
                     "(cap %.0f%%, stake fisso %.2f USDC)",

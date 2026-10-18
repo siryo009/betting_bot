@@ -916,7 +916,12 @@ class TestTripwire:
         src = Path("auto_bet.py").read_text(encoding="utf-8")
         assert "def _resting_place(" in src
         body = src.split("def _live_fill(")[1]
-        assert "_resting_place(prov, pick" in body
+        # Dal 17/10/2026 le due chiamate passano dal wrapper del CAP PER
+        # EVENTO: un ordine parcheggiato immobilizza escrow fuori dal ledger e
+        # senza il wrapper sfuggirebbe al limite per evento.
+        assert "_resting_with_cap(prov, pick" in body
+        assert "_resting_place(prov, pick" not in body.split(
+            "def _resting_with_cap")[0]
 
     def test_il_resting_non_scrive_il_ledger_da_solo(self):
         """Il modulo non importa il ledger a livello di modulo (import pigro)."""
