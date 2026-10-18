@@ -450,6 +450,39 @@ class TestFinestraT60:
         conn.close()
         assert row == ("live", atteso, "b1")
 
+    def test_il_dispatch_registra_la_base_del_cap_per_evento(self, temp_db,
+                                                             monkeypatch):
+        """Il dispatch T-60 usa la PROPRIA base, non quella dell'ultimo giro.
+
+        `_event_guard` e `cap_order_stake` leggono `_LAST_BANKROLL` quando il
+        chiamante non passa un bankroll: senza `set_last_bankroll` dentro il
+        dispatch lo stake sarebbe dimensionato sul capitale fresco e il cap
+        per evento su quello di un'ora prima (classe "due basi di misura"
+        del 21/09). Con `_LAST_BANKROLL` a 0 la guardia vale anche
+        `cap_unknown` -> nessun ordine, quindi il difetto sarebbe SILENZIOSO
+        a wallet piccolo.
+        """
+        _live_mode(monkeypatch)
+        monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 0.0)
+        _seed_validated_decision(mid="base1",
+                                 kickoff=datetime.now(timezone.utc)
+                                 + timedelta(minutes=20))
+        visti = []
+
+        def _fill(pick, stake, floor):
+            visti.append(round(auto_bet._LAST_BANKROLL, 6))
+            return {"ok": True, "market_id": "mx", "selection_id": 1,
+                    "bet_id": "b1", "status": "FULLY_FILLED",
+                    "price": floor, "stake": stake}
+
+        monkeypatch.setattr(auto_bet, "_live_fill", _fill)
+        auto_bet.t60_dispatch_pending(bankroll=34.0)
+        # La base registrata e' esattamente quella dello stake, e il cap per
+        # evento e' calcolabile durante il fill (prima sarebbe stato 0.0).
+        assert visti == [34.0]
+        assert auto_bet.event_stake_cap() == round(
+            34.0 * auto_bet.event_cap_pct(), 6)
+
     def test_senza_bet_id_non_scrive_la_riga(self, temp_db, monkeypatch):
         """Secondo punto di scrittura: senza bet_id NESSUNA riga live.
 

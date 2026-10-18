@@ -13524,3 +13524,22 @@ nuovo guardrail e lo scenario leggeva il cap invece della liquidita'. Corretto
 DERIVANDO lo stake dal cap (`EQUITY` dichiarata in un posto solo) e svuotando i
 claim fra gli scenari (`tracker.clear_event_claims`, nuovo: un claim persistente
 con TTL avrebbe fatto misurare al guardrail successivo il cap del precedente).
+
+**P6 — UNA SOLA BASE PER IL CAP PER EVENTO (`t60_dispatch_pending`).**
+`_event_guard` e `cap_order_stake` leggono `_LAST_BANKROLL` quando il chiamante
+non passa un bankroll. Il dispatch T-60 dimensionava lo stake sul capitale
+fresco (`sizing_equity(snap["equity"])`) ma NON registrava quella base: la
+guardia del cap per evento usava l'equity dell'ultimo giro di
+`run_today_bets` (fino a un'ora prima). Con `_LAST_BANKROLL` a 0 — processo
+appena riavviato, quindi nessun giro ancora — `event_stake_cap()` vale `0.0` e
+la guardia risponde `cap_unknown`: **nessun ordine, in silenzio**. Fix: una
+riga `set_last_bankroll(bankroll)` dopo il calcolo dello stake (= una sola
+base per stake, cap per ordine e cap per evento, stessa classe del 21/09
+"due basi di misura confrontate"). Tripwire
+`test_t60_breakers.TestFinestraT60.test_il_dispatch_registra_la_base_del_cap_per_evento`
+(asserisce `_LAST_BANKROLL == 34.0` DENTRO il fill e il cap calcolabile):
+**verificato che fallisce senza il fix** (`assert [0.0] == [34.0]`).
+Le altre corsie sono coperte: `run_today_bets` registra la base in FASE 2
+(`refresh_live_stakes` -> `set_last_bankroll(equity)`) e in `run_today_bets`
+stesso, e il smart hedging passa da `_live_fill` nello stesso processo dove
+`auto_bet_job` (60s, `first=60`) precede `hedge_job` (15', `first=210`).

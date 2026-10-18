@@ -1235,6 +1235,13 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
         logger.info("auto_bet: T60 stake sotto il minimo ordine "
                     "(bankroll %.2f): nessun ordine", bankroll or 0.0)
         return []
+    # STESSA BASE del cap per evento e del tetto per ordine (17/10/2026).
+    # `_event_guard` e `cap_order_stake` leggono `_LAST_BANKROLL` quando il
+    # chiamante non passa un bankroll: senza questa riga il dispatch T-60
+    # avrebbe usato l'equity dell'ULTIMO giro di `run_today_bets` (anche di
+    # un'ora prima) mentre lo stake era gia' dimensionato sul capitale fresco
+    # — la classe "due basi di misura confrontate" del 21/09.
+    set_last_bankroll(bankroll)
     now = datetime.now(timezone.utc)
     win_lo = now - timedelta(minutes=T60_WINDOW_MIN_MIN + 10)   # tolleranza dedup
     win_hi = now + timedelta(minutes=T60_WINDOW_MIN_MIN + 10)
