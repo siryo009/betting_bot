@@ -13444,9 +13444,12 @@ profilo dopo il deploy: guardare `/api/credits` (`rate_per_day`) e
 
 **Origine**: il proprietario ha notato un **residuo di -2,26 USDC** fra equity e
 P/L del ledger e un **ordine da 7,77 USDC (18,5% dell'equity) dove il cap
-per-ordine e' 12%**. Cinque interventi, tutti con test offline; **stato al
-18/10/2026 00:40 UTC: nel working tree, NON deployati** (eccezione: `06598bf`,
-`f222562`, `b906524` sono su `main`).
+per-ordine e' 12%**. Cinque interventi, tutti con test offline.
+**STATO: COMMITTATI E DEPLOYATI il 18/10/2026 01:16 UTC** (commit `c854bfc`,
+deployment `d0d20f01` SUCCESS, health 200; `_event_guard`, `stop_audit`,
+`cb2_soft_floor_status`, `sizing_equity` verificati sul container). Prima di
+quel deploy erano su `main` solo `06598bf` (dedup per market_id), `f222562`
+(fill rate per pick) e `b906524` (cache wallet).
 
 **P1 — CAP PER EVENTO (`auto_bet._event_guard` + `tracker.event_claims`).**
 La stessa partita arriva con **due `match_id`** (uno `sx-*`, uno the-odds-api):
@@ -13498,10 +13501,15 @@ quando l'equity si avvicina al muro patrimoniale (25 USDC), lasciando margine ai
 settlement aperti; non tocca la soglia del CB2 e si spegne con
 `CB2_SOFT_FLOOR_USDC=0`.
 
-**Stato operativo al 18/10 00:40 UTC**: equity **26,9201** (disponibile, 0 in
-gioco); **daily stop armato** fino alle **03:11** del 18/10, **weekly stop
-armato** fino alle **22:17** (drawdown 35,15% dal picco 41,5136); CB2 non
-armato. Il bot e' quindi fermo per due blocchi legittimi.
+**Stato operativo al 18/10 01:20 UTC (dopo il deploy)**: equity **26,9201**;
+**entrambi i blocchi azzerati** su decisione del proprietario (`/stopreset` non
+basta per il weekly: `clear_weekly_stop()` cancella solo il file e il drawdown
+rolling dal picco 41,5136 lo riarma SUBITO a -35%, quindi la finestra 168h e'
+stata **riavviata sulla base attuale** con backup dei tre file di stato
+(`.bak-<ts>`)). Al primo giro il bot ha ripreso a ordinare (2 ordini reali:
+tennis 3,18 @1,95 e MLS 3,23 @1,99, entrambi FULLY_FILLED).
+⚠️ **Margine patrimoniale sottile**: CB2 e' a **25 USDC**, equity 26,92 e ora
+6,41 USDC sono impegnati: ~1,92 USDC di margine prima dell'arresto totale.
 **Test**: `test_event_cap` (cap per evento, claim atomico, concorrenza),
 `test_stop_audit`, `test_event_identity`, `test_equity_reconciler` —
 **102 verdi** sui quattro file nuovi; **536** di regressione (`auto_bet` x2,
