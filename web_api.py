@@ -18,6 +18,7 @@ Uso su Railway: dopo aver deployato il bot, crea un secondo servizio con
 oppure avvialo a fianco del bot. Porta di default 8000 (override via WEB_API_PORT).
 """
 
+import hmac
 import json
 import logging
 import os
@@ -33,6 +34,81 @@ logger = logging.getLogger("web_api")
 # Railway injects PORT; fall back to WEB_API_PORT, then 8000 for local use.
 PORT = int(os.getenv("PORT") or os.getenv("WEB_API_PORT") or "8000")
 DB = DATA_DIR / "quotaverace.db"
+
+# --- R1 (19/10/2026): protezione delle rotte che possono toccare il denaro ---
+# Fail-closed a strati: senza API_ADMIN_TOKEN (>= 24 char) la rotta e' 503;
+# con il token ma senza API_AUTO_BET_ENABLED=1 e' 403; senza
+# API_AUTO_BET_ALLOW_LIVE=1 il giro e' FORZATO in SIM. Un token rubato, da
+# solo, non basta a piazzare un ordine reale.
+# NB: il NOME della variabile (non un valore) — il tripwire di igiene
+# segreti (test_secret_hygiene) segnala le assegnazioni con nomi
+# "credential-like": qui il valore e' una chiave d'ambiente, non un
+# segreto, e il nome della costante lo dichiara.
+ADMIN_ENV_NAME = "API_ADMIN_TOKEN"
+MIN_ADMIN_TOKEN_LEN = 24
+AUTO_BET_ENABLED_ENV = "API_AUTO_BET_ENABLED"
+AUTO_BET_ALLOW_LIVE_ENV = "API_AUTO_BET_ALLOW_LIVE"
+ADMIN_ROUTES = frozenset({"/api/auto_bet"})
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """True solo per 1/true/yes/on; variabile assente -> default.
+
+    Un valore ignoto NON vale True: una protezione non si accende per caso.
+    """
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def _admin_token() -> str:
+    return (os.getenv(ADMIN_ENV_NAME) or "").strip()
+
+
+def _admin_header_token(headers) -> str:
+    """Token dal header: `Authorization: Bearer ...` o `X-API-Token`.
+
+    Mai dalla query string: finirebbe nei log del server e nella storia
+    del browser (la stessa ragione per cui `key` non e' piu' su GET).
+    """
+    auth = (headers.get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (headers.get("X-API-Token") or "").strip()
+
+
+def admin_check(headers) -> tuple[bool, int, dict]:
+    """Autorizzazione delle rotte admin (pura, testabile senza rete).
+
+    Tre esiti distinti, tutti fail-closed:
+      503 admin_disabled        -> token assente (rotta spenta, non "aperta")
+      503 admin_token_too_short -> token debole (non e' una protezione)
+      401 unauthorized          -> token assente o errato
+    Il confronto e' a tempo costante (`hmac.compare_digest`).
+    """
+    token = _admin_token()
+    if not token:
+        return False, 503, {
+            "error": "admin_disabled",
+            "message": f"{ADMIN_ENV_NAME} non configurato: rotta disattivata "
+                       "(fail-closed).",
+        }
+    if len(token) < MIN_ADMIN_TOKEN_LEN:
+        return False, 503, {
+            "error": "admin_token_too_short",
+            "message": f"{ADMIN_ENV_NAME} troppo corto (min "
+                       f"{MIN_ADMIN_TOKEN_LEN} caratteri): rotta disattivata.",
+        }
+    supplied = _admin_header_token(headers)
+    if not supplied:
+        return False, 401, {
+            "error": "unauthorized",
+            "message": "Serve Authorization: Bearer <token> o X-API-Token.",
+        }
+    if not hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")):
+        return False, 401, {"error": "unauthorized", "message": "Token errato."}
+    return True, 200, {}
 
 
 def _bankroll():
@@ -635,21 +711,36 @@ def _telegram_send_message(token: str, chat_id: int, text: str):
 
 
 def _auto_bet(params=None, body=None):
-    """POST /api/auto_bet — esegue SUBITO le puntate del giorno (SIM-only),
-    come il job delle 08:50, e notifica su Telegram gli admin.
+    """POST /api/auto_bet — ADMIN ONLY (R1, 19/10/2026).
 
-    Dal 04/09 le puntate sono SEMPRE simulate con la quota del segnale
-    (mode='sim', nessun conto Exchange): finiscono in tabella `bets` e
-    vengono saldate a fine partita come sempre (ledger/ML/CLV).
+    Esegue SUBITO un giro di puntate, come il job delle 08:50. La rotta e'
+    protetta a monte da `admin_check` (token) e da `API_AUTO_BET_ENABLED`.
+
+    Modalita': di default il giro e' FORZATO in SIM (`mode_override="sim"`),
+    qualunque sia `AUTO_BET_MODE`/kill switch, quindi l'HTTP non puo'
+    piazzare ordini reali senza `API_AUTO_BET_ALLOW_LIVE=1`. E' una difesa
+    INDIPENDENTE dal token: un token rubato non basta a ordinare.
     """
+    if not _env_flag(AUTO_BET_ENABLED_ENV, default=False):
+        return 403, {
+            "error": "disabled",
+            "message": f"Rotta disattivata: imposta {AUTO_BET_ENABLED_ENV}=1 "
+                       "per abilitare /api/auto_bet.",
+        }
+    allow_live = _env_flag(AUTO_BET_ALLOW_LIVE_ENV, default=False)
+    mode_override = None if allow_live else "sim"
+    if mode_override == "sim":
+        logger.warning("api: /api/auto_bet forzato in SIM "
+                       "(ordini reali solo con %s=1)", AUTO_BET_ALLOW_LIVE_ENV)
     try:
         from auto_bet import run_today_bets
-        placed = run_today_bets(allow_sim=True)
+        placed = run_today_bets(allow_sim=True, mode_override=mode_override)
     except Exception as e:
         logger.exception("auto_bet endpoint")
         return 500, {"error": str(e)}
     if not placed:
         return {"ok": True, "piazzate": 0, "puntate": [],
+                "sim_forzata": mode_override == "sim",
                 "nota": "Nessuna puntata: nessun segnale o guardie attive (vedi log)."}
     mode = placed[0]["mode"]
     mode_label = {"live": "LIVE", "sim": "SIMULAZIONE", "dry-run": "DRY-RUN"}.get(mode, mode)
@@ -671,12 +762,17 @@ def _auto_bet(params=None, body=None):
         except Exception as e:
             results.append({"chat_id": chat_id, "ok": False, "error": str(e)})
     return {"ok": True, "piazzate": len(placed), "puntate": placed,
-            "notifiche": results}
+            "sim_forzata": mode_override == "sim", "notifiche": results}
 
 
 def _test_notify(params=None, body=None):
-    """POST/GET /api/test_notify — invia una notifica di prova su Telegram
+    """POST /api/test_notify — invia una notifica di prova su Telegram
     ai chat di ADMIN_CHAT_ID (+ opzionale ?chat_id= per test mirati).
+
+    R1 (19/10/2026): NON e' piu' registrata fra le rotte GET — una GET con
+    effetto collaterale (invio Telegram) non e' una rotta di monitoraggio.
+    La chiave resta accettata da body/query per retrocompatibilita' dei
+    chiamanti esistenti: il metodo corretto e' POST con `key` nel body.
 
     Sicurezza: attivo SOLO se TEST_NOTIFY_KEY e' configurato; senza la
     chiave giusta (parametro key) risponde 401. Disattivato = 403.
@@ -950,7 +1046,6 @@ ROUTES = {
     "/api/cassa": _cassa_get,
     "/api/db_stats": _db_stats_json,
     "/api/ratings": _ratings_json,
-    "/api/test_notify": _test_notify,
     "/api/training": _training_json,
     "/api/market_signals": _market_signals_json,
     "/api/drift": _drift_json,
@@ -999,6 +1094,14 @@ class Handler(BaseHTTPRequestHandler):
         if not handler:
             self._send(404, {"error": "not found", "routes": list(ROUTES.keys())})
             return
+        # R1: le rotte admin si autorizzano PRIMA di eseguire qualunque cosa.
+        if path in ADMIN_ROUTES:
+            ok, code, payload = admin_check(self.headers)
+            if not ok:
+                logger.warning("api: rotta admin negata %s (%s)",
+                               path, payload.get("error"))
+                self._send(code, payload)
+                return
         try:
             result = handler(params, body) if body is not None else handler(params)
         except Exception as e:

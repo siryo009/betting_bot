@@ -256,9 +256,12 @@ class TestCredits:
 class TestRoutes:
     def test_rotte_esistono(self):
         for route in ("/api/health", "/api/dashboard", "/api/storico", "/api/value",
-                      "/api/schedina", "/api/scan", "/api/test_notify",
+                      "/api/schedina", "/api/scan",
                       "/api/training", "/api/drift", "/api/calibration"):
             assert route in web_api.ROUTES
+        # R1 (19/10/2026): /api/test_notify NON e' piu' una GET — invia un
+        # messaggio Telegram, quindi e' un'azione e non una lettura.
+        assert "/api/test_notify" not in web_api.ROUTES
         assert "/api/test_notify" in web_api.POST_ROUTES
         assert "/api/auto_bet" in web_api.POST_ROUTES
 
@@ -279,16 +282,37 @@ class TestScanRemoved:
 
 
 class TestAutoBet:
+    """R1 (19/10/2026): la rotta richiede l'interruttore esplicito e, di
+    default, forza la SIM. Il gate del token e' coperto da test_api_auth_r1.py
+    (qui si misura il comportamento del gestore, senza rete)."""
+
+    def _enabled(self, monkeypatch):
+        monkeypatch.setenv("API_AUTO_BET_ENABLED", "1")
+        monkeypatch.delenv("API_AUTO_BET_ALLOW_LIVE", raising=False)
+
+    def test_spenta_senza_interruttore(self, monkeypatch):
+        monkeypatch.delenv("API_AUTO_BET_ENABLED", raising=False)
+        code, payload = web_api._auto_bet()
+        assert code == 403 and payload["error"] == "disabled"
+
     def test_nessuna_puntata(self, monkeypatch):
-        monkeypatch.setattr("auto_bet.run_today_bets", lambda **kw: [])
+        self._enabled(monkeypatch)
+        chiamate = []
+        monkeypatch.setattr("auto_bet.run_today_bets",
+                            lambda **kw: chiamate.append(kw) or [])
         d = web_api._auto_bet()
         assert d["ok"] is True and d["piazzate"] == 0
+        assert d["sim_forzata"] is True
+        assert chiamate == [{"allow_sim": True, "mode_override": "sim"}]
 
     def test_piazza_e_notifica_agli_admin(self, monkeypatch):
+        self._enabled(monkeypatch)
         fake = [{"home": "Birmingham City", "away": "Southampton",
                  "esito_key": "1", "price": 2.68, "stake": 5.0,
                  "mode": "dry-run"}]
-        monkeypatch.setattr("auto_bet.run_today_bets", lambda **kw: fake)
+        chiamate = []
+        monkeypatch.setattr("auto_bet.run_today_bets",
+                            lambda **kw: chiamate.append(kw) or fake)
         monkeypatch.setenv("ADMIN_CHAT_ID", "111")
         monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "tok")
         inviati = []
@@ -296,11 +320,15 @@ class TestAutoBet:
                             lambda t, c, text: inviati.append((c, text)))
         d = web_api._auto_bet()
         assert d["piazzate"] == 1
+        assert d["sim_forzata"] is True
+        assert chiamate == [{"allow_sim": True, "mode_override": "sim"}]
         assert len(inviati) == 1
         assert "PUNTATE AUTOMATICHE" in inviati[0][1]
         assert "DRY-RUN" in inviati[0][1]
 
     def test_errore_run_restituisce_500(self, monkeypatch):
+        self._enabled(monkeypatch)
+
         def boom(**kw):
             raise RuntimeError("Betfair giu'")
         monkeypatch.setattr("auto_bet.run_today_bets", boom)
