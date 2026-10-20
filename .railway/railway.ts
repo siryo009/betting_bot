@@ -416,6 +416,19 @@ export default defineRailway(() => {
       SX_BOOK_LEVELS_KEPT: preserve(),
       SX_PRIVATE_KEY: preserve(),
       T60_KILL_WALLET_USDC: preserve(),
+      // STOP-LOSS giornaliero/settimanale e TETTO ASSOLUTO per-ordine
+      // (21/10/2026). Con equity ~21 USDC e tetto dinamico 12% (2,53) un
+      // singolo ordine perso vale ~12% del capitale: le soglie 5%/12% si
+      // armavano al PRIMO ordine perso e fermavano le puntate 24h (misurato:
+      // nessun ordine dal 18/10 04:01 al 20/10 22:53). Le soglie larghe ~2
+      // (daily) e ~8 (weekly) ordini persi fanno misurare una SERIE, non un
+      // colpo; `ORDER_MAX_STAKE_USDC` fissa il rischio per ordine a 1 USDC
+      // finche' il capitale non torna sopra ~50.
+      DAILY_STOP_LOSS_PCT: preserve(),
+      DAILY_STOP_HOURS: preserve(),
+      WEEKLY_STOP_LOSS_PCT: preserve(),
+      WEEKLY_STOP_HOURS: preserve(),
+      WEEKLY_STOP_WINDOW_H: preserve(),
       // (la FINESTRA esecutiva ha le sue env dichiarate piu' sopra, nel
       // blocco dei circuit breakers T-60: T-180..T-2 dal 04/10/2026.)
       TENNIS_SANDBOX_ENABLED: preserve(),

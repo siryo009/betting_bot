@@ -498,15 +498,28 @@ def order_ceiling(bankroll: float | None = None) -> float:
     ignoto) -> il chiamante DEVE saltare l'ordine (fail-closed).
     """
     if T60_MAX_STAKE_USDC > 0:
-        return float(T60_MAX_STAKE_USDC)
-    try:
-        from decision.stake_engine import aggressive_cap_usdc
-        return float(aggressive_cap_usdc(
-            bankroll if bankroll is not None else _LAST_BANKROLL))
-    except Exception as exc:                                  # pragma: no cover
-        logger.warning("auto_bet: tetto per-ordine non calcolabile (%s): "
-                       "nessun ordine (fail-closed)", exc)
-        return 0.0
+        cap = float(T60_MAX_STAKE_USDC)
+    else:
+        try:
+            from decision.stake_engine import aggressive_cap_usdc
+            cap = float(aggressive_cap_usdc(
+                bankroll if bankroll is not None else _LAST_BANKROLL))
+        except Exception as exc:                              # pragma: no cover
+            logger.warning("auto_bet: tetto per-ordine non calcolabile (%s): "
+                           "nessun ordine (fail-closed)", exc)
+            return 0.0
+    # TETTO ASSOLUTO (`ORDER_MAX_STAKE_USDC`, 21/10/2026): vince sul dinamico
+    # come in `cap_order_stake`. Prima lo rispettava SOLO la corsia principale:
+    # misurato in produzione con `ORDER_MAX_STAKE_USDC=1.00` ed equity 21,10,
+    # `cap_order_stake(100)` dava 1.00 mentre `order_ceiling(21.10)` dava 2.532
+    # — cioe' il dispatch T-60 e CB3 (`validate_order_payload`) potevano
+    # mandare 2,53 USDC su un capitale di 21 (12%), il doppio del tetto
+    # dichiarato. Un tetto che vale su una corsia e non sull'altra non e' un
+    # tetto, e con 21 USDC di capitale e' la differenza fra perdere 1 o 2,53
+    # per ordine.
+    if ORDER_MAX_STAKE_USDC > 0:
+        cap = min(cap, float(ORDER_MAX_STAKE_USDC))
+    return cap
 
 
 def t60_stake(bankroll: float, *, mode: str = "sim") -> float:

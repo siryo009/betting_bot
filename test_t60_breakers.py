@@ -140,6 +140,31 @@ class TestCB1HardCap:
         sd = size(signal, risk, bankroll=1000.0, limits=limits, mode="live")
         assert sd.stake <= rec_stake + 1e-9
 
+    def test_tetto_assoluto_per_ordine_vale_anche_sul_t60(self, monkeypatch):
+        """`ORDER_MAX_STAKE_USDC` e' un tetto ASSOLUTO su OGNI corsia.
+
+        Regressione del 21/10/2026: con `ORDER_MAX_STAKE_USDC=1.00` ed equity
+        21,10 `cap_order_stake` dava 1.00 ma `order_ceiling` dava 2.532, quindi
+        il dispatch T-60 e CB3 potevano ordinare il 12% del capitale su un
+        tetto dichiarato di 1 USDC. Un tetto che vale su una corsia e non
+        sull'altra non e' un tetto.
+        """
+        monkeypatch.setattr(auto_bet, "T60_MAX_STAKE_USDC", 0.0)
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 1.00)
+        assert auto_bet.order_ceiling(21.10) == 1.00
+        assert auto_bet.order_ceiling(10_000.0) == 1.00
+        assert auto_bet.t60_stake(21.10, mode="live") == 1.0
+        # `enforce_order_ceiling` (torneo/rush) non puo' sfondarlo.
+        cands = [{"match_id": "m1", "esito": "1", "stake": 2.53,
+                  "quota": 1.70, "mercato": "1X2", "league": "Serie A",
+                  "kickoff": datetime.now(timezone.utc).isoformat()}]
+        kept, info = auto_bet.enforce_order_ceiling(cands, bankroll=21.10)
+        assert info["cap"] == 1.00
+        assert kept and kept[0]["stake"] <= 1.00 + 1e-9
+        # Senza il tetto assoluto torna il cap dinamico (reversibile).
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.0)
+        assert auto_bet.order_ceiling(21.10) > 1.0
+
     def test_cap_assoluto_configurabile(self, monkeypatch):
         """Env T60_MAX_STAKE_USDC=0.50: tetto assoluto ripristinabile."""
         monkeypatch.setattr(auto_bet, "T60_MAX_STAKE_USDC", 0.50)
