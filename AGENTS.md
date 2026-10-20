@@ -13594,3 +13594,84 @@ auto_bet, bot, web_api, decision, agents` OK; **69 test** (`test_team_names` +
 `python3` e' un symlink all'interprete di sistema e' **legata alla versione**:
 aggiornare Ubuntu senza ricrearla la rompe in modo silenzioso. `venv-*/` e'
 ora in `.gitignore` (il backup non deve finire in un commit).
+
+### 21/10/2026 — batteria di AGENTI, live riarmato, e la scala di protezioni che ha smesso di mangiare il capitale
+
+**Contesto misurato**: equity **21,10 USDC** (19,26 liberi + 1,84 in gioco), 81
+bet live totali, **-15,39 USDC** (ROI -7,4% su 208 puntati). Il live era acceso
+ma **non poteva produrre volume**: con tetto per-ordine 12% (2,53) un solo
+ordine perso vale ~12% del capitale, mentre lo stop giornaliero era al **5%** e
+il settimanale al **12%**: il PRIMO ordine perso fermava le puntate 24h. Misura
+del sintomo: **nessun ordine dal 18/10 04:01 al 20/10 22:53** (2,7 giorni).
+
+**1) La scala di protezioni (env, tutte `preserve()` in `.railway/railway.ts`).**
+Il criterio e' uno: la dimensione di UNA bet deve stare dentro il freno che
+misura una SERIE, e il pavimento deve fermare il sistema prima che il capitale
+sia mangiato.
+
+| leva | prima | ora | perche' |
+|---|---|---|---|
+| `ORDER_MAX_STAKE_USDC` | 0 (dinamico 12% = 2,53) | **1,00** | rischio per ordine 4,7% dell'equity invece di 12%: il freno prova a sopravvivere a una serie, non a un colpo |
+| `T60_KILL_WALLET_USDC` (CB2) | 1 (muro di fatto spento) | **10** | con 21 USDC il pavimento 1 proteggeva 1 USDC: a 10 si ferma **conservando meta' del capitale** |
+| `OPEN_EXPOSURE_CAP_PCT` | 0,70 (14,8 USDC) | **0,30** (6,33 USDC) | massimo ~6 ordini da 1 USDC in gioco insieme |
+| `DAILY_STOP_LOSS_PCT` | 0,05 (1,05 USDC) | **0,25** (5,28) | ~5 ordini persi, non uno |
+| `WEEKLY_STOP_LOSS_PCT` | 0,12 (2,53) | **0,40** (8,44) | ~8 ordini persi |
+| `TOURNAMENT_MODE` | 1 | **0** | il torneo Gridiron e' finito il 20/10 13:00Z: il layer x1,5 alzava lo stake per zero punti |
+| `GRIDIRON_ODDS_MAX` | 3,00 | **2,00** | stessa fascia del resto del progetto (la fascia >2,30 ha perso -50,7% storico) |
+
+**Perche' il pavimento a 10 e non a 1**: il proprietario aveva chiesto 1 per
+"andare live adesso". Con 1 USDC il sistema puo' letteralmente azzerarsi. A 10
+il circuito ferma tutto (serve `/t60reset` per ripartire) **lasciando in cassa
+meta' del capitale**: e' l'unico muro che ha ancora senso con 21 USDC, ed e'
+reversibile con una env.
+
+**2) BUG REALE FIXATO (`order_ceiling`, commit `7d0e57e` su `main`, deploy
+`da9b6a6b`/redeploy verificato).** `ORDER_MAX_STAKE_USDC` era rispettato SOLO da
+`cap_order_stake` (corsia principale). `order_ceiling` — che alimenta il
+dispatch T-60, CB3 (`validate_order_payload`) ed `enforce_order_ceiling` —
+continuava a tornare il **dinamico**: misurato sul container, con il tetto
+assoluto a 1,00, `cap_order_stake(100)=1.00` ma `order_ceiling(21.10)=2.532`.
+Cioe' **T-60 poteva ordinare 2,5x il tetto dichiarato**. Ora il tetto assoluto e'
+un `min()` anche in `order_ceiling`, con tripwire
+(`test_t60_breakers.test_tetto_assoluto_per_ordine_vale_anche_sul_t60`: 4
+assert, incluse `t60_stake(21.10,'live')==1.0` e `enforce_order_ceiling` che non
+sfonda). Verificato in produzione: `order_ceiling(21.1) = 1.0`,
+`t60_stake(21.1,live) = 1.0`.
+
+**3) LA BATTERIA DI AGENTI (`research_isolated/agents.sh`, nuovo).** La sessione
+tmux era morta col workspace (era gia' successo) e "gli agenti" non erano
+riavviabili: ora un launcher ricrea **6 pane** con un comando — 0 `live` (log
+di produzione in stream), 1 `clv` (validazione indipendente), 2 `shadow`
+(raccolta prospettica in loop), 3 `ev` (calibrazione EV), 4 `next` (protocollo,
+report-only), 5 `edge` (edge hunt). Tutti leggono lo **snapshot** via
+`QV_RESEARCH_DB` (letture read-only, zero ordini, zero crediti). Uso:
+`./research_isolated/agents.sh [status|kill]`.
+
+**4) ESITO DEGLI AGENTI SUL CAMPIONE FRESCO (81 bet, 2219 previsioni, 475 CLV).**
+- **CLV: ancora INSUFFICIENTE, non replicabile.** 0 giorni prospettici su 7,
+  servono >= 30 segnali chiusi con chiusura misurabile; il registro shadow e'
+  vuoto di chiusure. Nessuna promozione.
+- **EV calibration: TENNIS n=41, EV dichiarato +5,45% vs realizzato -7,53%
+  (bias +13,0 pp)**, Brier modello 0,2258 ~ mercato 0,2241 → il mercato resta
+  migliore, peso modello w=0,40. E' la conferma misurata che l'EV del tennis e'
+  gonfiato.
+- **Edge hunt**: la raccomandazione operativa era "max 1,00 USDC per ordine
+  finche' l'equity non supera 50" + "stop se 10 puntate chiudono con P/L
+  < -3,00". La prima e' applicata (`ORDER_MAX_STAKE_USDC`); la seconda e'
+  coperta dalla scala daily/weekly + pavimento CB2.
+
+**5) DOVE SI PERDEVA DAVVERO (misura, non ipotesi).** Sulle 80 bet chiuse: la
+fascia **>2,30 ha perso -13,78 (-50,7%, n=17)** e la **1,50-1,80 -10,78
+(-16,2%, n=21)**, mentre **1,20-1,50 ha reso +8,71 (+18,2%, n=14)**. Ma
+l'era recente (dal 14/10) e' negativa in TUTTE le fasce (-25,08 su 25 bet): la
+causa non e' il prezzo, e' la **TAGLIA** (stake 2,2-5,6 su un capitale di 21-46).
+Le perdite singole piu' grosse: #55 -5,61 · #56 -5,14 · #73 -4,98 (doppio ordine
+EFL) · #60 -4,47 · #76/#78 -3,23. Con stake 1,00 le stesse 26 bet avrebbero
+perso ~5,5 USDC invece di 25: **il tetto a 1 USDC e' la leva che conta**.
+
+⚠️ **Da sapere**: i freni ora misurano una serie, ma il sistema resta a
+**-7,4% ROI** sul suo storico: con 21 USDC la crescita non puo' venire
+dall'aumento dello stake, puo' venire solo dalla **selettivita'** (EV/bias
+tennis da correggere) e dal **CLV** quando il campione prospettico dira' se
+l'edge esiste. Prossimo passo naturale: usare il bias misurato (+13pp sul
+tennis) per alzare `TENNIS_EV_MIN` e rileggere il CLV fra 3-4 giorni.
