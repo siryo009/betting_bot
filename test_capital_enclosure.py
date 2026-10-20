@@ -502,3 +502,97 @@ def _seed_one(monkeypatch, quota=1.65, strong=False):
     _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
                       quota=quota,
                       status="strong_value" if strong else "value")
+
+
+# ---------------------------------------------------------------------------
+# 4. TETTO PER-ORDINE AL PUNTO UNICO (21/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestTettoAlPuntoUnico:
+    """`_live_fill` e' l'unico punto da cui passa un ordine reale: il tetto
+    per-ordine deve valere LI', non solo in FASE 2 della corsia principale.
+
+    Il varco e' STRUTTURALE: `enforce_order_ceiling` vive in FASE 2 della
+    corsia principale, quindi chi arriva a `_live_fill` per un'altra strada
+    (gambe di copertura, resting, catena chief) non lo attraversa e il suo
+    stake non viene riportato al tetto. La bet #81 a 1,84 (20/10 22:53) e'
+    ANTERIORE al deploy delle 23:12 che ha portato il tetto a 1,00: qui si
+    chiude il varco prima che produca un ordine fuori regola, non si corregge
+    un caso gia' accaduto.
+    """
+
+    class _Prov:
+        name = "sxbet"
+
+        def __init__(self, order=None):
+            self.order = order
+            self.place_calls = []
+
+        def best_back_price(self, market_id, selection_id):
+            return None                     # nessun floor che blocchi
+
+        def place_limit_order(self, market_id, selection_id, side, price,
+                              size, persistence="LAPSE"):
+            self.place_calls.append((market_id, selection_id, side, price, size))
+            self.order = self.order or type("_O", (), {
+                "ok": True, "bet_id": "0xcap", "status": "FULLY_FILLED",
+                "price": price, "price_matched": price, "requested": size,
+                "size_matched": size, "error": None})()
+            return self.order
+
+    def _setup(self, monkeypatch, prov):
+        import execution_engine as ee
+        engine = type("_Eng", (), {"provider": prov})()
+        monkeypatch.setattr(ee, "ExecutionEngine", lambda *a, **k: engine)
+        monkeypatch.setattr(ee, "resolve_match_market",
+                            lambda *a, **k: {"market_id": "m-home",
+                                             "selection_id": 1,
+                                             "event_name": "Osasuna vs Getafe",
+                                             "label": "1", "market_type": "1X2",
+                                             "line": None, "provider": "sxbet"})
+        monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 100.0)
+        monkeypatch.setattr(auto_bet, "DRY_RUN", False)
+
+    def _pick(self):
+        return {"match_id": "sx-cap-1", "home": "Osasuna", "away": "Getafe",
+                "esito_key": "1", "mercato": "1X2",
+                "commence": (datetime.now(timezone.utc)
+                             + timedelta(hours=3)).isoformat().replace("+00:00", "Z")}
+
+    def test_stake_oltre_il_tetto_viene_ridotto_prima_del_post(self, monkeypatch, temp_db):
+        prov = self._Prov()
+        self._setup(monkeypatch, prov)
+        res = auto_bet._live_fill(self._pick(), stake=1.84, floor=1.65)
+        assert res and res["ok"] is True
+        # 1.50 = ORDER_MAX_STAKE_USDC del fixture (tetto assoluto reale)
+        assert prov.place_calls[0][4] == 1.50
+        assert res["stake"] == 1.50
+
+    def test_stake_entro_il_tetto_non_viene_toccato(self, monkeypatch, temp_db):
+        prov = self._Prov()
+        self._setup(monkeypatch, prov)
+        res = auto_bet._live_fill(self._pick(), stake=1.20, floor=1.65)
+        assert res and res["ok"] is True
+        assert prov.place_calls[0][4] == 1.20
+
+    def test_sotto_il_ticket_dopo_il_tetto_non_parte(self, monkeypatch, temp_db):
+        """Tetto 0.50 < ticket 1.00: nessun ordine, mai un importo diverso."""
+        prov = self._Prov()
+        self._setup(monkeypatch, prov)
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.50)
+        monkeypatch.setattr(auto_bet, "aggressive_min_ticket", lambda: 1.00)
+        res = auto_bet._live_fill(self._pick(), stake=1.84, floor=1.65)
+        assert res is None and prov.place_calls == []
+
+    def test_tetto_non_calcolabile_fail_closed(self, monkeypatch, temp_db):
+        prov = self._Prov()
+        self._setup(monkeypatch, prov)
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.0)
+        monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 0.0)
+        res = auto_bet._live_fill(self._pick(), stake=1.00, floor=1.65)
+        assert res is None and prov.place_calls == []
+
+    def test_choke_ceiling_e_puro_e_leggibile(self):
+        cap = auto_bet._choke_ceiling({"match_id": "m", "esito_key": "1"}, 1.84)
+        assert cap == 1.50
+        assert auto_bet._choke_ceiling({"match_id": "m", "esito_key": "1"}, 0.0) is None

@@ -554,3 +554,39 @@ class TestTripwire:
     def test_log_isolato_nel_conftest(self):
         src = Path("conftest.py").read_text(encoding="utf-8")
         assert "HEDGE_LOG" in src
+
+
+class TestTettoPerOrdineSulleGambe:
+    """21/10/2026: le gambe di copertura rispettano il TETTO PER-ORDINE.
+
+    `hedge_plan` dimensionava H_i = f x S x Oe / O_i e lo confrontava solo con
+    `HEDGE_MAX_STAKE_USDC` (5,00), cioe' un ordine da 1,84 sarebbe passato con
+    il tetto per-ordine a 1,00. Il piano ora nasce con il cap che verra'
+    applicato davvero, cosi' una copertura impossibile e' dichiarata e NON si
+    piazza (una copertura parziale non blocca nulla: e' solo un secondo
+    ordine). Chiude un varco STRUTTURALE: nessun ordine e' ancora partito
+    fuori regola (il tetto a 1,00 e' del 20/10 23:12).
+    """
+
+    def test_gambe_oltre_il_tetto_non_piazzano(self, monkeypatch):
+        import auto_bet
+        monkeypatch.setenv("HEDGE_MAX_STAKE_USDC", "5.0")
+        monkeypatch.setattr(auto_bet, "order_ceiling", lambda *a, **k: 1.0)
+        plan = sh.hedge_plan(1.0, 3.40, {"X": 1.88, "2": 1.85}, f=1.0)
+        assert plan["ok"] is False
+        assert plan["reason"] == sh.REASON_ABOVE_CAP
+        assert plan["legs"] and plan["legs"][0]["stake"] > 1.0
+
+    def test_con_tetto_capiente_il_piano_prosegue(self, monkeypatch):
+        import auto_bet
+        monkeypatch.setenv("HEDGE_MAX_STAKE_USDC", "5.0")
+        monkeypatch.setattr(auto_bet, "order_ceiling", lambda *a, **k: 5.0)
+        plan = sh.hedge_plan(1.0, 3.40, {"X": 1.88, "2": 1.85}, f=1.0)
+        assert plan["reason"] != sh.REASON_ABOVE_CAP
+
+    def test_tetto_non_leggibile_usa_il_proprio_limite(self, monkeypatch):
+        import auto_bet
+        monkeypatch.setenv("HEDGE_MAX_STAKE_USDC", "2.0")
+        monkeypatch.setattr(auto_bet, "order_ceiling",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+        assert sh.max_stake_usdc() == 2.0

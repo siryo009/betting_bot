@@ -120,7 +120,31 @@ def min_stake_usdc() -> float:
 
 
 def max_stake_usdc() -> float:
-    return max(0.0, _num("HEDGE_MAX_STAKE_USDC", 5.0))
+    """Tetto per GAMBA = il piu' stretto fra il proprio e il TETTO PER-ORDINE.
+
+    PERCHE' (21/10/2026). Le gambe non passano da `enforce_order_ceiling`:
+    `hedge_plan` dimensiona H_i = f x S x Oe / O_i e lo confrontava solo con
+    `HEDGE_MAX_STAKE_USDC` (5,00). Misurato in produzione con il tetto
+    per-ordine a **1,00**: la bet #81 e' partita a **1,84** — un ordine reale
+    al 184% del tetto, su una corsia che non lo conosceva. Ora il piano nasce
+    con il cap che verra' applicato davvero: se le gambe non ci stanno il
+    piano e' `above_cap` e NON si piazza una copertura parziale (una copertura
+    a meta' non blocca nulla, e' solo un secondo ordine esposto).
+
+    Fail-open SOLO sulla misura: se il tetto non e' leggibile si usa il
+    proprio limite — il punto unico degli ordini (`auto_bet._choke_ceiling`)
+    applica comunque il cap prima di ogni POST.
+    """
+    hi = max(0.0, _num("HEDGE_MAX_STAKE_USDC", 5.0))
+    try:
+        import auto_bet
+        cap = float(auto_bet.order_ceiling() or 0.0)
+    except Exception as e:                                    # pragma: no cover
+        logger.debug("smart_hedging: tetto per-ordine non leggibile (%s)", e)
+        return hi
+    if cap <= 0:
+        return hi
+    return min(hi, cap) if hi > 0 else cap
 
 
 def min_minutes() -> float:

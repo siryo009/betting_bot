@@ -510,13 +510,12 @@ def order_ceiling(bankroll: float | None = None) -> float:
             return 0.0
     # TETTO ASSOLUTO (`ORDER_MAX_STAKE_USDC`, 21/10/2026): vince sul dinamico
     # come in `cap_order_stake`. Prima lo rispettava SOLO la corsia principale:
-    # misurato in produzione con `ORDER_MAX_STAKE_USDC=1.00` ed equity 21,10,
+    # misurato in produzione con `ORDER_MAX_STAKE_USDC=1.00` e equity 21,10,
     # `cap_order_stake(100)` dava 1.00 mentre `order_ceiling(21.10)` dava 2.532
     # — cioe' il dispatch T-60 e CB3 (`validate_order_payload`) potevano
     # mandare 2,53 USDC su un capitale di 21 (12%), il doppio del tetto
-    # dichiarato. Un tetto che vale su una corsia e non sull'altra non e' un
-    # tetto, e con 21 USDC di capitale e' la differenza fra perdere 1 o 2,53
-    # per ordine.
+    # dichiarato e 2,5x il rischio per ordine deciso dal proprietario. Un
+    # tetto che vale su una corsia e non sull'altra non e' un tetto.
     if ORDER_MAX_STAKE_USDC > 0:
         cap = min(cap, float(ORDER_MAX_STAKE_USDC))
     return cap
@@ -4809,6 +4808,71 @@ def _market_bet_open(market_id, selection_id) -> bool:
         return True
 
 
+def _choke_ceiling(pick: dict, stake: float,
+                   trace: dict | None = None) -> float | None:
+    """Riporta lo stake al TETTO PER-ORDINE nel PUNTO UNICO degli ordini.
+
+    PERCHE' ESISTE (21/10/2026). `enforce_order_ceiling` sta in FASE 2 della
+    corsia principale, quindi i chiamanti che arrivano a `_live_fill` per
+    altre strade (le GAMBE dello smart hedging, `resting_orders`, la catena
+    chief) NON lo attraversano: il loro stake nasce da un dimensionamento
+    proprio (`hedge_plan` lo confrontava solo con `HEDGE_MAX_STAKE_USDC` =
+    5,00) e nessuno lo riportava al tetto. Con `ORDER_MAX_STAKE_USDC=1.00`
+    una gamba da 1,84 sarebbe passata: il cap rispettato da una corsia e non
+    dall'altra non e' un cap.
+    ⚠️ Il caso e' STRUTTURALE, non ancora materializzato: la bet #81 a 1,84
+    (20/10 22:53) e' ANTERIORE al deploy delle 23:12 che ha portato il tetto
+    a 1,00, quindi non e' un aggiramento avvenuto. Questa guardia chiude il
+    varco prima che si apra, e non lascia al prossimo layer la scelta del
+    rischio per ordine.
+
+    Da qui passano TUTTI gli ordini reali, quindi il tetto si applica a
+    monte del controllo di profondita', della guardia per-evento e del
+    percorso RESTING: nessun layer puo' sfondarlo e nessuno stake viene
+    deciso su un capitale diverso da quello che il tetto misura.
+
+    Fail-closed su tetto non calcolabile (0.0) e sotto il ticket minimo
+    (mai un importo diverso dal tetto per far passare un ordine).
+    Ritorna lo stake effettivo, oppure None se l'ordine non deve partire.
+    """
+    try:
+        stake_f = float(stake or 0.0)
+    except (TypeError, ValueError):
+        stake_f = 0.0
+    mid = pick.get("match_id")
+    esito = pick.get("esito_key")
+    if stake_f <= 0:
+        logger.info("auto_bet: %s (%s) stake non valido (%.4f): nessun "
+                    "ordine", mid, esito, stake_f)
+        return None
+    capped = cap_order_stake(stake_f)           # tetto assoluto o % del bankroll
+    if capped is None or capped <= 0:
+        logger.warning("auto_bet: %s (%s) tetto per-ordine non calcolabile: "
+                       "nessun ordine (fail-closed)", mid, esito)
+        if trace is not None:
+            trace["outcome"] = "skipped_cap_unknown"
+        return None
+    if capped + 1e-9 < stake_f:
+        logger.info("auto_bet: %s (%s) stake %.2f riportato al tetto per-ordine "
+                    "%.2f (equity %.2f): nessun layer puo' superarlo",
+                    mid, esito, stake_f, capped, float(_LAST_BANKROLL or 0.0))
+        if trace is not None:
+            trace["capped_from"] = round(stake_f, 4)
+        stake_f = float(round(capped, 2))
+    try:
+        ticket = aggressive_min_ticket()
+    except Exception:                                         # pragma: no cover
+        ticket = MIN_STAKE_EUR
+    if stake_f + 1e-9 < float(ticket):
+        logger.info("auto_bet: %s (%s) stake %.2f sotto il ticket %.2f dopo il "
+                    "tetto: salto (fail-closed)", mid, esito, stake_f,
+                    float(ticket))
+        if trace is not None:
+            trace["outcome"] = "skipped_below_ticket"
+        return None
+    return stake_f
+
+
 def _live_fill(pick: dict, stake: float, floor: float) -> dict | None:
     """Piazza un ordine REALE e REGISTRA il tentativo (fill rate per PICK).
 
@@ -4855,6 +4919,11 @@ def _live_fill_impl(pick: dict, stake: float, floor: float,
         logger.warning("auto_bet: DRY-RUN — _live_fill INTERCETTATO per %s "
                        "(%s): nessun POST a SX Bet",
                        pick.get("match_id"), pick.get("esito_key"))
+        return None
+    # TETTO PER-ORDINE al PUNTO UNICO: vale anche per chi non passa da
+    # `enforce_order_ceiling` (gambe hedge, resting, catena chief).
+    stake = _choke_ceiling(pick, stake, trace)
+    if stake is None:
         return None
     try:
         import execution_engine as ee
@@ -5177,7 +5246,8 @@ def _league_multiplier(league: str | None) -> float:
 
 
 def run_today_bets(stake_eur: float | None = None,
-                   allow_sim: bool = True) -> list[dict]:
+                   allow_sim: bool = True,
+                   mode_override: str | None = None) -> list[dict]:
     """Piazza le puntate del giorno (SIM di default, LIVE con
     AUTO_BET_MODE=live + provider reale). Ritorna il riepilogo.
 
@@ -5196,14 +5266,31 @@ def run_today_bets(stake_eur: float | None = None,
             disponibile). Default BET_STAKE_EUR env o 5.00.
         allow_sim: True -> in assenza di provider reale si ripiega sulla
             simulazione; False -> fail-closed (nessuna puntata).
+        mode_override: forza la modalita' del giro. Accettati SOLO "sim" e
+            "off": l'override puo' abbassare (impedire ordini reali), mai
+            alzare. Un valore diverso -> nessuna puntata (fail-closed).
     """
+    # R1 (19/10/2026): override di modalita' SOLO verso il basso.
+    # Un chiamante (es. POST /api/auto_bet) puo' impedire l'esecuzione reale,
+    # MAI imporla. Valore non ammesso -> fail-closed, mai ignorato in
+    # silenzio (un "live" scritto per errore non deve diventare un ordine).
+    if mode_override is not None and mode_override not in ("sim", "off"):
+        logger.error("auto_bet: mode_override=%r non ammesso (solo sim/off): "
+                     "nessuna puntata", mode_override)
+        return []
+
     # Default stake fisso (fallback se adaptive staking non disponibile)
     stake_eur_default = stake_eur if stake_eur is not None else float(
         os.getenv("BET_STAKE_EUR", str(BET_STAKE_DEFAULT_EUR)))
 
     # --- Modalita' effettiva del giro (prima dei candidati: decide il
-    # --- bankroll del Kelly).
-    mode = _execution_mode(allow_sim)
+    # --- bankroll del Kelly). L'override vince sulla modalita' richiesta,
+    # --- MA il kill switch resta un'autorita' superiore: un override non
+    # --- puo' riaccendere cio' che l'operatore ha spento (ne' live ne' sim).
+    if mode_override is not None:
+        mode = "off" if _requested_mode() == "off" else mode_override
+    else:
+        mode = _execution_mode(allow_sim)
     if mode == "off":
         # Kill-switch /autobet off oppure fail-closed senza provider reale.
         logger.error("auto_bet: modalita' 'off' (kill-switch o fail-closed): "
