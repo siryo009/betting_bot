@@ -303,6 +303,11 @@ export default defineRailway(() => {
       ORDER_FIXED_STAKE_USDC: preserve(),
       ORDER_MAX_STAKE_USDC: preserve(),
       T60_MAX_STAKE_USDC: preserve(),
+      // SOGLIA MORBIDA del CB2 (21/10/2026): con l'equity che si avvicina al
+      // muro patrimoniale (10 USDC) si smette di APRIRE nuove puntate
+      // lasciando respirare i settlement aperti, invece di arrivare al muro
+      // duro e restare fermi finche' un admin non fa `/t60reset`. 0 = spenta.
+      CB2_SOFT_FLOOR_USDC: preserve(),
       // Finestra esecutiva **T-180..T-2** (04/10/2026, direttiva
       // "Ottimizzazione Quantitativa" punto 3): era T-60..T-5. L'apertura a
       // 3 ore cattura le formazioni ufficiali e i volumi dei sindacati

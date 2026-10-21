@@ -13675,3 +13675,59 @@ dall'aumento dello stake, puo' venire solo dalla **selettivita'** (EV/bias
 tennis da correggere) e dal **CLV** quando il campione prospettico dira' se
 l'edge esiste. Prossimo passo naturale: usare il bias misurato (+13pp sul
 tennis) per alzare `TENNIS_EV_MIN` e rileggere il CLV fra 3-4 giorni.
+
+### Tetto per-ordine al PUNTO UNICO + primo giorno interamente al cap 1,00 (20-21/10/2026)
+
+**Contesto misurato (21/10, container AMS, sola lettura).** Live e senza blocchi:
+kill switch `live` + `provider_ready`, nessuno stop (daily 25%, weekly 40%), CB2
+(10 USDC) non armato, `ORDER_MAX_STAKE_USDC=1.00`, `OPEN_EXPOSURE_CAP_PCT=0.30`,
+`TOURNAMENT_MODE=0`, `TENNIS_ODDS_MAX=2.30`. Ledger live: **81 puntate**,
+209,98 USDC puntati, **P/L -15,39**, 40 vinte su 80 chiuse (**ROI -7,3%**).
+Cash: equity **21,10** (19,26 liberi + 1,84 in gioco), tetto per-ordine **1,00**,
+recinto 30% = **6,33**.
+
+**Il difetto chiuso (strutturale, NON materializzato).** `enforce_order_ceiling`
+vive in FASE 2 della corsia principale: chi arriva a `_live_fill` per un'altra
+strada — **gambe dello smart hedging**, `resting_orders`, catena chief — non lo
+attraversa, e `hedge_plan` confrontava le gambe solo con `HEDGE_MAX_STAKE_USDC`
+(5,00). Con il tetto a 1,00 una gamba da 1,84 sarebbe passata.
+⚠️ **Correzione di evidenza**: la bet #81 (`sx-L20525973`, NCAAF, stake **1,84**)
+NON e' un aggiramento — e' delle **22:53**, mentre il deploy che ha portato
+`ORDER_MAX_STAKE_USDC=1,00` e' delle **23:12** (`/app/auto_bet.py` mtime). Sotto
+il cap precedente (12% di 21,10 = 2,53) era regolare. Un log che accusa il
+codice per un caso mai accaduto e' lo stesso difetto di un log che mente.
+
+**Fix (commit `23d4f03`, deploy verificato).**
+- `auto_bet._choke_ceiling(pick, stake, trace)`: il tetto si applica nel
+  **punto unico** da cui passa ogni ordine reale, **a monte** del controllo di
+  profondita', della guardia per-evento e del percorso RESTING. Fail-closed su
+  tetto non calcolabile e sotto il ticket minimo; in `fill_rate` gli esiti
+  diventano `skipped_cap_unknown` / `skipped_below_ticket`, cosi' un ordine
+  fermato dal cap non si confonde con uno mai tentato.
+- `smart_hedging.max_stake_usdc()` = `min(HEDGE_MAX_STAKE_USDC, tetto per-ordine)`:
+  il piano nasce con il cap che verra' applicato davvero, quindi una copertura
+  impossibile e' dichiarata `above_cap` e **non si piazza** (una copertura
+  parziale non blocca nulla: e' solo un secondo ordine esposto). Fail-open solo
+  sulla MISURA (il choke point applica comunque il cap).
+- `CB2_SOFT_FLOOR_USDC=12` impostata su Railway **e** dichiarata `preserve()`:
+  con equity ≤ 12 il bot smette di APRIRE nuove puntate lasciando respirare i
+  settlement aperti, invece di arrivare al muro duro di 10 USDC e restare fermo
+  finche' un admin non fa `/t60reset`.
+
+**Test.** `test_capital_enclosure.TestTettoAlPuntoUnico` (5: stake 1,84 → 1,50
+prima del POST, stake sotto il tetto intatto, tetto 0,50 < ticket → nessun
+ordine, tetto non calcolabile → fail-closed, `_choke_ceiling` puro) +
+`test_smart_hedging.TestTettoPerOrdineSulleGambe` (3: gambe oltre il tetto →
+`above_cap` e nessun ordine, tetto capiente → il piano prosegue, tetto
+illeggibile → si usa il proprio limite). **524 test** nei sette lotti del
+denaro verdi, **`verify_guardrails.py` A-J tutti bloccanti**, `railway config
+plan` = *already up to date* (0 to destroy), 0 marker di conflitto.
+
+**Perche' il capitale non cresce (la parte scomoda).** Con 1,00 USDC per ordine
+e -7,3% di ROI storico, la crescita non puo' venire dallo stake: **lo stake e' il
+freno, non il motore**. Le leve con dati a supporto sono (a) la **selettivita'**
+(il bias tennis misurato: EV dichiarato +5,45% contro realizzato -7,53% → la
+soglia della corsia vale ~13pp di EV dichiarato) e (b) il **CLV prospettico**
+(+4,54% medio, IC95 +2,98/+6,11, 45 campioni) che e' l'unico segnale di edge
+misurato. Il tetto a 1,00 va rialzato a mano solo quando il ledger mostra un
+ROI positivo su un campione che la `significance.py` dichiara conclusivo.
