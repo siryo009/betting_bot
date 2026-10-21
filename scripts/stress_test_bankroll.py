@@ -72,7 +72,9 @@ import numpy as np  # noqa: E402
 DEFAULT_STAKE_USDC = 1.50
 DEFAULT_MAX_STAKE_USDC = 1.50
 DEFAULT_CAP_PCT = 0.40
-#: Bankroll di riferimento della direttiva: 40% = 12.16 USDC -> 30.40 USDC.
+#: Bankroll del fallback DICHIARATO (12.16 USDC = 40% -> 30.40 USDC). Non e' il
+#: valore di produzione: a runtime si leggono equity e recinto da auto_bet
+#: (`enclosure()`), quindi il numero vive in un posto solo e non invecchia qui.
 DEFAULT_BANKROLL_USDC = 12.16 / DEFAULT_CAP_PCT
 
 DEFAULT_SIMS = 100_000
@@ -365,8 +367,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--bets", type=int, default=DEFAULT_BETS,
                     help=f"puntate per percorso (default {DEFAULT_BETS})")
     ap.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL_USDC,
-                    help="bankroll di partenza (default: quello del recinto "
-                         "12.16 USDC = 40%)")
+                    help="bankroll di partenza (default: i riferimenti di "
+                         f"produzione; fallback dichiarato {DEFAULT_BANKROLL_USDC:.2f} USDC "
+                         "se le costanti di auto_bet non sono leggibili)")
     ap.add_argument("--stake", type=float, default=None,
                     help="stake per ordine (default: lo stake fisso di produzione)")
     ap.add_argument("--cap-pct", type=float, default=None,

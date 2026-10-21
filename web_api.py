@@ -12,6 +12,8 @@ Endpoint:
   GET /api/drift             -> stato drift modello (verifica remota)
   GET /api/calibration       -> dashboard calibrazione (Brier/ECE, curve)
   GET /api/significance      -> significativita' statistica del campione
+  GET /api/agents            -> tabella di comando: stato di OGNI agente,
+                                sicurezza, capitale e flusso (sola lettura)
 
 Uso su Railway: dopo aver deployato il bot, crea un secondo servizio con
   startCommand = "python web_api.py"
@@ -22,7 +24,9 @@ import hmac
 import json
 import logging
 import os
+import re
 import sqlite3
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -48,7 +52,39 @@ ADMIN_ENV_NAME = "API_ADMIN_TOKEN"
 MIN_ADMIN_TOKEN_LEN = 24
 AUTO_BET_ENABLED_ENV = "API_AUTO_BET_ENABLED"
 AUTO_BET_ALLOW_LIVE_ENV = "API_AUTO_BET_ALLOW_LIVE"
-ADMIN_ROUTES = frozenset({"/api/auto_bet"})
+# P1 (19/10/2026): il permesso e' per METODO, non per path. `GET /api/cassa`
+# e' una lettura e resta pubblica; `POST`/`DELETE /api/cassa` scrivono il
+# ledger della cassa e richiedono il token admin. Proteggere il path a
+# prescindere dal metodo renderebbe illeggibile la pagina Cassa del sito.
+ADMIN_METHOD_ROUTES = {
+    "POST": frozenset({"/api/auto_bet", "/api/analisi", "/api/cassa"}),
+    "DELETE": frozenset({"/api/cassa"}),
+}
+# Unione dei path (compatibilita' con R1 e per i report diagnostici).
+ADMIN_ROUTES = frozenset().union(*ADMIN_METHOD_ROUTES.values())
+
+# Secondo interruttore esplicito per le scritture P1 (analisi/cassa): il token
+# dice CHI, questo dice SE. Stessa logica di API_AUTO_BET_ENABLED.
+WRITE_ENABLED_ENV = "API_WRITE_ENABLED"
+
+# Separazione lettura/admin: se API_READ_TOKEN e' configurato le GET lo
+# richiedono (o accettano il token admin); se non lo e' restano pubbliche
+# (il sito legge la dashboard). Con API_REQUIRE_READ_TOKEN=1 la modalita'
+# diventa fail-closed: senza token di lettura le GET rispondono 503.
+READ_ENV_NAME = "API_READ_TOKEN"
+READ_STRICT_ENV = "API_REQUIRE_READ_TOKEN"
+READ_PUBLIC_ROUTES = frozenset({"/api/health"})
+
+# Conferma di cancellazione: una DELETE senza questa stringa non tocca il
+# ledger. Protegge dall'errore (script, dito sbagliato), non dall'attaccante
+# (quello lo ferma il token): il valore va scritto per intero.
+CASSA_DELETE_CONFIRM = "CANCELLA_CASSA"
+
+# Redazione dei segreti nei log della richiesta: `log_message` stampa la
+# request line, quindi una chiave in query string finirebbe nel log. Il
+# pattern copre i nomi usati dal progetto (key/token/api_key/password).
+_SECRET_QUERY_RE = re.compile(
+    r"((?:key|token|api_key|apikey|password)=)[^&\s\"']+", re.IGNORECASE)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -111,6 +147,58 @@ def admin_check(headers) -> tuple[bool, int, dict]:
     return True, 200, {}
 
 
+def _read_token() -> str:
+    return (os.getenv(READ_ENV_NAME) or "").strip()
+
+
+def read_check(headers) -> tuple[bool, int, dict]:
+    """Autorizzazione delle rotte di LETTURA (separata da quella admin).
+
+    - API_READ_TOKEN assente: GET pubbliche (il sito legge i dati) salvo
+      API_REQUIRE_READ_TOKEN=1, che le spegne (503 fail-closed).
+    - API_READ_TOKEN presente: serve il token di lettura O quello admin.
+    - Token di lettura troppo corto: 503 (non e' una protezione).
+    """
+    read = _read_token()
+    if not read:
+        if _env_flag(READ_STRICT_ENV, default=False):
+            return False, 503, {
+                "error": "read_disabled",
+                "message": f"{READ_ENV_NAME} non configurato e "
+                           f"{READ_STRICT_ENV}=1: letture disattivate.",
+            }
+        return True, 200, {}
+    if len(read) < MIN_ADMIN_TOKEN_LEN:
+        return False, 503, {
+            "error": "read_token_too_short",
+            "message": f"{READ_ENV_NAME} troppo corto (min "
+                       f"{MIN_ADMIN_TOKEN_LEN} caratteri): letture disattivate.",
+        }
+    supplied = _admin_header_token(headers)
+    if not supplied:
+        return False, 401, {
+            "error": "unauthorized",
+            "message": "Serve Authorization: Bearer <token> o X-API-Token.",
+        }
+    admin = _admin_token()
+    ok = hmac.compare_digest(supplied.encode("utf-8"), read.encode("utf-8"))
+    if not ok and admin:
+        ok = hmac.compare_digest(supplied.encode("utf-8"), admin.encode("utf-8"))
+    if not ok:
+        return False, 401, {"error": "unauthorized", "message": "Token errato."}
+    return True, 200, {}
+
+
+def _write_disabled() -> tuple[int, dict] | None:
+    """Gate delle scritture P1: None = abilitate, altrimenti (codice, corpo)."""
+    if _env_flag(WRITE_ENABLED_ENV, default=False):
+        return None
+    return 403, {
+        "error": "disabled",
+        "message": f"Scritture disattivate: imposta {WRITE_ENABLED_ENV}=1.",
+    }
+
+
 def _bankroll():
     return float(os.getenv("BANKROLL_DEFAULT", "100.0"))
 
@@ -168,13 +256,10 @@ def _dashboard_json(params=None):
     conn.close()
     roi = summary.get("roi", 0.0)
     closed = summary.get("closed", 0)
-    # Salda previsioni e cassa in modo idempotente prima di mostrare i numeri.
-    try:
-        from tracker import settle_predictions, settle_cassa
-        settle_predictions()
-        settle_cassa()
-    except Exception:
-        pass
+    # P1 (19/10/2026): qui NON si salda piu' nulla. Una GET che scrive il
+    # ledger non e' una lettura: la dashboard poteva chiudere righe (e
+    # consumare crediti nel percorso di settlement) se richiesta da un
+    # crawler o da un'anteprima. Il settlement resta nei job del bot.
     per_mercato = {}
     try:
         from tracker import predictions_summary
@@ -582,28 +667,61 @@ def _campionati_json(params=None):
                             for name, teams in ALL_LEAGUES.items()]}
 
 
-def _cassa_get(params=None):
-    """Cassa con saldo automatico: le scommesse chiuse sono aggiornate
-    coi risultati reali (idempotente, le pending restano pending)."""
-    from tracker import get_cassa, cassa_totals, settle_cassa
+def _backup_cassa_rows(rows: list) -> Path | None:
+    """Salva le righe della cassa PRIMA della cancellazione (fail-closed).
+
+    Ritorna il path del backup, oppure None se il file non e' stato scritto:
+    in quel caso il chiamante NON cancella nulla. Scrittura atomica
+    (tmp + fsync + os.replace) come gli altri stati persistenti su volume.
+    """
     try:
-        settle_cassa()
-    except Exception as e:
-        logger.warning("settle_cassa al GET /api/cassa: %s", e)
+        bdir = DATA_DIR / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        path = bdir / ("cassa_" + now.strftime("%Y%m%dT%H%M%S%f") + ".json")
+        tmp = path.with_suffix(".json.tmp")
+        payload = {"ts": now.isoformat(), "righe": rows}
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, default=str)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return path
+    except Exception as exc:
+        logger.error("api: backup cassa fallito (%s): nessuna cancellazione", exc)
+        return None
+
+
+def _cassa_get(params=None):
+    """GET /api/cassa — LETTURA PURA (P1, 19/10/2026).
+
+    Prima eseguiva il settlement della cassa dentro una GET: una lettura che
+    scrive puo' essere innescata da qualunque pagina o anteprima, non e'
+    idempotente e non ha autenticazione. Il saldo resta aggiornato dai job di
+    settlement del bot (watchdog 4h + job serali); qui non si tocca il ledger.
+    """
+    from tracker import get_cassa, cassa_totals
     entries = get_cassa()
     return {"scommesse": entries, "totali": cassa_totals(entries)}
 
 
 def _cassa_post(params=None, body=None):
+    """POST /api/cassa — ADMIN: inserisce una scommessa e salda la cassa."""
+    blocked = _write_disabled()
+    if blocked:
+        return blocked
     from tracker import save_cassa_entry, get_cassa, cassa_totals, settle_cassa
     data = body or {}
-    partita = (data.get("partita") or "").strip()
-    esito = (data.get("esito") or "").strip()
-    quota = float(data.get("quota") or 0)
-    importo = float(data.get("importo") or 0)
+    partita = str(data.get("partita") or "").strip()
+    esito = str(data.get("esito") or "").strip()
+    try:
+        quota = float(data.get("quota") or 0)
+        importo = float(data.get("importo") or 0)
+        ev = float(data.get("ev") or 0)
+    except (TypeError, ValueError):
+        return 400, {"error": "quota/importo/ev non numerici"}
     if not partita or not esito or quota <= 1.0 or importo <= 0:
         return 400, {"error": "Campi mancanti o non validi: servono partita, esito, quota>1, importo>0"}
-    ev = float(data.get("ev") or 0)
     save_cassa_entry(partita, esito, quota, importo, ev=ev, data=data.get("data"))
     try:
         settle_cassa()
@@ -613,17 +731,64 @@ def _cassa_post(params=None, body=None):
     return {"ok": True, "scommesse": entries, "totali": cassa_totals(entries)}
 
 
-def _cassa_delete(params=None):
-    from tracker import clear_cassa, cassa_totals
+def _cassa_delete(params=None, body=None):
+    """DELETE /api/cassa — ADMIN + conferma esplicita + backup (P1).
+
+    Tre protezioni contro la cancellazione accidentale:
+    1. token admin (chi puo');
+    2. `API_WRITE_ENABLED=1` (se puo');
+    3. `confirm=CANCELLA_CASSA` (cosa sta facendo) e, prima del DELETE, un
+       backup JSON su volume. Se il backup fallisce NON si cancella nulla.
+
+    `dry_run=1` ritorna il conteggio senza toccare il ledger.
+    """
+    blocked = _write_disabled()
+    if blocked:
+        return blocked
+    from tracker import clear_cassa, get_cassa, cassa_totals
+    data = body or {}
+    params = params or {}
+    rows = get_cassa()
+    dry = str(data.get("dry_run") or params.get("dry_run") or "").lower() in (
+        "1", "true", "yes", "on")
+    if dry:
+        return {"ok": True, "dry_run": True, "righe": len(rows),
+                "eliminate": 0, "totali": cassa_totals(rows)}
+    confirm = str(data.get("confirm") or params.get("confirm") or "").strip()
+    if confirm != CASSA_DELETE_CONFIRM:
+        return 428, {
+            "error": "confirmation_required",
+            "message": "Per svuotare la cassa invia confirm="
+                       + CASSA_DELETE_CONFIRM
+                       + " (oppure dry_run=1 per il conteggio).",
+            "righe": len(rows),
+        }
+    # Conta PRIMA di cancellare: `rows` e' lo snapshot letto sopra, e un
+    # clear che mutasse la lista (o un DB che si svuota) non deve far
+    # riportare "0 righe eliminate" su una cancellazione avvenuta.
+    count = len(rows)
+    backup = _backup_cassa_rows(rows)
+    if backup is None:
+        return 500, {"error": "backup_failed",
+                     "message": "Backup non scritto: cancellazione annullata."}
     clear_cassa()
-    return {"ok": True, "scommesse": [], "totali": cassa_totals([])}
+    logger.warning("api: cassa svuotata (%d righe, backup %s)", count, backup)
+    return {"ok": True, "eliminate": count, "backup": str(backup),
+            "scommesse": [], "totali": cassa_totals([])}
 
 
 def _analisi_json(params=None, body=None):
     """Rigenera calendario + analisi con la strategia corrente (come /analisi del bot).
 
     POST /api/analisi — esegue fetch_and_analyze_today e ritorna il riepilogo.
+
+    P1 (19/10/2026): rotta ADMIN (protetta in `_dispatch`) + interruttore
+    `API_WRITE_ENABLED=1`. La scansione consuma crediti the-odds-api e
+    riscrive il ledger: non puo' essere innescata da un anonimo.
     """
+    blocked = _write_disabled()
+    if blocked:
+        return blocked
     try:
         from fixture_engine import fetch_and_analyze_today
         from rating_engine import compute_ratings
@@ -784,8 +949,10 @@ def _test_notify(params=None, body=None):
         return 403, {"error": "disabled",
                      "message": "Endpoint disattivato: configura TEST_NOTIFY_KEY "
                                  "nelle variabili di Railway."}
-    supplied = params.get("key") or body.get("key") or ""
-    if supplied != key:
+    supplied = str(params.get("key") or body.get("key") or "")
+    # Confronto a tempo costante (stessa regola del token admin): un confronto
+    # `!=` e' misurabile byte per byte e su una chiave di servizio non si usa.
+    if not hmac.compare_digest(supplied.encode("utf-8"), key.encode("utf-8")):
         return 401, {"error": "unauthorized",
                      "message": "Chiave TEST_NOTIFY_KEY errata."}
 
@@ -886,6 +1053,38 @@ def _significance_json(params=None):
     except Exception as e:
         logger.exception("errore /api/significance")
         return {"status": "error", "error": str(e)}
+
+
+def _agents_json(params=None):
+    """GET /api/agents — TABELLA DI COMANDO degli agenti (sola lettura).
+
+    Una card per agente (Dati, Strategia, Analisi, Cervello, Finanza, Sizing,
+    Advisor, Esecuzione) con lo STATO dell'ultimo ciclo, gli indicatori del
+    contratto e l'attivita' nella finestra; piu' sicurezza (kill switch, stop
+    giornaliero/settimanale, pausa settlement, gate di mercato), capitale
+    (equity riconciliata, recinto, tetto per ordine) e flusso (decisioni,
+    residuo di refertazione).
+
+    Tutte le soglie e gli stati arrivano dalle LORO fonti (`agent_board` delega
+    a `auto_bet`/`tracker`): nessun numero ricopiato in questo file, cosi' la
+    tabella non puo' mostrare una regola diversa da quella applicata.
+
+    Query: `?days=N` (finestra degli aggregati, default `AGENT_BOARD_DAYS`).
+    Fail-safe: un errore e' un campo `error`, mai un 500 sul browser.
+    """
+    p = params or {}
+    try:
+        import agent_board
+        days = None
+        if str(p.get("days") or "").strip():
+            try:
+                days = float(p["days"])
+            except (TypeError, ValueError):
+                days = None
+        return agent_board.board(days)
+    except Exception as e:
+        logger.exception("errore /api/agents")
+        return {"error": str(e), "agents": [], "generated_at": None}
 
 
 def _drift_json(params=None):
@@ -1051,6 +1250,7 @@ ROUTES = {
     "/api/drift": _drift_json,
     "/api/calibration": _calibration_json,
     "/api/significance": _significance_json,
+    "/api/agents": _agents_json,
 }
 
 POST_ROUTES = {
@@ -1073,7 +1273,10 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch(POST_ROUTES, self._read_body())
 
     def do_DELETE(self):
-        self._dispatch(DELETE_ROUTES, None)
+        # P1: il corpo della DELETE serve per `confirm`/`dry_run`. Senza
+        # leggerlo, una cancellazione protetta non potrebbe mai essere
+        # confermata via JSON (resterebbe solo la query string).
+        self._dispatch(DELETE_ROUTES, self._read_body())
 
     def _read_body(self):
         try:
@@ -1094,11 +1297,22 @@ class Handler(BaseHTTPRequestHandler):
         if not handler:
             self._send(404, {"error": "not found", "routes": list(ROUTES.keys())})
             return
-        # R1: le rotte admin si autorizzano PRIMA di eseguire qualunque cosa.
-        if path in ADMIN_ROUTES:
+        # R1/P1: le rotte admin si autorizzano PRIMA di eseguire qualunque
+        # cosa. Il permesso e' per METODO: `GET /api/cassa` e' una lettura
+        # pubblica, `POST`/`DELETE` sullo stesso path sono admin.
+        method = (self.command or "").upper()
+        if path in ADMIN_METHOD_ROUTES.get(method, frozenset()):
             ok, code, payload = admin_check(self.headers)
             if not ok:
-                logger.warning("api: rotta admin negata %s (%s)",
+                logger.warning("api: rotta admin negata %s %s (%s)",
+                               method, path, payload.get("error"))
+                self._send(code, payload)
+                return
+        # P1: permesso di LETTURA separato (health sempre pubblica).
+        if method == "GET" and path not in READ_PUBLIC_ROUTES:
+            ok, code, payload = read_check(self.headers)
+            if not ok:
+                logger.warning("api: lettura negata %s (%s)",
                                path, payload.get("error"))
                 self._send(code, payload)
                 return
@@ -1123,7 +1337,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, fmt, *args):
-        logger.info("%s - %s", self.address_string(), fmt % args)
+        # Alcune rotte accettano ancora `key` in query string (retrocompat):
+        # senza redazione la chiave finirebbe nei log del container.
+        msg = _SECRET_QUERY_RE.sub(r"\1***", fmt % args)
+        logger.info("%s - %s", self.address_string(), msg)
 
 
 def main():

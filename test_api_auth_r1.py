@@ -8,8 +8,8 @@ Cosa difende questo file, in ordine di importanza:
    `API_AUTO_BET_ALLOW_LIVE` non e' attivo: il token da solo non ordina;
 4. `run_today_bets` accetta l'override di modalita' **solo verso il basso**
    ("sim"/"off"): un "live" scritto per errore non diventa un ordine;
-5. nessuna rotta GET puo' ordinare o inviare messaggi (e le uniche GET che
-   scrivono sono quelle dichiarate, con settlement idempotente).
+5. nessuna rotta GET puo' ordinare, inviare messaggi o scrivere il ledger
+   (P1, 19/10/2026: l'allowlist delle scritture su GET e' vuota).
 
 Tutto OFFLINE: `auto_bet` e' sostituito da un modulo finto in `sys.modules`,
 Telegram e' sostituito, il server ascolta su 127.0.0.1 con porta effimera.
@@ -32,10 +32,12 @@ import web_api
 
 TOKEN = "fake/r1-token-0123456789abcdef"  # finto e dichiarato, non un segreto
 
-# Scritture ammesse su una rotta GET: settlement IDEMPOTENTE del ledger locale
-# (nessun ordine, nessuna rete). Se una GET nuova scrive, il test fallisce e
-# la si deve dichiarare qui — non scoprire dopo.
-GET_WRITE_ALLOWLIST = {"/api/dashboard", "/api/cassa"}
+# P1 (19/10/2026): NESSUNA. La saldatura della cassa (ex GET /api/cassa) e
+# quella della dashboard sono state spostate nei job del bot: una GET che
+# scrive non e' una lettura e non deve esistere. Se una GET nuova scrive, il
+# test fallisce e va CORRETTA — non dichiarata qui: l'allowlist resta vuota
+# come stato permanente (e' il tripwire della direttiva P1).
+GET_WRITE_ALLOWLIST = set()
 
 _FORBIDDEN_GET = re.compile(
     r"\b(run_today_bets|_live_fill|place_limit_order|place_order|"
@@ -302,3 +304,30 @@ class TestRotteMonitoraggio:
         code, _ = _request(base_url + "/api/test_notify", method="POST",
                            body={})
         assert code == 401
+
+    def test_test_notify_confronto_a_tempo_costante(self, base_url, monkeypatch):
+        """Anche la chiave di test passa da hmac.compare_digest, non da ==.
+
+        La proposta P2-bis (minimo 24 char, chiave solo nel body, allowlist dei
+        destinatari, rate limit) NON e' applicata: qui si difende solo il
+        confronto a tempo costante introdotto con R1.
+        """
+        chiave = "fake/test-key"
+        monkeypatch.setenv("TEST_NOTIFY_KEY", chiave)
+        monkeypatch.setenv("ADMIN_CHAT_ID", "111")
+        monkeypatch.setenv("QUOTAVERACE_BOT_TOKEN", "fake/bot-token")
+        monkeypatch.setattr(web_api, "_telegram_send_message",
+                            lambda *a, **k: {"ok": True})
+        chiamate = []
+        originale = web_api.hmac.compare_digest
+
+        def spia(a, b):
+            chiamate.append((a, b))
+            return originale(a, b)
+
+        monkeypatch.setattr(web_api.hmac, "compare_digest", spia)
+        code, _ = _request(
+            base_url + "/api/test_notify", method="POST", body={"key": chiave})
+        assert code == 200
+        assert chiave.encode("utf-8") in [b for _, b in chiamate], (
+            "la chiave di test_notify deve essere confrontata a tempo costante")

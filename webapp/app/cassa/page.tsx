@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { expectedGoals, prob1x2, probOverUnder, probBtts, computeEv, TEAM_RATINGS } from '../../lib/poisson'
+import { CASSA_ENDPOINT, deleteCassa, loadState, postCassa } from '../../lib/cassaClient'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 const STORAGE_KEY = 'qv_cassa_v1'
@@ -43,7 +44,8 @@ export default function Cassa() {
   const [quota, setQuota] = useState('2.00')
   const [importo, setImporto] = useState('10')
   const [cassa, setCassa] = useState<CassaRow[]>([])
-  const [syncState, setSyncState] = useState<'ok' | 'offline' | 'loading'>('loading')
+  const [syncState, setSyncState] = useState<'ok' | 'locale' | 'offline' | 'errore' | 'loading'>('loading')
+  const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const boxRef = useRef<HTMLDivElement>(null)
 
@@ -71,45 +73,54 @@ export default function Cassa() {
     loadCassa()
   }, [])
 
-  // Carica cassa: localStorage prima, poi backup server se locale vuoto
+  // Carica cassa: mostra subito la copia locale, ma lo stato `ok` arriva SOLO
+  // dal server. Senza conferma remota lo stato e' `locale` (dati non allineati)
+  // oppure `errore`/`offline`: mai "sincronizzato" per un dato solo locale.
   async function loadCassa() {
+    let localRows: CassaRow[] = []
     try {
       const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) { setCassa(JSON.parse(raw)); setSyncState('ok'); return }
-    } catch { /* ignore */ }
+      if (raw) {
+        localRows = JSON.parse(raw)
+        if (localRows.length) setCassa(localRows)
+      }
+    } catch { /* copia locale illeggibile: si resta sul server */ }
     try {
-      const res = await fetch(`${API_BASE}/api/cassa`)
-      if (res.ok) {
-        const j = await res.json()
-        const rows = (j.scommesse || []).map((s: any) => ({
-          id: String(s.id), data: s.data, partita: s.partita, esito: s.esito,
-          quota: Number(s.quota), importo: Number(s.importo), ev: Number(s.ev || 0), prob: 0,
-          esito_finale: s.esito_finale || null,
-          profit: s.profit != null ? Number(s.profit) : null,
-          settled_at: s.settled_at || null,
+      const res = await fetch(CASSA_ENDPOINT, { cache: 'no-store' })
+      if (!res.ok) {
+        setSyncState(loadState({
+          serverOk: false, serverRows: 0, localRows: localRows.length,
         }))
-        if (rows.length) { setCassa(rows); persistLocal(rows) }
-        setSyncState('ok')
-      } else { setSyncState('offline') }
-    } catch { setSyncState('offline') }
+        return
+      }
+      const j: any = await res.json().catch(() => null)
+      if (!j || typeof j !== 'object') {
+        setSyncState(loadState({
+          serverOk: false, serverRows: 0, localRows: localRows.length,
+        }))
+        return
+      }
+      const rows = (j.scommesse || []).map((s: any) => ({
+        id: String(s.id), data: s.data, partita: s.partita, esito: s.esito,
+        quota: Number(s.quota), importo: Number(s.importo), ev: Number(s.ev || 0), prob: 0,
+        esito_finale: s.esito_finale || null,
+        profit: s.profit != null ? Number(s.profit) : null,
+        settled_at: s.settled_at || null,
+      }))
+      if (rows.length) { setCassa(rows); persistLocal(rows) }
+      setSyncState(loadState({
+        serverOk: true, serverRows: rows.length, localRows: localRows.length,
+      }))
+    } catch {
+      setSyncState(loadState({
+        serverOk: false, serverRows: 0, localRows: localRows.length,
+        networkError: true,
+      }))
+    }
   }
 
   function persistLocal(rows: CassaRow[]) {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(rows)) } catch { /* ignore */ }
-  }
-
-  async function backupServer(rows: CassaRow[]) {
-    // Ricostruisce il backup server dalla cassa locale (semplice e idempotente)
-    try {
-      await fetch(`${API_BASE}/api/cassa`, { method: 'DELETE' })
-      for (const r of rows) {
-        await fetch(`${API_BASE}/api/cassa`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ partita: r.partita, esito: r.esito, quota: r.quota, importo: r.importo, ev: r.ev, data: r.data }),
-        })
-      }
-      setSyncState('ok')
-    } catch { setSyncState('offline') }
   }
 
   // Autocomplete
@@ -164,7 +175,8 @@ export default function Cassa() {
   const vincita = quotaNum > 0 ? importoNum * quotaNum : 0
   const profit = vincita - importoNum
 
-  function addToCassa() {
+  async function addToCassa() {
+    if (busy) return
     if (!home || !away) { setNotice('⚠️ Inserisci prima la partita (cerca casa e trasferta).'); return }
     if (quotaNum <= 1) { setNotice('⚠️ Quota non valida (deve essere > 1).'); return }
     if (importoNum <= 0) { setNotice('⚠️ Inserisci l\'importo da scommettere (€).'); return }
@@ -176,23 +188,59 @@ export default function Cassa() {
       ev: cand?.ev || 0, prob: cand?.prob || 0,
       esito_finale: null, profit: null, settled_at: null,
     }
+    setBusy(true)
+    const res = await postCassa({
+      partita: row.partita, esito: row.esito, quota: row.quota,
+      importo: row.importo, ev: row.ev, data: row.data,
+    })
+    setBusy(false)
+    if (!res.ok) {
+      // P2: il server NON ha salvato. La cassa locale non viene toccata e il
+      // messaggio di successo NON compare (prima il fallimento era silenzioso).
+      setSyncState(res.status === 0 ? 'offline' : 'errore')
+      setNotice(`❌ NON salvata sul server (${res.status ? `HTTP ${res.status}` : 'rete'}): ${res.message}. La cassa locale non è stata modificata.`)
+      return
+    }
     const rows = [row, ...cassa]
-    setCassa(rows); persistLocal(rows); backupServer(rows)
-    setNotice(`✅ ${home} vs ${away} — ${esito} @ ${quotaNum.toFixed(2)} con €${importoNum.toFixed(2)} aggiunta alla cassa.`)
+    setCassa(rows); persistLocal(rows); setSyncState('ok')
+    setNotice(`✅ ${home} vs ${away} — ${esito} @ ${quotaNum.toFixed(2)} con €${importoNum.toFixed(2)} aggiunta alla cassa (salvata sul server).`)
     // reset per la prossima
     setHome(''); setAway(''); setSignal(null); setImporto('10')
   }
 
   function removeRow(id: string) {
+    // Il backend espone solo lo svuotamento totale: non esiste una DELETE per
+    // singola riga. Rimuovere in locale e riscrivere tutto il server (DELETE +
+    // POST) poteva lasciare la cassa server vuota o parziale se un POST
+    // falliva: qui si tocca SOLO il dispositivo e lo si dichiara.
     const rows = cassa.filter(r => r.id !== id)
-    setCassa(rows); persistLocal(rows); backupServer(rows)
+    setCassa(rows); persistLocal(rows)
+    setNotice('ℹ️ Riga rimossa solo da questo dispositivo: il backend non supporta la cancellazione di una singola riga. Per allineare il server usa 🗑 Svuota (cancella tutto, con conferma) e reinserisci le righe.')
   }
 
-  function clearAll() {
-    if (!confirm('Svuotare tutta la cassa?')) return
-    setCassa([]); persistLocal([])
-    try { fetch(`${API_BASE}/api/cassa`, { method: 'DELETE' }) } catch { /* ignore */ }
-    setNotice('🗑 Cassa svuotata.')
+  async function clearAll() {
+    if (busy) return
+    // Conferma ESPLICITA dell'utente: la frase richiesta dal backend va scritta.
+    // Non viene mai inviata da sola e non esiste un percorso che la aggiri.
+    const typed = window.prompt(
+      'Questa operazione SVUOTA LA CASSA SUL SERVER (il backend crea un backup prima di cancellare).\n' +
+      'Scrivi CANCELLA_CASSA per confermare:'
+    )
+    if (typed === null) return
+    if (typed.trim() !== 'CANCELLA_CASSA') {
+      setNotice('❌ Operazione annullata: testo di conferma non corretto. Nulla è stato cancellato.')
+      return
+    }
+    setBusy(true)
+    const res = await deleteCassa('CANCELLA_CASSA')
+    setBusy(false)
+    if (!res.ok) {
+      setSyncState(res.status === 0 ? 'offline' : 'errore')
+      setNotice(`❌ Cassa NON svuotata sul server (${res.status ? `HTTP ${res.status}` : 'rete'}): ${res.message}. I dati locali sono invariati.`)
+      return
+    }
+    setCassa([]); persistLocal([]); setSyncState('ok')
+    setNotice('🗑 Cassa svuotata sul server (backup creato dal backend).')
   }
 
   const totali = useMemo(() => {
@@ -216,7 +264,15 @@ export default function Cassa() {
       </div>
       <p className="text-gray-400 text-sm mb-6">
         Inserisci la partita, scegli l'esito, indica l'importo: il calcolatore ti mostra la <b className="text-emerald-400">vincita probabile in euro</b>.
-        {syncState === 'offline' && <span className="text-amber-400"> · backup server non raggiungibile (dati solo su questo dispositivo)</span>}
+        {syncState === 'offline' && <span className="text-amber-400"> · server non raggiungibile (dati solo su questo dispositivo)</span>}
+        {syncState === 'locale' && (
+          <span className="text-amber-400"> · dati solo su questo dispositivo, non confermati dal server</span>
+        )}
+        {syncState === 'errore' && (
+          <span className="text-red-400"> · sincronizzazione non riuscita
+            <button onClick={() => loadCassa()} className="ml-2 underline hover:text-red-300">riprova</button>
+          </span>
+        )}
       </p>
 
       {/* ── Ricerca partita ── */}
@@ -294,8 +350,8 @@ export default function Cassa() {
                 <div className="text-3xl font-bold text-emerald-400">€{vincita.toFixed(2)}</div>
                 <div className="text-sm text-gray-400">€{importoNum.toFixed(2)} × {quotaNum.toFixed(2)} · profitto <b className={profit >= 0 ? 'text-emerald-400' : 'text-red-400'}>€{profit.toFixed(2)}</b></div>
               </div>
-              <button onClick={addToCassa} className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-lg font-bold transition">
-                ➕ Aggiungi alla cassa
+              <button onClick={addToCassa} disabled={busy} className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-bold transition">
+                {busy ? '⏳ Salvataggio…' : '➕ Aggiungi alla cassa'}
               </button>
             </div>
           </>
@@ -307,7 +363,7 @@ export default function Cassa() {
       <div className="bg-gray-800 rounded-xl overflow-hidden">
         <div className="flex items-center justify-between p-4 border-b border-gray-700">
           <h2 className="text-xl font-bold">📒 3 · Tabella cassa ({totali.n})</h2>
-          {totali.n > 0 && <button onClick={clearAll} className="text-xs text-red-400 hover:text-red-300">🗑 Svuota</button>}
+          {totali.n > 0 && <button onClick={clearAll} disabled={busy} className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50">🗑 Svuota</button>}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left">

@@ -86,8 +86,11 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # esercitano la funzione VERA non vengono isolati: sono i tripwire del
     # recinto (`test_capital_enclosure`) e la sua VERIFICA sugli ordini reali
     # (`test_order_watch`, che gira su un ledger temporaneo).
+    # `test_recovery_gate2` (20/10/2026) si aggiunge perche' il suo scopo E'
+    # misurare le protezioni vere (tetto per ordine, cap per evento): con la
+    # funzione sostituita misurerebbe l'isolamento, cioe' nulla.
     _verifica_il_recinto = ("test_capital_enclosure", "test_order_watch",
-                            "test_aggressive_kelly")
+                            "test_aggressive_kelly", "test_recovery_gate2")
     if not any(name in request.node.nodeid for name in _verifica_il_recinto):
         # Firma NUOVA (04/10/2026): `cap_order_stake(stake, bankroll=None)`.
         # L'isolamento sostituisce la funzione VERA (il cap dinamico non e'
@@ -127,7 +130,8 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     # 20.0...) su wallet finti piccoli: con il cap reale (12% dell'equity)
     # ogni ordine verrebbe respinto e l'asserzione leggerebbe il cap invece
     # della grandezza in esame. Si isola la FUNZIONE, mai la soglia.
-    if "test_event_cap" not in request.node.nodeid:
+    if not any(name in request.node.nodeid
+               for name in ("test_event_cap", "test_recovery_gate2")):
         monkeypatch.setattr(
             "auto_bet._event_guard",
             lambda *a, **k: {"allowed": True, "reason": "isolated",

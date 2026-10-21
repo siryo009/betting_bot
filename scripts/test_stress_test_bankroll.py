@@ -193,14 +193,19 @@ class TestReport:
         rows = stb.build_matrix((1.6,), n_sims=200, n_bets=20, bankroll=env["bankroll"],
                                 stake=env["stake"], cap_pct=env["cap_pct"])
         txt = stb.format_report(env, rows, 0.01)
-        assert "12.1600 USDC" in txt
+        # il recinto e' quello di PRODUZIONE, che cambia: il numero atteso si
+        # deriva, non si scrive a mano (lezione del 16/10 sui valori letterali).
+        cap_usdc = env["bankroll"] * env["cap_pct"]
+        assert f"{cap_usdc:.4f} USDC" in txt
         assert f"fonte costanti: {env['constants_source']}" in txt
         assert "WR pareggio" in txt and "MaxDD p95" in txt
 
     def test_cli_json_parsabile(self, capsys):
         assert stb.main(["--sims", "300", "--bets", "20", "--json"]) == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload["enclosure"]["max_concurrent"] == 8
+        enc = payload["enclosure"]
+        expected = max(1, int((enc["bankroll"] * enc["cap_pct"]) // enc["stake"]))
+        assert enc["max_concurrent"] == expected
         assert len(payload["matrix"]) == len(stb.DEFAULT_ODDS_GRID)
 
     def test_cli_testuale_esce_zero(self, capsys):
