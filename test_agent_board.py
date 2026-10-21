@@ -238,6 +238,14 @@ class TestCard:
         assert cards["data"]["window"]["cycles"] == 3
         assert cards["data"]["window"]["with_output"] == 3
 
+    def test_il_capo_conta_ogni_ciclo_nella_finestra(self, log):
+        """Il Capo produce in ogni ciclo: senza il ramo dedicato restava 0/7."""
+        _write(log, [_record(), _record()])
+        records = agent_board.read_cycles(1, path=log)["records"]
+        chief = {c["id"]: c for c in agent_board.agent_cards(records)}["chief"]
+        assert chief["window"]["with_output"] == 2
+        assert chief["window"]["last_seen"]
+
 
 # ---------------------------------------------------------------------------
 # 3) Indicatori (dalle chiavi vere dei contratti)

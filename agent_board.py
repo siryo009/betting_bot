@@ -463,6 +463,14 @@ def _window_stats(spec: AgentSpec, records: list[dict]) -> dict[str, Any]:
     """Quanti cicli hanno prodotto un output per questo agente (finestra)."""
     produced = 0
     last_seen = ""
+    if not spec.section:
+        # Il CAPO "produce" in OGNI ciclo registrato (la sua sezione e' il
+        # record): contarlo con `_section` lo avrebbe lasciato a 0 su 7 cicli
+        # riusciti (misurato in produzione il 21/10).
+        last = records[-1] if records else {}
+        return {"cycles": len(records), "with_output": len(records),
+                "last_seen": (str(last.get("_ts") or last.get("ts") or "")
+                              or None)}
     for rec in records:
         section = _section(rec, spec)
         if section:
