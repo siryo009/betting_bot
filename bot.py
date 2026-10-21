@@ -482,6 +482,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "`/torneo` – classifica del torneo SX Bet (posizione, gap, tempo)\n"
         "`/rush` – stato del rush finale del torneo (admin)\n"
         "`/clv [giorni]` – tracker CLV: quota d'acquisto vs closing line (admin)\n"
+        "`/agenti` – tabella di comando: stato e indicatori di ogni agente (admin)\n"
         "`/subscribe` – attiva notifiche Pro\n"
         "`/risultati` – statistiche reali dei segnali\n"
         "`/backtest` – calibrazione EV atteso vs ROI realizzato\n"
@@ -1599,6 +1600,33 @@ async def cmd_ordini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         logger.error("cmd_ordini: %s", e)
         await update.message.reply_text(f"❌ Errore verifica ordini: {e}")
+
+
+async def cmd_agenti(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/agenti — TABELLA DI COMANDO: chi ha lavorato e cosa lo ha fermato (admin).
+
+    Una riga per agente nell'ORDINE della catena (Dati -> Strategia -> Analisi
+    -> Cervello -> Finanza -> Sizing -> Advisor -> Esecuzione) con lo stato
+    dell'ultimo ciclo e i suoi indicatori, piu' sicurezza, capitale e flusso.
+    Sola lettura del registro cicli + ledger: zero ordini, zero crediti. La
+    stessa vista che serve la webapp (`GET /api/agents`), da un'unica fonte
+    (`agent_board.board`): due formattazioni non possono divergere.
+    """
+    admin_ids = _admin_chat_ids()
+    if admin_ids and update.effective_chat.id not in admin_ids:
+        await update.message.reply_text("⛔ Comando riservato agli admin.")
+        return
+    try:
+        import agent_board
+        # `refresh=True`: chi digita il comando vuole lo stato di adesso, non
+        # l'istantanea in cache del polling (15s).
+        board = agent_board.board(refresh=True)
+        text = agent_board.format_report(board)
+    except Exception as e:
+        logger.error("cmd_agenti: %s", e)
+        await update.message.reply_text(f"❌ Errore tabella agenti: {e}")
+        return
+    await update.message.reply_text(text[:4000])
 
 
 async def cmd_torneo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3789,6 +3817,7 @@ def main() -> None:
     application.add_handler(CommandHandler("autobet", cmd_autobet))
     application.add_handler(CommandHandler("hedge", cmd_hedge))
     application.add_handler(CommandHandler("ordini", cmd_ordini))
+    application.add_handler(CommandHandler("agenti", cmd_agenti))
     application.add_handler(CommandHandler("torneo", cmd_torneo))
     application.add_handler(CommandHandler("classifica", cmd_torneo))
     application.add_handler(CommandHandler("rush", cmd_rush))

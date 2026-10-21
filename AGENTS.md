@@ -13731,3 +13731,62 @@ soglia della corsia vale ~13pp di EV dichiarato) e (b) il **CLV prospettico**
 (+4,54% medio, IC95 +2,98/+6,11, 45 campioni) che e' l'unico segnale di edge
 misurato. Il tetto a 1,00 va rialzato a mano solo quando il ledger mostra un
 ROI positivo su un campione che la `significance.py` dichiara conclusivo.
+
+### Tabella di comando degli agenti + dashboard (`agent_board.py`, 21/10/2026)
+
+**Direttiva del proprietario**: una **tabella di comando** dove ogni agente lavora
+separato dagli altri, guardabile dal web con tutti gli indicatori, valutando n8n
+come orchestratore.
+
+**PERCHE' NON n8n (decisione, non pigrizia)**: n8n e' un orchestratore di
+webhook/cron, e in questo progetto **gli agenti sono gia' isolati e orchestrati
+dal Capo** (`chief_orchestrator`, direttiva 15/10: nessun agente importa un
+altro, i dati passano solo da lui). Mettere n8n fra Capo e agenti aggiungerebbe
+un secondo compositore con un secondo stato, e **una chiamata HTTP per agente**
+in un ciclo che gira **ogni 60 secondi**. La fonte di verita' del "come sta
+lavorando" e' il registro dei cicli (`data/decision/chief_cycles.jsonl`) e i
+ledger, **entrambi locali al container**: leggerli e' gratis, passarli per un
+webhook no.
+→ La dashboard e' quindi **nativa** (`agent_board.py` + `GET /api/agents` +
+pagina `/agenti` della webapp). n8n resta **compatibile come consumatore**: puo'
+chiamare `GET /api/agents` e riceverne il JSON, senza che diventi parte della
+catena del denaro.
+
+**`agent_board.py` (nuovo)**: payload di sola lettura con
+  - **una card per agente** nell'ORDINE della catena (Dati → Strategia → Analisi
+    → Cervello → Finanza → Sizing → Advisor → Esecuzione, piu' il Capo):
+    `status` (`ok`/`skipped`/`idle`/`error`/`unknown`), `detail` che dice **cosa
+    lo ha fermato**, `metrics[]` (valore + tono + unita'), contratto
+    `consumes`/`produces`/`isolation`, e la finestra (`cycles`/`with_output`);
+  - **sicurezza**: i blocchi in **ordine di precedenza** (`kill_switch`,
+    `daily_stop`, `weekly_stop`, `market_gate`) con lo stato di ognuno;
+  - **capitale**: equity (`sizing_equity`), esposizione aperta/cap, tetto
+    per-ordine, cap duro, ticket;
+  - **flusso**: `decisions` (verdetto/stati/stake) e residuo del settlement.
+  Ogni sezione ha il proprio `error`: una lettura rotta **non** svuota la tabella.
+  **Zero scritture, zero rete, zero crediti, zero ordini**; cache 15s
+  (`AGENT_BOARD_TTL_S`) perche' il giro gira ogni 60s e la pagina fa polling.
+  CLI: `venv/bin/python agent_board.py [--days N] [--json] [--refresh]`.
+  I valori vengono dalle **funzioni che li governano** (`auto_bet.kill_switch_status`,
+  `daily_stop_status`, `weekly_stop_status`, `market_gate_status`,
+  `open_exposure_status`, `order_ceiling`, `order_watch.current_equity`,
+  `tracker.decision_stats`/`settlement_residue`): nessuna soglia ricopiata.
+
+**Superfici**: `GET /api/agents` (`?days=`, lettura pubblica come le altre GET),
+comando admin **`/agenti`** in Telegram (stessa `format_report`, `refresh=True`:
+chi lo digita vuole lo stato di adesso) e pagina **`/agenti`** della webapp
+(link nel menu) con filtri per stato, badge per agente, tabella indicatori,
+sicurezza/capitale/flusso. Una sola formattazione (`format_report`) serve
+Telegram e CLI: due non possono divergere.
+
+**Test**: `test_agent_board.py` **47 verdi, tutti OFFLINE** (registro in un file
+temporaneo, `auto_bet`/`tracker`/`order_watch` sostituiti dove serve): lettura e
+finestra (con date **relative a `now`**: due volte un test e' scaduto col
+calendario), card e ordine della catena, ciclo fermo → `skipped` a valle,
+advisor in attesa, errori di sezione, metriche dai contratti veri (durata, feed,
+quote, shadow), bool che **non** diventano conteggi, sicurezza (nessun blocco,
+kill switch, precedenza, gate con motivo, `auto_bet` non importabile), capitale
+(equity, recinto, letture che esplodono), flusso, cache/refresh, report con dati
+parziali, e tripwire (sorgente senza percorsi d'ordine/`requests`/SQL di
+scrittura, `import agent_board` che **non** carica `tracker`/`auto_bet`/`bot`,
+rotta registrata, handler fail-safe, comando `agenti` registrato).
