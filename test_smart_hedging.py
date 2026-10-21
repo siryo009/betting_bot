@@ -560,18 +560,25 @@ class TestTettoPerOrdineSulleGambe:
     """21/10/2026: le gambe di copertura rispettano il TETTO PER-ORDINE.
 
     `hedge_plan` dimensionava H_i = f x S x Oe / O_i e lo confrontava solo con
-    `HEDGE_MAX_STAKE_USDC` (5,00), cioe' un ordine da 1,84 sarebbe passato con
-    il tetto per-ordine a 1,00. Il piano ora nasce con il cap che verra'
-    applicato davvero, cosi' una copertura impossibile e' dichiarata e NON si
-    piazza (una copertura parziale non blocca nulla: e' solo un secondo
-    ordine). Chiude un varco STRUTTURALE: nessun ordine e' ancora partito
-    fuori regola (il tetto a 1,00 e' del 20/10 23:12).
+    `HEDGE_MAX_STAKE_USDC` (5,00): con il tetto per-ordine a 1,00 un ordine da
+    1,84 sarebbe passato. Il piano ora nasce con il cap che verra' applicato
+    davvero, cosi' una copertura impossibile e' dichiarata e NON si piazza
+    (una copertura parziale non blocca nulla: e' solo un secondo ordine
+    esposto, con il resto della posizione scoperto).
+
+    Si passa da `cap_order_stake` e non da `order_ceiling()`: il primo
+    rispetta il tetto ASSOLUTO anche quando il bankroll dell'ultimo giro non
+    e' noto (primo giro dopo un riavvio, quando `hedge_job` puo' precedere
+    `auto_bet_job`). Con la sola `order_ceiling()` il piano sarebbe nato a
+    5,00 e la gamba sarebbe stata CLAMPATA a 1,00 al POST: una copertura
+    ridotta a meta' e' peggio di nessuna copertura, perche' sembra un lock.
     """
 
     def test_gambe_oltre_il_tetto_non_piazzano(self, monkeypatch):
         import auto_bet
         monkeypatch.setenv("HEDGE_MAX_STAKE_USDC", "5.0")
-        monkeypatch.setattr(auto_bet, "order_ceiling", lambda *a, **k: 1.0)
+        monkeypatch.setattr(auto_bet, "cap_order_stake",
+                            lambda stake, bankroll=None: min(float(stake), 1.0))
         plan = sh.hedge_plan(1.0, 3.40, {"X": 1.88, "2": 1.85}, f=1.0)
         assert plan["ok"] is False
         assert plan["reason"] == sh.REASON_ABOVE_CAP
@@ -580,13 +587,23 @@ class TestTettoPerOrdineSulleGambe:
     def test_con_tetto_capiente_il_piano_prosegue(self, monkeypatch):
         import auto_bet
         monkeypatch.setenv("HEDGE_MAX_STAKE_USDC", "5.0")
-        monkeypatch.setattr(auto_bet, "order_ceiling", lambda *a, **k: 5.0)
+        monkeypatch.setattr(auto_bet, "cap_order_stake",
+                            lambda stake, bankroll=None: float(stake))
         plan = sh.hedge_plan(1.0, 3.40, {"X": 1.88, "2": 1.85}, f=1.0)
         assert plan["reason"] != sh.REASON_ABOVE_CAP
 
     def test_tetto_non_leggibile_usa_il_proprio_limite(self, monkeypatch):
         import auto_bet
         monkeypatch.setenv("HEDGE_MAX_STAKE_USDC", "2.0")
-        monkeypatch.setattr(auto_bet, "order_ceiling",
+        monkeypatch.setattr(auto_bet, "cap_order_stake",
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
         assert sh.max_stake_usdc() == 2.0
+
+    def test_il_tetto_viene_dal_cap_per_ordine(self):
+        """Tripwire sul CALL, non sulla prosa: il limite si legge da
+        `cap_order_stake(hi)` (che rispetta il tetto assoluto anche senza
+        bankroll), non da una soglia propria ne' da `order_ceiling()` (0 senza
+        bankroll). Il caso reale e' in `test_capital_enclosure`, dove
+        `cap_order_stake` non e' sostituito dal conftest."""
+        src = Path("smart_hedging.py").read_text(encoding="utf-8")
+        assert "cap = float(auto_bet.cap_order_stake(hi) or 0.0)" in src

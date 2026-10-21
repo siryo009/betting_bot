@@ -131,20 +131,29 @@ def max_stake_usdc() -> float:
     piano e' `above_cap` e NON si piazza una copertura parziale (una copertura
     a meta' non blocca nulla, e' solo un secondo ordine esposto).
 
-    Fail-open SOLO sulla misura: se il tetto non e' leggibile si usa il
-    proprio limite — il punto unico degli ordini (`auto_bet._choke_ceiling`)
-    applica comunque il cap prima di ogni POST.
+    Passa da `auto_bet.cap_order_stake`, non da `order_ceiling()`: il primo
+    rispetta il tetto ASSOLUTO (`ORDER_MAX_STAKE_USDC`) anche quando il
+    bankroll dell'ultimo giro non e' ancora noto — cioe' nel primo giro dopo
+    un riavvio, che e' esattamente quando `hedge_job` puo' partire prima di
+    `auto_bet_job`. Con la sola `order_ceiling()` il valore sarebbe 0 e il
+    piano sarebbe nato con 5,00 di limite, per poi venire CLAMPATO a 1,00 al
+    POST: una gamba da 1,84 ridotta a 1,00 NON e' una copertura (non blocca
+    nulla e lascia scoperto il resto).
+
+    Fail-open SOLO sulla misura: se nemmeno il tetto assoluto e' leggibile si
+    usa il proprio limite — il punto unico degli ordini
+    (`auto_bet._choke_ceiling`) applica comunque il cap prima di ogni POST.
     """
     hi = max(0.0, _num("HEDGE_MAX_STAKE_USDC", 5.0))
     try:
         import auto_bet
-        cap = float(auto_bet.order_ceiling() or 0.0)
+        cap = float(auto_bet.cap_order_stake(hi) or 0.0)
     except Exception as e:                                    # pragma: no cover
         logger.debug("smart_hedging: tetto per-ordine non leggibile (%s)", e)
         return hi
     if cap <= 0:
         return hi
-    return min(hi, cap) if hi > 0 else cap
+    return min(hi, cap)
 
 
 def min_minutes() -> float:

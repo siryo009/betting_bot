@@ -592,6 +592,14 @@ class TestTettoAlPuntoUnico:
         res = auto_bet._live_fill(self._pick(), stake=1.00, floor=1.65)
         assert res is None and prov.place_calls == []
 
+    def test_limite_delle_gambe_hedge_usa_il_tetto_assoluto(self, monkeypatch):
+        """Anche senza bankroll noto (primo giro dopo un riavvio) il limite
+        delle gambe di copertura e' il tetto assoluto reale, non HEDGE_MAX."""
+        import smart_hedging as sh
+        monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 0.0)
+        monkeypatch.setenv("HEDGE_MAX_STAKE_USDC", "5.0")
+        assert sh.max_stake_usdc() == 1.50
+
     def test_choke_ceiling_e_puro_e_leggibile(self):
         cap = auto_bet._choke_ceiling({"match_id": "m", "esito_key": "1"}, 1.84)
         assert cap == 1.50
