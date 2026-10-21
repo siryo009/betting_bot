@@ -38,6 +38,19 @@ export default defineRailway(() => {
       ADAPTIVE_WEIGHTING_TTL: preserve(),
       ADAPTIVE_WEIGHTING_WINDOW_DAYS: preserve(),
       API_FOOTBALL_KEY: preserve(),
+      // Autenticazione HTTP P0/P1 (19-21/10/2026): le rotte che toccano DENARO
+      // e ledger (`/api/auto_bet`, POST/DELETE `/api/cassa`) richiedono il
+      // token admin e l'interruttore delle scritture; le GET restano pubbliche
+      // finche' `API_READ_TOKEN` non e' impostato. `preserve()` NON crea
+      // valori: senza le variabili le rotte restano fail-closed (503) e il
+      // LIVE HTTP resta forzato in SIM, che e' la direzione voluta. Sono qui
+      // perche' un `config apply` non distrugga quelle impostate.
+      API_ADMIN_TOKEN: preserve(),
+      API_AUTO_BET_ALLOW_LIVE: preserve(),
+      API_AUTO_BET_ENABLED: preserve(),
+      API_READ_TOKEN: preserve(),
+      API_REQUIRE_READ_TOKEN: preserve(),
+      API_WRITE_ENABLED: preserve(),
       AUTO_BET_DRY_RUN: preserve(),
       AUTO_BET_MODE: preserve(),
       AUTO_BET_STAKE_MODE: preserve(),
