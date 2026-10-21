@@ -167,6 +167,25 @@ class TestCard:
         assert cards["finance"]["status"] == "ok"
         assert cards["execution"]["status"] == "ok"
 
+    def test_il_capo_non_e_in_attesa_su_un_ciclo_riuscito(self, log):
+        """Il Capo NON ha una sezione: la sua sezione e' il record.
+
+        In produzione il 21/10 la tabella diceva `chief: idle` su un ciclo
+        `ok: true` — cioe' il contrario di quello che era successo.
+        """
+        _write(log, [_record()])
+        records = agent_board.read_cycles(1, path=log)["records"]
+        chief = {c["id"]: c for c in agent_board.agent_cards(records)}["chief"]
+        assert chief["status"] == "ok"
+        assert "5.0s" in chief["detail"]
+
+    def test_il_capo_segnato_bloccato_quando_il_ciclo_e_fermo(self, log):
+        _write(log, [_record(ok=False, blocked="kill_switch: off")])
+        records = agent_board.read_cycles(1, path=log)["records"]
+        chief = {c["id"]: c for c in agent_board.agent_cards(records)}["chief"]
+        assert chief["status"] == "skipped"
+        assert "kill_switch" in chief["detail"]
+
     def test_ciclo_fermo_rende_skipped_i_valle(self, log):
         rec = _record(ok=False, blocked="market_gate: FEED_STALE")
         rec["market"] = {}

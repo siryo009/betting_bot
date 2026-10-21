@@ -306,15 +306,20 @@ def _feed_label(gate: dict) -> tuple[str, str]:
     return (reason or "bloccato"), "bad"
 
 
+def _duration_ms(rec: dict) -> Optional[float]:
+    """Durata del ciclo in millisecondi (`None` se le due date non tornano)."""
+    started = _parse_ts(rec.get("started_at"))
+    finished = _parse_ts(rec.get("finished_at"))
+    if not started or not finished:
+        return None
+    return round((finished - started).total_seconds() * 1000.0, 1)
+
+
 def _metrics_for(spec: AgentSpec, section: Any, rec: dict) -> list[dict]:
     """Indicatori dell'agente, dalle SOLE chiavi che il contratto produce."""
     sec = section if isinstance(section, dict) else {}
     if spec.id == "chief":
-        started = _parse_ts(rec.get("started_at"))
-        finished = _parse_ts(rec.get("finished_at"))
-        duration_ms = None
-        if started and finished:
-            duration_ms = round((finished - started).total_seconds() * 1000.0, 1)
+        duration_ms = _duration_ms(rec)
         return [
             _metric("bankroll", "Bankroll", _num(rec.get("bankroll")), "USDC"),
             _metric("mode", "Modalita'", str(rec.get("mode") or "?"), ""),
@@ -429,6 +434,18 @@ def _status_for(spec: AgentSpec, section: Any, rec: Optional[dict]) -> tuple[str
     if isinstance(section, dict) and section.get("error"):
         return "error", str(section.get("error"))
     blocked = str(rec.get("blocked_reason") or "")
+    # Il CAPO non ha una "sezione" propria: la sua sezione E' il record. Senza
+    # questo ramo un ciclo riuscito lo mostrava "in attesa" (misurato in
+    # produzione il 21/10: `ok: true` nel ciclo e `chief: idle` in tabella),
+    # cioe' la tabella diceva il contrario di quello che era successo.
+    if spec.section == "":
+        dur = _duration_ms(rec)
+        detail = "ciclo eseguito"
+        if isinstance(dur, float):
+            detail += " in %.1fs" % (dur / 1000.0)
+        if blocked:
+            return "skipped", f"ciclo fermato: {blocked}"
+        return ("ok" if rec.get("ok") else "skipped"), detail
     if produced:
         if spec.id == "advisor":
             return "ok", f"{len(section) if isinstance(section, list) else 0} consigli"
