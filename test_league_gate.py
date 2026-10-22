@@ -460,3 +460,71 @@ class TestTierAPagamentoBlocked:
         assert value_filter.is_paid_oracle_league("   ") is False
         # controprova: una lega vera `blocked` paga normalmente
         assert value_filter.is_paid_oracle_league(BANNED) is True
+
+
+class TestCoppeEuropeeInProbation:
+    """Coppe europee in probation (23/10/2026).
+
+    Contesto: il board serale di coppe (Europa e Conference League) era il 100%
+    dei pick NON giocabili — `blocked` non per una misura, ma per default. Le
+    coppe non hanno un ROI storico che le promuova nel core e non sono nemmeno
+    fra le leghe misurate negative: entrano quindi in probation, con la
+    strategia piu' severa del progetto (edge piu' alto, Kelly 0.4x, cap 0.5%).
+
+    Questi test difendono le tre cose che le rendono davvero giocabili: il
+    tier, l'alias dell'etichetta SX (senza, la coppa e' insaldabile) e la
+    rotazione delle quote (senza, la lega e' dormiente di fatto).
+    """
+
+    CUPS = ("Europa League", "Conference League")
+
+    def test_entrambe_sono_in_probation(self):
+        for league in self.CUPS:
+            assert value_filter.league_tier(league) == "probation", league
+            assert value_filter.league_allowed(league) is True, league
+
+    def test_strategia_probation_piu_severa_del_core(self):
+        for league in self.CUPS:
+            strat = value_filter.get_league_strategy(league)
+            assert strat["min_edge"] >= value_filter.PROBATION_STRATEGY["min_edge"]
+            assert strat["max_stake"] <= 0.01
+            assert strat["kelly_mult"] <= 0.5
+
+    def test_varianti_del_nome_verso_la_chiave_sports_map(self):
+        """"UEFA Conference League" e "Europa Conference League" sono lo
+        STESSO torneo: la variante deve portare al nome canonico, mai il
+        contrario (la trappola del 29/09 sulle nazionali)."""
+        for raw in ("UEFA Conference League", "Europa Conference League",
+                    "UEFA Europa Conference League"):
+            assert value_filter.canonical_league(raw) == "Conference League"
+        assert value_filter.canonical_league("UEFA Europa League") == "Europa League"
+
+    def test_etichetta_sx_risolta_e_saldabile(self):
+        import odds_api
+        for label, want in (("Conference League_UEFA", "Conference League"),
+                            ("Europa League_UEFA", "Europa League")):
+            # `_league_sx_to_sports_map` -> nome canonico (chiave del gate)
+            assert sx_signals._league_sx_to_sports_map(label) == want
+            # `league_to_sport` -> SPORT KEY (quella che usa il settlement)
+            assert sx_signals.league_to_sport(label) == odds_api.SPORTS_MAP[want]
+            # saldabile: la chiave esiste in SPORTS_MAP (settlement the-odds-api)
+            assert want in odds_api.SPORTS_MAP
+
+    def test_rotazione_non_dormiente(self):
+        import odds_api
+        for league in self.CUPS:
+            days = odds_api.SPORTS_INTERVAL_DAYS[league]
+            assert days <= 7, (league, days)
+
+    def test_taglio_del_cap_e_del_kelly_rispettato_dal_motore(self):
+        """La probation deve costare MENO del core a parita' di segnale."""
+        core = value_filter.get_league_strategy("Premier League")
+        cups = value_filter.get_league_strategy("Conference League")
+        assert cups["kelly_mult"] < core["kelly_mult"]
+        assert cups["min_edge"] >= core["min_edge"]
+
+    def test_serie_a_resta_vietata(self):
+        """Controprova: aprire le coppe non deve riaprire le leghe misurate
+        negative (Serie A -5.9%, La Liga -6.3% sul backtest 12/09)."""
+        assert value_filter.league_allowed("Serie A") is False
+        assert value_filter.league_allowed("La Liga") is False

@@ -63,6 +63,9 @@ class TestLeagueMapping:
             "Superliga": "Superliga Danimarca",
             "Europa League_UEFA": "Europa League",
             "Champions League_UEFA": "Champions League",
+            # 23/10/2026: senza questa voce il fuzzy stretto tornava None e la
+            # coppa era insaldabile (nessun risultato, righe aperte per sempre).
+            "Conference League_UEFA": "Conference League",
             "The Championship": "EFL Championship",
             "English Premier League": "Premier League",
             "Campeonato Brasileiro": "Brasileirao",

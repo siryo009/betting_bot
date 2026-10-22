@@ -916,11 +916,20 @@ class TestSplitReport:
         nuovo conterebbe come giocabile nel report e non nell'ordine).
         """
         import pathlib
-        from value_filter import PLAYABLE_TIERS
+        import value_filter
         assert mm.PLAYABLE_STATUSES == ("value", "strong_value", "moderate")
-        assert mm.PLAYABLE_STATUSES is PLAYABLE_TIERS      # alias, non copia
+        assert mm.PLAYABLE_STATUSES == value_filter.PLAYABLE_TIERS
+        # ⚠️ L'identita' di oggetto (`is`) NON si puo' pretendere: un test che fa
+        # `importlib.reload(value_filter)` (test_value_filter.test_env_override)
+        # RICREA la tupla, quindi dopo un reload l'alias punta alla versione
+        # precedente. Insieme nello stesso processo l'`is` falliva — un test che
+        # dipende dall'ordine di esecuzione e' un falso allarme che arriva nel
+        # momento peggiore. L'intento ("alias, non copia") si verifica nel
+        # SORGENTE, dove la copia si vedrebbe.
+        src_mm = pathlib.Path(mm.__file__).read_text()
+        assert "PLAYABLE_STATUSES: Tuple[str, ...] = PLAYABLE_TIERS" in src_mm
         # Nessuna delle due fonti ricopia la tupla a mano.
-        for mod in (mm, __import__("value_filter")):
+        for mod in (mm, value_filter):
             src = pathlib.Path(mod.__file__).read_text()
             assert src.count('"value", "strong_value"') <= 1
 

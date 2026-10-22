@@ -1019,11 +1019,17 @@ SPORTS_INTERVAL_DAYS = {
     "Swiss Super League": 2,
     # coppe europee e leghe liquide non giocabili: ogni 3 giorni (telemetria
     # e CLV, prima erano 7/30)
-    "Champions League": 3, "Europa League": 3,
+    # Coppe: Champions 3gg (lega non giocabile, solo telemetria/CLV); Europa e
+    # Conference a **2gg** dal 23/10/2026 (erano 3 e 14): da quando sono in
+    # probation sono leghe GIOCABILI, e l'invariante del 25/09 vale anche per
+    # loro — a 7gg la rotazione non cattura le odds (l'API le pubblica 1-3
+    # giorni prima), ed e' esattamente quello che rendeva il board delle coppe
+    # pieno di pick e vuoto di candidati giocabili.
+    "Champions League": 3, "Europa League": 2, "Conference League": 2,
     "Serie A": 3, "La Liga": 3,
     # ogni 14 giorni (erano 30): copertura dei campionati secondari che le
     # corsie torneo/probation possono giocare
-    "Conference League": 14, "Coppa Italia": 14, "Copa del Rey": 14,
+    "Coppa Italia": 14, "Copa del Rey": 14,
     "Coupe de France": 14, "DFB Pokal": 14, "FA Cup": 14, "EFL Cup": 14,
     "Primeira Liga": 14, "Veikkausliiga": 14,
     "A-League": 14,

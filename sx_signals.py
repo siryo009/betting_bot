@@ -194,6 +194,11 @@ SX_LEAGUE_ALIASES: Dict[str, Optional[str]] = {
     "Saudi Arabia Pro League": "Saudi Pro League",
     "Saudi Pro League": "Saudi Pro League",
     "Europa League_UEFA": "Europa League", "Champions League_UEFA": "Champions League",
+    # 23/10/2026: misurato che `Conference League_UEFA` NON veniva risolto (il
+    # fuzzy stretto torna None) -> la coppa sarebbe stata insaldabile e invisibile
+    # al gate. L'etichetta e' quella del provider, il valore e' la chiave di
+    # `odds_api.SPORTS_MAP`.
+    "Conference League_UEFA": "Conference League",
     "Premiership": "Scottish Premiership", "Superettan": "Sweden Superettan",
     "Superliga": "Superliga Danimarca",
     # Asia / resto del mondo

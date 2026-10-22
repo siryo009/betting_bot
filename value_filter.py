@@ -217,10 +217,14 @@ STRATEGY_LEAGUES = {
 # saldabili) · `blocked` (tutto il resto).
 #
 # Le leghe in probation ricevono una strategia PIU' SEVERA del core, non
-# uguale: edge minimo +4pp (contro +2/+2.5pp), Kelly ridotto (0.4 contro
-# 0.8-1.3) e cap di stake 0.5% (contro 1.5-2%). Cosi' il volume aggiunto e'
-# a taglia minima — se il ledger live le promuove, si potra' allinearle al
-# core (decisione futura, da misurare).
+# uguale: edge minimo +2pp (dal 14/10; era +4pp dal 21/09), Kelly ridotto
+# (0.4 contro 0.8-1.3) e cap di stake 0.5% (contro 1.5-2%). Cosi' il volume
+# aggiunto e' a taglia minima — se il ledger live le promuove, si potra'
+# allinearle al core (decisione futura, da misurare).
+# Dal 23/10/2026 la probation accoglie anche le due coppe europee (Europa e
+# Conference League): non hanno un ROI misurato, quindi non possono stare nel
+# core, ma "blocked" era un default e non una misura — e il loro board era il
+# 100% dei pick non giocabili nelle sere infrasettimanali.
 #
 # CRITERI DI AMMISSIONE (tutti obbligatori):
 #   1. presente in `odds_api.SPORTS_MAP` (altrimenti non e' saldabile);
@@ -240,6 +244,17 @@ PROBATION_LEAGUES = {
     "Scottish Premiership", "Superliga Danimarca", "Allsvenskan",
     # Asia / Golfo
     "K League 1", "J1 League", "Liga MX", "Saudi Pro League",
+    # Coppe europee (23/10/2026, direttiva del proprietario).
+    # NON hanno un ROI misurato — quindi NON possono stare nel core (che
+    # significa "storico positivo"), ma non sono nemmeno fra le leghe misurate
+    # NEGATIVE: "blocked" era un default, non una misura. Entrano in probation,
+    # cioe' con la strategia piu' severa del progetto: edge minimo piu' alto,
+    # Kelly 0.4x e cap 0.5% del bankroll. Motivo operativo: il board serale di
+    # coppe era il 100% dei pick non giocabili (Europa/Conference), e con il
+    # campionato fermo o infrasettimanale il gate lasciava il bot a zero
+    # candidati. Se il ledger le promuove si allineano al core; se le boccia si
+    # riportano a blocked — in entrambi i casi con una misura, non a naso.
+    "Europa League", "Conference League",
 }
 
 # Strategia di probation: piu' severa del core su edge, Kelly e cap.
@@ -297,6 +312,13 @@ LEAGUE_ALIASES = {
     "nations league": "UEFA Nations League",
     "afrika cup of nations": "Africa Cup of Nations",
     "caf africa cup of nations": "Africa Cup of Nations",
+    # Coppe europee (23/10/2026): le varianti dei provider verso la chiave di
+    # `SPORTS_MAP` ("Europa League", "Conference League"), MAI il contrario.
+    "uefa europa league": "Europa League",
+    "uefa conference league": "Conference League",
+    "europa conference league": "Conference League",
+    "uefa europa conference league": "Conference League",
+    "uefa conference league qualifiers": "Conference League",
 }
 
 
