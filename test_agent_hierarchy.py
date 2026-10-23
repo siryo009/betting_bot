@@ -506,6 +506,112 @@ class TestPorteDelCapo:
 
 
 # ---------------------------------------------------------------------------
+# 1c. FEED CONDIVISO: la catena riceve il mercato VALIDATO (23/10/2026)
+# ---------------------------------------------------------------------------
+
+def _validated_snapshot(tmp_path):
+    """Snapshot di mercato VALIDATO (3 refresh conformi), senza rete."""
+    from decision.feeds import DEFAULT_GATEWAY_ID, MarketFeed, StaticSource, utcnow
+    from decision.middleware import ListSink, Observability
+    row = {"schema_version": "1.0", "event_id": "sx-1", "market": "1X2",
+           "selection": "1", "odds": 1.65, "timestamp": utcnow().isoformat(),
+           "source": "sxbet", "gateway_id": DEFAULT_GATEWAY_ID,
+           "home": "Inter", "away": "Cagliari", "league": ALLOWED_LEAGUE}
+    feed = MarketFeed([StaticSource([row], name="sxbet", source_id="sxbet")],
+                      observability=Observability(sink=ListSink()),
+                      state_path=tmp_path / "feed_state.json")
+    snapshot = None
+    for _ in range(3):
+        snapshot = feed.refresh(force=True)
+    return snapshot
+
+
+class TestFeedCondiviso:
+    """Il feed VALIDATO deve arrivare alla catena, altrimenti non ordina.
+
+    Difetto del 23/10/2026: `for_cycle` costruiva la Finanza e la passava
+    esplicitamente, quindi il blocco "se gli agenti sono iniettati" non girava
+    e la Finanza restava SENZA feed -> ogni piano usciva `feed_missing` -> la
+    corsia `CHIEF_EXECUTION=live` non produceva un ordine dal 15/10, mentre lo
+    stesso giro ordinava dalla corsia storica.
+    """
+
+    def test_il_feed_arriva_a_tutti_gli_agenti_del_ciclo(self, tmp_path):
+        snapshot = _validated_snapshot(tmp_path)
+        chief = ChiefOrchestrator.for_cycle(bankroll=100.0, mode="live",
+                                           feed=snapshot)
+        # La Finanza costruita dalla fabbrica NON riceve `feed` nel costruttore:
+        # e' il Capo a doverlo propagare (era il punto del difetto).
+        assert chief.finance.feed is snapshot
+        assert chief.data.feed is snapshot
+
+    def test_senza_feed_il_piano_si_ferma_col_feed_missing(self, conn, tmp_path):
+        signal = DataAgent().process(conn=conn, now=NOW).signals[0]
+        blocked = FinanceAgent(bankroll=100.0, mode="sim",
+                               feed_required=True).process(signal)
+        assert blocked.record.risk.verdict == "reject"
+        assert "feed_missing" in str(blocked.record.risk.reason).lower()
+        # Controprova: con lo STESSO segnale e il feed validato il piano passa.
+        snapshot = _validated_snapshot(tmp_path)
+        passed = FinanceAgent(bankroll=100.0, mode="sim",
+                              feed=snapshot).process(signal)
+        assert passed.record.risk.verdict == "approve", passed.record.risk.reason
+
+    def test_snapshot_valido_o_stop_mai_un_ripiego_silenzioso(self, tmp_path, monkeypatch):
+        import auto_bet as ab
+        from decision.feeds import MarketFeed, StaticSource
+        monkeypatch.setattr("decision.feeds.feed_enabled", lambda *a, **k: True)
+        ok_feed = MarketFeed([StaticSource([], name="sxbet", source_id="sxbet")],
+                             state_path=tmp_path / "ok.json")
+        monkeypatch.setattr("decision.feeds.feed_from_env",
+                            lambda *a, **k: ok_feed)
+        # Sorgente che risponde ma NESSUNA validazione: la catena si FERMA.
+        assert ab.market_feed_snapshot() == (None, False)
+        down = MarketFeed([StaticSource([], name="sxbet", source_id="sxbet",
+                                        fail="sx 503")],
+                          state_path=tmp_path / "down.json")
+        monkeypatch.setattr("decision.feeds.feed_from_env", lambda *a, **k: down)
+        assert ab.market_feed_snapshot() == (None, False)
+        # Feed disattivato da env: nessuno snapshot ma VIA LIBERA (la catena
+        # valuta senza dati di mercato, scelta esplicita come in build_plan).
+        monkeypatch.setattr("decision.feeds.feed_enabled", lambda *a, **k: False)
+        assert ab.market_feed_snapshot() == (None, True)
+
+    def test_feed_validato_restituisce_lo_snapshot(self, tmp_path, monkeypatch):
+        import auto_bet as ab
+        from decision.feeds import MarketFeed, StaticSource
+        monkeypatch.setattr("decision.feeds.feed_enabled", lambda *a, **k: True)
+        _validated_snapshot(tmp_path)      # stato del gateway sul volume
+        feed = MarketFeed([StaticSource([], name="sxbet", source_id="sxbet")],
+                          state_path=tmp_path / "feed_state.json")
+        monkeypatch.setattr("decision.feeds.feed_from_env", lambda *a, **k: feed)
+        snapshot, proceed = ab.market_feed_snapshot()
+        assert proceed is True and snapshot is not None
+        assert snapshot.is_validated is True
+
+    def test_la_corsia_chief_chiede_il_feed_e_non_lo_inventa(self):
+        """Tripwire AST: la corsia passa un feed VALIDATO al Capo.
+
+        Giudica il codice (la docstring nomina il difetto apposta) e difende
+        la proprieta': senza `feed=`, la catena tornerebbe a `feed_missing`.
+        """
+        import ast
+        import auto_bet
+        from pathlib import Path
+        tree = ast.parse(Path(auto_bet.__file__).read_text(encoding="utf-8"))
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == "_chief_live_candidates")
+        names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+        kws = {k.arg for n in ast.walk(fn) if isinstance(n, ast.Call)
+               for k in n.keywords if k.arg}
+        assert "market_feed_snapshot" in names
+        assert "feed" in kws          # for_cycle(..., feed=<snapshot>)
+        # Il verdetto va LETTO: senza il controllo la corsia ordinerebbe
+        # anche su un feed non validato (fail-closed perso).
+        assert "_puo_proseguire" in names
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 

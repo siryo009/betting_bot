@@ -69,7 +69,14 @@ class DataAgent:
 
     def process(self, *, conn=None, now=None) -> MarketData:
         if self.feed is not None:
-            snapshot = self.feed.refresh()
+            # Il feed puo' essere il GATEWAY (`MarketFeed`, che sa fare il
+            # refresh) oppure uno SNAPSHOT gia' validato che il chiamante ha in
+            # mano (il Capo lo riceve dalla corsia che ha gia' pagato la
+            # verifica: un secondo refresh farebbe due identita' di mercato).
+            if hasattr(self.feed, "refresh"):
+                snapshot = self.feed.refresh()
+            else:
+                snapshot = self.feed
             gate = verify_feed(snapshot)
         else:
             snapshot = None

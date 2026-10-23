@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from agents.analysis_agent import AnalysisAgent
 from agents.brain_agent import BrainAgent
@@ -45,7 +45,8 @@ class ChiefOrchestrator:
                  advisor: Optional[Any] = None,
                  analysis: Optional[AnalysisAgent] = None,
                  brain: Optional[BrainAgent] = None, *,
-                 advisor_enabled: Optional[bool] = None) -> None:
+                 advisor_enabled: Optional[bool] = None,
+                 feed: Optional[Any] = None) -> None:
         # Esito dell'ultimo ciclo (porta pubblica `live_trades`): inizializzato
         # qui perche' una corsia possa chiederlo anche prima di un ciclo,
         # senza `AttributeError`.
@@ -82,11 +83,22 @@ class ChiefOrchestrator:
             # (dal Data Agent) e lo STESSO feed valuta i piani ( Finance Agent):
             # due feed farebbero due letture SX e due identita' di mercato diverse.
             from decision.feeds import MarketFeed, feed_enabled
-            feed = MarketFeed() if feed_enabled() else None
+            feed = feed or (MarketFeed() if feed_enabled() else None)
             if self.data is None:
                 self.data = DataAgent(feed=feed)
             if self.finance is None:
                 self.finance = FinanceAgent(feed=feed)
+        # --- FEED CONDIVISO anche con agenti INIETTATI (23/10/2026) ----------
+        # `for_cycle` costruisce la Finanza e la passa esplicitamente, quindi il
+        # blocco qui sopra non girava: la Finanza restava SENZA feed e OGNI
+        # piano finiva `feed_missing`, cioe' la corsia del Capo non produceva
+        # un ordine dal 15/10 pur essendo `CHIEF_EXECUTION=live`. Il gate di
+        # mercato resta fail-closed: se il chiamante non da' un feed validato,
+        # la catena continua a fermarsi (nessun ripiego silenzioso).
+        if feed is not None:
+            for _agent in (self.data, self.finance):
+                if _agent is not None and getattr(_agent, "feed", None) is None:
+                    _agent.feed = feed
         # L'Advisor di default RIUSA SEMPRE la Finanza del ciclo (il micro-stake
         # e' una ri-valutazione con lo stesso motore, bankroll frazionato) e la
         # stessa Strategia/Data per il market switch: anche quando gli agenti
@@ -120,7 +132,7 @@ class ChiefOrchestrator:
 
     @classmethod
     def for_cycle(cls, *, bankroll: float = 0.0, mode: str = "sim",
-                  **kwargs) -> "ChiefOrchestrator":
+                  feed: Optional[Any] = None, **kwargs) -> "ChiefOrchestrator":
         """Capo pronto per un ciclo con bankroll/mode dati (FABBRICA del Capo).
 
         Esiste perche' NESSUN altro modulo debba costruire gli agenti della
@@ -129,7 +141,7 @@ class ChiefOrchestrator:
         La Finanza si costruisce qui, con bankroll e mode del giro.
         """
         kwargs.setdefault("finance", cls.default_finance(bankroll, mode))
-        return cls(**kwargs)
+        return cls(feed=feed, **kwargs)
 
     def run_cycle(self, *, conn=None, now=None) -> CycleReport:
         report = CycleReport(

@@ -3433,6 +3433,40 @@ def _market_feed_gate(*, request_id: str = "auto_bet") -> tuple[bool, str, dict]
         return False, f"gate di mercato non valutabile ({type(exc).__name__}: {exc})", {}
 
 
+def market_feed_snapshot(*, request_id: str = "auto_bet") -> tuple[Optional[Any], bool]:
+    """Snapshot di mercato VALIDATO per la catena: `(snapshot, puo_proseguire)`.
+
+    Perche' esiste (23/10/2026): la catena del Capo costruiva i piani con la
+    Finanza SENZA feed, quindi ogni piano usciva `feed_missing` e la corsia
+    `CHIEF_EXECUTION=live` non produceva ordini dal 15/10 — mentre lo stesso
+    giro li piazzava dalla corsia storica. Qui la catena riceve lo STESSO
+    gateway del percorso d'ordine (una sola identita' di mercato).
+
+    Tre esiti, con la stessa semantica di `_market_feed_gate`:
+      * `(snapshot, True)`  — feed validato: la catena valuta su quei dati;
+      * `(None, True)`      — feed DISATTIVATO da env (`DECISION_FEED_ENABLED=0`):
+        scelta esplicita, la catena valuta senza dati di mercato (come
+        `feed_required=False` in `build_plan`);
+      * `(None, False)`     — nessuna sorgente, refresh fallito, quotatura
+        vecchia, serie di validazione incompleta o errore: il chiamante si
+        FERMA (fail-closed). Un errore non diventa mai "mercato ok".
+    """
+    try:
+        from decision.feeds import feed_enabled, feed_from_env
+        if not feed_enabled():
+            return None, True
+        feed = feed_from_env()
+        if feed is None or not feed.has_sources:
+            return None, False
+        snapshot = feed.refresh(request_id=request_id)
+        if not feed.gate(snapshot).allowed:
+            return None, False
+        return snapshot, True
+    except Exception as exc:
+        logger.debug("auto_bet: snapshot di mercato non disponibile (%s)", exc)
+        return None, False
+
+
 def market_gate_status() -> dict:
     """Ultimo verdetto del gate di mercato (per /autobet e per le notifiche)."""
     return dict(_last_market_gate)
@@ -6343,7 +6377,17 @@ def _chief_live_candidates(*, bankroll: float, now=None) -> list[dict]:
         # catena internamente e restituisce i trade gia' dimensionati. Questa
         # corsia NON importa piu' Analysis/Brain e non tocca `chief.finance`:
         # gli agenti lavorano separatamente e si passa solo dal Chief.
-        chief = ChiefOrchestrator.for_cycle(bankroll=bankroll, mode="live")
+        # FEED VALIDATO (23/10/2026): senza, ogni piano della catena usciva
+        # `feed_missing` e la corsia non ordinava mai. Lo snapshot viene dal
+        # gateway gia' usato dal percorso d'ordine; `puo_proseguire=False` =
+        # catena ferma, `_feed None` con via libera = feed spento da env.
+        _feed, _puo_proseguire = market_feed_snapshot(request_id="chief")
+        if not _puo_proseguire:
+            logger.info("auto_bet: corsia chief ferma — gate di mercato non "
+                        "validato (fail-closed, nessun ordine)")
+            return []
+        chief = ChiefOrchestrator.for_cycle(bankroll=bankroll, mode="live",
+                                            feed=_feed)
         trades = chief.live_trades(bankroll=bankroll, now=now)
         for trade in trades:
             if not trade.executable or float(trade.stake or 0.0) <= 0:
