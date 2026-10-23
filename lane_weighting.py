@@ -207,12 +207,17 @@ def _verdict(values: List[float]) -> Dict[str, Any]:
         row["status"] = STATUS_UNAVAILABLE
         row["note"] = f"test statistico non eseguibile ({exc})"
         return row
-    for key in ("mean", "ci_low", "ci_high", "p_value"):
+    # Gli estremi dell'intervallo sono in PUNTI PERCENTUALI (si leggono
+    # accanto a `avg_clv`), il p-value resta un numero in [0, 1]: moltiplicarlo
+    # per 100 produceva `p_value: 1.98`, un valore che non esiste e che fa
+    # sembrare rotto un test che stava rispondendo correttamente.
+    for key in ("ci_low", "ci_high"):
         val = test.get(key)
-        if key == "mean":
-            continue
         if val is not None:
             row[key] = round(float(val) * 100, 3)
+    p_val = test.get("p_value")
+    if p_val is not None:
+        row["p_value"] = round(min(1.0, max(0.0, float(p_val))), 4)
     row["reliable"] = True
     mean = test.get("mean")
     mean = float(mean) if mean is not None else (sum(values) / n)

@@ -13917,3 +13917,37 @@ recinto 70%, stop giornaliero/settimanale, CB2, ticket 1.00, tetto per-ordine
 12%. La demozione riduce la **TAGLIA**, non aggiunge o toglie la possibilita' di
 ordinare: una corsia fermata dal CLV resta in telemetria (i suoi segnali
 continuano a misurarsi) e si riapre da sola quando l'IC95 torna sopra zero.
+
+**7) VERIFICA SUL CONTAINER (23/10, deploy `8959fa3f` SUCCESS) — e un difetto
+trovato leggendola.** Moduli vivi: `lane_weighting.enabled() = True`,
+`tennis_lane.EV_MIN = 0.045`. Report sul **ledger di produzione**:
+
+```
+🎯 Demozione per corsia (CLV) — ON | finestra 60g · campione min 30 · floor 0.00
+  ✅ 1X2:    n=31  CLV +2.88%  (IC95 +0.49..+5.27, p=0.020)  → x1.00
+  ✅ TENNIS: n=32  CLV +4.51%  (IC95 +3.44..+5.59, p<0.001)  → x1.00
+```
+
+**Nessuna corsia demozione**: il CLV misurato e' POSITIVO in entrambe. Il dato
+onesto da mettere agli atti e' che il **tennis ha CLV +4,51%** mentre il suo P/L
+realizzato e' **-2,0%**: sono due domande diverse (il prezzo comprato era
+buono, i risultati sono andati male) ed e' esattamente il motivo per cui la
+demozione guarda il CLV e non il P/L. L'alzata del pavimento EV al 4,5% resta
+la leva di **selettivita'**; la taglia la decide il CLV. OU/AH non compaiono:
+non hanno trade live, quindi non sono giudicabili (e non vengono inventati).
+
+**DIFETTO TROVATO NELLA LETTURA (corretto):** il report moltiplicava il
+**p-value** per 100 insieme agli estremi dell'IC -> `p_value: 1.98` su un test
+che in realta' rispondeva 0,0198. Un numero impossibile in un report fa
+sembrare rotto cio' che funziona. Ora il p-value resta in [0,1] (clampato) e
+solo gli estremi dell'IC sono in punti percentuali; tripwire
+`test_p_value_resta_in_zero_uno`. Dietro questo c'e' la regola di sempre: **un
+rapporto che si legge in produzione va letto almeno una volta sui dati veri**,
+non solo asserito nei test.
+
+**`railway config plan`: "already up to date"** (0 to add, 0 to change,
+0 to destroy). Nota operativa: la **sessione CLI Railway era scaduta**
+(`railway whoami` -> `Unauthorized`, nessun `RAILWAY_TOKEN` nel vault): si
+rientra con `railway login --browserless` (codice su railway.com/activate) —
+e il processo di login va tenuto vivo in BACKGROUND, altrimenti il codice muore
+col comando.

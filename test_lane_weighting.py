@@ -162,6 +162,21 @@ class TestVerdetto:
         assert row["status"] == lw.STATUS_OK
         assert row["multiplier"] == 1.0
 
+    def test_p_value_resta_in_zero_uno(self):
+        """Il p-value NON si scala in punti percentuali (trovato in produzione).
+
+        Il report lo moltiplicava per 100: il verdetto reale del 1X2 (p=0,0198)
+        usciva come `p_value: 1.98`, un numero che non esiste — e che faceva
+        sembrare rotto un test che stava rispondendo correttamente.
+        """
+        _seed_batch(35, clv=-0.06, spread=0.01)
+        row = lw.table(use_cache=False)["1X2"]
+        assert row["p_value"] is not None
+        assert 0.0 <= row["p_value"] <= 1.0, row["p_value"]
+        # Gli estremi dell'IC sono invece in punti percentuali (accanto a avg_clv).
+        assert row["ci_high"] < 0
+        assert abs(row["ci_high"]) < 100.0
+
     def test_ogni_corsia_ha_il_suo_verdetto(self):
         _seed_batch(35, clv=-0.06, mercato="TENNIS", league="ATP")
         for i in range(35, 45):
