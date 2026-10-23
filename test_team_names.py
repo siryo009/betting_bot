@@ -81,6 +81,64 @@ class TestSameTeam:
         assert team_names.same_team("Corinthians", "Vila Nova") is False
         assert team_names.same_team("Alpha", "Beta") is False
 
+    def test_alias_esplicito_un_livello(self):
+        """Caso REALE del 23/10/2026: `team_ratings` contiene SIA 'Wolves' SIA
+        'Wolverhampton Wanderers' come voci distinte, e il ledger aveva
+        `home_team='Wolves'` con esito 'Wolverhampton Wanderers' -> il segnale
+        veniva scartato. L'alias dichiarato (`wolves -> Wolverhampton`) chiude
+        il caso.
+        """
+        assert team_names.same_team("Wolverhampton Wanderers", "Wolves") is True
+        assert team_names.same_team("Wolves", "Wolverhampton Wanderers") is True
+        # e resta deterministico anche col nome completo
+        assert team_names.same_team("Wolves", "Wolverhampton") is True
+
+    def test_alias_non_avvicina_squadre_diverse(self):
+        """L'allargamento e' SOLO per alias dichiarati: nessuna coppia estranea
+        deve avvicinarsi (un falso positivo chiuderebbe una bet con un'altra
+        partita)."""
+        for a, b in (("Wolves", "Watford"),
+                     ("Wolverhampton Wanderers", "Watford"),
+                     ("Tottenham", "Wolverhampton"),
+                     ("Manchester United", "Newcastle United")):
+            assert team_names.same_team(a, b) is False, (a, b)
+
+    def test_alias_expanded_un_solo_livello(self):
+        """Un alias che punta a un altro alias non genera catene: la funzione
+        si ferma al primo grado (nessun indovinello)."""
+        assert team_names._alias_expanded("Wolves") == "Wolverhampton"
+        assert team_names._alias_expanded("Wolverhampton") == "Wolverhampton"
+        assert team_names._alias_expanded("Sconosciuta FC") == "Sconosciuta FC"
+
+    def test_alias_confrontati_solo_per_uguaglianza(self):
+        """Regressione 23/10/2026: l'alias espanso NON deve passare dal
+        contenimento dei token.
+
+        Con `same_team(espanso)` il nome espanso entrava nello stadio 4 e
+        'Inter Milan' (-> 'Inter') diventava uguale a QUALSIASI squadra che
+        contenesse 'inter': sui 828 nomi reali di `team_ratings` questo
+        produceva 6 falsi positivi (Inter Miami, Inter Turku, Inter Club
+        d'Escaldes, Sporting Braga) — cioe' partite diverse saldate con lo
+        stesso risultato. L'alias unisce solo forme della STESSA squadra.
+        """
+        for a, b in (("Inter Milan", "Inter Miami"),
+                     ("Inter Milan", "Inter Turku"),
+                     ("Inter Milan", "FC Inter Turku"),
+                     ("Inter Milan", "Inter Club d'Escaldes"),
+                     ("FC Internazionale", "Inter Miami"),
+                     ("Sporting Lisbon", "Sporting Braga"),
+                     ("Sporting Lisbona", "Sporting Braga")):
+            assert team_names.same_team(a, b) is False, (a, b)
+            assert team_names.same_team(b, a) is False, (a, b)
+
+    def test_alias_resta_equivalenza(self):
+        """La stessa squadra con l'alias continua a coincidere (equivalenza,
+        non contenimento): e' il caso che la correzione doveva conservare."""
+        assert team_names.same_team("Inter Milan", "Inter") is True
+        assert team_names.same_team("FC Internazionale", "Inter") is True
+        assert team_names.same_team("Sporting Lisbon", "Sporting CP") is True
+        assert team_names.same_team("Wolverhampton Wanderers", "Wolverhampton") is True
+
     def test_contenimento_ambiguo_risolto_dal_chiamante(self):
         """Il contenimento da solo NON e' una prova: 'Manchester' sta sia in
         'Manchester United' sia in 'Manchester City'. Per questo il chiamante

@@ -3713,25 +3713,58 @@ async def backup_data_job(context: ContextTypes.DEFAULT_TYPE):
     """Backup giornaliero dei dati persistenti (delega a backup_manager).
 
     Snapshot in data/backups/<timestamp>/: DB (consistente via backup API),
-    dataset ML fresco (csv+json), cache e log. Tiene gli ultimi BACKUP_KEEP
-    snapshot (env, default 7).
+    dataset ML fresco (csv+json), cache e log, manifest `backup.json`. Tiene i
+    BACKUP_KEEP snapshot VALIDI piu' recenti (env, default 7) e mai l'ultimo
+    valido.
+
+    UN SOLO RESPONSABILE DELLA ROTAZIONE (23/10/2026): i JSONL di telemetria
+    vengono ruotati DENTRO `run_backup`, prima della copia. Il job non ruota
+    piu' per conto suo: prima lo faceva due volte (qui e in `run_backup`) e
+    l'esito stampato poteva appartenere a una rotazione diversa da quella che
+    aveva prodotto lo snapshot.
+
+    TRE ESITI DISTINGUIBILI, presi dal criterio unico di `backup_manager`:
+    VALIDO -> INFO, PARZIALE -> WARNING, NON VALIDO (DB assente/integrita'
+    rotta) -> ERROR. Il job non dichiara mai "completato" un backup che non
+    sia valido.
     """
-    from backup_manager import run_backup
-    from telemetry_logs import rotate_jsonl_logs
+    from backup_manager import run_backup, rotation_text
     loop = asyncio.get_running_loop()
-    # ROTAZIONE dei JSONL di telemetria PRIMA del backup (03/10/2026): lo
-    # snapshot copia TUTTA `data/`, quindi comprimere prima significa che la
-    # copia contiene i log gia' ridotti — senza questo, un `book_flow_events`
-    # da 20 MB finiva intero in ogni snapshot (volume all'81% il 30/09).
-    # Fail-safe: un problema di rotazione non deve impedire il backup.
+    # Tracciabilita' (23/10/2026): un identificativo per RUN + tre righe
+    # distinguibili (AVVIO / COMPLETATO / PARZIALE / FALLITO). Prima il job non
+    # lasciava alcuna traccia propria: l'unica riga era quella di `run_backup`,
+    # quindi "job mai partito" e "job partito e fallito in silenzio" si
+    # leggevano uguali nel log. Il timestamp e' UTC esplicito.
+    job_id = "backup-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    started = datetime.now(timezone.utc)
+    logger.info("backup_data_job[%s] AVVIO — snapshot DB/dataset ML "
+                "(rotazione JSONL inclusa nello snapshot)", job_id)
     try:
-        await loop.run_in_executor(_scan_executor, rotate_jsonl_logs)
+        summary = await loop.run_in_executor(_scan_executor, run_backup)
     except Exception as e:
-        logger.warning(f"backup_data_job: rotazione log: {e}")
-    try:
-        await loop.run_in_executor(_scan_executor, run_backup)
-    except Exception as e:
-        logger.error(f"backup_data_job: {e}")
+        # Distinguibile da un successo: FALLITO con l'id del run e la durata.
+        logger.error("backup_data_job[%s] FALLITO dopo %.1fs: %s", job_id,
+                     (datetime.now(timezone.utc) - started).total_seconds(), e)
+        return
+    summary = summary or {}
+    db = summary.get("db") or {}
+    status = str(summary.get("status") or "unknown")
+    motivi = ", ".join(summary.get("reasons") or []) or "n/d"
+    durata = (datetime.now(timezone.utc) - started).total_seconds()
+    dettaglio = ("snapshot %s | stato: %s | integrity DB: %s | "
+                 "%d file data copiati, %d non copiati | %s")
+    args = (summary.get("stamp"), status, db.get("integrity", "n/d"),
+            summary.get("data_files", 0), summary.get("data_errors", 0),
+            rotation_text(summary))
+    if status == "ok":
+        logger.info("backup_data_job[%s] COMPLETATO in %.1fs — " + dettaglio,
+                    job_id, durata, *args)
+    elif status == "partial":
+        logger.warning("backup_data_job[%s] PARZIALE in %.1fs — motivi: %s | "
+                       + dettaglio, job_id, durata, motivi, *args)
+    else:
+        logger.error("backup_data_job[%s] FALLITO in %.1fs — motivi: %s | "
+                     + dettaglio, job_id, durata, motivi, *args)
 
 
 def send_telegram_message_direct(text: str) -> None:

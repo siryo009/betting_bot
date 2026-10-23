@@ -1400,6 +1400,39 @@ def _goals_sane(sh, sa, result=None) -> bool:
     return True
 
 
+def _team_side(esito, home, away):
+    """Lato ('1'/'2') di una previsione il cui esito e' un NOME DI SQUADRA.
+
+    Regola UNICA condivisa con la catena `decision` (`team_names.side_of`):
+    confronta il nome grezzo e quello RISOLTO contro casa e trasferta con
+    `same_team`. Prima il tracker confrontava solo `_norm_team`, quindi
+    'Brondby IF' (SX) su `away='Brondby'` restava un esito SCONOSCIUTO e la
+    previsione non si chiudeva mai (23/10/2026).
+
+    Ritorna None quando l'esito non e' riconducibile a un solo lato — nome
+    che somiglia a ENTRAMBE le squadre compreso: un esito ambiguo NON va
+    assegnato per esclusione (salderebbe la riga col risultato di un'altra
+    squadra). Il chiamante lascia la riga aperta.
+    """
+    if not esito:
+        return None
+    try:
+        from rating_engine import resolve_team_name
+        from team_names import side_of
+        return side_of(esito, home, away, resolve=resolve_team_name)
+    except Exception:
+        # Ripiego deterministico: confronto esatto sulla normalizzazione
+        # locale (comportamento storico), mai un contenimento arbitrario.
+        en = _norm_team(esito)
+        if not en:
+            return None
+        if home and en == _norm_team(home):
+            return "1"
+        if away and en == _norm_team(away):
+            return "2"
+        return None
+
+
 def _esito_possible(mercato, esito, sh, sa, home=None, away=None):
     """Tripwire anti-contraddizione: l'esito PUÒ essere vinto coi gol (sh, sa)?
 
@@ -1413,14 +1446,16 @@ def _esito_possible(mercato, esito, sh, sa, home=None, away=None):
     el = str(esito or "").lower().strip()
     if m == "AH":
         return None
-    home_n = _norm_team(home) if home else ""
-    away_n = _norm_team(away) if away else ""
-    el_n = _norm_team(el)
-    if m in ("1X2",) or el in ("1", "2", "x", "draw", "pareggio") or \
-            (home and el_n == home_n) or (away and el_n == away_n):
-        if el == "1" or (home and el_n == home_n):
+    # Il lato di un esito "nome squadra" lo decide `_team_side` (helper
+    # condiviso con `decision.adapters`). Se e' AMBIGUO ritorna None: qui
+    # significa "non verificabile", non "contraddittorio" -> non si blocca
+    # una chiusura su un dubbio, e il verdetto stesso restera' assente
+    # (`_prediction_outcome` non chiude una riga con esito ambiguo).
+    side = _team_side(el, home, away) if (home or away) else None
+    if m in ("1X2",) or el in ("1", "2", "x", "draw", "pareggio") or side:
+        if el == "1" or side == "1":
             return sh > sa
-        if el == "2" or (away and el_n == away_n):
+        if el == "2" or side == "2":
             return sa > sh
         if el in ("x", "draw", "pareggio"):
             return sh == sa
@@ -1844,11 +1879,13 @@ def _prediction_outcome(mercato, esito, quota, sh, sa, home, away):
     elif el == "2":
         won = sa > sh
     else:
-        # esito = nome squadra (es. "Osasuna")
-        hn = _norm_team(home); an = _norm_team(away); en = _norm_team(el)
-        if en == hn:
+        # esito = nome squadra (es. "Osasuna", "Brondby IF"): il lato lo
+        # decide l'helper condiviso con `decision.adapters`. Un esito che
+        # somiglia a entrambe le squadre (o a nessuna) lascia la riga APERTA.
+        side = _team_side(el, home, away)
+        if side == "1":
             won = sh > sa
-        elif en == an:
+        elif side == "2":
             won = sa > sh
         else:
             return None, None

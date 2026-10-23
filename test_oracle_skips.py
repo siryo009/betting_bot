@@ -206,8 +206,19 @@ def test_job_credit_watchdog_usa_la_diagnosi():
 
 
 def test_rotazione_agganciata_al_backup():
-    src = (Path(__file__).parent / "bot.py").read_text()
-    assert "rotate_jsonl_logs" in src
+    """UN SOLO responsabile della rotazione JSONL (23/10/2026).
+
+    La rotazione e' dentro `backup_manager.run_backup` (prima della copia di
+    `data/`); il job del bot NON la esegue per conto suo, altrimenti l'esito
+    stampato poteva appartenere a una rotazione diversa da quella che aveva
+    prodotto lo snapshot.
+    """
+    bot_src = (Path(__file__).parent / "bot.py").read_text()
+    assert "rotate_jsonl_logs" not in bot_src
+    bm_src = (Path(__file__).parent / "backup_manager.py").read_text()
+    assert "rotate_jsonl_logs" in bm_src
+    # l'esito resta visibile nel riepilogo del job
+    assert "rotation_text" in bot_src
 
 
 def test_env_dichiarate_in_iac():

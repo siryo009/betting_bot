@@ -15,7 +15,7 @@ import value_filter as vf
 from decision import KillSwitchStatus, ReasonCode, RiskLimits, decide
 from decision.adapters import (
     FULL_SAMPLE, calibration_active, canonical_outcome, compute_confidence,
-    iter_signals, model_coverage, signal_from_row,
+    default_resolver, iter_signals, model_coverage, signal_from_row,
 )
 
 ALLOWED_LEAGUE = "Premier League"
@@ -201,6 +201,72 @@ class TestEsitoCanonico:
         assert canonical_outcome("", "Inter", "Cagliari") is None
         assert canonical_outcome("Inter", "", "") is None
         assert canonical_outcome("1X", "Inter", "Cagliari") is None
+
+    def test_alias_non_avvicina_squadre_diverse(self):
+        """Regressione 23/10/2026: l'alias espanso non deve diventare un
+        contenimento. 'Inter Milan' e 'Inter Miami' sono due squadre (e il
+        resolver di default, senza `team_ratings`, lascia i nomi grezzi):
+        l'adapter deve rifiutare, mai assegnare un lato per esclusione.
+        """
+        ident = lambda n: n  # noqa: E731  (nessuna risoluzione: nomi grezzi)
+        assert canonical_outcome("Inter Milan", "Inter Miami", "Chicago Fire",
+                                 resolve=ident) is None
+        assert canonical_outcome("Inter Milan", "FC Inter Turku", "HJK",
+                                 resolve=ident) is None
+        assert canonical_outcome("Sporting Lisbon", "Sporting Braga", "Porto",
+                                 resolve=ident) is None
+        # controprova: la stessa squadra scritta in due modi resta valida
+        assert canonical_outcome("Inter Milan", "Inter", "Cagliari",
+                                 resolve=ident) == "1"
+
+    def test_il_resolver_di_default_risolve_davvero(self, monkeypatch):
+        """Regressione 23/10/2026: `default_resolver` importava un nome
+        inesistente (`resolve_team_name`) e l'ImportError finiva nell'`except`,
+        quindi restituiva SEMPRE il nome originale. La risoluzione non
+        avveniva mai e `canonical_outcome` lavorava solo con `same_team`.
+        """
+        import team_names
+        calls = []
+
+        def finto(nome, known=None):
+            calls.append(nome)
+            return {"Wolverhampton Wanderers": "Wolverhampton"}.get(nome)
+
+        monkeypatch.setattr(team_names, "resolve_team", finto)
+        resolve = default_resolver()
+        assert resolve("Wolverhampton Wanderers") == "Wolverhampton"
+        assert calls == ["Wolverhampton Wanderers"]   # la funzione e' usata
+        # Non risolto -> nome ORIGINALE (fail-safe, mai una stringa vuota).
+        assert resolve("Sconosciuta") == "Sconosciuta"
+
+    def test_resolver_rotto_non_rompe_la_canonicalizzazione(self, monkeypatch):
+        import team_names
+
+        def boom(nome, known=None):
+            raise RuntimeError("db non leggibile")
+
+        monkeypatch.setattr(team_names, "resolve_team", boom)
+        assert default_resolver()("Inter") == "Inter"
+        # Il resto della catena resta utilizzabile (match per nome grezzo).
+        assert canonical_outcome("Inter", "Inter", "Cagliari") == "1"
+
+    def test_nomi_societari_risolti_dalla_pool(self, monkeypatch):
+        """Caso reale della produzione (Wolves vs Watford, 23/10/2026):
+        l'esito "Wolverhampton Wanderers" deve diventare `1` perche' il nome
+        risolto coincide con quello di casa — con la pool di `team_ratings`.
+        """
+        import team_names
+        pool = ["Wolverhampton", "Watford"]
+        originale = team_names.resolve_team
+        monkeypatch.setattr(
+            team_names, "resolve_team",
+            lambda nome, known=None: originale(nome, known=pool))
+        assert canonical_outcome("Wolverhampton Wanderers", "Wolves",
+                                 "Watford") == "1"
+        # E l'ambiguita' resta impossibile: la stessa squadra su entrambi i
+        # lati non produce un esito.
+        assert canonical_outcome("Wolverhampton Wanderers", "Wolves",
+                                 "Wolverhampton") is None
 
     def test_riga_con_nome_squadra_diventa_signal(self):
         """Regressione end-to-end: la riga con esito = nome squadra produce

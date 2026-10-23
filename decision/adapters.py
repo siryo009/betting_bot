@@ -138,11 +138,16 @@ def canonical_outcome(esito: str, home: str, away: str,
     come "esito non valido" e il confronto shadow misurava un insieme diverso
     da quello su cui la produzione scommette (3 segnali su 4 righe).
 
-    Deterministico e fail-closed: confronta il nome grezzo e quello RISOLTO
-    (`team_names.resolve_team_name`, iniettabile) e poi `team_names.same_team`
-    (tollerante a codici di stato e sigle societarie). Se l'esito coincide con
-    ENTRAMBE le squadre (dato incoerente) o con nessuna, ritorna None: la riga
-    viene scartata come prima, mai un esito indovinato.
+    La decisione sul lato (nome grezzo e RISOLTO confrontati con casa e
+    trasferta tramite `team_names.same_team`) vive in **`team_names.side_of`**:
+    una sola regola condivisa con il settlement del `tracker`, che la usa per
+    lo stesso scopo (prima erano due copie, e quella del tracker conosceva
+    solo il nome normalizzato). Il resolver e' iniettabile (`resolve`, default
+    `default_resolver()` -> `team_names.resolve_team`).
+
+    Fail-closed: se l'esito coincide con ENTRAMBE le squadre (dato incoerente)
+    o con nessuna, ritorna None — la riga viene scartata come prima, mai un
+    esito indovinato per esclusione.
     """
     raw = str(esito or "").strip()
     if raw.lower() in DRAW_ALIASES:
@@ -154,27 +159,16 @@ def canonical_outcome(esito: str, home: str, away: str,
         return None
     resolver = resolve or default_resolver()
     try:
-        raw_r = resolver(raw)
+        from team_names import side_of
+        return side_of(raw, home, away, resolve=resolver)
     except Exception:
-        raw_r = raw
-    candidates = {c for c in (raw, raw_r) if c}
-
-    def _matches(candidate: str, team: str) -> bool:
-        if candidate == team:
-            return True
-        try:
-            from team_names import same_team
-            return bool(same_team(candidate, team))
-        except Exception:
-            return False
-
-    hits = set()
-    for candidate in candidates:
-        for side, team in (("1", home), ("2", away)):
-            for name in {team, resolver(team)}:
-                if name and _matches(candidate, name):
-                    hits.add(side)
-    return hits.pop() if len(hits) == 1 else None
+        # Ripiego deterministico solo se l'helper condiviso non e' importabile:
+        # confronto esatto sul nome grezzo. Mai un contenimento di token qui.
+        if raw == home:
+            return "1"
+        if raw == away:
+            return "2"
+        return None
 
 
 def signal_from_row(row: Any, *, coverage: float = 0.0, calibrated: bool = False,
@@ -316,11 +310,20 @@ QUERY_OPEN_SIGNALS = """
 
 
 def default_resolver() -> Callable[[str], str]:
-    """Risoluzione nomi squadra del progetto (fail-safe sul nome originale)."""
+    """Risoluzione nomi squadra del progetto (fail-safe sul nome originale).
+
+    ⚠️ 23/10/2026: qui si importava `resolve_team_name`, un nome che in
+    `team_names` NON ESISTE (la funzione e' `resolve_team`). L'`ImportError`
+    finiva nell'`except` e il resolver restituiva sempre il nome originale,
+    quindi la risoluzione non avveniva MAI e `canonical_outcome` lavorava solo
+    con `same_team`: misurato in produzione su Wolves vs Watford, dove
+    l'esito "Wolverhampton Wanderers" non agganciava "Wolves" e un segnale
+    `value` con edge +21,9pp veniva scartato in silenzio dalla catena.
+    """
     def resolve(name: str) -> str:
         try:
-            from team_names import resolve_team_name
-            return resolve_team_name(name) or name
+            from team_names import resolve_team
+            return resolve_team(name) or name
         except Exception:
             return name
 

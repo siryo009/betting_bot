@@ -32,23 +32,32 @@ conta per il modello):
      candidati sono ugualmente buoni si ritorna None — meglio nessun rating
      (profilo neutro) che il rating della squadra sbagliata.
 
+Due punti d'ingresso, oltre a `resolve_team`:
+
+  * `same_team(a, b)` — confronto tollerante fra due nomi di PROVIDER
+    diversi (settlement SX, cache sharp), senza roster;
+  * `side_of(esito, home, away)` — il LATO ('1'/'2') di una previsione quando
+    l'esito e' il NOME di una squadra: regola UNICA condivisa da
+    `decision.adapters` e dal `tracker` (un esito ambiguo resta None, non
+    viene assegnato per esclusione).
+
+`resolve_team(nome)` risolve un nome ESTERNO contro il roster del DB (usato dal
+modello: `rating_engine`/`poisson_engine`).
+
 Il modulo e' PURO e senza dipendenze dal modello: legge solo `team_ratings`.
-
-Due punti d'ingresso:
-
-  * `resolve_team(nome)` — risolve un nome ESTERNO contro il roster del DB
-    (usato dal modello: `rating_engine`/`poisson_engine`);
-  * `same_team(a, b)` — confronto SIMMETRICO tra due nomi di provider
-    diversi, senza roster (usato dal settlement SX, dove 'Flamengo-RJ' e
-    'CR Flamengo', 'Vila Nova GO' e 'Vila Nova', "Newell's Old Boys" e
-    'Newells Old Boys' devono coincidere).
+L'unica conoscenza "esterna" e' `TEAM_ALIASES`, sempre applicata a UN livello
+(non c'e' ricorsione) e sempre confrontata per UGUAGLIANZA: un alias unisce
+forme della STESSA squadra, non tutte le squadre che ne condividono un token
+(il contenimento applicato al nome espanso rendeva uguali 'Inter Milan' e
+'Inter Miami', 'Inter Turku', 'Inter Club d'Escaldes', 'Sporting Braga' —
+falsi positivi misurati il 23/10/2026 su 828 nomi reali).
 """
 from __future__ import annotations
 
 import re
 import sqlite3
 import unicodedata
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from config import DATA_DIR
 
@@ -96,6 +105,7 @@ TEAM_ALIASES: Dict[str, str] = {
     "borussia dortmund": "Borussia Dortmund",
     "bvb dortmund": "Borussia Dortmund",
     "wolves": "Wolverhampton",
+    "wolverhampton wanderers": "Wolverhampton",
     "olympique lyonnais": "Lyon",
     "olympique lyon": "Lyon",
     "sporting lisbona": "Sporting CP",
@@ -172,7 +182,51 @@ def _core(name: str) -> str:
     return " ".join(toks) or key
 
 
-def same_team(a: str, b: str) -> bool:
+def _alias_expanded(name: str) -> str:
+    """Nome con l'ALIAS esplicito applicato (un solo livello, deterministico).
+
+    Serve a `same_team`: l'alias e' una conoscenza che il progetto ha gia'
+    dichiarato, quindi due nomi che puntano allo stesso alias descrivono la
+    stessa squadra. Senza questo grado, 'Wolverhampton Wanderers' e 'Wolves'
+    restano due squadre diverse (misurato in produzione il 23/10: il segnale
+    `value` con esito 'Wolverhampton Wanderers' su `home_team='Wolves'` veniva
+    scartato perche' nessuno stadio collegava i due nomi).
+    """
+    try:
+        return TEAM_ALIASES.get(_alias_key(name), name)
+    except Exception:
+        return name
+
+
+def _alias_equal(a: str, b: str) -> bool:
+    """True se i due nomi coincidono DOPO l'espansione dell'alias (un livello).
+
+    L'alias e' conoscenza dichiarata dal progetto: puo' UNIRE solo forme che
+    designano la stessa squadra ('Wolves' e 'Wolverhampton Wanderers').
+    L'unico confronto sicuro sul nome espanso e' l'UGUAGLIANZA (`normalize` o
+    `_core`), mai il contenimento dei token: il 23/10/2026 il contenimento
+    applicato all'espansione rendeva uguali 'Inter Milan' / 'Inter Miami',
+    'Inter Milan' / 'Inter Turku' e 'Sporting Lisbon' / 'Sporting Braga'
+    (falsi positivi misurati sui 828 nomi reali di `team_ratings`).
+
+    Ritorna False quando nessuno dei due nomi ha un alias: senza espansione
+    questo stadio non ha nulla da aggiungere agli stadi precedenti.
+    """
+    if not a or not b:
+        return False
+    try:
+        ea, eb = _alias_expanded(a), _alias_expanded(b)
+    except Exception:
+        return False
+    if (ea, eb) == (a, b):
+        return False
+    na, nb = normalize(ea), normalize(eb)
+    if na and na == nb:
+        return True
+    return bool(_core(ea)) and _core(ea) == _core(eb)
+
+
+def same_team(a: str, b: str, _expand: bool = True) -> bool:
     """True se due nomi designano la stessa squadra (confronto SIMMETRICO).
 
     Diverso da `resolve_team`: li' un nome viene risolto contro il roster del
@@ -185,7 +239,13 @@ def same_team(a: str, b: str) -> bool:
       3. chiave `_core` uguale (anche codici di stato e particelle:
          'Flamengo-RJ' == 'CR Flamengo', 'Vila Nova GO' == 'Vila Nova');
       4. contenimento dei token (`MIN_TOKEN_SCORE`): 'cr flamengo' contiene
-         'flamengo'.
+         'flamengo';
+      5. ALIAS espliciti (`TEAM_ALIASES`, un solo livello) confrontati per
+         UGUAGLIANZA: 'Wolves' e 'Wolverhampton Wanderers' puntano entrambi a
+         'Wolverhampton', quindi coincidono. Il contenimento NON si applica al
+         nome espanso (vedi `_alias_equal`): un alias dichiarato unisce forme
+         della STESSA squadra, non tutte le squadre che ne condividono un
+         token.
 
     Il contenimento (e in generale il confronto tollerante) puo' essere
     AMBIGUO: 'Manchester' sta dentro sia 'Manchester United' sia
@@ -209,6 +269,14 @@ def same_team(a: str, b: str) -> bool:
     ca, cb = _core(ra), _core(rb)
     if ca == cb:
         return True
+    if _expand:
+        # Un livello di alias su ENTRAMBI i lati, confrontato SOLO per
+        # uguaglianza: la ricorsione e' spenta (un alias che punta a un altro
+        # alias non deve generare un confronto a catena) e il contenimento
+        # non entra mai in questo stadio (falsi positivi 'Inter Milan' /
+        # 'Inter Miami', 23/10/2026).
+        if _alias_equal(ra, rb):
+            return True
     ta, tb = set(ca.split()), set(cb.split())
     if not ta or not tb:
         return False
@@ -216,6 +284,63 @@ def same_team(a: str, b: str) -> bool:
         return False
     inter = len(ta & tb)
     return inter / float(len(ta | tb)) >= MIN_TOKEN_SCORE
+
+
+def _name_variants(name, resolve: Optional[Callable[[str], str]]) -> Set[str]:
+    """Forme sotto cui un nome puo' comparire: grezza + RISOLTA (se c'e')."""
+    raw = str(name or "").strip()
+    if not raw:
+        return set()
+    out = {raw}
+    if resolve is not None:
+        try:
+            resolved = str(resolve(raw) or "").strip()
+        except Exception:
+            resolved = ""
+        if resolved:
+            out.add(resolved)
+    return out
+
+
+def side_of(esito, home, away,
+            resolve: Optional[Callable[[str], Optional[str]]] = None
+            ) -> Optional[str]:
+    """Lato ('1' casa, '2' trasferta) di una previsione dal suo esito.
+
+    Regola UNICA e condivisa (23/10/2026): la usa `decision.adapters`
+    (`canonical_outcome`) e la usa il `tracker` nel settlement, cosi' la
+    catena di decisione e il ledger non possono leggere lo stesso esito in
+    due modi diversi. Prima erano due copie della stessa logica, e quella del
+    tracker confrontava solo il nome normalizzato: 'Brondby IF' su
+    `home='Randers'` / `away='Brondby'` restava un esito sconosciuto e la
+    previsione non si chiudeva MAI.
+
+    Deterministico e fail-closed:
+
+      * il nome grezzo e quello RISOLTO (`resolve`, se passato) vengono
+        confrontati con il nome grezzo e quello risolto di casa e trasferta
+        usando `same_team` (tollerante a sigle e codici di stato);
+      * se l'esito somiglia a ENTRAMBE le squadre (dato incoerente: e' il
+        caso di una partita con due nomi che si contengono) ritorna None —
+        non si assegna il lato "per esclusione";
+      * se non somiglia a nessuna ritorna None.
+
+    None non e' un errore: e' l'assenza di un verdetto. Il chiamante deve
+    lasciare la riga APERTA, mai saldarla a caso. Non solleva mai.
+    """
+    try:
+        names = _name_variants(esito, resolve)
+        if not names:
+            return None
+        hits = set()
+        for side, team in (("1", home), ("2", away)):
+            for candidate in _name_variants(team, resolve):
+                if any(same_team(name, candidate) for name in names):
+                    hits.add(side)
+                    break
+        return hits.pop() if len(hits) == 1 else None
+    except Exception:
+        return None
 
 
 def invalidate() -> None:
