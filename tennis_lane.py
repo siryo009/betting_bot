@@ -77,10 +77,20 @@ MARKET = "TENNIS"
 HOURS_AHEAD = float(os.getenv("TENNIS_HOURS_AHEAD", "48"))
 MAX_MARKETS = int(os.getenv("TENNIS_MAX_MARKETS", "300"))
 
-#: Soglia EV. La direttiva del 30/09 chiedeva "EV > 2.5%" per il tennis: e' una
-#: soglia PROPRIA e dichiarata (il calcio resta a `value_filter.EV_MIN`), cosi'
-#: il valore si legge da un solo posto e si cambia senza toccare il codice.
-EV_MIN = float(os.getenv("TENNIS_EV_MIN", "0.025"))
+#: Soglia EV. E' una soglia PROPRIA e dichiarata (il calcio resta a
+#: `value_filter.EV_MIN`), cosi' il valore si legge da un solo posto e si
+#: cambia senza toccare il codice.
+#:
+#: 23/10/2026 — da 2,5% a **4,5%** su direttiva del proprietario, dopo la
+#: MISURA sul ledger: su 81 chiusure live il tennis dichiara EV **+6,0%** e
+#: realizza **-2,0%**, cioe' il modello sovrastima di ~8pp (la misura del
+#: 21/10 su un altro campione diceva +13pp: direzione coerente, entita'
+#: variabile). Con quel bias addosso, un segnale dichiarato al 2,5% vale circa
+#: zero nel mondo reale: la soglia e' alzata di ~2pp, NON di 8, perche' 8pp
+#: avrebbero azzerato la corsia su una stima ancora rumorosa. Il criterio che
+#: resta valido in generale e' quello statistico: se il CLV del tennis e'
+#: misurato negativo, `lane_weighting` lo ferma da solo con l'IC95.
+EV_MIN = float(os.getenv("TENNIS_EV_MIN", "0.045"))
 
 #: Fascia quota della corsia (02/10/2026). E' PROPRIA del tennis e piu' larga
 #: di quella calcistica 1.30-1.80 (`value_filter`): qui si seleziona su

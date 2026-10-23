@@ -13790,3 +13790,130 @@ kill switch, precedenza, gate con motivo, `auto_bet` non importabile), capitale
 parziali, e tripwire (sorgente senza percorsi d'ordine/`requests`/SQL di
 scrittura, `import agent_board` che **non** carica `tracker`/`auto_bet`/`bot`,
 rotta registrata, handler fail-safe, comando `agenti` registrato).
+
+### 23/10/2026 — Coppe in probation (deploy `d40a101`) + la misura del capitale
+
+**Operatività**: crediti the-odds-api riportati a **482** (`sustainable 53,6/giorno`,
+reset 01/11) dopo giorni a 0 (la rotazione del 04:00 del 23/10 era stata bloccata
+dal hard stop a 5). Produzione = `bf306d3`; il lavoro sulle coppe era rimasto
+**non committato** (un deploy via GitHub non lo porta: solo i commit viaggiano).
+
+**Coppe aperte** (`value_filter.STRATEGY_LEAGUES` + alias SX + rotazione 2gg):
+`Europa League` e `Conference League` entrano in **probation** con la strategia
+piu' prudente del progetto — edge **2pp**, Kelly **x0,4**, cap **0,5%**. Prima
+erano `blocked` (fail-closed): ogni pick veniva scartato **per lega** prima di
+essere valutato, quindi il turno europeo produceva **zero candidati per
+costruzione**. Nessuna soglia di cassa allentata (EV, fascia, cap, ticket
+invariati). Tripwire: `test_league_gate.TestCoppeInProbation`,
+`TestAliasCoppeSenzaFalsoDivieto`, `TestRotazioneCoppe`.
+
+**Il quadro del capitale (misurato il 23/10, sole letture)** — le live:
+**85 bet**, ~210 USDC puntati, **P/L −15,4 (−7,3% ROI)**, equity **18,67**.
+Per corsia (previsioni, P/L per unita'): **1X2 +2,1% (n=82)**, **tennis −2,0%
+(n=81, EV dichiarato +6,0% → il modello sovrastima di ~8pp)**, **OU −1,4%
+(n=220, il volume piu' grosso)**, AH +51% (n=1). **CLV +4,5%** (IC95
++3,0/+6,1, n=45, `beating`).
+
+**La lettura da non dimenticare**: esecuzione buona (CLV positivo) e stime di
+probabilita' gonfiate in due corsie; con n=85 il ROI realizzato sta a **meno di
+1 sigma** dal CLV, quindi **non dimostra** ne' che la strategia perda ne' che
+guadagni. A quota media 1,65 servono **13.121 chiusure** per dimostrare un edge
+del 2% (41% con trenta): **nessuna soglia si tocca sui P/L**, si tocca solo su
+CLV per bucket (>= 30 campioni, IC95 inferiore > 0).
+
+**Aritmetica del profitto (perche' il capitale e' il vincolo)**: con 18,67 USDC
+e 1 USDC per ordine, un edge del +4,5% rende ~**4,5 centesimi per puntata**;
+il profitto in euro resta minuscolo finche' lo stake non cresce — e lo stake non
+puo' crescere prima che l'edge sia provato. Ordine corretto delle leve:
+**selettivita' (togliere le corsie gonfiate) -> prova dell'edge (CLV) -> solo
+dopo, scala dello stake**.
+
+**Routine dell'agente (ogni sessione, in quest'ordine)**: crediti
+(`/api/credits`, `rate_per_day`) -> settlement (`/api/health`:
+`overdue_orphans` deve essere 0) -> CLV per bucket -> P/L per corsia -> **al
+massimo UNA modifica**, dichiarata e reversibile da env. Nessun allentamento di
+soglia senza una misura che lo sostenga, nessuna modifica di strategia senza
+il via del proprietario.
+
+### 23/10/2026 (sera) — Tennis: pavimento EV al 4,5% + auto-demozione per CORSIA (`lane_weighting.py`)
+
+Due decisioni del proprietario eseguite: **pavimento EV del tennis alzato** e
+**auto-demozione costruita**. Prima di scrivere codice e' stato letto il percorso
+del denaro, e la lettura ha trovato un difetto che cambia il segno del lavoro.
+
+**1) SCOPERTA: la ponderazione per lega non ha MAI avuto effetto in produzione.**
+`ADAPTIVE_WEIGHTING=1` e' acceso dal 17/10, ma il moltiplicatore veniva applicato
+dentro il ramo dello staking storico, **prima** che il Kelly aggressivo
+**riscrivesse** `pick_stake`: un peso applicato prima di chi ricalcola non e' un
+peso. In produzione, dal 17/10, `ADAPTIVE_WEIGHTING` e' stato un **no-op**
+silenzioso. E' la stessa classe del 13/09 (doppio scaling) e del 21/09 (due basi
+di misura): logica applicata nel punto sbagliato della catena.
+
+**Fix strutturale**: la ponderazione non e' piu' sparsa. Un unico punto,
+`auto_bet._apply_clv_weighting(candidates)`, gira **DOPO** ogni layer che
+dimensiona (Kelly, torneo, rush) e **PRIMA** dei cap di portafoglio (tetto
+per-ordine, risk parity, copula) — cosi' nessun layer successivo puo' rialzare
+cio' che il CLV ha ridotto, e il recinto vede lo stake DEFINITIVO.
+E' invocato in **entrambi** i punti che mandano ordini reali: la corsia
+principale (`run_today_bets`, FASE 2) e il **dispatch T-60** (solo `mode=live`:
+la riga `t60-sim` e' paper), altrimenti il gate sarebbe aggirabile ordinando
+dall'altra corsia. Tripwire: `test_adaptive_weighting.TestIntegrazioneAutoBet`
+verifica che l'aggancio stia **dopo** `refresh_live_stakes`/`_apply_tournament`/
+`_apply_rush` e che il T-60 usi lo stesso punto.
+
+**2) `lane_weighting.py` (NUOVO) — demozione automatica di una corsia dal CLV.**
+Perche' il CLV e non il P/L: a quota media 1,65 il P/L richiede ~13.100 chiusure
+per dimostrare un edge del 2%, il CLV si valida in decine di osservazioni
+(`significance.detectable_edge`). Un dato, due esiti:
+- almeno `LANE_WEIGHTING_MIN_SAMPLES` (**30**, la soglia del progetto) trade
+  chiusi e **IC95 della media CLV interamente sotto zero** -> la corsia **si
+  ferma** (`floor` 0.0);
+- media negativa con IC che **contiene** lo zero -> **dimezzata** (x0.5):
+  sospetto, non prova;
+- tutto il resto -> 1.0. **Mai sopra 1.0**: la promozione non e' automatica.
+
+Il campione sono i **trade** (`bets`, denaro vero), non i segnali: una corsia non
+si giudica su cio' che non e' stato comprato (`--signals` esiste per la misura).
+Letti via `clv_tracker.collect` e `significance.roi_test` — **zero formule
+ricopiate**. `LANE_MAP` e' deterministico e un mercato sconosciuto **non** viene
+buttato in un secchio "altro" (sarebbe demotare cose che nessuno ha misurato).
+Fail-open dichiarato (DB rotto, `scipy` assente, righe ostili -> 1.0); sola
+lettura, nessun ordine, nessuna rete; env lette a **ogni chiamata** (spegnere
+non richiede redeploy) + memo 300s.
+
+Nel combinatore vince la **piu' restrittiva** (`min(lega, corsia)`) e un
+candidato ridotto sotto il ticket minimo viene **SCARTATO** (fail-closed: non si
+arrotonda mai per farlo passare).
+
+**3) Tennis: `TENNIS_EV_MIN` 2,5% -> 4,5%.** Misura che lo motiva: su 81 chiusure
+live il tennis dichiara EV **+6,0%** e realizza **-2,0%** (~8pp di sovrastima;
+la misura del 21/10 su un altro campione diceva +13pp: direzione coerente,
+entita' variabile). Alzato di ~2pp e **non di 8**, perche' 8 avrebbero azzerato
+la corsia su una stima ancora rumorosa. Il testimone passa al criterio
+statistico: se il CLV del tennis e' **misurato** negativo con l'IC95, e'
+`lane_weighting` a fermarlo, non una soglia scelta a occhio.
+
+**4) Env** (tutte `preserve()` in `.railway/railway.ts`): `LANE_WEIGHTING` (1),
+`_WINDOW_DAYS` (60), `_MIN_SAMPLES` (30), `_FLOOR` (0.0), `_SUSPECT_MULT` (0.5),
+`_ALPHA` (0.05), `_TTL` (300). Aggiunte nello stesso blocco anche le sette
+`ADAPTIVE_WEIGHTING_*`, che erano lette e **non dichiarate**: un
+`railway config plan` le avrebbe distrutte. `railway config plan`: **0 to
+destroy**.
+
+**5) Isolamento nei test** (`conftest.py`): `LANE_WEIGHTING=0` ovunque tranne
+`test_lane_weighting` + `reset_cache()` prima/dopo — la memo e' stato di modulo
+e in un test che non patcha il DB leggerebbe il ledger di **produzione**,
+cambiando lo stake che il test sta misurando (lezione della cache OU del 26/09).
+
+**6) Verifiche**: `test_lane_weighting` (40) + `test_adaptive_weighting` (38) +
+`test_auto_bet`/`test_auto_bet_live`/`test_capital_enclosure` (124) +
+`test_t60_breakers`/`test_tennis_lane`/`test_exposure_gate`/`test_order_watch`
+(193) + `test_clv_tracker`/`test_bot`/`test_railway_drift_check`/
+`test_secret_hygiene` (178) — **tutti verdi**; `verify_guardrails.py`
+**A–J TUTTI BLOCCANO** (exit 0); `compileall` OK, 0 marker di conflitto.
+
+⚠️ **Cosa NON e' stato toccato**: EV/fascia/cap del calcio, `EV_MIN_LIQUID`,
+recinto 70%, stop giornaliero/settimanale, CB2, ticket 1.00, tetto per-ordine
+12%. La demozione riduce la **TAGLIA**, non aggiunge o toglie la possibilita' di
+ordinare: una corsia fermata dal CLV resta in telemetria (i suoi segnali
+continuano a misurarsi) e si riapre da sola quando l'IC95 torna sopra zero.

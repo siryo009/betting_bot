@@ -450,6 +450,25 @@ export default defineRailway(() => {
       // (la FINESTRA esecutiva ha le sue env dichiarate piu' sopra, nel
       // blocco dei circuit breakers T-60: T-180..T-2 dal 04/10/2026.)
       TENNIS_SANDBOX_ENABLED: preserve(),
+      // PESO CLV PER LEGA E PER CORSIA (23/10/2026, `lane_weighting.py` +
+      // `auto_bet._apply_clv_weighting`). La demozione automatica di una corsia
+      // e' decisa dall'**intervallo di confidenza** del CLV medio misurato sui
+      // trade (>= 30 campioni): puo' solo RIDURRE lo stake, fino a fermare la
+      // corsia. `LANE_WEIGHTING=0` la spegne senza redeploy.
+      LANE_WEIGHTING: preserve(),
+      LANE_WEIGHTING_WINDOW_DAYS: preserve(),
+      LANE_WEIGHTING_MIN_SAMPLES: preserve(),
+      LANE_WEIGHTING_FLOOR: preserve(),
+      LANE_WEIGHTING_SUSPECT_MULT: preserve(),
+      LANE_WEIGHTING_ALPHA: preserve(),
+      LANE_WEIGHTING_TTL: preserve(),
+      ADAPTIVE_WEIGHTING: preserve(),
+      ADAPTIVE_WEIGHTING_WINDOW_DAYS: preserve(),
+      ADAPTIVE_WEIGHTING_MIN_SAMPLES: preserve(),
+      ADAPTIVE_WEIGHTING_FLOOR: preserve(),
+      ADAPTIVE_WEIGHTING_CLV_FLOOR_THRESHOLD: preserve(),
+      ADAPTIVE_WEIGHTING_RESTRICT_THRESHOLD: preserve(),
+      ADAPTIVE_WEIGHTING_TTL: preserve(),
       // Corsia TENNIS (30/09/2026, `tennis_lane.py`): interruttore, identita'
       // SX (sport 6 / type 52), soglia EV PROPRIA (2.5%), FASCIA QUOTA della
       // corsia (1.30-2.50 dal 02/10/2026: oltre la banda il longshot non e' un

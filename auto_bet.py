@@ -1295,6 +1295,15 @@ def t60_dispatch_pending(bankroll: float | None = None) -> list[dict]:
             "created_at": created.isoformat() if created else "",
         })
 
+    # --- PESO CLV (23/10/2026), anche sul T-60: stesso meccanismo della corsia
+    # principale, o il peso sarebbe aggirabile ordinando da qui. Solo LIVE: la
+    # riga `t60-sim` e' paper e non tocca il denaro.
+    if mode == "live":
+        picks, _clvw = _apply_clv_weighting(picks)
+        if _clvw.get("scaled") or _clvw.get("dropped"):
+            logger.info("auto_bet: T60 peso CLV — %d stake ridotti, %d scartati",
+                        _clvw["scaled"], _clvw["dropped"])
+
     # --- FASE B0: M6 FASE 3+4 (risk parity + drawdown rebalancing), 16/10/2026.
     # Il T-60 e' il SECONDO punto che manda ordini reali: gli stessi due gate
     # della corsia principale, applicati sullo stake DEFINITIVO del T-60, o il
@@ -5245,6 +5254,100 @@ def _league_multiplier(league: str | None) -> float:
         return 1.0
 
 
+def _lane_multiplier(mercato: str | None) -> float:
+    """Moltiplicatore di Kelly per la CORSIA (CLV misurato, automatico).
+
+    Delega a `lane_weighting.lane_multiplier` (import pigro): il criterio e'
+    statistico (IC95 del CLV medio sotto zero, campione minimo 30) e puo' solo
+    RIDURRE, fino a fermare la corsia. Fail-open: qualunque errore vale 1.0.
+
+    Perche' serve DOPO la dimensione finale e non prima: prima del 23/10 la
+    ponderazione per lega veniva applicata qui, ma il ramo del Kelly
+    aggressivo **riscriveva** lo stake subito dopo, quindi in produzione
+    `ADAPTIVE_WEIGHTING=1` non ha mai avuto effetto (trovato leggendo il
+    percorso). Un peso che si applica prima di chi ricalcola non e' un peso.
+    """
+    try:
+        import lane_weighting
+        return float(lane_weighting.lane_multiplier(mercato))
+    except Exception as e:
+        logger.debug("auto_bet: ponderazione per corsia non disponibile (%s)", e)
+        return 1.0
+
+
+def _apply_clv_weighting(candidates: list[dict]) -> tuple[list[dict], dict]:
+    """Riduce lo stake secondo il CLV MISURATO (lega + corsia). Solo verso il basso.
+
+    Gira DOPO la dimensione finale di ogni layer (Kelly, torneo, rush) e PRIMA
+    dei cap di portafoglio (tetto per-ordine, risk parity, copula): cosi'
+    nessun layer successivo puo' rialzare cio' che il CLV ha ridotto, e il
+    recinto d'esposizione vede lo stake definitivo.
+
+    Due dimensioni, **vince la piu' restrittiva** (`min`): lega
+    (`adaptive_weighting`, CLV 30gg) e corsia (`lane_weighting`, IC95). Un
+    candidato ridotto sotto il ticket minimo del motore viene SCARTATO
+    (fail-closed): non si arrotonda mai per farlo passare.
+
+    Fail-open su tutto il resto: un errore di telemetria lascia lo stake
+    invariato. Nessuna corsia viene messa in pausa qui: la demozione agisce
+    solo sulla TAGLIA (mai sulla possibilita' di ordinare) e solo quando il
+    campione la sostiene.
+    """
+    info = {"scaled": 0, "by_league": 0, "by_lane": 0, "dropped": 0,
+            "stopped": 0}
+    try:
+        ticket = float(aggressive_min_ticket())
+    except Exception:
+        ticket = 0.0
+    kept: list[dict] = []
+    for cand in candidates or []:
+        try:
+            stake = float(cand.get("stake") or 0.0)
+        except (TypeError, ValueError):
+            kept.append(cand)
+            continue
+        if stake <= 0:
+            kept.append(cand)
+            continue
+        try:
+            lm = float(_league_multiplier(cand.get("league")))
+            lw = float(_lane_multiplier(cand.get("mercato")))
+        except Exception as exc:
+            logger.debug("auto_bet: pesi CLV non calcolabili per %s (%s)",
+                         cand.get("match_id"), exc)
+            kept.append(cand)
+            continue
+        mult = max(0.0, min(1.0, min(lm, lw)))
+        if mult >= 1.0:
+            kept.append(cand)
+            continue
+        new_stake = round(stake * mult, 2)
+        if mult <= 0.0 or new_stake < ticket:
+            info["dropped"] += 1
+            if mult <= 0.0:
+                info["stopped"] += 1
+            logger.warning(
+                "auto_bet: %s (%s @ %.2f) CLV STOP [lega x%.2f, corsia x%.2f]: "
+                "stake %.2f -> %.2f (ticket %.2f) — nessun ordine",
+                cand.get("match_id"), cand.get("esito_key"),
+                float(cand.get("price") or 0.0), lm, lw, stake, new_stake,
+                ticket)
+            continue
+        if lm < 1.0:
+            info["by_league"] += 1
+        if lw < 1.0:
+            info["by_lane"] += 1
+        info["scaled"] += 1
+        cand["stake"] = new_stake
+        cand["clv_weight"] = {"total": round(mult, 4), "league": round(lm, 4),
+                              "lane": round(lw, 4), "before": stake}
+        logger.info("auto_bet: %s (%s) peso CLV x%.2f (lega x%.2f, corsia "
+                    "x%.2f): stake %.2f -> %.2f USDC", cand.get("match_id"),
+                    cand.get("esito_key"), mult, lm, lw, stake, new_stake)
+        kept.append(cand)
+    return kept, info
+
+
 def run_today_bets(stake_eur: float | None = None,
                    allow_sim: bool = True,
                    mode_override: str | None = None) -> list[dict]:
@@ -5740,17 +5843,12 @@ def run_today_bets(stake_eur: float | None = None,
                 pick_stake *= MOVEMENT_BONUS_MULTIPLIER
                 logger.info("auto_bet: %s odds MOVEMENT %.1f%% (sharp money) "
                             "+20%% stake", pick["match_id"], odds_move * 100)
-            # Ponderazione dinamica per campionato (26/09/2026, default OFF):
-            # se la lega ha CLV sistematicamente negativo nella finestra
-            # (30gg) il moltiplicatore di Kelly viene RIDOTTO. Con l'env
-            # spenta ritorna 1.0 e il percorso resta identico al 22/09.
-            _lm = _league_multiplier(pick.get("league"))
-            if _lm < 1.0:
-                _before = pick_stake
-                pick_stake *= _lm
-                logger.info("auto_bet: %s lega '%s' CLV negativo -> stake "
-                            "x%.2f (€%.2f -> €%.2f)", pick["match_id"],
-                            pick.get("league") or "?", _lm, _before, pick_stake)
+            # Ponderazione CLV: NON qui. Fino al 23/10 il peso per lega veniva
+            # applicato in questo punto, ma il ramo del Kelly aggressivo
+            # riscrive subito dopo `pick_stake` — quindi il peso era di fatto
+            # morto in produzione. L'unica applicazione e' ora
+            # `_apply_clv_weighting`, DOPO la dimensione finale di ogni layer
+            # (Kelly, torneo, rush) e PRIMA dei cap di portafoglio.
             if pick_stake <= 0:
                 logger.info("auto_bet: stake adaptive = 0 per %s (EV negativo), salto",
                             pick["match_id"])
@@ -6006,6 +6104,19 @@ def run_today_bets(stake_eur: float | None = None,
         # fuori finestra la lista e' INVARIATA. I cap di portafoglio della
         # FASE 2 restano l'ultima parola.
         candidates, _rush = _apply_rush(candidates, bankroll=_bankroll)
+
+        # --- PESO CLV PER LEGA E PER CORSIA (23/10/2026, automatico).
+        # Ultimo passo che PUO' SOLO RIDURRE prima dei cap di portafoglio: il
+        # peso per lega (CLV 30gg) e quello per corsia (IC95 del CLV) sono
+        # applicati allo stake DEFINITIVO, dopo Kelly/torneo/rush. Prima di
+        # questo punto il Kelly riscriveva lo stake e il peso veniva perso.
+        candidates, _clvw = _apply_clv_weighting(candidates)
+        if _clvw.get("scaled") or _clvw.get("dropped"):
+            logger.info("auto_bet: peso CLV — %d stake ridotti (lega %d, corsia "
+                        "%d), %d scartati (di cui %d corsie fermate)",
+                        _clvw["scaled"], _clvw["by_league"],
+                        _clvw["by_lane"], _clvw["dropped"],
+                        _clvw["stopped"])
 
         # --- TETTO UNICO PER-ORDINE (13/10/2026, direttiva proprietario):
         # nessun layer (Kelly, torneo, rush) puo' produrre un ordine sopra il

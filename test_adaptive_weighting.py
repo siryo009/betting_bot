@@ -351,11 +351,31 @@ class TestIntegrazioneAutoBet:
         assert 10.0 * m < 10.0
 
     def test_tripwire_chiamata_nel_percorso_staking(self):
+        """Il moltiplicatore di lega agisce nello STESSO punto del CLV, DOPO
+        la dimensione finale.
+
+        Fino al 22/10 la chiamata stava dentro il ramo di Kelly storico, cioe'
+        PRIMA che il Kelly aggressivo riscrivesse lo stake: con
+        `KELLY_AGGRESSIVE` attivo (produzione dal 17/10) la riduzione veniva
+        sovrascritta e la ponderazione per lega non aveva alcun effetto.
+        Ora l'unico punto e' `_apply_clv_weighting` (lega x CLV), invocato
+        dopo ogni layer che dimensiona e prima dei cap di portafoglio.
+        """
         src = Path("auto_bet.py").read_text(encoding="utf-8")
-        assert '_league_multiplier(pick.get("league"))' in src
-        # Solo riduzione: nel percorso ordini la variabile si moltiplica
-        # sempre (nessun percorso che la usi come divisore).
-        assert "pick_stake *= _lm" in src
+        assert '_league_multiplier(cand.get("league"))' in src
+        # Solo riduzione: il moltiplicatore e' chiuso in [0, 1] e lo stake
+        # viene MOLTIPLICATO (nessun percorso lo usa come divisore).
+        assert "mult = max(0.0, min(1.0, min(lm, lw)))" in src
+        assert 'cand["stake"] = new_stake' in src
+        # Nel percorso dei candidati l'aggancio e' quello nuovo...
+        i_cand = src.index(
+            "candidates, _clvw = _apply_clv_weighting(candidates)")
+        # ...e deve stare DOPO la dimensione finale (Kelly/torneo/rush).
+        for call in ("_apply_tournament(", "_apply_rush(",
+                     "refresh_live_stakes("):
+            assert src.index(call) < i_cand, call
+        # L'aggancio T-60 usa lo stesso punto (il gate non e' aggirabile).
+        assert "picks, _clvw = _apply_clv_weighting(picks)" in src
 
     def test_env_dichiarate_nella_iac(self):
         src = Path(".railway/railway.ts").read_text(encoding="utf-8")

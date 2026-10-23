@@ -285,6 +285,17 @@ def _isolated_decision_io(request, tmp_path, monkeypatch):
     _gl.reset_cache()
     if "test_gridiron_lane" not in request.node.nodeid:
         monkeypatch.setenv("GRIDIRON_LANE", "0")
+    # AUTO-DEMOZIONE PER CORSIA DAL CLV (23/10/2026, `lane_weighting`). Legge il
+    # ledger vero via `clv_tracker`: nei test il DB e' quasi sempre temporaneo,
+    # ma un test che non lo patcha leggerebbe quello di PRODUZIONE e il verdetto
+    # cambierebbe lo stake che sta misurando. Spenta ovunque tranne nel file
+    # dedicato; la memo di modulo si azzera (stato in-process che sopravvive fra
+    # i test, stessa lezione della cache di prontezza OU del 26/09).
+    import lane_weighting as _lw
+    _lw.reset_cache()
+    monkeypatch.setenv(
+        "LANE_WEIGHTING",
+        "1" if "test_lane_weighting" in request.node.nodeid else "0")
     # INDICE DELL'IDENTITA' DI MERCATO DELLE CORSIE (16/10/2026,
     # `auto_bet._lane_index`). Un candidato che arriva dal LEDGER non porta
     # `market_id`/`selection_id` (la tabella `predictions` non ha quelle
