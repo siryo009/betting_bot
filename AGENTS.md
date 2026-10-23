@@ -13951,3 +13951,37 @@ non solo asserito nei test.
 rientra con `railway login --browserless` (codice su railway.com/activate) —
 e il processo di login va tenuto vivo in BACKGROUND, altrimenti il codice muore
 col comando.
+
+### Riparazione del backup: rotazione dei log ATTIVI + copia per voce (23/10/2026)
+
+**Sintomo misurato** (log del container): il backup del volume falliva da due
+giri con `No space left on device` mentre la riga di log diceva
+`integrity: ok, 25 file data`. Volume 434 MB, `/app/data` 146 MB di cui
+**`execution/book_flow_events.jsonl` 79 MB** e **`decision/chief_cycles.jsonl`
+19 MB**: due JSONL scritti ogni 60s, copiati INTERI in ogni snapshot.
+
+**Causa radice doppia.** 1) La rotazione di `telemetry_logs` richiede una
+finestra di **quiete** di 15 minuti: un log scritto ogni 60s non e' MAI quieto,
+quindi proprio i due file che crescono di piu' non entravano mai in rotazione.
+2) La copia di `data/` era in un **unico try**: il primo `ENOSPC` abortiva il
+ciclo, lo snapshot restava con 25 voci su ~117 e il messaggio finale era
+comunque un successo.
+
+**Fix.** `telemetry_logs`: soglia `LOG_ROTATE_ACTIVE_MAX_MB` (20 MB) — un file
+ATTIVO oltre soglia viene **compattato in place** (copia `.gz` + troncamento
+sotto `flock`), il writer continua ad appendere sullo stesso inode; il
+controllo sui file attivi e' valutato **PRIMA** del gate `big or old` (senza,
+con un `max_mb` alto non scatterebbe mai). `backup_manager`: rotazione
+**prima** della copia con `root=data_dir` esplicito (`telemetry_logs` tiene
+`DATA_DIR` all'import), copia **voce per voce** con errori contati, stop
+dichiarato su `ENOSPC` e campo **`data_partial`**: il log dice PARZIALE, non
+piu' "integrity: ok".
+
+**Verifica in produzione** (deploy `6eb129d2`, commit `3d1e748`): al boot la
+rotazione ha compattato `book_flow_events` (79 MB -> 14 MB `.gz`), il job di
+backup ha scritto **117 file, 0 errori, `data_partial: false`, integrity ok**
+(`predictions 2280, bets 86, clv_history 497, match_results 17930`), backup
+manuale identico; volume **163 MB / 434 MB (39%)**.
+Test: `test_telemetry_logs` (22) + `test_backup_manager` (10) — cinque nuovi
+sul comportamento attivo e sulla copia parziale, verificati **fallire senza il
+fix** (il gate `big or old` prima del ramo attivo non compattava nulla).
