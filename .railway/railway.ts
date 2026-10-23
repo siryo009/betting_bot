@@ -79,6 +79,10 @@ export default defineRailway(() => {
       LOG_ROTATE_AFTER_DAYS: preserve(),
       LOG_ROTATE_QUIET_MIN: preserve(),
       LOG_ROTATE_KEEP: preserve(),
+      // Tetto per i log scritti DI CONTINUO (23/10/2026): un file scritto ogni
+      // 60s non e' mai "quieto" per 15 minuti, quindi sopra questa soglia
+      // viene compattato in place (copia .gz + troncamento sotto flock).
+      LOG_ROTATE_ACTIVE_MAX_MB: preserve(),
       BOOK_FLOW_DEDUP_MIN: preserve(),
       BOOK_FLOW_LOG: preserve(),
       BOOK_FLOW_MAX_KEYS: preserve(),

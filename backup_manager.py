@@ -12,6 +12,13 @@ Contenuto di ogni snapshot (data/backups/<timestamp>/):
   - data/...              : cache, modelli, log ordini, saltate.json, ecc.
 
 La pulizia tiene gli ultimi BACKUP_KEEP snapshot (env BACKUP_KEEP, default 7).
+
+PRIMA della copia esegue `telemetry_logs.rotate_jsonl_logs()` (23/10/2026): la
+copia prende TUTTA `data/`, quindi i JSONL di telemetria vanno compattati prima,
+altrimenti crescono dentro ogni snapshot. L'esito della copia e' dichiarato:
+`data_partial` = True quando una voce non e' stata copiata (spazio esaurito,
+permessi) — il log NON dice piu' "integrity: ok" facendo sembrare completo uno
+snapshot incompleto.
 """
 from __future__ import annotations
 
@@ -100,7 +107,23 @@ def run_backup(dest_root: Optional[Path] = None, keep: Optional[int] = None) -> 
     dest.mkdir(parents=True, exist_ok=True)
 
     summary: Dict = {"stamp": stamp, "dest": str(dest), "db": None,
-                     "ml": None, "data_files": 0, "errors": []}
+                     "ml": None, "data_files": 0, "data_errors": 0,
+                     "data_partial": False, "rotation": None, "errors": []}
+
+    # 0) ROTAZIONE dei JSONL di telemetria PRIMA della copia (23/10/2026).
+    # Lo snapshot copia TUTTA `data/`: senza questo, due log di telemetria
+    # scritti ogni 60s (`book_flow_events` 79 MB, `chief_cycles` 19 MB) finivano
+    # interi in ogni snapshot e il volume da 434 MB andava in
+    # `No space left on device` — i backup del 23/10 si sono chiusi parziali.
+    # Fail-safe: un problema di rotazione non impedisce il backup.
+    try:
+        from telemetry_logs import rotate_jsonl_logs
+        # `root` esplicito: telemetry_logs tiene `DATA_DIR` all'IMPORT, quindi
+        # senza questo argomento la rotazione guarderebbe una cartella diversa
+        # da quella che stiamo per copiare (e nei test quella di produzione).
+        summary["rotation"] = rotate_jsonl_logs(root=data_dir)
+    except Exception as e:
+        logger.warning("backup: rotazione log non eseguita: %s", e)
 
     # 1) DB via backup API (consistente con connessioni aperte)
     try:
@@ -119,20 +142,46 @@ def run_backup(dest_root: Optional[Path] = None, keep: Optional[int] = None) -> 
     # 2) Dataset ML fresco (csv + json)
     summary["ml"] = export_ml_dataset(dest)
 
-    # 3) Copia data/ (scan, cache, modelli, ordini...)
+    # 3) Copia data/ (scan, cache, modelli, ordini...) — UNA voce per volta.
+    # Prima un solo errore abortiva l'intero ciclo (bastava un file): lo
+    # snapshot risultava con 25 voci su ~30 e il log diceva comunque
+    # "integrity: ok", cioe' un rapporto che sembrava un successo su un backup
+    # PARZIALE (trovato il 23/10 mentre verificavo il volume pieno).
     try:
-        for item in data_dir.iterdir():
-            if item.name == "backups" or item == dest:
-                continue
-            target = dest / item.name
+        items = [i for i in data_dir.iterdir()
+                 if i.name != "backups" and i != dest]
+    except Exception as e:
+        logger.error("backup: data/ illeggibile: %s", e)
+        summary["errors"].append(f"data: {e}")
+        items = []
+    disk_full = False
+    for item in items:
+        if disk_full:
+            # Spazio finito: continuare produce una sfilza di errori identici
+            # e allunga il job per niente. Si dichiara e ci si ferma.
+            summary["data_errors"] += 1
+            continue
+        target = dest / item.name
+        try:
             if item.is_dir():
                 shutil.copytree(item, target, dirs_exist_ok=True)
             else:
                 shutil.copy2(item, target)
             summary["data_files"] += 1
-    except Exception as e:
-        logger.error("backup: errore copia data/: %s", e)
-        summary["errors"].append(f"data: {e}")
+        except OSError as e:
+            summary["data_errors"] += 1
+            summary["errors"].append(f"data/{item.name}: {e}")
+            if getattr(e, "errno", None) == 28:        # ENOSPC
+                disk_full = True
+                logger.error("backup: SPAZIO ESAURITO durante la copia di "
+                             "data/%s — snapshot PARZIALE (DB e dataset ML "
+                             "sono scritti): liberare spazio o aumentare il "
+                             "volume", item.name)
+        except Exception as e:
+            summary["data_errors"] += 1
+            summary["errors"].append(f"data/{item.name}: {e}")
+    if summary["data_errors"]:
+        summary["data_partial"] = True
 
     # 4) Pulizia: mantiene gli ultimi `keep` snapshot
     k = keep if keep is not None else _keep()
@@ -147,16 +196,28 @@ def run_backup(dest_root: Optional[Path] = None, keep: Optional[int] = None) -> 
         summary["errors"].append(f"pulizia: {e}")
 
     integ = (summary["db"] or {}).get("integrity", "n/d") if summary["db"] else "n/d"
-    logger.info("backup: snapshot %s → %s (integrity: %s, %d file data)",
-                stamp, dest, integ, summary["data_files"])
+    if summary["data_partial"]:
+        # Mai un "integrity: ok" che si legge come successo quando la copia di
+        # `data/` e' incompleta: DB e dataset ML ci sono, il resto no.
+        logger.warning("backup: snapshot %s → %s PARZIALE — integrity DB: %s, "
+                       "%d file data copiati, %d NON copiati (vedi gli errori "
+                       "nel report)", stamp, dest, integ,
+                       summary["data_files"], summary["data_errors"])
+    else:
+        logger.info("backup: snapshot %s → %s (integrity: %s, %d file data)",
+                    stamp, dest, integ, summary["data_files"])
     return summary
 
 
 def format_backup_report(s: Dict) -> str:
     """Riepilogo compatto per Telegram."""
     if s.get("errors"):
-        return (f"⚠️ *Backup completato con errori* ({s['stamp']})\n"
-                + "\n".join(f"• {e}" for e in s["errors"]))
+        head = f"⚠️ *Backup completato con errori* ({s['stamp']})\n"
+        if s.get("data_partial"):
+            head += (f"DB e dataset ML scritti; copia data/ PARZIALE "
+                     f"({s.get('data_files', 0)} file copiati, "
+                     f"{s.get('data_errors', 0)} non copiati)\n")
+        return head + "\n".join(f"• {e}" for e in s["errors"][:10])
     db = s.get("db") or {}
     tables = db.get("tables", {})
     integ = db.get("integrity", "n/d")

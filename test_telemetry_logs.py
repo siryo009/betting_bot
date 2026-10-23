@@ -81,6 +81,54 @@ def test_file_appena_scritto_non_si_tocca(tmp_path):
     assert log.exists()
 
 
+def test_file_attivo_enorme_si_compatta(tmp_path):
+    """Un JSONL scritto ogni 60s non matura mai l'eta': senza la soglia dei
+    file ATTIVI crescerebbe all'infinito (misurato il 23/10: 98 MB di JSONL
+    che sfondavano il volume e facevano fallire i backup)."""
+    log = _write(tmp_path / "execution" / "book_flow_events.jsonl",
+                 _lines(50000))                            # mtime = adesso
+    res = tl.rotate_jsonl_logs(root=tmp_path, max_mb=100, after_days=3650,
+                               quiet_min=15, keep=3, active_max_mb=1)
+    assert len(res["rotated"]) == 1
+    assert res["rotated"][0].get("active") is True
+    assert log.exists()                     # il vivo resta: writer appende
+    assert log.stat().st_size == 0          # ...ma viene troncato
+    gens = list((tmp_path / "execution").glob("book_flow_events.jsonl*.gz"))
+    assert len(gens) == 1
+    with gzip.open(gens[0], "rt", encoding="utf-8") as fh:
+        assert json.loads(fh.readline())["i"] == 0
+
+
+def test_compattazione_attiva_non_dipende_da_max_mb(tmp_path):
+    """Regressione: la soglia dei file attivi veniva valutata DOPO il gate
+    `big or old`, quindi con un `max_mb` alto un file attivo non entrerebbe
+    MAI in rotazione. Le due soglie sono indipendenti."""
+    log = _write(tmp_path / "active.jsonl", _lines(50000))
+    res = tl.rotate_jsonl_logs(root=tmp_path, max_mb=10000, after_days=3650,
+                               quiet_min=15, keep=3, active_max_mb=0.5)
+    assert len(res["rotated"]) == 1 and res["rotated"][0].get("active")
+    assert log.exists() and log.stat().st_size == 0
+
+
+def test_compattazione_attiva_rispetta_keep(tmp_path):
+    for _ in range(4):
+        _write(tmp_path / "active.jsonl", _lines(50000))
+        tl.rotate_jsonl_logs(root=tmp_path, max_mb=100, after_days=3650,
+                             quiet_min=15, keep=2, active_max_mb=0.5)
+    gens = sorted(tmp_path.glob("active.jsonl*.gz"))
+    assert len(gens) == 2, "vanno tenute solo le `keep` generazioni"
+
+
+def test_compattazione_attiva_lasciata_ai_default_senza_soglia(tmp_path):
+    """Sotto la soglia attiva (default 20 MB) un file fresco non si tocca:
+    la finestra di quiete continua a proteggere il writer."""
+    log = _write(tmp_path / "small.jsonl", _lines(50000))
+    res = tl.rotate_jsonl_logs(root=tmp_path, max_mb=100, after_days=3650,
+                               quiet_min=15, keep=3)
+    assert res["rotated"] == []
+    assert log.exists() and log.stat().st_size > 0
+
+
 def test_potatura_generazioni(tmp_path):
     for i in range(4):
         log = _write(tmp_path / "log.jsonl", _lines(2000), age_days=2 + i)
@@ -88,6 +136,17 @@ def test_potatura_generazioni(tmp_path):
                              quiet_min=0, keep=2)
     gens = sorted((tmp_path).glob("log.jsonl*.gz"))
     assert len(gens) == 2, "vanno tenute solo le `keep` generazioni"
+
+
+def test_compattazione_attiva_non_tocca_le_snapshot_backup(tmp_path):
+    """Anche il percorso dei file attivi deve saltare le snapshot di backup:
+    compattare un log DENTRO uno snapshot lo renderebbe una falsa copia."""
+    snap = tmp_path / "backups" / "20260101-000000-000000"
+    log = _write(snap / "book_flow_events.jsonl", _lines(50000))
+    res = tl.rotate_jsonl_logs(root=tmp_path, max_mb=100, after_days=3650,
+                               quiet_min=15, keep=3, active_max_mb=0.5)
+    assert res["rotated"] == []
+    assert log.exists() and log.stat().st_size > 0
 
 
 def test_registri_backup_mai_toccati(tmp_path):

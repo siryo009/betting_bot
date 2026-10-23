@@ -90,6 +90,101 @@ def test_format_backup_report(temp_db, tmp_path):
     assert "errori" in backup_manager.format_backup_report(s2)
 
 
+# ------------------------------------------ rotazione + copia onesta (23/10)
+
+def test_rotazione_log_prima_della_copia(temp_db, tmp_path, monkeypatch):
+    """I JSONL di telemetria vengono compattati PRIMA che lo snapshot copi
+    `data/`: senza, i due log scritti ogni 60s finivano interi in ogni backup
+    e il volume andava in `No space left on device` (23/10)."""
+    import json as _json
+    import telemetry_logs as tl
+    monkeypatch.setenv("TELEMETRY_ROTATE_ENABLED", "1")
+    monkeypatch.setenv("LOG_ROTATE_ACTIVE_MAX_MB", "0.001")
+    monkeypatch.setenv("LOG_ROTATE_QUIET_MIN", "15")
+    log = tmp_path / "data" / "execution" / "book_flow_events.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("\n".join(_json.dumps({"i": i}) for i in range(3000)) + "\n")
+    big = log.stat().st_size
+
+    s = backup_manager.run_backup(dest_root=tmp_path / "b", keep=1)
+
+    assert s["rotation"] is not None and s["rotation"]["enabled"] is True
+    assert log.exists() and log.stat().st_size == 0        # troncato in place
+    gens = list(log.parent.glob("book_flow_events.jsonl*.gz"))
+    assert len(gens) == 1                                  # storia conservata
+    # lo snapshot NON contiene i MB del log: prende il vivo troncato
+    snap = Path(s["dest"])
+    assert (snap / "execution" / "book_flow_events.jsonl").exists()
+    assert (snap / "execution" / "book_flow_events.jsonl").stat().st_size == 0
+    assert big > 0
+
+
+def test_rotazione_fallita_non_blocca_il_backup(temp_db, tmp_path):
+    """Fail-safe: un problema di rotazione non deve impedire il backup."""
+    import telemetry_logs as tl
+
+    def _boom(**kw):
+        raise RuntimeError("rotazione rotta")
+
+    orig = tl.rotate_jsonl_logs
+    tl.rotate_jsonl_logs = _boom
+    try:
+        s = backup_manager.run_backup(dest_root=tmp_path / "b", keep=1)
+    finally:
+        tl.rotate_jsonl_logs = orig
+    assert s["rotation"] is None
+    assert s["db"]["integrity"] == "ok"
+    assert (Path(s["dest"]) / "quotaverace.db").exists()
+
+
+def test_copia_parziale_viene_dichiarata(temp_db, tmp_path, monkeypatch):
+    """Una voce che non si copia non deve fermare le altre e lo snapshot deve
+    dire di essere PARZIALE (prima: 25 voci su ~30 e log "integrity: ok")."""
+    (tmp_path / "data" / "a.txt").write_text("a")
+    (tmp_path / "data" / "b.txt").write_text("b")
+    (tmp_path / "data" / "c.txt").write_text("c")
+    import shutil
+    real = shutil.copy2
+
+    def _copy2(src, dst, *a, **kw):
+        if Path(src).name == "b.txt":
+            raise OSError(13, "Permesso negato")
+        return real(src, dst, *a, **kw)
+
+    monkeypatch.setattr(shutil, "copy2", _copy2)
+    s = backup_manager.run_backup(dest_root=tmp_path / "b", keep=1)
+
+    assert s["data_partial"] is True
+    assert s["data_errors"] == 1
+    snap = Path(s["dest"])
+    assert (snap / "a.txt").exists() and (snap / "c.txt").exists()
+    assert not (snap / "b.txt").exists()
+    assert any("data/b.txt" in e for e in s["errors"])
+    report = backup_manager.format_backup_report(s)
+    assert "PARZIALE" in report and "2 file copiati" in report
+
+
+def test_spazio_esaurito_ferma_la_copia(temp_db, tmp_path, monkeypatch):
+    """ENOSPC: si dichiara e ci si ferma (niente sfilza di errori identici)."""
+    for name in ("a", "b", "c", "d"):
+        (tmp_path / "data" / f"{name}.txt").write_text(name)
+    import errno
+    import shutil
+    calls = {"n": 0}
+
+    def _copy2(src, dst, *a, **kw):
+        calls["n"] += 1
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(shutil, "copy2", _copy2)
+    s = backup_manager.run_backup(dest_root=tmp_path / "b", keep=1)
+
+    assert calls["n"] == 1, "dopo ENOSPC non si tenta piu' la copia"
+    assert s["data_partial"] is True
+    assert s["data_errors"] == 4          # 1 tentata + 3 dichiarate
+    assert s["db"]["integrity"] == "ok"   # DB e dataset ML restano scritti
+
+
 def test_latest_backup(temp_db, tmp_path):
     assert backup_manager.latest_backup(tmp_path / "b") is None
     backup_manager.run_backup(dest_root=tmp_path / "b", keep=1)

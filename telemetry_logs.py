@@ -23,6 +23,14 @@ OGNI evento (`decision.middleware.JsonlSink`, `liquidity_monitor.record_skip`,
 il writer lo ricrea alla scrittura successiva. La finestra di QUIETE e' la
 garanzia: non si tocca un file che qualcuno ha appena scritto.
 
+⚠️ **E le eccezione alla quiete (23/10/2026)**: un file scritto a ogni giro di
+60s non e' MAI quieto per 15 minuti, quindi la sola regola della quiete rendeva
+impossibile ruotare proprio i log che crescono di piu' (`book_flow_events` 79 MB
++ `chief_cycles` 19 MB) — e il volume si e' riempito fino a far fallire i
+backup. Sopra `LOG_ROTATE_ACTIVE_MAX_MB` (20 MB) un file ATTIVO viene compattato
+**in place** (copia `.gz` + troncamento sotto `flock`): il writer continua ad
+appendere sullo stesso inode.
+
 Fail-safe totale: ogni errore e' contato e loggato, MAI propagato (un problema
 di manutenzione log non deve fermare il giro puntate ne' il backup).
 
@@ -52,6 +60,17 @@ DEFAULT_MAX_MB = 5.0
 DEFAULT_AFTER_DAYS = 2.0
 #: Quante generazioni `.gz` conservare per ogni file (le piu' recenti).
 DEFAULT_KEEP = 3
+#: Soglia per un file SCRITTO DI CONTINUO (mai "quieto").
+#:
+#: Perche' esiste (23/10/2026): la regola della QUIETE rendeva impossibile
+#: ruotare proprio i log che crescono di piu'. Un file scritto a ogni giro di
+#: 60s non resta inattivo 15 minuti **mai**, quindi `book_flow_events.jsonl`
+#: (79 MB) e `chief_cycles.jsonl` (19 MB) non entravano in rotazione, finivano
+#: interi in ogni snapshot del backup e il volume (434 MB) si e' riempito:
+#: i backup del 23/10 sono falliti con `No space left on device`.
+#: Sopra questa soglia il file viene compattato **in place** (copia in `.gz` +
+#: troncamento sotto `flock`), non rimosso.
+DEFAULT_ACTIVE_MAX_MB = 20.0
 
 _ONCE: Dict[str, bool] = {}
 
@@ -183,11 +202,77 @@ def iter_events(path: Path, days: Optional[float] = None) -> Iterator[dict]:
     yield from out
 
 
+def _rotate_active(path: Path, keep: int, res: Dict[str, Any],
+                   max_mb: float) -> bool:
+    """Compatta in place un file SCRITTO DI CONTINUO (copia `.gz` + tronca).
+
+    Perche' non si rimuove: il writer di un log attivo sta appendendo in questo
+    momento, e togliergli il file sotto i piedi significherebbe perdere tutto
+    cio' che scrive finche' non riapre. Si legge sotto `flock` esclusivo, si
+    scrive la generazione `.gz`, poi si tronca a zero: il writer continua ad
+    appendere sullo STESSO inode.
+
+    Costo dichiarato: i byte arrivati fra la lettura e il troncamento (una
+    sola riga, la finestra e' di microsecondi) vanno persi. Si accetta per un
+    log di TELEMETRIA, dove il valore e' la serie storica e non la singola
+    riga; l'alternativa misurata era un backup che non si completa (23/10).
+
+    False = non toccato (troppo piccolo, `fcntl` assente, errore).
+    """
+    try:
+        st = path.stat()
+    except Exception:
+        return False
+    if st.st_size < max_mb * 1024 * 1024:
+        return False
+    try:
+        import fcntl                                    # POSIX (container Linux)
+    except Exception:                                   # pragma: no cover
+        res["deferred"] = res.get("deferred", 0) + 1
+        return False
+    try:
+        with open(path, "rb+") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                raw = fh.read()
+                if not raw:
+                    return False
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+                dest = path.parent / f"{path.name}.{stamp}.gz"
+                with gzip.open(dest, "wb") as gz:
+                    gz.write(raw)
+                fh.seek(0)
+                fh.truncate(0)
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        res["bytes_before"] += len(raw)
+        res["bytes_after"] += dest.stat().st_size
+        res["active_rotated"] = res.get("active_rotated", 0) + 1
+        res["rotated"].append({"path": str(path), "gz": str(dest),
+                               "bytes": len(raw), "active": True})
+        logger.info("telemetry_logs: compattato log ATTIVO %s (%.1f MB -> "
+                    "%.1f MB, file troncato)", path.name, len(raw) / 1e6,
+                    dest.stat().st_size / 1e6)
+        try:
+            for old_gen in _generations(path)[:-keep]:
+                old_gen.unlink()
+                res["pruned"] += 1
+        except Exception as e:                              # pragma: no cover
+            logger.warning("telemetry_logs: potatura %s fallita (%s)", path, e)
+            res["errors"] += 1
+        return True
+    except Exception as e:
+        logger.warning("telemetry_logs: compattazione %s fallita (%s)", path, e)
+        res["errors"] += 1
+        return False
+
+
 def rotate_jsonl_logs(*, root: Optional[Path] = None,
                       max_mb: Optional[float] = None,
                       after_days: Optional[float] = None,
                       quiet_min: Optional[float] = None,
                       keep: Optional[int] = None,
+                      active_max_mb: Optional[float] = None,
                       enabled: Optional[bool] = None,
                       now: Optional[float] = None,
                       dry_run: bool = False) -> Dict[str, Any]:
@@ -206,11 +291,14 @@ def rotate_jsonl_logs(*, root: Optional[Path] = None,
         enabled = rotate_enabled()
     res: Dict[str, Any] = {"enabled": bool(enabled), "scanned": 0, "rotated": [],
                            "pruned": 0, "bytes_before": 0, "bytes_after": 0,
-                           "errors": 0, "dry_run": bool(dry_run)}
+                           "errors": 0, "dry_run": bool(dry_run),
+                           "active_rotated": 0, "deferred": 0}
     if not enabled:
         return res
     max_mb = _num_env("LOG_ROTATE_MAX_MB", DEFAULT_MAX_MB) if max_mb is None \
         else float(max_mb)
+    active_max_mb = _num_env("LOG_ROTATE_ACTIVE_MAX_MB", DEFAULT_ACTIVE_MAX_MB) \
+        if active_max_mb is None else float(active_max_mb)
     after_days = _num_env("LOG_ROTATE_AFTER_DAYS", DEFAULT_AFTER_DAYS) \
         if after_days is None else float(after_days)
     quiet_min = _num_env("LOG_ROTATE_QUIET_MIN", DEFAULT_QUIET_MIN) \
@@ -241,13 +329,24 @@ def rotate_jsonl_logs(*, root: Optional[Path] = None,
             continue
         age_days = (now_ts - st.st_mtime) / 86400.0
         quiet_min_elapsed = (now_ts - st.st_mtime) / 60.0
+        # Il controllo sui file ATTIVI viene PRIMA della soglia big/old: un
+        # JSONL scritto ogni 60s non matura mai l'eta' e puo' superare
+        # "quiet_min"; se dipendesse da max_mb basterebbe un max_mb alto per
+        # lasciarlo crescere (misurato il 23/10: 98 MB di JSONL).
+        if quiet_min_elapsed < quiet_min:
+            # Scritto attivamente: NON si rimuove (il writer sta appendendo).
+            # Ma se e' enorme si compatta in place.
+            if st.st_size >= active_max_mb * 1024 * 1024:
+                if dry_run:
+                    res["rotated"].append({"path": str(path),
+                                           "bytes": st.st_size,
+                                           "dry_run": True, "active": True})
+                    continue
+                _rotate_active(path, keep, res, active_max_mb)
+            continue
         big = st.st_size >= max_mb * 1024 * 1024
         old = age_days >= after_days
         if not (big or old):
-            continue
-        if quiet_min_elapsed < quiet_min:
-            # attivamente scritto: si aspetta (mai comprimere sotto i piedi
-            # di un writer)
             continue
         if dry_run:
             res["rotated"].append({"path": str(path), "bytes": st.st_size,
@@ -279,8 +378,9 @@ def rotate_jsonl_logs(*, root: Optional[Path] = None,
             res["errors"] += 1
 
     if res["rotated"]:
-        logger.info("telemetry_logs: ruotati %d JSONL (%.1f MB -> %.1f MB), "
-                    "%d generazioni potate", len(res["rotated"]),
+        logger.info("telemetry_logs: ruotati %d JSONL (di cui %d attivi) "
+                    "%.1f MB -> %.1f MB, %d generazioni potate",
+                    len(res["rotated"]), res.get("active_rotated", 0),
                     res["bytes_before"] / 1e6, res["bytes_after"] / 1e6,
                     res["pruned"])
     return res
@@ -292,7 +392,8 @@ def format_report(res: Dict[str, Any]) -> str:
         lines.append("  disattivata (TELEMETRY_ROTATE_ENABLED=0)")
         return "\n".join(lines)
     lines.append(f"  file scansionati: {res.get('scanned', 0)} | ruotati: "
-                 f"{len(res.get('rotated') or [])} | generazioni potate: "
+                 f"{len(res.get('rotated') or [])} (attivi compattati: "
+                 f"{res.get('active_rotated', 0)}) | generazioni potate: "
                  f"{res.get('pruned', 0)} | errori: {res.get('errors', 0)}")
     if res.get("bytes_before"):
         lines.append(f"  compresso: {res['bytes_before'] / 1e6:.1f} MB -> "
