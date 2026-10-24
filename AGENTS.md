@@ -13985,3 +13985,147 @@ manuale identico; volume **163 MB / 434 MB (39%)**.
 Test: `test_telemetry_logs` (22) + `test_backup_manager` (10) — cinque nuovi
 sul comportamento attivo e sulla copia parziale, verificati **fallire senza il
 fix** (il gate `big or old` prima del ramo attivo non compattava nulla).
+
+### 24/10/2026 — live RIARMATO con inviluppo misurato, taglio dei costi, piano di monetizzazione (`GO_LIVE_PLAN.md`)
+
+**Direttiva**: "usa tutti gli strumenti, cerca la migliore soluzione per andare
+live e iniziare a monetizzare". Misure in sola lettura sul container AMS; nessun
+ordine forzato.
+
+**1) L'EVIDENZA CHE DECIDE (non le impressioni).** `clv_tracker.py --days 40`:
+**63 campioni, CLV +3,71%**, IC95 **[+2,43%, +4,99%]**, p≈0, **49/63 positivi**,
+`status = beating`. Per sport: tennis **+4,51%** (n=32, 93,8% positivi),
+football **+3,76%** (n=25), **football USA −0,79% (n=6, 0/6 positivi)**.
+Il benchmark `betfair_t0` ha **n=10** e dice −0,48%: troppo piccolo per smentire,
+abbastanza per NON dichiarare chiusa la validazione.
+P/L live: **86 chiuse, −17,07** su 214,98 puntati (−7,9%); ultimi 7 giorni
+**−19,79**. Per fascia quota: <1,50 **+18,2%**, 1,80–2,10 **+7,3%**,
+1,50–1,80 −14,9%, **2,10–2,50 −36,6%**, **≥2,50 −67,0%**. Per mercato (previsioni
+giocabili): 1X2 **+4,47**, AH −2,54, TENNIS −4,09, OU −12,48.
+
+**2) BUG DI CONFIGURAZIONE TROVATO E CHIUSO — il live non avrebbe potuto
+ordinare.** `T60_KILL_WALLET_USDC` era **25** con equity **19,40**: il CB2
+(`t60_check_wallet_kill`, chiamato in `run_today_bets` in modalita' live)
+avrebbe armato il flag al PRIMO candidato e restituito `[]` per sempre. Non era
+visibile nei log perche' con **0 candidati** quel ramo non viene raggiunto.
+Ora soglia **12** (arresto conservando il 62% del capitale; coerente con lo stop
+settimanale 40% = −7,76). Verificato sul container: `t60_check_wallet_kill(19.40)
+= False`, flag assente.
+⚠️ **Lezione**: una soglia assoluta in USDC va SEMPRE confrontata con l'equity
+corrente prima di armare; con capitale che scende una protezione diventa un
+interruttore.
+
+**3) TAGLI APPLICATI (env Railway, tutte gia' in `preserve()`).**
+`GRIDIRON_LANE=0` (0/6 CLV positivi, P/L −56,4%, torneo chiuso il 20/10),
+`TENNIS_ODDS_MAX=2,00` (le fasce sopra 2,10 sono tutte in perdita),
+`ORACLE_ENABLED=0` (oracolo a linea: 3 cr/chiamata, **0 ordini in tutta la sua
+storia**), `SETTLEMENT_HEAL_INTERVAL_HOURS=48`, `ORACLE_H2H_BUDGET_DAY=16`,
+`ODDS_DAILY_BUDGET=30`, `TENNIS_ORACLE_TTL_MIN=720`.
+Motivo dei crediti: **412 residui, reset 01/11 (7 giorni), ritmo 76,2/giorno
+contro 58,9 sostenibili** → esaurimento previsto **29/10**, due giorni PRIMA del
+reset. Profilo atteso dopo i tagli: ~35–45/giorno.
+Live riarmato: `set_kill_switch("live")`, tetto per ordine **1,00**, recinto
+**30%**, ticket 1,00, finestra T-720..T-2, Kelly cap 12%. Cicli puliti, 0
+errori, 0 ordini (nessun candidato in finestra al momento del riarmo).
+
+**4) IL PUNTO ECONOMICO (scritto in `GO_LIVE_PLAN.md`).**
+`profitto/mese ≈ stake × puntate/giorno × 30 × edge`. Con edge +3,7%: a **19,40**
+e stake 1,00 → **~3 €/mese**; a 300 e stake 3,00 con 15–20 puntate → **~55–67 €**;
+a 600 → ~133 €. Quindi **il muro e' il capitale, non il modello**: alzare le
+soglie (fatto il 14/10) non produce volume se il turnover e' limitato dal tetto
+per ordine.
+
+**5) VENUE — ricerca fatta, conclusione.** SX Bet: **1% sull'utile netto, solo
+taker** (`docs.sx.bet/user-guides/trading/fees`), 0% maker, min 1 USDC, non ADM
+(vincite da dichiarare in Italia). **Betfair.it (ADM) ha API ufficiale completa**
+(`identitysso-cert.betfair.it/api/certlogin` + App Key, `SportsAPING/v1.0`),
+min back **2,00 €** (incrementi 0,50), vincita max **10.000 €**, imposta alla
+fonte: capitale minimo sensato **200–500 €**. Nel repo esiste gia'
+`execution_engine.BetfairJsonRpcProvider` (stesso protocollo): un provider
+`betfair_it` e' una **sottoclasse** (login certificato + regole italiane +
+settlement via `listClearedOrders`), non un modulo nuovo.
+**Maker rewards SX** (≥ 100 $ per ordine, book ≥ 10 s, ordine migliore della
+global line, 0% fee): la leva con il miglior rapporto rischio/rendimento, e il
+codice c'e' gia' (`resting_orders`) — diventa possibile a **300–500 USDC**.
+Smarkets/BetInAsia restano esclusi (non ADM, stake minimi alti).
+
+**6) GATE CONGELATI per alzare lo stake**: CLV n ≥ 50 con IC95 tutto sopra 0 **e**
+conferma del secondo sharp (≥ 20 chiusure `betfair_t0`); ≥ 30 chiusure dell'era
+con IC95 del ROI sopra 0 (`significance.py`); capitale ≥ 100 (1% = 1,00 €) e
+≥ 300–500 per i maker rewards.
+
+**7) STATO**: live armato, 2 bet aperte (WTA Ningbo + NCAAF), 106 previsioni
+aperte, 412 crediti, `overdue_orphans` 0. Nessuna modifica di codice in questo
+giro (solo env + documentazione): `GO_LIVE_PLAN.md` e' il nuovo riferimento
+operativo, `AGENTS.md` resta la memoria.
+
+#### Consegnato nello stesso giorno: provider `betfair_it` + salute del volume
+
+Le due voci che il piano lasciava "da fare" sono state implementate e testate.
+
+**1) `execution_engine.BetfairItProvider` (Betfair Italia/ADM).** Non e' un
+modulo nuovo: e' una **sottoclasse** di `BetfairJsonRpcProvider`. Per rendere
+possibile la sottoclasse sono stati estratti due accessor sovrascrivibili
+(`login_url`/`api_base`, letti da `_login`/`_rpc`) — prima gli endpoint erano
+costanti lette a livello modulo, quindi duplicare `placeOrders` sarebbe stata
+l'unica via (la classe di bug del 13/09 e 26/09: due copie che divergono).
+Differenze reali, tutte misurate sulla documentazione ufficiale:
+- login **certificato** `identitysso-cert.betfair.it/api/certlogin` con
+  `cert=(crt, key)`, risposta `loginStatus`/`sessionToken` (non
+  `status`/`token`); senza certificato il login fallisce DICHIARATO;
+- endpoint nazionali `api.betfair.it`, currency EUR;
+- **regole ADM fail-closed** in `precheck_order`: puntata minima **2,00 EUR**
+  e vincita massima **10.000 EUR per scommessa, puntata compresa**
+  (`size * price <= 10.000`). Sotto/sopra i limiti l'ordine NON viene corretto
+  per farlo passare: `OrderResult(status="REJECTED")` **senza rete**;
+- **ladder Betfair** (`betfair_tick`): BACK arrotonda **per difetto**, LAY per
+  eccesso (mai pagare piu' del richiesto, mai accettare meno); fuori da
+  1.01-1000 -> `None` (nessun prezzo inventato). Stessa lezione del fix
+  `pct_scaled_to_decimal` di SX del 10/10 (round-trip lossless);
+- **settlement**: `list_cleared_orders()` (`betStatus=SETTLED`) e' la fonte
+  dell'esito per il nostro lato (WON/LOST/PUSH + profit), gemella di
+  `_results_from_sx`: Betfair non da' i punteggi, da' l'esito del mercato — che
+  per il referto e' esattamente cio' che serve.
+Registrato in `build_provider` (`EXECUTION_PROVIDER=betfair_it`) e in
+`_creds_configured`; senza credenziali resta **DryRunProvider** (fail-closed).
+Env `BETFAIR_IT_*` dichiarate `preserve()` in `.railway/railway.ts` (⚠️ il
+certificato `.crt`/`.key` NON va in `secrets/`: `vault --commit` lo leggerebbe
+come plaintext).
+Test: `test_betfair_it.py` (**nuovo**) — ladder, direzione sicura, limiti ADM,
+login certificato finto, nessuna chiamata di rete su un ordine fuori regola,
+settlement, factory e fallback DryRun, tripwire "nessuna credenziale in
+chiaro".
+
+**2) SALUTE DEL VOLUME (`backup_manager.storage_status`).** Il 24/10 il bot si e'
+fermato con 231 `ENOSPC` senza che NESSUN guardrail di denaro se ne
+accorgesse: il capitale era intatto, il disco era pieno. Ora c'e' una lettura
+unica (sola lettura, **fail-safe**: non solleva mai) con:
+- volume (totali/usati/liberi in MB e %), soglie di **esercizio**
+  (`WARN_FREE_PCT` 20, `CRITICAL_FREE_PCT` 8, `MIN_FREE_MB` 40) e livello
+  `ok`/`warn`/`critical`/`unknown` con motivi machine-readable;
+- stato dei backup (conteggio, `keep`, MB totali, ultimo + eta', stato del
+  manifest) e il **conto che ha causato l'incidente**: `snapshot medio x keep`
+  contro il 90% del volume -> `backup_troppo_grande_per_il_volume`;
+- superfici: `GET /api/dashboard` (`storage` completo) e `GET /api/health`
+  (`level`/`free_mb`/`free_pct`/`backups`/`latest_backup`/`warnings` in forma
+  compatta, perche' l'health e' dove guarda un monitor esterno) + card
+  **"💾 Volume & backup"** nella dashboard webapp.
+Test: `test_storage_status.py` (**nuovo**, 17) — soglie, conto del backup,
+letture rotte che non sollevano, superfici. ⚠️ Il fixture iniziale scriveva
+20.000 file per snapshot e ha **riempito il volume della macchina di test**
+(`ENOSPC` durante la suite): ora la dimensione e' INIETTATA via `_size_mb`,
+perche' il soggetto e' l'aritmetica, non l'allocazione.
+
+**3) `research_isolated/` entra in git (solo CODICE e report).** Era il
+laboratorio citato nei punti precedenti ma **untracked**: la memoria lo
+descriveva come esistente e nel repo non c'era. Lo snapshot del ledger di
+produzione (`research_isolated/snapshot/`, 51 MB) e' **dati**, non codice:
+ora e' in `.gitignore` (insieme a `*.db.bak-*`), quindi non finisce in un
+commit. Test del laboratorio: **418 verdi** (`test_research_lab.py` +
+`research_isolated/tests/`), tutti offline.
+
+**Verifiche del giro**: `test_betfair_it` + `test_execution_engine` +
+`test_backup_manager` + `test_storage_status` + `test_web_api` (**250 verdi**),
+`test_bot` + `test_reports` + `test_secret_hygiene` + `test_railway_drift_check`
++ `test_liquidity_monitor` (115), `npm run build` OK, `railway config plan` =
+*already up to date* (**0 to destroy**).
