@@ -704,7 +704,7 @@ def main() -> int:
     # Stake per ordine NEL MONDO NUOVO (04/10): il cap dinamico 12% del
     # bankroll (4.03 su 33.55), non piu' l'importo fisso 1.50 del 28/09.
     per_order_h = round(auto_bet.order_ceiling(equity_h), 2)
-    cap_h = round(equity_h * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2)
+    cap_h = round(auto_bet.open_exposure_cap(equity_h), 2)
     # Quanti ordini entrano PRIMA di saturare il recinto (50% dal 13/10:
     # 16.78 su 33.55): 4 x 4.03 = 16.12, il quinto porterebbe a 20.15 > 16.78
     # e va respinto. Il conteggio e' DERIVATO dal cap, non scritto a mano:

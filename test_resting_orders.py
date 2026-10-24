@@ -785,13 +785,14 @@ class TestCapitaleImmobilizzato:
         assert stake == 2.0 and count == 1
 
     def test_recinto_vede_il_capitale_parcheggiato(self, temp_db):
-        """8 resting da 2.0 (16.0 USDC) su un bankroll 20.0 sfondano il tetto
-        a QUALUNQUE valore ragionevole del recinto (<= 80%): nessun ordine
-        nuovo. La quantita' e' scelta sopra il cap di proposito, cosi' il test
-        non dipende dal valore corrente di `OPEN_EXPOSURE_CAP_PCT`
-        (14/10/2026: 50% -> 70%)."""
-        bankroll = 20.0
-        cap = bankroll * auto_bet.OPEN_EXPOSURE_CAP_PCT
+        """8 resting da 2,0 (16,0 USDC) sfondano il tetto del recinto: nessun
+        ordine nuovo. La quantita' e' scelta sopra il cap di proposito e il
+        bankroll sta SOPRA il muro CB2 (default di codice 30): dal 24/10 il
+        tetto e' `min(percentuale, equity - muro)`, quindi con un bankroll
+        sotto il muro il recinto sarebbe chiuso per il muro e non per il
+        capitale parcheggiato — il test misurerebbe un'altra regola."""
+        bankroll = 40.0
+        cap = auto_bet.open_exposure_cap(bankroll)
         for i in range(8):
             _seed_open(order_id=f"0x{i}", stake=2.0, match_id=f"sx-L{i}")
         status = auto_bet.open_exposure_status(bankroll)
@@ -801,14 +802,14 @@ class TestCapitaleImmobilizzato:
         assert status["blocked"] is True
 
     def test_proiezione_respinge_oltre_il_tetto(self, temp_db):
-        bankroll, aperti = 20.0, 6.0
+        bankroll, aperti = 40.0, 6.0
         for i in range(3):
             _seed_open(order_id=f"0x{i}", stake=2.0, match_id=f"sx-L{i}")
-        # Il tetto e' `bankroll x OPEN_EXPOSURE_CAP_PCT` letto fresco: la
-        # proiezione respinge cio' che sfora anche di 0,5 USDC e accetta cio'
-        # che resta dentro anche di 0,5. Derivato, cosi' il test misura la
-        # REGOLA e non il valore del momento.
-        cap = bankroll * auto_bet.OPEN_EXPOSURE_CAP_PCT
+        # Il tetto viene da `open_exposure_cap` letto fresco: la proiezione
+        # respinge cio' che sfora anche di 0,5 USDC e accetta cio' che resta
+        # dentro anche di 0,5. Derivato, cosi' il test misura la REGOLA e non
+        # il valore del momento.
+        cap = auto_bet.open_exposure_cap(bankroll)
         assert auto_bet.exposure_allows(bankroll, cap - aperti + 0.5)["allowed"] is False
         assert auto_bet.exposure_allows(bankroll, cap - aperti - 0.5)["allowed"] is True
 

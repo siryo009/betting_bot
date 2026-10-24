@@ -14129,3 +14129,106 @@ commit. Test del laboratorio: **418 verdi** (`test_research_lab.py` +
 `test_bot` + `test_reports` + `test_secret_hygiene` + `test_railway_drift_check`
 + `test_liquidity_monitor` (115), `npm run build` OK, `railway config plan` =
 *already up to date* (**0 to destroy**).
+
+### Recinto 30% coerente col cap 1 USDC + scomposizione del -7,94% (24/10/2026)
+
+Due direttive del proprietario nello stesso giro: (a) rendere il recinto di
+esposizione (30%) coerente col cap per ordine di 1,00 USDC, cosi' il numero di
+ordini contemporanei si legge dal tetto; (b) spiegare **da dove arriva** il
+-7,9% delle puntate live chiuse.
+
+**1) IL RECINTO HA UNA SOLA DEFINIZIONE (`auto_bet.open_exposure_cap`).**
+Prima il tetto del recinto si scriveva a mano in quattro posti
+(`open_exposure_status`, `exposure_allows`, l'audit `order_watch`, la
+diagnostica `verify_guardrails`) e ogni ritocco di soglia lasciava indietro una
+copia. Ora una funzione sola calcola `min(percentuale, spazio al muro CB2)` e lo
+arrotonda a **ordini INTERI** del cap per-ordine corrente:
+
+```
+cap = floor(min(eq x 30%, eq - T60_KILL_WALLET_USDC) / order_ceiling(eq)) x order_ceiling(eq)
+```
+
+- **ordini interi**: con il cap a 1,00 un tetto di 5,82 lascia 0,82 che nessun
+  ordine puo' usare; il tetto e' quindi un multiplo esatto e `cap_rule` lo
+  dichiara ("5 ordini da 1.00 USDC = 5.00 USDC (min fra 30% di 19.40 = 5.82,
+  spazio al muro CB2 7.40)");
+- **spazio al muro CB2**: l'esposizione aperta non puo' superare la distanza fra
+  equity e muro patrimoniale (`T60_KILL_WALLET_USDC`, 12 in produzione),
+  altrimenti un colpo su tutti gli ordini aperti attraverserebbe il muro e il
+  recinto non avrebbe protetto nulla;
+- **default di codice allineato alla produzione** (`OPEN_EXPOSURE_CAP_PCT`
+  0.70 -> **0.30**): un tetto diverso nel codice si legge come regime diverso.
+- **numeri reali** (container, 24/10): equity **19,3978**, 5 ordini aperti per
+  **5,00**, tetto **5,00** (5 ordini da 1,00), utilizzazione **25,8%** — il 30%
+  e' la quota che l'equity sostiene; il conteggio scala con l'equity (a 30,00
+  diventano 9 ordini, a 50,00 quindici).
+- `order_watch.cap_pct()`/`_exposure_cap()` e la dashboard leggono la STESSA
+  funzione (tripwire: nessuna soglia duplicata).
+
+**2) TEST AGGIORNATI DERIVANDOLI DAL TETTO** (una soglia cambiata senza test e'
+un cambiamento silenzioso): `test_exposure_gate` (nuovo
+`test_recinto_30_percento_coerente_col_cap_da_1_usdc` coi tre valori di
+produzione 0.30/1.00/12 -> **5 ordini da 1,00**), `test_order_watch`
+(`test_il_settlement_libera_il_posto` non ha piu' "8 ordini" scritti a mano:
+`n` viene dal tetto), `test_capital_enclosure` (il tetto non e' piu' `40,00` a
+mano: `39,00` = 26 ordini da 1,50, e il conteggio e' derivato),
+`test_resting_orders` (bankroll 40, sopra il muro CB2, altrimenti il recinto
+sarebbe chiuso dal muro e non dal capitale parcheggiato).
+⚠️ Un primo tentativo impostava `T60_KILL_WALLET_USDC = 12` **a livello di
+modulo** nei file di test: mutava un globale di produzione e faceva fallire
+`test_t60_breakers` (4 rossi) per ordine di import. Ora i test scelgono
+un'equity sopra il muro (50,00) e il muro si prova con `monkeypatch`.
+**`verify_guardrails.py`: A-J TUTTI BLOCCANO** (H dichiara "recinto esposizione
+30%"). Regressioni verdi: 8 file del denaro (359), rischi/portafoglio/griglia
+(400+).
+
+**3) LA SCOMPOSIZIONE DEL -7,94% (`live_decomp.py`, nuovo, sola lettura).**
+86 puntate live chiuse: stake **214,98**, P/L **-17,07**, ROI **-7,94%**, 43V/43P.
+
+| corsia | n | stake | P/L | ROI | hit |
+|---|---|---|---|---|---|
+| FOOTBALL USA | 6 | 11,65 | **-6,57** | -56,4% | 33% |
+| CALCIO 1X2 | 31 | 92,12 | -5,53 | -6,0% | 52% |
+| TENNIS | 49 | 111,21 | -4,97 | -4,5% | 51% |
+
+| fascia quota | n | stake | P/L | ROI | hit |
+|---|---|---|---|---|---|
+| 1,20-1,50 | 14 | 47,92 | **+8,71** | **+18,2%** | 79% |
+| 1,50-1,80 | 26 | 71,47 | **-10,62** | **-14,9%** | 54% |
+| 1,80-2,00 | 20 | 49,75 | -0,20 | -0,4% | 55% |
+| 2,00-2,30 | 9 | 18,65 | -1,18 | -6,3% | 44% |
+| 2,30-2,50 | 7 | 10,76 | -2,76 | -25,7% | 29% |
+| >= 2,50 | 10 | 16,44 | **-11,02** | **-67,0%** | 10% |
+
+| era (data di apertura) | n | stake medio | P/L | ROI | hit |
+|---|---|---|---|---|---|
+| 11/09-13/10 favoriti netti | 53 | 2,37 | **+9,99** | **+7,9%** | 54,7% |
+| 14/10-20/10 "bot aggressivo" | 29 | 2,94 | **-28,22** | **-33,1%** | 37,9% |
+| dal 21/10 cap 1,00 USDC | 4 | 1,00 | +1,16 | +29,0% | 75% |
+
+**La conclusione che i numeri sostengono**: il -17,07 **non viene dalle corsie**
+(nessuna e' strutturalmente negativa: tennis -4,5% e calcio -6,0% su 111 e 92
+puntati sono rumore su questi campioni) e **nemmeno dal solo prezzo**: le due
+fasce estreme sono speculari (1,20-1,50 **+18,2%** con hit 79%, >= 2,50
+**-67,0%** con hit 10%). La perdita sta in **due finestre**:
+(a) **l'era "bot aggressivo" 14-20/10**: -28,22 su 85 puntati con hit rate
+**37,9%** contro il 54,7% dell'era precedente a quote MEDIE quasi identiche
+(1,92 vs 2,49 → il calo di hit non e' un effetto della fascia), e con stake
+medio 2,94 invece di 2,37: **la taglia ha trasformato un hit-rate sfortunato in
+metà del capitale**;
+(b) **la coda alta (>= 2,50)**: 10 puntate, -11,02, hit 10% — e dentro quella
+c'era il tennis pre-fascia 1,30-2,00 (quote 4,28 / 5,59 / 17,02).
+Le 8 perdite piu' grosse sono tutte **stake 3,18-5,61** (bet #55 -5,61 · #56
+-5,14 · #73 -4,98 · #46 -4,71 · #60 -4,47 · #76/#78 -3,23 · #75 -3,18):
+**totale delle 50 bet > 2,00 USDC = -13,62 dei -17,07** (−80%). Le 4 puntate
+dell'era col cap a 1,00 sono **+1,16**.
+⚠️ **Limite dichiarato**: 67 delle 86 righe hanno `league` assente (la colonna
+nasce il 16/10), quindi la lettura per LEGA copre solo le ~19 righe recenti
+(EFL Championship -7,77 su 2, NCAAF -6,57 su 6, Bundesliga +3,30 su 2, WTA
+Ningbo +0,48 su 3): **su questo campione la lega NON e' giudicabile**.
+**Uso**: `venv/bin/python live_decomp.py [--json] [--db PATH]` (sola lettura
+`mode=ro`, offline). `test_live_decomp.py` = **52 verdi offline** (connessione
+di sola lettura che RIFIUTA una `UPDATE`, classificazioni corsia/fascia/era,
+somme dei bucket = totale, fail-safe). Bug trovato dai test: una riga **senza
+data** finiva nell'era piu' vecchia (confronto fra stringhe) — ora ha il bucket
+dichiarato `(data assente)`.

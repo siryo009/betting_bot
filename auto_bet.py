@@ -171,8 +171,23 @@ TOTAL_EXPOSURE_CAP_PCT = 0.60  # max 60% di bankroll per il portafoglio del gior
 #  scelta e' stata ribaltata a favore del VOLUME, e le due protezioni restano
 #  attive e invariate (stop giornaliero 5%, stop settimanale 12%): il freno
 #  contro il sovraccarico non e' piu' il recinto, sono gli stop.
-# Per tornare al contenimento: `OPEN_EXPOSURE_CAP_PCT=0.50` (env, preserve()).
-OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.70"))
+# ... **30% (24/10/2026, direttiva del proprietario: "recinto 30% coerente col
+# cap 1 USDC cosi' il bot puo' tenere piu' ordini aperti insieme")**. Il 30%
+# (era 70%) e' la configurazione che il cap da 1,00 USDC rende sostenibile:
+# con equity 19,40 il tetto e' 5,82 -> **5 ordini da 1,00 in gioco insieme**,
+# mentre al 70% (13,58) il collo di bottiglia diventavano gli stop giornaliero
+# e settimanale, non il numero di ordini. Per tornare al volume: env
+# `OPEN_EXPOSURE_CAP_PCT=0.70` (preserve() in IaC, zero redeploy di codice).
+#
+# ⚠️ DAL 24/10/2026 la percentuale NON e' piu' l'unico vincolo: il tetto si
+# calcola in `open_exposure_cap` come `min(percentuale, equity - muro CB2)`
+# arrotondato a **ordini interi** del cap per-ordine corrente. Motivo: con il
+# cap per-ordine a 1,00 USDC un tetto di 5,82 permetteva 5 ordini "a mano" e
+# lasciava 0,82 di spazio morto, e nulla legava il recinto al muro
+# patrimoniale (un colpo su tutti gli ordini aperti poteva attraversarlo).
+# Il default di CODICE e' allineato alla produzione (0.30): un tetto diverso
+# nel codice si legge come regime diverso e non e' difendibile in un audit.
+OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.30"))
 # Tetto per SINGOLO ordine. **DINAMICO dal 04/10/2026** (direttiva del
 # proprietario: "sostituisci qualsiasi hard cap fisso precedente con una
 # percentuale dinamica sul bankroll"): il tetto e' `bankroll x
@@ -2079,16 +2094,107 @@ def _open_live_exposure() -> float:
     return _open_live_snapshot()[0]
 
 
+def _cb2_cliff_room(bankroll: float) -> float | None:
+    """Spazio (USDC) fra l'equity e il muro patrimoniale CB2.
+
+    None = muro non configurato (`T60_KILL_WALLET_USDC` <= 0): nessun vincolo
+    aggiuntivo. Perche' conta per il RECINTO: se l'esposizione aperta potesse
+    superare questa distanza, un colpo sfortunato su TUTTI gli ordini aperti
+    attraverserebbe il muro e il sistema si fermerebbe con il capitale gia'
+    mangiato — cioe' il recinto non avrebbe protetto nulla.
+    """
+    try:
+        floor = float(T60_KILL_WALLET_USDC or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if floor <= 0 or bankroll <= 0:
+        return None
+    return max(bankroll - floor, 0.0)
+
+
+def _round_to_orders(cap: float, bankroll: float) -> float:
+    """Arrotonda il tetto a un numero INTERO di ordini al cap corrente.
+
+    Perche' (direttiva 24/10/2026): con il cap per-ordine a 1,00 USDC un tetto
+    di 7,40 lascia 0,40 di spazio che nessun ordine puo' usare — un "libero"
+    che non esiste. Il tetto e' quindi un multiplo esatto del cap per ordine:
+    quanti ordini si possono tenere aperti si legge direttamente.
+    """
+    try:
+        order = float(order_ceiling(bankroll) or 0.0)
+    except Exception:
+        return cap
+    if order <= 0 or cap < order:
+        return cap
+    return int((cap + 1e-9) // order) * order
+
+
+def open_exposure_cap(bankroll: float) -> float:
+    """Tetto del recinto d'esposizione APERTA, in USDC (UNICA definizione).
+
+    Tre vincoli, vince il piu' stretto:
+      1. `bankroll x OPEN_EXPOSURE_CAP_PCT` (la percentuale del recinto);
+      2. **spazio residuo fino al muro CB2** (`equity - T60_KILL_WALLET_USDC`):
+         un colpo su TUTTI gli ordini aperti non deve attraversare il muro
+         patrimoniale — altrimenti il recinto protegge il capitale solo sulla
+         carta;
+      3. arrotondamento a **ordini INTERI** del cap per-ordine corrente, cosi'
+         il tetto dice quanti ordini entrano davvero (nessuno spazio morto).
+
+    Perche' esiste (24/10/2026): con il cap per-ordine a 1,00 USDC e il recinto
+    al 30% su 19,40 di equity il tetto era 5,82 -> 5 ordini, ma il conto si
+    faceva a mano e cambiava con l'equity. Ora e' una funzione sola, letta da
+    `open_exposure_status`, `exposure_allows`, l'audit (`order_watch`) e la
+    diagnostica (`verify_guardrails`): una soglia, un posto, nessuna copia.
+
+    Fail-safe: bankroll non positivo -> 0 (nessun ordine); cap per-ordine non
+    calcolabile -> si usa il tetto percentuale senza arrotondamento.
+    """
+    bankroll = max(float(bankroll or 0.0), 0.0)
+    if bankroll <= 0:
+        return 0.0
+    cap = bankroll * OPEN_EXPOSURE_CAP_PCT
+    room = _cb2_cliff_room(bankroll)
+    if room is not None:
+        cap = min(cap, room)
+    return round(_round_to_orders(cap, bankroll), 2)
+
+
+def open_exposure_rule(bankroll: float) -> str:
+    """Come e' stato calcolato il tetto (per log, audit e dashboard).
+
+    `7 ordini da 1.00 USDC = 7.00 (min fra 50% di 19.40 = 9.70 e spazio al
+    muro CB2 7.40)` — senza questa riga un tetto piu' basso del previsto
+    sembra un errore invece di un vincolo piu' stretto che ha vinto.
+    """
+    bankroll = max(float(bankroll or 0.0), 0.0)
+    cap = open_exposure_cap(bankroll)
+    try:
+        order = float(order_ceiling(bankroll) or 0.0)
+    except Exception:
+        order = 0.0
+    pct_cap = bankroll * OPEN_EXPOSURE_CAP_PCT
+    room = _cb2_cliff_room(bankroll)
+    parts = ["%.0f%% di %.2f = %.2f" % (OPEN_EXPOSURE_CAP_PCT * 100,
+                                        bankroll, pct_cap)]
+    if room is not None and room < pct_cap - 1e-9:
+        parts.append("spazio al muro CB2 %.2f (vince il piu' stretto)" % room)
+    n = int(round(cap / order)) if order > 0 else 0
+    head = ("%d ordini da %.2f USDC" % (n, order)) if n > 0 else "nessun ordine"
+    return "%s = %.2f USDC (min fra %s)" % (head, cap, ", ".join(parts))
+
+
 def open_exposure_status(bankroll: float, *,
                          open_stake: float | None = None) -> dict:
     """Stato del recinto d'esposizione aperta (lettura, nessuna scrittura).
 
-    Ritorna {open_stake, count, cap, blocked, pct, reason}: `blocked=True`
-    quando l'esposizione aperta raggiunge la soglia — da quel momento il giro
-    non piazza ordini reali ma continua a valutare e telemetrizzare (shadow).
-    `cap` e' SEMPRE `bankroll x OPEN_EXPOSURE_CAP_PCT` letto fresco: con il
-    capitale aggiornato il tetto segue (compounding automatico, nessun valore
-    congelato).
+    Ritorna {open_stake, count, cap, cap_rule, blocked, pct, reason}:
+    `blocked=True` quando l'esposizione aperta raggiunge la soglia — da quel
+    momento il giro non piazza ordini reali ma continua a valutare e
+    telemetrizzare (shadow). `cap` viene da `open_exposure_cap` (UNICA
+    definizione: percentuale, spazio al muro CB2, ordini interi) letto fresco:
+    con il capitale aggiornato il tetto segue (compounding automatico, nessun
+    valore congelato). `cap_rule` dichiara quale vincolo ha vinto.
 
     `open_stake` esplicito (dal 13/10/2026): il giro puntate ha gia' letto
     l'escrow REALE del wallet (`_live_wallet_snapshot`). Passandolo qui il
@@ -2100,7 +2206,7 @@ def open_exposure_status(bankroll: float, *,
     """
     explicit_open = open_stake
     bankroll = float(bankroll or 0.0)
-    cap = max(bankroll, 0.0) * OPEN_EXPOSURE_CAP_PCT
+    cap = open_exposure_cap(bankroll)
     open_stake, count = _open_live_snapshot()
     if explicit_open is not None:
         try:
@@ -2114,17 +2220,21 @@ def open_exposure_status(bankroll: float, *,
                 and candidate > open_stake):
             open_stake = candidate
     blocked = open_stake >= cap
+    try:
+        rule = open_exposure_rule(bankroll)
+    except Exception:                                          # pragma: no cover
+        rule = "tetto %.2f USDC" % cap
     return {
         "open_stake": open_stake,
         "count": count,
         "cap": round(cap, 2),
+        "cap_rule": rule,
         "bankroll": round(bankroll, 2),
         "pct": (round(open_stake / bankroll, 4) if bankroll > 0 else None),
         "blocked": bool(blocked),
-        "reason": ("esposizione aperta %.2f >= tetto %.2f (%.0f%% del bankroll "
-                   "%.2f): ordini reali sospesi, sola shadow finche' i "
-                   "settlement non liberano fondi"
-                   % (open_stake, cap, OPEN_EXPOSURE_CAP_PCT * 100, bankroll))
+        "reason": ("esposizione aperta %.2f >= tetto %.2f (%s): ordini reali "
+                   "sospesi, sola shadow finche' i settlement non liberano "
+                   "fondi" % (open_stake, cap, rule))
         if blocked else "",
     }
 
@@ -2136,9 +2246,10 @@ def exposure_allows(bankroll: float, new_stake: float, *,
     Direttiva 28/09/2026: il tetto e' sul capitale immobilizzato SIMULTANEO,
     non solo una soglia di blocco: un nuovo ordine e' ammesso solo se
     l'esposizione PROIETTATA (aperta + nuovo stake) resta entro il cap.
-    Esempio con le soglie attuali (cap 50% dal 13/10/2026): con equity
-    33.55 USDC il tetto e' 16.77 e con stake da 1.50 entrano 11 ordini
-    (16.50 USDC); il dodicesimo porterebbe a 18.00 > 16.77 e viene respinto.
+    Il tetto viene da `open_exposure_cap` (percentuale, spazio al muro CB2,
+    ordini interi). Esempio con equity 19.40, recinto 50% e cap per-ordine
+    1.00: il tetto e' min(9.70, 19.40-12.00 = 7.40) = 7.40 -> **7 ordini da
+    1.00**; l'ottavo porterebbe a 8.00 > 7.40 e viene respinto.
 
     E' la lettura che l'Advisor interroga a OGNI ciclo (via Execution Agent):
     un solo punto di verita' per il tetto, cosi' la corsia di denaro e il

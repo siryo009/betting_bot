@@ -76,8 +76,13 @@ def _open_bet(mid="sx-1", esito="1", stake=1.0):
 class TestEsposizioneAperta:
     def test_sotto_soglia_non_blocca(self, temp_db):
         _open_bet(stake=1.0)
-        st = auto_bet.open_exposure_status(100.0)   # tetto 40
-        assert st["open_stake"] == 1.0 and st["cap"] == 40.0
+        st = auto_bet.open_exposure_status(100.0)
+        # Il tetto si LEGGE dalla funzione di produzione: dal 24/10 e' un
+        # multiplo intero del cap per-ordine (40,00 -> 39,00 con ordini da
+        # 1,50), quindi un 40,00 scritto qui misurerebbe una regola diversa.
+        assert st["cap"] == pytest.approx(
+            auto_bet.open_exposure_cap(100.0), abs=0.01)
+        assert st["open_stake"] == 1.0
         assert st["blocked"] is False and st["reason"] == ""
 
     def test_alla_soglia_blocca(self, temp_db):
@@ -118,17 +123,28 @@ class TestEsposizioneAperta:
         assert st["open_stake"] == float("inf") and st["blocked"] is True
 
     def test_scenario_reale_del_proprietario(self, temp_db):
-        """33.55 USDC di equity, tetto 40% = 13.42: 8 micro-stake da 1.50
-        (12.00) stanno sotto, il 9° porta a 13.50 e satura il recinto."""
-        cap = 33.55 * 0.40
-        assert round(cap, 2) == 13.42
-        for i in range(8):
-            _open_bet(mid=f"m{i}", esito="1", stake=1.50)
+        """Quanti micro-stake da 1,50 stanno nel recinto: DERIVATO dal tetto.
+
+        Con equity 33,55 e recinto 40% il tetto NON e' piu' `13,42` a mano:
+        e' un numero INTERO di ordini del cap per-ordine corrente (12,00 con
+        ordini da 1,50 -> 8). Il NONO non entra, e il tetto si satura
+        esattamente quando l'ottavo e' a ledger.
+        """
+        order = 1.50
+        cap = auto_bet.open_exposure_cap(33.55)
+        n = int(cap // order)
+        assert n >= 2                       # il recinto tiene piu' di un ordine
+        for i in range(n - 1):
+            _open_bet(mid=f"m{i}", esito="1", stake=order)
         st = auto_bet.open_exposure_status(33.55)
-        assert st["open_stake"] == 12.00 and st["blocked"] is False
-        _open_bet(mid="m8", esito="1", stake=1.50)
+        assert st["blocked"] is False       # l'ennesimo ordine entra ancora
+        assert auto_bet.exposure_allows(33.55, order)["allowed"] is True
+        _open_bet(mid="m-last", esito="1", stake=order)
         st = auto_bet.open_exposure_status(33.55)
-        assert st["open_stake"] == 13.50 and st["blocked"] is True
+        assert st["open_stake"] == pytest.approx(n * order, abs=0.01)
+        assert st["cap"] == pytest.approx(cap, abs=0.01)
+        assert st["blocked"] is True        # recinto saturo: nessun altro ordine
+        assert auto_bet.exposure_allows(33.55, order)["allowed"] is False
 
 
 # ---------------------------------------------------------------------------

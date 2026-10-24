@@ -44,8 +44,19 @@ from decision.models import KillSwitchStatus
 
 NOW = datetime.now(timezone.utc)
 ALLOWED_LEAGUE = "Premier League"
-EQUITY = 33.55                 # equity reale del wallet SX
-CAP = round(EQUITY * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2)   # recinto
+# Equity di prova SCELTA perche' il vincolo che deve governare qui e' la
+# PERCENTUALE del recinto, non lo spazio fino al muro CB2: dal 24/10 il tetto
+# e' `min(percentuale, equity - muro)` e con il default di codice del muro
+# (30) un'equity di 33,55 lascerebbe 3,55 di spazio, cioe' 2 ordini — un
+# regime che in produzione (muro 12, env Railway) non esiste. Con 50,00 lo
+# spazio (20,00) e' piu' ampio del 30% (15,00) e il test misura la regola che
+# vuole misurare. Il muro CB2 ha i suoi test dedicati, con monkeypatch.
+EQUITY = 50.0                  # tetto = 30% di 50 = 15,00 (8 ordini da 1,68)
+# Tetto del recinto: si LEGGE dalla funzione di produzione (percentuale,
+# spazio al muro CB2, ordini interi) invece di ricalcolare `equity x pct`:
+# una seconda formula qui misurerebbe una regola che il bot non applica.
+CAP = round(auto_bet.open_exposure_cap(EQUITY), 2)
+
 FIXED = 1.50                   # stake fisso per ordine reale
 # Ordini che stanno DENTRO il recinto con l'equity di prova, e quanti ne
 # servono per SATURARE quello del Capo (bankroll 100). Entrambi DERIVATI dal
@@ -53,7 +64,7 @@ FIXED = 1.50                   # stake fisso per ordine reale
 # motivo sbagliato (lezione del 13/09 e del 28/09).
 N_PIENO = int(CAP // FIXED)
 CHIEF_BANKROLL = 100.0
-CHIEF_CAP = round(CHIEF_BANKROLL * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2)
+CHIEF_CAP = round(auto_bet.open_exposure_cap(CHIEF_BANKROLL), 2)
 CHIEF_N = int(CHIEF_CAP // FIXED) + 1
 
 
@@ -183,8 +194,8 @@ class TestGateAdvisor:
         assert advisor.exposure_gate(bankroll=EQUITY, stake=FIXED).resolved is False
         raddoppiato = advisor.exposure_gate(bankroll=EQUITY * 2, stake=FIXED)
         assert raddoppiato.resolved is True
-        assert raddoppiato.exposure["cap"] == round(
-            EQUITY * 2 * auto_bet.OPEN_EXPOSURE_CAP_PCT, 2)
+        assert raddoppiato.exposure["cap"] == pytest.approx(
+            round(auto_bet.open_exposure_cap(EQUITY * 2), 2))
 
     def test_rilascio_dinamico_dopo_un_settlement(self, temp_db):
         """Chiuso un match l'esposizione scende: il ciclo successivo riparte
@@ -381,3 +392,106 @@ def _chain(conn, *, bankroll=100.0, kills=None):
     finance = FinanceAgent(bankroll=bankroll, kills=kills)
     advisor = AdvisorAgent(finance=finance, strategy=strategy)
     return data, strategy, finance, advisor
+
+
+# ---------------------------------------------------------------------------
+# Tetto del recinto COERENTE col cap per ordine e col muro patrimoniale
+# (direttiva 24/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestTettoCoerenteColCapPerOrdine:
+    """`open_exposure_cap` e' UNICA fonte del tetto (percentuale, muro CB2,
+    ordini interi) e i consumatori la leggono invece di ricalcolarla."""
+
+    def test_tetto_allineato_agli_ordini_interi(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "T60_KILL_WALLET_USDC", 12.0)
+        equity = 19.40
+        cap = auto_bet.open_exposure_cap(equity)
+        order = float(auto_bet.order_ceiling(equity))
+        room = min(equity * auto_bet.OPEN_EXPOSURE_CAP_PCT, equity - 12.0)
+        assert order > 0
+        # Il tetto e' un multiplo ESATTO del cap per ordine: niente spazio
+        # morto, e il numero di ordini si legge dal tetto.
+        assert cap == pytest.approx(int((cap + 1e-9) // order) * order,
+                                    abs=0.01)
+        assert cap <= room + 1e-9
+        assert cap > room - order        # l'arrotondamento toglie < 1 ordine
+
+    def test_tetto_non_attraversa_il_muro_cb2(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 1.0)
+        monkeypatch.setattr(auto_bet, "T60_KILL_WALLET_USDC", 12.0)
+        equity = 19.40
+        cap = auto_bet.open_exposure_cap(equity)
+        # Un colpo su TUTTI gli ordini aperti non deve portare l'equity sotto
+        # il muro: e' il motivo per cui il recinto lo legge.
+        assert equity - cap >= 12.0
+
+    def test_percentuale_vince_con_capitale_grande(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.0)
+        monkeypatch.setattr(auto_bet, "T60_KILL_WALLET_USDC", 12.0)
+        equity = 100.0
+        cap = auto_bet.open_exposure_cap(equity)
+        order = float(auto_bet.order_ceiling(equity))
+        # Lo spazio al muro (88) e' piu' ampio della percentuale (70): vince
+        # la percentuale, arrotondata per difetto agli ordini interi.
+        assert cap <= equity * auto_bet.OPEN_EXPOSURE_CAP_PCT + 1e-9
+        assert cap > equity * auto_bet.OPEN_EXPOSURE_CAP_PCT - order
+
+    def test_regola_dichiarata_nello_stato(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "T60_KILL_WALLET_USDC", 12.0)
+        state = auto_bet.open_exposure_status(19.40, open_stake=0.0)
+        assert "ordini" in state["cap_rule"]
+        assert state["cap"] == pytest.approx(
+            auto_bet.open_exposure_cap(19.40), abs=0.01)
+        assert state["blocked"] is False
+
+    def test_blocco_quando_il_tetto_e_raggiunto(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "T60_KILL_WALLET_USDC", 12.0)
+        equity = 19.40
+        order = float(auto_bet.order_ceiling(equity))
+        cap = auto_bet.open_exposure_cap(equity)
+        state = auto_bet.open_exposure_status(equity, open_stake=cap)
+        assert state["blocked"] is True
+        assert auto_bet.exposure_allows(equity, order,
+                                        open_stake=cap)["allowed"] is False
+        assert auto_bet.exposure_allows(equity, order,
+                                        open_stake=cap - order)["allowed"] is True
+
+    def test_cap_zero_senza_equity(self):
+        assert auto_bet.open_exposure_cap(0) == 0.0
+        assert auto_bet.open_exposure_cap(-5) == 0.0
+
+    def test_recinto_30_percento_coerente_col_cap_da_1_usdc(self, monkeypatch):
+        """Direttiva 24/10/2026: il recinto e' al 30% e il cap per ordine e'
+        1,00 USDC, quindi il tetto dice QUANTI ordini stanno aperti insieme.
+
+        Sono i tre valori di PRODUZIONE (letto da `/proc/1/environ` il
+        24/10/2026): `OPEN_EXPOSURE_CAP_PCT=0.30`, `ORDER_MAX_STAKE_USDC=1.00`,
+        `T60_KILL_WALLET_USDC=12`. Con equity 19,40: 30% = 5,82, spazio al muro
+        = 7,40 -> vince la percentuale, arrotondata a **5 ordini da 1,00**.
+        Il muro NON e' il vincolo (7,40 > 5,82): e' la percentuale, che e'
+        cio' che il proprietario ha chiesto di rendere coerente col cap.
+        """
+        assert auto_bet.OPEN_EXPOSURE_CAP_PCT == pytest.approx(0.30)
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 1.00)
+        monkeypatch.setattr(auto_bet, "T60_KILL_WALLET_USDC", 12.0)
+        # Anche il cap DINAMICO e' quello di produzione (12%): con il 5% di
+        # default di codice il tetto efficace sarebbe 0,97 (il dinamico vince
+        # sull'assoluto) e il test misurerebbe un altro regime.
+        monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.12")
+        equity = 19.40
+        cap = auto_bet.open_exposure_cap(equity)
+        order = float(auto_bet.order_ceiling(equity))
+        assert order == pytest.approx(1.00)
+        assert cap == pytest.approx(5.00)          # 5 ordini interi da 1,00
+        assert cap <= equity - 12.0                # non attraversa il muro CB2
+        state = auto_bet.open_exposure_status(equity)
+        assert state["cap_rule"].startswith("5 ordini da 1.00 USDC")
+
+    def test_audit_usa_la_stessa_formula(self):
+        """`order_watch` (audit) e il bot devono misurare lo STESSO tetto."""
+        import order_watch
+        for equity in (9.0, 19.40, 33.55, 100.0):
+            assert order_watch._exposure_cap(
+                equity, auto_bet.OPEN_EXPOSURE_CAP_PCT) == pytest.approx(
+                    auto_bet.open_exposure_cap(equity))

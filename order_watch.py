@@ -21,9 +21,11 @@ COSA CONTROLLA
    copiato). Le righe PRECEDENTI alla direttiva sono dichiarate
    `stake_predirective`, non giudicate: applicare la regola di oggi al passato
    sarebbe un falso positivo.
-2. **Recinto del 40%** — replay cronologico delle aperture/chiusure: in ogni
-   istante in cui un ordine si apre, la somma degli stake aperti deve stare
-   dentro `equity x OPEN_EXPOSURE_CAP_PCT`. L'equity dell'istante viene dallo
+2. **Recinto dell'esposizione aperta** — replay cronologico delle aperture/
+   chiusure: in ogni istante in cui un ordine si apre, la somma degli stake
+   aperti deve stare dentro il tetto dato da `auto_bet.open_exposure_cap`
+   (percentuale, spazio al muro CB2, ordini interi — una sola definizione,
+   letta e non ricopiata). L'equity dell'istante viene dallo
    storico campionato (`bankroll_history.json`); senza campione il tetto e'
    STIMATO con l'equity corrente e la cosa viene dichiarata (`cap_estimated`),
    mai spacciata per verificata.
@@ -133,6 +135,29 @@ def min_ticket() -> float:
 def cap_pct() -> float:
     """Percentuale del recinto (UNICA fonte: `auto_bet`)."""
     return float(_ab().OPEN_EXPOSURE_CAP_PCT)
+
+
+def _exposure_cap(equity: float, pct: float) -> float:
+    """Tetto del recinto all'equity data (UNICA fonte: `auto_bet`).
+
+    Delega a `auto_bet.open_exposure_cap` — percentuale, spazio al muro CB2 e
+    ordini interi. L'audit deve misurare ESATTAMENTE il tetto che il bot
+    applica: ricalcolarlo qui come `equity x pct` segnalerebbe violazioni su
+    ordini corretti (o, peggio, non le segnalerebbe). Fail-safe: se la fonte
+    non e' importabile si usa il tetto percentuale dichiarato.
+    """
+    try:
+        return float(_ab().open_exposure_cap(equity))
+    except Exception:
+        return float(equity) * float(pct)
+
+
+def _exposure_rule(equity: float, pct: float) -> str:
+    """Come e' stato calcolato il tetto (dichiarato nella violazione)."""
+    try:
+        return str(_ab().open_exposure_rule(equity))
+    except Exception:
+        return "%.0f%% di %.2f" % (float(pct) * 100, float(equity))
 
 
 def current_equity() -> Optional[float]:
@@ -356,7 +381,7 @@ def audit(db_path: Optional[Any] = None, *, since: str = DIRECTIVE_SINCE,
                           "non verificabile (non equivale a verificato)",
                 "created_at": row.get("created_at")})
             continue
-        cap_i = eq_i * pct
+        cap_i = _exposure_cap(eq_i, pct)
         if src != "sample":
             declared.append({
                 "id": row.get("id"), "kind": "cap_estimated",
@@ -368,7 +393,7 @@ def audit(db_path: Optional[Any] = None, *, since: str = DIRECTIVE_SINCE,
         if running > cap_i + TOL:
             _add(VIOL_EXPOSURE_OVER_CAP, row,
                  f"esposizione aperta {running:.4f} > tetto {cap_i:.4f} "
-                 f"({pct * 100:.0f}% di {eq_i:.2f})")
+                 f"({_exposure_rule(eq_i, pct)})")
 
     verdict = "ok" if not violations else "violazioni"
     return {
