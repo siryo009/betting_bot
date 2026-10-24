@@ -7,7 +7,12 @@ webapp/node_modules/
 webapp/.next/
 *.tsbuildinfo
 *.db
+*.db.bak-*
 *.tar.gz
+# Snapshot del ledger di PRODUZIONE usati dal laboratorio di ricerca: sono dati
+# (51 MB, con lo storico delle puntate), non codice. Il laboratorio li legge se
+# presenti in locale; `research_isolated/` committato e' solo codice + report.
+research_isolated/snapshot/
 _archivio/
 .env
 .env.*

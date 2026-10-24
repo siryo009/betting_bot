@@ -437,6 +437,18 @@ export default defineRailway(() => {
       SX_API_KEY: preserve(),
       SX_BOOK_LEVELS_KEPT: preserve(),
       SX_PRIVATE_KEY: preserve(),
+      // Betfair Italia (ADM), provider `betfair_it` di execution_engine.py:
+      // stesso protocollo SportsAPING di BetInAsia/MollyBet, ma login
+      // CERTIFICATO e regole nazionali (puntata minima 2,00 EUR, vincita
+      // massima 10.000 EUR). Le credenziali NON sono ancora impostate: senza
+      // di esse il provider resta DryRun (fail-closed).
+      BETFAIR_IT_APP_KEY: preserve(),
+      BETFAIR_IT_USERNAME: preserve(),
+      BETFAIR_IT_PASSWORD: preserve(),
+      BETFAIR_IT_CERT_PATH: preserve(),
+      BETFAIR_IT_KEY_PATH: preserve(),
+      BETFAIR_IT_MIN_STAKE: preserve(),
+      BETFAIR_IT_MAX_PAYOUT: preserve(),
       T60_KILL_WALLET_USDC: preserve(),
       // STOP-LOSS giornaliero/settimanale e TETTO ASSOLUTO per-ordine
       // (21/10/2026). Con equity ~21 USDC e tetto dinamico 12% (2,53) un

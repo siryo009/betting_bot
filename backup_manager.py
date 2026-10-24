@@ -209,6 +209,173 @@ def snapshot_is_valid(snapshot) -> bool:
     return snapshot_status(snapshot) == STATUS_OK
 
 
+# ---------------------------------------------------------------------------
+# Salute dello spazio: un volume PIENO e' un interruttore SILENZIOSO
+# ---------------------------------------------------------------------------
+# Il 24/10/2026 il bot si e' fermato perche' il volume era al 100%
+# (`database or disk is full` in ogni job, 231 errori ENOSPC): `BACKUP_KEEP`
+# era a 7 con snapshot da ~70 MB su un volume da 434 MB. Nessun guardrail di
+# DENARO poteva accorgersene — il capitale era intatto, il bot semplicemente
+# non poteva scrivere. Questa funzione rende lo stato leggibile prima che
+# succeda: la legge `/api/dashboard` e la mostra la webapp.
+
+# Soglie (percentuale di spazio LIBERO). Sono soglie di ESERCIZIO, non di
+# strategia: non toccano il denaro, dichiarano quando il disco sta per
+# diventare un problema operativo.
+WARN_FREE_PCT = 20.0
+CRITICAL_FREE_PCT = 8.0
+MIN_FREE_MB = 40.0
+STALE_BACKUP_H = 48.0
+
+
+def _dir_age_hours(path: Path) -> Optional[float]:
+    """Eta' in ore di uno snapshot, dal nome (stamp) o dal mtime."""
+    try:
+        stamp = path.name
+        dt = datetime.strptime(stamp, "%Y%m%d-%H%M%S-%f").replace(
+            tzinfo=timezone.utc)
+    except Exception:
+        try:
+            dt = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except Exception:
+            return None
+    return round((datetime.now(timezone.utc) - dt).total_seconds() / 3600.0, 2)
+
+
+def _size_mb(path) -> float:
+    try:
+        total = 0
+        for p in Path(path).rglob("*"):
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:
+                continue
+        return round(total / (1024 * 1024), 1)
+    except Exception:
+        return 0.0
+
+
+def storage_status(data_dir=None, backup_root=None) -> Dict:
+    """Spazio del volume + stato dei backup (SOLA LETTURA, fail-safe).
+
+    Ritorna:
+        {"ok", "level": ok|warn|critical|unknown,
+         "volume": {path, total_mb, used_mb, free_mb, used_pct, free_pct},
+         "backups": {count, keep, total_mb, latest, latest_status,
+                    latest_age_h, statuses, over_keep},
+         "thresholds": {...}, "warnings": [motivi machine-readable],
+         "details": [testo leggibile]}
+
+    Non solleva MAI: una dashboard che esplode e' peggio di una dashboard che
+    dichiara `ok: False` con il motivo.
+    """
+    out: Dict = {
+        "ok": False, "level": "unknown", "volume": {}, "backups": {},
+        "thresholds": {"warn_free_pct": WARN_FREE_PCT,
+                        "critical_free_pct": CRITICAL_FREE_PCT,
+                        "min_free_mb": MIN_FREE_MB,
+                        "stale_backup_h": STALE_BACKUP_H},
+        "warnings": [], "details": [], "error": None,
+    }
+    try:
+        data = Path(data_dir) if data_dir is not None else _data_dir()
+        root = Path(backup_root) if backup_root is not None else data / "backups"
+    except Exception as e:                       # pragma: no cover - difensivo
+        out["error"] = str(e)
+        return out
+
+    # 1) VOLUME
+    try:
+        usage = shutil.disk_usage(str(data))
+        total_mb = round(usage.total / (1024 * 1024), 1)
+        free_mb = round(usage.free / (1024 * 1024), 1)
+        used_mb = round((usage.total - usage.free) / (1024 * 1024), 1)
+        used_pct = round(100.0 * (usage.total - usage.free) / usage.total, 1) \
+            if usage.total else 0.0
+        out["volume"] = {"path": str(data), "total_mb": total_mb,
+                         "used_mb": used_mb, "free_mb": free_mb,
+                         "used_pct": used_pct,
+                         "free_pct": round(100.0 - used_pct, 1)}
+    except Exception as e:
+        out["error"] = f"volume: {e}"
+        return out
+
+    # 2) BACKUP
+    snaps = []
+    try:
+        if root.is_dir():
+            snaps = sorted((p for p in root.iterdir() if p.is_dir()),
+                           key=lambda p: p.name, reverse=True)
+    except Exception as e:
+        out["error"] = f"backups: {e}"
+    statuses: Dict[str, int] = {}
+    for s in snaps:
+        st = snapshot_status(s)
+        statuses[st] = statuses.get(st, 0) + 1
+    latest = snaps[0] if snaps else None
+    keep = _keep()
+    out["backups"] = {
+        "count": len(snaps), "keep": keep,
+        "total_mb": round(sum(_size_mb(s) for s in snaps), 1),
+        "latest": latest.name if latest else None,
+        "latest_status": snapshot_status(latest) if latest else None,
+        "latest_age_h": _dir_age_hours(latest) if latest else None,
+        "statuses": statuses,
+        "over_keep": len(snaps) > keep,
+    }
+
+    # 3) GIUDIZIO (il primo motivo vince il livello)
+    free_pct = out["volume"].get("free_pct") or 0.0
+    free_mb = out["volume"].get("free_mb") or 0.0
+    if free_pct <= CRITICAL_FREE_PCT or free_mb < MIN_FREE_MB:
+        out["warnings"].append("disco_quasi_pieno")
+        out["level"] = "critical"
+    elif free_pct <= WARN_FREE_PCT:
+        out["warnings"].append("disco_pieno")
+        out["level"] = "warn"
+    else:
+        out["level"] = "ok"
+
+    b = out["backups"]
+    if not b["count"]:
+        out["warnings"].append("nessun_backup")
+        if out["level"] == "ok":
+            out["level"] = "warn"
+    else:
+        if b["latest_status"] != STATUS_OK:
+            out["warnings"].append(f"ultimo_backup_{b['latest_status']}")
+            if out["level"] == "ok":
+                out["level"] = "warn"
+        if b["latest_age_h"] is not None and b["latest_age_h"] > STALE_BACKUP_H:
+            out["warnings"].append("backup_vecchio")
+            if out["level"] == "ok":
+                out["level"] = "warn"
+        if b["over_keep"]:
+            out["warnings"].append("backup_oltre_keep")
+            if out["level"] == "ok":
+                out["level"] = "warn"
+        # Il conto che ha causato l'incidente del 24/10: `keep x snapshot`
+        # contro il volume. Se non ci starebbero DUE volte, il backup di boot
+        # e' un interruttore che spegne il bot.
+        avg = (b["total_mb"] / b["count"]) if b["count"] else 0.0
+        if avg and (avg * b["keep"]) > (out["volume"]["total_mb"] * 0.9):
+            out["warnings"].append("backup_troppo_grande_per_il_volume")
+            if out["level"] == "ok":
+                out["level"] = "warn"
+
+    out["ok"] = out["level"] == "ok"
+    out["details"] = [
+        f"volume: {out['volume']['used_mb']:.0f}/{out['volume']['total_mb']:.0f} MB "
+        f"({out['volume']['used_pct']:.0f}% usato, {out['volume']['free_mb']:.0f} MB liberi)",
+        f"backup: {b['count']} snapshot ({b['total_mb']:.0f} MB), keep {b['keep']}, "
+        f"ultimo {b['latest'] or '—'} ({b['latest_status'] or '—'}"
+        + (f", {b['latest_age_h']:.1f}h" if b["latest_age_h"] is not None else "")
+        + ")",
+    ]
+    return out
+
+
 def _write_manifest(dest: Path, summary: Dict) -> Optional[str]:
     """Scrive `backup.json` in modo atomico. Ritorna l'errore (None = ok).
 

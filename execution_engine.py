@@ -15,6 +15,10 @@ Un'unica interfaccia Python (ExecutionProvider) copre tutti i provider:
 - `sxbet`: REST V3 crypto, credenziali SX_API_KEY / SX_PRIVATE_KEY (firma
   EIP-712 degli ordini, fondi nel proxy wallet; base URL personalizzabile
   con SX_API_BASE, default api.sx.bet, testnet api.toronto.sx.bet);
+- `betfair_it`: Betfair **Italia (ADM)** — stesso protocollo SportsAPING,
+  login CERTIFICATO (identitysso-cert.betfair.it) e regole nazionali
+  (min 2,00 EUR, vincita max 10.000 EUR): sottoclasse di
+  `BetfairJsonRpcProvider`, credenziali BETFAIR_IT_APP_KEY/USERNAME/PASSWORD;
 - `dry_run` (default senza credenziali o con EXECUTION_DRY_RUN=1):
   nessuna rete, misura simulata.
 
@@ -392,6 +396,17 @@ class BetfairJsonRpcProvider(ExecutionProvider):
 
     name = "betfair-compatible"
 
+    # Endpoint del protocollo: PROPRIETA' sovrascrivibili dalla sottoclasse.
+    # `_login`/`_rpc` leggono da qui, quindi chi cambia venue (Betfair Italia)
+    # ridefinisce DUE valori invece di duplicare il protocollo.
+    @property
+    def login_url(self) -> str:
+        return EXECUTION_LOGIN_URL
+
+    @property
+    def api_base(self) -> str:
+        return EXECUTION_API_BASE
+
     def _login(self) -> str:
         """Login e cache del token di sessione."""
         if self._token and (time.time() - self._token_ts) < 3600:
@@ -400,7 +415,7 @@ class BetfairJsonRpcProvider(ExecutionProvider):
             raise RuntimeError("credenziali aggregatore mancanti "
                                "(EXECUTION_APP_KEY/USERNAME/PASSWORD)")
         resp = requests.post(
-            EXECUTION_LOGIN_URL,
+            self.login_url,
             data={"username": self.username, "password": self.password},
             headers={"X-Application": self.app_key},
             timeout=EXECUTION_TIMEOUT)
@@ -417,7 +432,7 @@ class BetfairJsonRpcProvider(ExecutionProvider):
         token = self._login()
         t0 = time.perf_counter()
         resp = requests.post(
-            EXECUTION_API_BASE,
+            self.api_base,
             json={"jsonrpc": "2.0", "method": f"SportsAPING/v1.0/{method}",
                   "params": params, "id": "1"},
             headers={"X-Application": self.app_key,
@@ -558,6 +573,228 @@ class MollyBetProvider(BetfairJsonRpcProvider):
     """Aggregatore MollyBet (protocollo Betfair-compatible)."""
 
     name = "mollybet"
+
+
+# ---------------------------------------------------------------------------
+# Betfair Italia (ADM) — stesso protocollo SportsAPING, venue DIVERSA
+# ---------------------------------------------------------------------------
+# Credenziali SOLO da env (regola 7: mai in chat, mai nel repo).
+#   BETFAIR_IT_APP_KEY / BETFAIR_IT_USERNAME / BETFAIR_IT_PASSWORD
+#   BETFAIR_IT_CERT_PATH / BETFAIR_IT_KEY_PATH  (login certificato, file .crt/.pem
+#                                               e .key: NON metterli in secrets/
+#                                               — `vault --commit` li leggerebbe)
+BETFAIR_IT_APP_KEY = os.getenv("BETFAIR_IT_APP_KEY", "")
+BETFAIR_IT_USERNAME = os.getenv("BETFAIR_IT_USERNAME", "")
+BETFAIR_IT_PASSWORD = os.getenv("BETFAIR_IT_PASSWORD", "")
+BETFAIR_IT_CERT_PATH = os.getenv("BETFAIR_IT_CERT_PATH", "")
+BETFAIR_IT_KEY_PATH = os.getenv("BETFAIR_IT_KEY_PATH", "")
+BETFAIR_IT_LOGIN_URL = os.getenv(
+    "BETFAIR_IT_LOGIN_URL",
+    "https://identitysso-cert.betfair.it/api/certlogin")
+BETFAIR_IT_API_BASE = os.getenv(
+    "BETFAIR_IT_API_BASE",
+    "https://api.betfair.it/exchange/betting/json-rpc/v1")
+
+# Regole ADM (Betfair Italia, pagina ufficiale "Come scommettere"):
+# - puntata minima 2,00 EUR;
+# - vincita massima 10.000 EUR per singola operazione, COMPRESA la puntata
+#   -> quindi `size * price <= 10.000`.
+# Non sono soglie di strategia: sono vincoli dell'operatore. Il provider e'
+# fail-closed: sotto/sopra i limiti NON arrotonda per far passare l'ordine.
+BETFAIR_IT_MIN_STAKE = float(os.getenv("BETFAIR_IT_MIN_STAKE", "2.0"))
+BETFAIR_IT_MAX_PAYOUT = float(os.getenv("BETFAIR_IT_MAX_PAYOUT", "10000.0"))
+BETFAIR_IT_CURRENCY = os.getenv("BETFAIR_IT_CURRENCY", "EUR")
+
+# Ladder dei prezzi Betfair: (da, fino a escluso, passo).
+_BETFAIR_TICKS: tuple = (
+    (1.01, 2.00, 0.01),
+    (2.00, 3.00, 0.02),
+    (3.00, 4.00, 0.05),
+    (4.00, 6.00, 0.10),
+    (6.00, 10.00, 0.20),
+    (10.00, 20.00, 0.50),
+    (20.00, 30.00, 1.00),
+    (30.00, 50.00, 2.00),
+    (50.00, 100.00, 5.00),
+    (100.00, 1000.00, 10.00),
+)
+
+
+def _tick_segment(price: float):
+    """(lo, hi, step) del segmento di ladder che contiene `price`, o None."""
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return None
+    for lo, hi, step in _BETFAIR_TICKS:
+        if lo <= p < hi:
+            return lo, hi, step
+    return None
+
+
+def betfair_tick(price: float, side: str = "BACK"):
+    """Prezzo valido sulla ladder Betfair, arrotondato nella DIREZIONE SICURA.
+
+    BACK: si arrotonda PER DIFETTO (non si paga mai piu' di quanto richiesto);
+    LAY: si arrotonda PER ECCESSO (non si accetta mai meno del richiesto).
+    Fuori da 1.01-1000 -> None (il chiamante salta l'ordine: mai un prezzo
+    inventato).
+    """
+    seg = _tick_segment(price)
+    if seg is None:
+        return None
+    lo, hi, step = seg
+    p = float(price)
+    # aritmetica intera in unita' di passo: niente errori di floating point
+    # (`(2.03 - 2.00) / 0.02` non e' esattamente 1.5 su binario).
+    units = (p - lo) / step
+    n = int(units + 1e-9)
+    floor_p = round(lo + n * step, 2)
+    if str(side).upper() == "LAY" and abs(floor_p - p) > 1e-9:
+        nxt = round(floor_p + step, 2)
+        # Il bordo superiore del segmento e' a sua volta un tick valido (ed e'
+        # il primo valore del segmento successivo): alzarsi li' e' corretto,
+        # tornare a `lo` manderebbe il prezzo nella direzione OPPOSTA.
+        return hi if nxt >= hi else nxt
+    return floor_p
+
+
+class BetfairItProvider(BetfairJsonRpcProvider):
+    """Provider Betfair Italia (ADM) — SportsAPING/v1.0, login CERTIFICATO.
+
+    Perche' una sottoclasse e non un modulo nuovo: il protocollo e' lo stesso
+    (`BetfairJsonRpcProvider`), cambiano solo DUE endpoint e la forma del
+    login. Duplicare `placeOrders`/`listMarketCatalogue` significherebbe due
+    copie che possono divergere — la classe di bug del 13/09 e del 26/09.
+
+    Differenze reali rispetto al provider per gli aggregatori:
+    1. login su `identitysso-cert.betfair.it/api/certlogin` con **certificato
+       client** (cert+key), risposta `loginStatus`/`sessionToken` (non
+       `status`/`token`);
+    2. endpoint nazionali `api.betfair.it`, currency EUR;
+    3. regole ADM: puntata minima 2,00 EUR e vincita massima 10.000 EUR per
+       scommessa (compresa la puntata) -> `place_limit_order` e' fail-closed
+       su entrambe;
+    4. prezzi sulla **ladder** Betfair, arrotondati nella direzione sicura.
+
+    Settlement: `list_cleared_orders()` (betStatus SETTLED) e' la fonte
+    dell'esito per i mercati saldati dall'exchange, gemella di
+    `_results_from_sx` per SX Bet.
+    """
+
+    name = "betfair_it"
+
+    def __init__(self, app_key: str = "", username: str = "",
+                 password: str = "", cert_path: str = "",
+                 key_path: str = "") -> None:
+        super().__init__(app_key, username, password)
+        self.cert_path = cert_path
+        self.key_path = key_path
+
+    @property
+    def login_url(self) -> str:
+        return BETFAIR_IT_LOGIN_URL
+
+    @property
+    def api_base(self) -> str:
+        return BETFAIR_IT_API_BASE
+
+    def _cert(self):
+        """Coppia (cert, key) per requests, o None se non configurata.
+
+        Senza certificato il login verrebbe RIFIUTATO dall'operatore: qui
+        ritorna None e il login fallisce in modo dichiarato, mai silenzioso.
+        """
+        if self.cert_path and self.key_path:
+            return (self.cert_path, self.key_path)
+        return None
+
+    def _login(self) -> str:
+        """Login CERTIFICATO (certlogin) con cache del session token."""
+        if self._token and (time.time() - self._token_ts) < 3600:
+            return self._token
+        if not (self.app_key and self.username and self.password):
+            raise RuntimeError(
+                "credenziali Betfair.it mancanti "
+                "(BETFAIR_IT_APP_KEY/BETFAIR_IT_USERNAME/BETFAIR_IT_PASSWORD)")
+        resp = requests.post(
+            self.login_url,
+            data={"username": self.username, "password": self.password},
+            headers={"X-Application": self.app_key,
+                     "Accept": "application/json"},
+            cert=self._cert(),
+            timeout=EXECUTION_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        status = data.get("loginStatus") or data.get("status")
+        if status != "SUCCESS":
+            raise RuntimeError(f"login Betfair.it fallito: {status or data}")
+        token = data.get("sessionToken") or data.get("token")
+        if not token:
+            raise RuntimeError("login Betfair.it: risposta senza sessionToken")
+        self._token = token
+        self._token_ts = time.time()
+        return self._token
+
+    def precheck_order(self, side: str, price: float, size: float) -> tuple:
+        """Valida un ordine contro le regole ADM PRIMA della rete.
+
+        Ritorna (price_sulla_ladder | None, errore | None). Nessun
+        arrotondamento che faccia passare un ordine fuori regola: se lo stake
+        e' sotto il minimo o il payout supera il massimo, l'errore e' esplicito.
+        """
+        try:
+            p = float(price)
+            s = float(size)
+        except (TypeError, ValueError):
+            return None, "prezzo/stake non numerici"
+        if p <= 1.0:
+            return None, f"prezzo non valido: {p}"
+        tick = betfair_tick(p, side)
+        if tick is None:
+            return None, f"prezzo fuori dalla ladder Betfair (1.01-1000): {p}"
+        if s < BETFAIR_IT_MIN_STAKE:
+            return None, (f"puntata {s:.2f} sotto il minimo ADM "
+                          f"{BETFAIR_IT_MIN_STAKE:.2f} EUR")
+        payout = s * tick
+        if payout > BETFAIR_IT_MAX_PAYOUT:
+            return None, (f"vincita potenziale {payout:.2f} oltre il massimo ADM "
+                          f"{BETFAIR_IT_MAX_PAYOUT:.2f} EUR")
+        return tick, None
+
+    def place_limit_order(self, market_id: str, selection_id: int,
+                          side: str, price: float, size: float,
+                          persistence: str = "LAPSE") -> OrderResult:
+        side = str(side).upper()
+        if side not in ("BACK", "LAY"):
+            return OrderResult(False, None, "FAILURE", price, None, 0.0, 0.0,
+                               error=f"side non valido: {side}")
+        tick, err = self.precheck_order(side, price, size)
+        if err:
+            # Fail-closed: nessuna chiamata di rete per un ordine che
+            # l'operatore rifiuterebbe (o che supererebbe i limiti ADM).
+            logger.warning("betfair_it: ordine scartato — %s", err)
+            return OrderResult(False, None, "REJECTED", price, None, 0.0, 0.0,
+                               error=err)
+        return super().place_limit_order(market_id, selection_id, side,
+                                         tick, float(size), persistence)
+
+    def list_cleared_orders(self, bet_ids: Optional[Sequence[str]] = None,
+                            from_iso: Optional[str] = None,
+                            to_iso: Optional[str] = None) -> Dict:
+        """Ordini SALDATI (settlement): esito, profitto, prezzo di chiusura.
+
+        Betfair non dà i punteggi: dà l'esito del mercato per il NOSTRO lato
+        (`betOutcome` WON/LOST/PUSH, `profit`). E' la fonte gemella di
+        `listClearedOrders` per SX (`markets/find`).
+        """
+        params: Dict = {"betStatus": "SETTLED", "groupBy": "BET"}
+        if bet_ids:
+            params["betIds"] = [str(b) for b in bet_ids]
+        if from_iso and to_iso:
+            params["settledDateRange"] = {"from": from_iso, "to": to_iso}
+        result, _ = self._rpc("listClearedOrders", params)
+        return result or {}
 
 
 class SmarketsProvider(ExecutionProvider):
@@ -1385,6 +1622,9 @@ def _creds_configured() -> bool:
     if EXECUTION_PROVIDER in ("betinasia", "mollybet"):
         return bool(EXECUTION_APP_KEY and EXECUTION_USERNAME
                     and EXECUTION_PASSWORD)
+    if EXECUTION_PROVIDER == "betfair_it":
+        return bool(BETFAIR_IT_APP_KEY and BETFAIR_IT_USERNAME
+                    and BETFAIR_IT_PASSWORD)
     return False
 
 
@@ -1397,6 +1637,8 @@ def build_provider() -> ExecutionProvider:
       (credenziali SX_API_KEY/SX_PRIVATE_KEY);
     - EXECUTION_PROVIDER=smarkets              -> SmarketsProvider
       (credenziali SMARKETS_USERNAME/PASSWORD);
+    - EXECUTION_PROVIDER=betfair_it           -> BetfairItProvider
+      (Betfair Italia/ADM: BETFAIR_IT_APP_KEY/USERNAME/PASSWORD + certificato);
     - EXECUTION_PROVIDER=betinasia|mollybet    -> provider aggregatore
       (credenziali EXECUTION_APP_KEY/USERNAME/PASSWORD);
     - credenziali mancanti o provider ignoto   -> DryRunProvider (default
@@ -1417,6 +1659,15 @@ def build_provider() -> ExecutionProvider:
         logger.warning(
             "execution: credenziali Smarkets mancanti "
             "(SMARKETS_USERNAME/PASSWORD) -> DryRunProvider")
+        return DryRunProvider()
+    if EXECUTION_PROVIDER == "betfair_it":
+        if BETFAIR_IT_APP_KEY and BETFAIR_IT_USERNAME and BETFAIR_IT_PASSWORD:
+            return BetfairItProvider(BETFAIR_IT_APP_KEY, BETFAIR_IT_USERNAME,
+                                     BETFAIR_IT_PASSWORD,
+                                     BETFAIR_IT_CERT_PATH, BETFAIR_IT_KEY_PATH)
+        logger.warning(
+            "execution: credenziali Betfair.it mancanti "
+            "(BETFAIR_IT_APP_KEY/USERNAME/PASSWORD) -> DryRunProvider")
         return DryRunProvider()
     if EXECUTION_PROVIDER in ("betinasia", "mollybet"):
         if EXECUTION_APP_KEY and EXECUTION_USERNAME and EXECUTION_PASSWORD:

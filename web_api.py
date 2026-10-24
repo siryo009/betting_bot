@@ -314,6 +314,16 @@ def _dashboard_json(params=None):
         closing["rows"] = (closing.get("rows") or [])[:20]
     except Exception:
         pass
+    # SALUTE DEL VOLUME (24/10/2026): il disco pieno ha fermato il bot con 231
+    # errori ENOSPC senza che nessun guardrail di denaro se ne accorgesse.
+    # Lo stato sta qui perche' e' una lettura a costo zero (due `stat`), e la
+    # dashboard e' il posto dove un operatore lo guarda ogni giorno.
+    storage = {}
+    try:
+        from backup_manager import storage_status
+        storage = storage_status()
+    except Exception as e:
+        storage = {"ok": False, "level": "unknown", "error": str(e)}
     return {
         "bankroll": bankroll,
         "roi_30gg": roi,
@@ -324,6 +334,7 @@ def _dashboard_json(params=None):
         "per_mercato": per_mercato,
         "market_signals": market,
         "closing": closing,
+        "storage": storage,
         **extra,
     }
 
@@ -446,8 +457,23 @@ def _health_json(params=None):
     # ratings 2022-2024). Dal 06/09 l'ESECUZIONE passa dall'aggregatore
     # (execution_engine.py, BetInAsia BLACK/MollyBet). Il flag
     # betfair_enabled resta per compatibilita col frontend, sempre False.
+    # VOLUME/BACKUP in forma COMPATTA: l'health e' il posto dove un monitor
+    # esterno guarda (Railway, uptime checker) e il disco pieno del 24/10 era
+    # invisibile proprio li'. Il dettaglio completo sta in /api/dashboard.
+    storage = None
+    try:
+        from backup_manager import storage_status
+        _st = storage_status()
+        storage = {"level": _st.get("level"),
+                   "free_mb": (_st.get("volume") or {}).get("free_mb"),
+                   "free_pct": (_st.get("volume") or {}).get("free_pct"),
+                   "backups": (_st.get("backups") or {}).get("count"),
+                   "latest_backup": (_st.get("backups") or {}).get("latest_status"),
+                   "warnings": _st.get("warnings") or []}
+    except Exception as e:
+        storage = {"level": "unknown", "error": str(e), "warnings": []}
     return {"status": "ok", "api_football_key": bool(os.getenv("API_FOOTBALL_KEY")),
-            "quota": creds, "settlement": settlement,
+            "quota": creds, "settlement": settlement, "storage": storage,
             "betfair_enabled": False, "betfair": None}
 
 

@@ -19,6 +19,13 @@ const DEMO = {
   streaks: { current_streak: 0, current_type: 'none', max_win_streak: 0, max_loss_streak: 0 },
   clv: { n: 0, avg_raw: 0, avg_vf: 0, avg_vs_pinnacle: 0, pending: 0 },
   closing: { closed_n: 0, with_closing: 0, beat_positive: 0, avg_beat: null },
+  storage: {
+    ok: true,
+    level: 'ok',
+    volume: { total_mb: 434, used_mb: 140, free_mb: 294, used_pct: 32.3, free_pct: 67.7 },
+    backups: { count: 2, keep: 2, total_mb: 140, latest: '20261024-003437', latest_status: 'ok', latest_age_h: 1.2 },
+    warnings: [],
+  },
   auto_bets: { n: 0, won: 0, lost: 0, total_stake: 0, pnl: 0, roi: 0 },
   bankroll_stats: { current: 500, peak: 500, drawdown_pct: 0, risk_level: '🟢 OK' },
   market_signals: {
@@ -50,6 +57,11 @@ export default function Dashboard() {
   const streaks = d.streaks || {}
   const clv = d.clv || {}
   const cl = d.closing || {}
+  const st = d.storage || {}
+  const vol = st.volume || {}
+  const bk = st.backups || {}
+  const stLevel = st.level || 'unknown'
+  const stColor = stLevel === 'ok' ? 'text-emerald-400' : stLevel === 'warn' ? 'text-amber-400' : stLevel === 'critical' ? 'text-red-400' : 'text-gray-400'
   const ab = d.auto_bets || {}
   const pm = d.per_mercato || {}
   const bs = d.bankroll_stats || {}
@@ -260,6 +272,43 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* VOLUME & BACKUP (24/10/2026): il 24/10 il volume e' arrivato al 100% e
+          il bot ha smesso di scrivere (231 errori ENOSPC) senza che nessun
+          guardrail di denaro se ne accorgesse. Questa sezione rende visibile
+          PRIMA cio' che prima si vedeva solo nei log, dopo il guasto. */}
+      <div className="bg-gray-800 rounded-xl p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-bold">💾 Volume &amp; backup</h2>
+          <span className={`text-xs px-2 py-1 rounded ${stLevel === 'ok' ? 'bg-emerald-900 text-emerald-300' : stLevel === 'warn' ? 'bg-amber-900 text-amber-300' : stLevel === 'critical' ? 'bg-red-900 text-red-300' : 'bg-gray-700 text-gray-300'}`}>
+            {stLevel === 'ok' ? '🟢 OK' : stLevel === 'warn' ? '🟡 ATTENZIONE' : stLevel === 'critical' ? '🔴 CRITICO' : '⚪ SCONOSCIUTO'}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+          <MiniStat label="Spazio libero" value={vol.free_mb != null ? `${Number(vol.free_mb).toFixed(0)} MB` : '—'} color={stColor} />
+          <MiniStat label="Volume usato" value={vol.used_pct != null ? `${Number(vol.used_pct).toFixed(0)}%` : '—'} color={stColor} />
+          <MiniStat label="Backup" value={bk.count != null ? `${bk.count}/${bk.keep ?? '—'}` : '—'} />
+          <MiniStat label="Ultimo backup" value={bk.latest_status ? String(bk.latest_status) : '—'} color={bk.latest_status === 'ok' ? 'text-emerald-400' : 'text-amber-400'} />
+        </div>
+        {vol.total_mb ? (
+          <div className="w-full h-3 bg-gray-900 rounded-full overflow-hidden mb-3">
+            <div className={`h-3 ${Number(vol.used_pct ?? 0) >= 92 ? 'bg-red-500' : Number(vol.used_pct ?? 0) >= 80 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+              style={{ width: `${Math.min(100, Number(vol.used_pct ?? 0))}%` }} />
+          </div>
+        ) : null}
+        <p className="text-xs text-gray-500">
+          {bk.total_mb ? `${Number(bk.total_mb).toFixed(0)} MB di backup su ${Number(vol.total_mb).toFixed(0)} MB di volume` : 'Nessun backup presente'}
+          {bk.latest_age_h != null ? ` · ultimo ${Number(bk.latest_age_h).toFixed(1)}h fa` : ''}
+        </p>
+        {(st.warnings || []).length > 0 && (
+          <p className={`text-sm mt-2 ${stLevel === 'critical' ? 'text-red-400' : 'text-amber-400'}`}>
+            ⚠️ {st.warnings.join(' · ')}
+          </p>
+        )}
+        <p className="text-xs text-gray-600 mt-2">
+          Il volume pieno blocca scritture su DB e ordini: un backup da ~70 MB × keep deve stare sotto metà del volume.
+        </p>
       </div>
     </main>
   )
