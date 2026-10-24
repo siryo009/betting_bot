@@ -225,6 +225,11 @@ export default defineRailway(() => {
       BRAIN_VOLATILITY_PP_MIN: preserve(),
       BRAIN_SHIELD_CAP_PCT: preserve(),
       OPEN_EXPOSURE_CAP_PCT: preserve(),
+      // Floor in ORDINI del recinto (24/10/2026): col cap per ordine FISSO a
+      // 1 USDC il 30% di una equity piccola dava 5 posizioni e la percentuale
+      // era il collo di bottiglia (il muro CB2 ne lasciava 7). `0` lo spegne;
+      // col cap dinamico il floor e' inert per costruzione.
+      OPEN_EXPOSURE_MIN_ORDERS: preserve(),
       // GATE DI DIPENDENZA / COPULA (14/10/2026, direttiva proprietario: enforce
       // in produzione, moltiplicatore SOLO in [0,1]). Ultimo passo di sizing
       // prima della FASE 3: `COPULA_GUARD` (1 = attivo, 0 = spento),

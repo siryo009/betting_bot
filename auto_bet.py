@@ -181,13 +181,33 @@ TOTAL_EXPOSURE_CAP_PCT = 0.60  # max 60% di bankroll per il portafoglio del gior
 #
 # ⚠️ DAL 24/10/2026 la percentuale NON e' piu' l'unico vincolo: il tetto si
 # calcola in `open_exposure_cap` come `min(percentuale, equity - muro CB2)`
-# arrotondato a **ordini interi** del cap per-ordine corrente. Motivo: con il
-# cap per-ordine a 1,00 USDC un tetto di 5,82 permetteva 5 ordini "a mano" e
-# lasciava 0,82 di spazio morto, e nulla legava il recinto al muro
-# patrimoniale (un colpo su tutti gli ordini aperti poteva attraversarlo).
+# arrotondato a **ordini interi** del cap per-ordine corrente, con un **floor in
+# ordini** (`OPEN_EXPOSURE_MIN_ORDERS`, 8) che vale nel regime a taglia FISSA:
+# con 1,00 USDC per ordine il 30% di 19,40 darebbe 5 posizioni mentre il muro CB2
+# ne lascerebbe 7 — la percentuale, non il rischio, era il collo di bottiglia.
 # Il default di CODICE e' allineato alla produzione (0.30): un tetto diverso
 # nel codice si legge come regime diverso e non e' difendibile in un audit.
 OPEN_EXPOSURE_CAP_PCT = float(os.getenv("OPEN_EXPOSURE_CAP_PCT", "0.30"))
+# Floor in ORDINI del tetto del recinto (direttiva 24/10/2026).
+# Perche' esiste: con il cap per ordine a **1,00 USDC** la percentuale da sola
+# e' un vincolo troppo GROSSOLANO per il capitale piccolo — il 30% di 19,40 e'
+# 5,82, cioe' **5 ordini** e basta, mentre il muro CB2 (12) lascerebbe spazio
+# per 7. Il floor dice "il recinto tiene almeno N posizioni", cosi' il bot puo'
+# tenere piu' ordini aperti insieme senza che ogni ritocco dell'equity cambi il
+# conteggio a sorpresa.
+#
+# ⚠️ Vale SOLO nel regime a taglia FISSA (`ORDER_MAX_STAKE_USDC` > 0): con il
+# cap DINAMICO (percentuale del bankroll) N ordini sarebbero N x 12% = fino al
+# 96% dell'equity, cioe' il recinto sparirebbe. Quando il cap e' percentuale
+# la percentuale del recinto e' gia' coerente per costruzione e il floor resta
+# spento.
+# Ordine di precedenza (vince il piu' stretto): floor/percentuale -> muro CB2
+# -> intero bankroll -> ordini interi. `0` disattiva il floor.
+try:
+    OPEN_EXPOSURE_MIN_ORDERS = int(float(
+        os.getenv("OPEN_EXPOSURE_MIN_ORDERS", "8")))
+except (TypeError, ValueError):                      # pragma: no cover
+    OPEN_EXPOSURE_MIN_ORDERS = 8
 # Tetto per SINGOLO ordine. **DINAMICO dal 04/10/2026** (direttiva del
 # proprietario: "sostituisci qualsiasi hard cap fisso precedente con una
 # percentuale dinamica sul bankroll"): il tetto e' `bankroll x
@@ -2129,10 +2149,47 @@ def _round_to_orders(cap: float, bankroll: float) -> float:
     return int((cap + 1e-9) // order) * order
 
 
+def open_exposure_floor(bankroll: float) -> float:
+    """Tetto MINIMO in ORDINI del recinto, in USDC (0 = floor spento).
+
+    Direttiva 24/10/2026 ("recinto coerente col cap 1 USDC, cosi' il bot puo'
+    tenere piu' ordini aperti insieme"): `OPEN_EXPOSURE_MIN_ORDERS` (8) volte
+    il cap per ordine corrente.
+
+    Perche' serve: con il cap a **1,00 USDC** il 30% di 19,40 sono 5,82, cioe'
+    **5 posizioni**, mentre il muro CB2 (12,00) ne lascerebbe 7 — la
+    percentuale era il collo di bottiglia, non il rischio. Il floor alza il
+    tetto al numero di ordini richiesto, e i due vincoli che restano
+    (muro CB2, intero bankroll) impediscono che il floor sfondi il capitale.
+
+    Fail-closed: ritorna 0 (nessun floor, si usa la percentuale) quando il
+    regime e' a cap DINAMICO — li' N ordini sarebbero N x 12% dell'equity e
+    il recinto sparirebbe — o quando il cap per ordine non e' calcolabile.
+    """
+    try:
+        needed = int(OPEN_EXPOSURE_MIN_ORDERS)
+    except (TypeError, ValueError):
+        return 0.0
+    if needed <= 0:
+        return 0.0
+    try:
+        if float(ORDER_MAX_STAKE_USDC or 0.0) <= 0:
+            return 0.0                    # regime dinamico: nessun floor
+        order = float(order_ceiling(bankroll) or 0.0)
+    except Exception:
+        return 0.0
+    if order <= 0:
+        return 0.0
+    return float(needed) * order
+
+
 def open_exposure_cap(bankroll: float) -> float:
     """Tetto del recinto d'esposizione APERTA, in USDC (UNICA definizione).
 
-    Tre vincoli, vince il piu' stretto:
+    Vincoli, vince il piu' stretto:
+      0. **floor in ordini** `open_exposure_floor` (solo regime a taglia
+         fissa): il recinto tiene almeno `OPEN_EXPOSURE_MIN_ORDERS` posizioni.
+         E' un MINIMO, quindi `max(percentuale, floor)`;
       1. `bankroll x OPEN_EXPOSURE_CAP_PCT` (la percentuale del recinto);
       2. **spazio residuo fino al muro CB2** (`equity - T60_KILL_WALLET_USDC`):
          un colpo su TUTTI gli ordini aperti non deve attraversare il muro
@@ -2154,9 +2211,13 @@ def open_exposure_cap(bankroll: float) -> float:
     if bankroll <= 0:
         return 0.0
     cap = bankroll * OPEN_EXPOSURE_CAP_PCT
+    floor = open_exposure_floor(bankroll)
+    if floor > cap:
+        cap = floor                      # il floor e' un MINIMO, non un cap
     room = _cb2_cliff_room(bankroll)
     if room is not None:
         cap = min(cap, room)
+    cap = min(cap, bankroll)             # mai piu' dell'intero capitale
     return round(_round_to_orders(cap, bankroll), 2)
 
 
@@ -2177,7 +2238,13 @@ def open_exposure_rule(bankroll: float) -> str:
     room = _cb2_cliff_room(bankroll)
     parts = ["%.0f%% di %.2f = %.2f" % (OPEN_EXPOSURE_CAP_PCT * 100,
                                         bankroll, pct_cap)]
-    if room is not None and room < pct_cap - 1e-9:
+    floor = open_exposure_floor(bankroll)
+    if floor > pct_cap + 1e-9:
+        # Il floor ha ALZATO il tetto: senza questa riga un tetto piu' alto
+        # del 30% sembrerebbe un errore di calcolo invece della regola.
+        parts.append("floor di %d ordini = %.2f (vince sul 30%%)"
+                     % (int(OPEN_EXPOSURE_MIN_ORDERS), floor))
+    if room is not None and room < max(pct_cap, floor) - 1e-9:
         parts.append("spazio al muro CB2 %.2f (vince il piu' stretto)" % room)
     n = int(round(cap / order)) if order > 0 else 0
     head = ("%d ordini da %.2f USDC" % (n, order)) if n > 0 else "nessun ordine"

@@ -173,7 +173,8 @@ riempimenti reali**, non sui segnali.
 | `ORDER_MAX_STAKE_USDC` | 1,00 | **tetto per ordine** (5,2% dell'equity) |
 | `KELLY_MAX_STAKE_PCT` | 0,12 | cap dinamico 12% (non vincolante a 19,40) |
 | `KELLY_MIN_TICKET_USDC` | 1,00 | sotto il ticket non si ordina |
-| `OPEN_EXPOSURE_CAP_PCT` | 0,30 | max ~5 ordini aperti insieme |
+| `OPEN_EXPOSURE_CAP_PCT` | 0,30 | base del recinto; con `OPEN_EXPOSURE_MIN_ORDERS` (8) e il muro CB2 tiene **7 ordini da 1,00** (7,00 su 19,40) |
+| `OPEN_EXPOSURE_MIN_ORDERS` | 8 | floor in ordini del recinto (solo con cap per ordine fisso) |
 | `DAILY_STOP_LOSS_PCT` | 0,25 | stop a −4,85 USDC |
 | `WEEKLY_STOP_LOSS_PCT` | 0,40 | stop a −7,76 USDC |
 | `T60_KILL_WALLET_USDC` | **12** | CB2: arresto con 62% del capitale ancora in cassa |

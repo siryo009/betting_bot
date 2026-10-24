@@ -14145,13 +14145,24 @@ copia. Ora una funzione sola calcola `min(percentuale, spazio al muro CB2)` e lo
 arrotonda a **ordini INTERI** del cap per-ordine corrente:
 
 ```
-cap = floor(min(eq x 30%, eq - T60_KILL_WALLET_USDC) / order_ceiling(eq)) x order_ceiling(eq)
+cap = floor(min(max(eq x 30%, 8 x order_ceiling(eq)), eq - T60_KILL_WALLET_USDC, eq)
+            / order_ceiling(eq)) x order_ceiling(eq)
 ```
 
-- **ordini interi**: con il cap a 1,00 un tetto di 5,82 lascia 0,82 che nessun
-  ordine puo' usare; il tetto e' quindi un multiplo esatto e `cap_rule` lo
-  dichiara ("5 ordini da 1.00 USDC = 5.00 USDC (min fra 30% di 19.40 = 5.82,
-  spazio al muro CB2 7.40)");
+- **floor in ORDINI (`OPEN_EXPOSURE_MIN_ORDERS`, 8) — la parte che "tiene piu'
+  ordini aperti insieme"**: col cap per ordine FISSO a 1,00 USDC il 30% di
+  19,40 vale 5,82, cioe' **5 posizioni**, mentre il muro CB2 (12,00) ne
+  lascerebbe 7: il collo di bottiglia era la percentuale, non il rischio. Il
+  floor alza il tetto a 8 ordini e i due limiti che restano (muro CB2, intero
+  bankroll) impediscono che sfondi il capitale. ⚠️ **Vale SOLO nel regime a
+  taglia fissa** (`ORDER_MAX_STAKE_USDC` > 0): col cap DINAMICO (12% del
+  bankroll) 8 ordini sarebbero fino al 96% dell'equity e il recinto
+  sparirebbe, quindi il floor e' inert per costruzione; `0` lo spegne;
+- **ordini interi**: con il cap a 1,00 un tetto di 8,00 che il muro riduce a
+  7,40 lascia 0,40 che nessun ordine puo' usare; il tetto e' quindi un multiplo
+  esatto e `cap_rule` lo dichiara ("7 ordini da 1.00 USDC = 7.00 USDC (min fra
+  30% di 19.40 = 5.82, floor di 8 ordini = 8.00 (vince sul 30%), spazio al muro
+  CB2 7.40)");
 - **spazio al muro CB2**: l'esposizione aperta non puo' superare la distanza fra
   equity e muro patrimoniale (`T60_KILL_WALLET_USDC`, 12 in produzione),
   altrimenti un colpo su tutti gli ordini aperti attraverserebbe il muro e il
@@ -14159,9 +14170,12 @@ cap = floor(min(eq x 30%, eq - T60_KILL_WALLET_USDC) / order_ceiling(eq)) x orde
 - **default di codice allineato alla produzione** (`OPEN_EXPOSURE_CAP_PCT`
   0.70 -> **0.30**): un tetto diverso nel codice si legge come regime diverso.
 - **numeri reali** (container, 24/10): equity **19,3978**, 5 ordini aperti per
-  **5,00**, tetto **5,00** (5 ordini da 1,00), utilizzazione **25,8%** — il 30%
-  e' la quota che l'equity sostiene; il conteggio scala con l'equity (a 30,00
-  diventano 9 ordini, a 50,00 quindici).
+  **5,00**, tetto **7,00** (**7 ordini da 1,00**: 5 dalla percentuale prima del
+  floor, 7 dopo), utilizzazione **36%** — il conteggio scala con l'equity e, con
+  il cap a taglia fissa, il floor e' cio' che tiene il recinto utilizzabile.
+  Verifica dei tre valori di produzione: `open_exposure_cap(19.40) = 7.00`
+  (muro CB2 rispettato: `19.40 - 7.00 = 12.40 >= 12`), `floor(0) -> 5.00`,
+  `OPEN_EXPOSURE_MIN_ORDERS` dichiarata `preserve()` in IaC.
 - `order_watch.cap_pct()`/`_exposure_cap()` e la dashboard leggono la STESSA
   funzione (tripwire: nessuna soglia duplicata).
 
