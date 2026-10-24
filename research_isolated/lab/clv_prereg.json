@@ -1,0 +1,104 @@
+{
+  "protocol": "CLV-VALIDATION-1",
+  "frozen_at": "2026-10-20T21:00:00+00:00",
+  "frozen_by": "agente (sessione 20/10/2026) su direttiva del proprietario",
+  "purpose": "Verificare se il CLV positivo osservato identifica un vantaggio replicabile. Un test solo, congelato PRIMA di raccogliere dati nuovi.",
+  "definitions": {
+    "clv_gross": "quota_acquisto / quota_chiusura - 1 (market_calib.clv_raw)",
+    "closing": "ultima quota sharp disponibile prima del fischio d'inizio (Pinnacle; etichetta `sx` = chiusura dell'exchange in cui compriamo)",
+    "universe": "puntate eseguite (mode='live') con una chiusura misurabile; una riga per (match, esito)",
+    "excluded": "echo (chiusura = quota del segnale), chiusura assente/invalida, prezzo assente, duplicati",
+    "success": "n >= 30 E limite inferiore del bootstrap CI95 (cluster per partita) > 0",
+    "failure": "n >= 30 E limite superiore del CI95 < 0",
+    "otherwise": "insufficiente (mai promosso per direzione)"
+  },
+  "primary": "C1",
+  "primary_rule": "La coorte primaria e' TUTTE le osservazioni misurate: non e' una fascia scelta guardando i risultati. Le altre coorti sono secondarie/descrittive e NON possono ribaltare il verdetto sulla primaria.",
+  "cohorts": [
+    {
+      "id": "C1",
+      "label": "tutte le puntate eseguite con chiusura misurata (PRIMARIA)",
+      "primary": true,
+      "all": true,
+      "where": [],
+      "rationale": "E' l'insieme su cui il progetto riporta il CLV: nessun filtro ex post, nessuna fascia scelta dopo aver visto i numeri."
+    },
+    {
+      "id": "C2",
+      "label": "solo chiusure con fonte DICHIARATA",
+      "where": [{"field": "closing_source_class", "in": ["sharp_declared"]}],
+      "rationale": "La colonna `closing_source` esiste dal 13/10: solo queste chiusure sanno dire da dove vengono."
+    },
+    {
+      "id": "C3",
+      "label": "solo chiusure legacy (fonte non dichiarata)",
+      "where": [{"field": "closing_source_class", "in": ["sharp_legacy"]}],
+      "rationale": "Controllo di provenienza: se il segno cambia fra dichiarate e legacy, il numero dipende da come e' stato scritto il dato."
+    },
+    {
+      "id": "C4",
+      "label": "calcio 1X2",
+      "where": [{"field": "sport", "in": ["football"]}],
+      "rationale": "Le due popolazioni (calcio/tennis) hanno gate e staking diversi: mescolarle nasconde quale delle due porta il CLV."
+    },
+    {
+      "id": "C5",
+      "label": "tennis",
+      "where": [{"field": "sport", "in": ["tennis"]}],
+      "rationale": "Corsia che ha prodotto la maggior parte degli ordini reali dell'era."
+    },
+    {
+      "id": "C6",
+      "label": "ordini con >= 6h di anticipo",
+      "where": [{"field": "lead_band", "in": [">=6h"]}],
+      "rationale": "Il meccanismo dichiarato del CLV e' il tempo fra acquisto e chiusura: senza anticipo non c'e' movimento da catturare."
+    },
+    {
+      "id": "C7",
+      "label": "ordini con < 6h di anticipo",
+      "where": [{"field": "lead_band", "in": ["<6h"]}],
+      "rationale": "Controllo opposto al precedente: se il CLV e' lo stesso, il meccanismo dichiarato non e' quello che produce il numero."
+    },
+    {
+      "id": "C8",
+      "label": "fascia quota 1.30-1.80",
+      "where": [{"field": "odds_band", "in": ["1.30-1.80"]}],
+      "rationale": "Fascia dei favoriti netti, quella su cui il progetto ha concentrato la strategia."
+    },
+    {
+      "id": "C9",
+      "label": "fascia quota 1.80-2.20",
+      "where": [{"field": "odds_band", "in": ["1.80-2.20"]}],
+      "rationale": "Fascia intermedia: il tennis 2.00-2.30 e' stato misurato in perdita, il CLV dice la stessa cosa?"
+    },
+    {
+      "id": "C10",
+      "label": "fascia quota >= 2.20",
+      "where": [{"field": "odds_band", "in": [">=2.20"]}],
+      "rationale": "Quota alta: e' la fascia dove il CLV e' piu' facile da gonfiare (longshot bias dello sharp)."
+    },
+    {
+      "id": "C11",
+      "label": "chiusura dell'EXCHANGE in cui compriamo (controllo)",
+      "where": [{"field": "closing_source_class", "in": ["venue_internal"]}],
+      "rationale": "Controllo interno: se il nostro prezzo batte anche la chiusura dello stesso exchange, l'edge e' nel prezzo; se no, il +4% e' un effetto del benchmark."
+    }
+  ],
+  "hypothesis": {
+    "id": "H-CLV-1",
+    "statement": "Sui segnali 1X2 giocabili (value/strong_value/moderate) nati dopo il 20/10/2026 21:00 UTC, il CLV grezzo contro la chiusura sharp T-0 e' > 0 con limite inferiore del CI95 > 0 su n >= 30.",
+    "one_hypothesis_only": true,
+    "why_this_one": "E' l'unica ipotesi che il campione esistente non puo' gia' soddisfare: il campione storico e' la stessa era che l'ha generata (nessun holdout).",
+    "falsification": "n >= 30 e CI95 interamente sotto zero -> ipotesi respinta. CI95 che include lo zero -> non conclusa, non promossa.",
+    "observation_window_days": 7,
+    "orders_allowed": false,
+    "record_unselected": true,
+    "do_not_reuse_old_holdout": "Le osservazioni gia' usate per generare l'ipotesi (snapshot <= 20/10/2026) restano nel campione storico e NON contano come dati prospettici."
+  },
+  "safety": {
+    "production_untouched": true,
+    "cb2_armed": true,
+    "live_disabled": true,
+    "orders": 0
+  }
+}

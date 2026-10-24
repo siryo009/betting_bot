@@ -1,0 +1,219 @@
+{
+  "gate": "RECOVERY GATE 2",
+  "generated_at_utc": "2026-10-20T18:20:00Z",
+  "mode": "read_only_offline_tests",
+  "verdict": {
+    "code": "A",
+    "label": "BLOCCATO",
+    "reasons": [
+      "CB2 armato (equity 21.1004 <= 25.00): /t60reset riarma immediatamente, servono +3.8996 USDC (+18.5%)",
+      "kill-switch override su file = off (scritto 18/10 22:44:47, 'AUDIT CAPITALE 2026-10-19')",
+      "crediti 31 con hard stop a 5 e reset fra 11 giorni; budget oracolo autorizzati (36 cr/g linea) ~25x il residuo",
+      "candidati: nessun EV positivo al prezzo equo del book (Porto -0.99%, Napoli -0.50%); il +14.44% di Napoli e' divergenza modello-vs-mercato, non edge",
+      "terzo candidato (Tigres-Leon) non quotato su SX: 0 mercati su 600 scansionati"
+    ],
+    "not_technical_fault": true
+  },
+  "runtime": {
+    "now_utc": "2026-10-20T18:17:45Z",
+    "service": "betting_bot (creative-vibrancy, region ams)",
+    "health_http": 200,
+    "kill_switch": {"override": "off", "env_mode": "live", "requested": "off", "effective": "off", "provider_ready": true},
+    "kill_switch_file": {"path": "/app/data/execution/auto_bet_mode.json", "mode": "off", "reason": "AUDIT CAPITALE 2026-10-19 - blocco richiesto dal proprietario", "mtime": "2026-10-18T22:44:47Z"},
+    "cb2": {"triggered": true, "threshold": 25.0, "triggered_at": "2026-10-18T04:42:54Z", "wallet_equity_at_trigger": 23.6901, "reason": "equity wallet 23.69 <= soglia 25.00 USDC"},
+    "daily_stop": {"stopped": false, "day": "2026-10-18", "start_bankroll": 26.9201, "stopped_until": "2026-10-19T04:42:39Z", "basis_key": "live_equity", "loss_pct": 5.0},
+    "weekly_stop": {"stopped": false, "until": null, "window_h": 168, "loss_pct": 12.0},
+    "cb2_soft_floor": {"configured": false, "floor": 0.0, "hard": 25.0, "blocked": false},
+    "dry_run": false,
+    "execution_window": "T-720..T-2",
+    "aggressive_kelly_active": true,
+    "fixed_stake_usdc": 0.0,
+    "wallet": {"available": 21.1004, "exposure": 0.0, "provider_exposure": 0.0, "exposure_source": "ledger", "equity": 21.1004, "cached": false, "stale": false, "open_orders": 0},
+    "open_bets": 0,
+    "resting_orders": {"open": 0, "total": 0},
+    "event_claims": {"total": 1, "expired": true, "expires_at": "2026-10-18T04:06:41Z", "harmless": true},
+    "credits": {"remaining": 31, "days_to_reset": 11, "hard_stop": 5},
+    "oracle_budgets": {"line_calls_per_day": 12, "line_credits_per_call": 3, "line_credits_per_day": 36, "h2h_calls_per_day": 40, "oracle_enabled": true},
+    "ledger": {"open_1x2_all_statuses": 81, "open_1x2_playable": 35, "playable_with_future_kickoff": 3, "bets_total": 80, "last_bet": {"id": 80, "created_at": "2026-10-18T04:01:41Z", "stake": 2.07}, "open_bets": 0},
+    "log_evidence": "18:00-18:03 UTC: 'kill-switch OFF attivo - nessuna puntata' ogni 60s, 0 ordini, 0 ERROR"
+  },
+  "protections": {
+    "code_map": {
+      "cb2_arm": "auto_bet.t60_check_wallet_kill(equity) -> data/execution/t60_kill.json (soglia inclusiva, fail-closed su flag corrotto)",
+      "cb2_block": "auto_bet.run_today_bets (gate in testa) e auto_bet.t60_dispatch_pending",
+      "kill_switch": "auto_bet.kill_switch_status() (file override > env AUTO_BET_MODE)",
+      "daily_stop": "auto_bet.check_daily_stop(bankroll, basis, basis_key) + daily_stop.json",
+      "weekly_stop": "auto_bet.check_weekly_stop + weekly_stop.json + bankroll_history.json (rolling 168h)",
+      "order_cap": "auto_bet.order_ceiling <- decision.stake_engine.aggressive_cap_usdc",
+      "event_cap": "auto_bet._event_guard -> tracker.claim_event_stake (BEGIN IMMEDIATE, TTL 300s)",
+      "enclosure": "auto_bet.exposure_allows / open_exposure_status",
+      "duplicates": "tracker.bet_exists_open_market + claim atomico + dedup cross-corsia",
+      "rollback": "auto_bet.clear_daily_stop / clear_weekly_stop / t60_clear_kill"
+    },
+    "thresholds": {
+      "cb2_wallet_usdc": 25.0,
+      "daily_stop_pct": 0.05,
+      "weekly_stop_pct": 0.12,
+      "weekly_window_h": 168,
+      "order_cap_pct": 0.12,
+      "event_cap_pct": 0.12,
+      "open_exposure_cap_pct": 0.70,
+      "correlation_cap_pct": 0.30,
+      "total_exposure_cap_pct": 0.60,
+      "min_stake_usdc": 1.0,
+      "exchange_min_stake_usdc": 1.0,
+      "kelly_fraction_range": [0.15, 0.25]
+    },
+    "checks": [
+      {"id": "P1", "check": "codice esatto che arma il CB2 individuato", "status": "PASS", "evidence": "t60_check_wallet_kill + file t60_kill.json"},
+      {"id": "P2", "check": "CB2: soglia inclusiva e fail-closed su flag corrotto", "status": "PASS", "evidence": "24.90/25.00 armano, 25.01 no, json rotto -> triggered"},
+      {"id": "P3", "check": "CB2 impedisce l'invio ordini (run_today_bets)", "status": "PASS", "evidence": "0 chiamate a _live_fill, 0 righe bets; controprova equity 400 -> 1 chiamata"},
+      {"id": "P4", "check": "CB2 impedisce l'invio ordini (dispatch T-60)", "status": "PASS", "evidence": "t60_dispatch_pending esce prima del gate di mercato e di _live_fill"},
+      {"id": "P5", "check": "CB2 disinnescabile senza capitale", "status": "FAIL", "evidence": "/t60reset con equity 21.1004 riarma subito (gap 3.8996 USDC)"},
+      {"id": "P6", "check": "CB2 copre la corsia smart hedging", "status": "FAIL", "evidence": "smart_hedging._blocked_reason() -> None con CB2 armato. Gap dichiarato, NON corretto (fuori perimetro: nessuna modifica alla produzione)"},
+      {"id": "P7", "check": "kill-switch off esce prima di leggere il wallet", "status": "PASS", "evidence": "nessuna lettura wallet, nessun _live_fill"},
+      {"id": "P8", "check": "causa del kill-switch off identificata", "status": "PASS", "evidence": "override persistente scritto 18/10 22:44:47 su richiesta del proprietario"},
+      {"id": "P9", "check": "stop giornaliero -5% blocca (bordo incluso)", "status": "PASS", "evidence": "-5.0% blocca, -4% no, base meno autorevole non arma"},
+      {"id": "P10", "check": "stop settimanale -12% blocca", "status": "PASS", "evidence": "30->25 (-16.67%) blocca, 30->28 (-6.7%) no"},
+      {"id": "P11", "check": "rollback manuale idempotente", "status": "PASS", "evidence": "clear_daily_stop / clear_weekly_stop / t60_clear_kill"},
+      {"id": "P12", "check": "tetto per ordine da fonte unica", "status": "PASS", "evidence": "order_ceiling(21.1004) == cap_order_stake(9999, 21.1004) == 2.532048"},
+      {"id": "P13", "check": "minimo eseguibile coerente motore/exchange", "status": "PASS", "evidence": "auto_bet.MIN_STAKE_EUR == execution_engine.EXECUTION_MIN_STAKE_EUR == 1.00"},
+      {"id": "P14", "check": "numero massimo di posizioni simultanee", "status": "PASS", "evidence": "recinto 70% = 14.7713 -> 5 posizioni al tetto, 14 al minimo"},
+      {"id": "P15", "check": "errore API wallet (percorso produzione) fail-closed", "status": "PASS", "evidence": "refresh_live_stakes -> wallet_non_leggibile -> 0 candidati, 0 POST"},
+      {"id": "P16", "check": "errore API wallet (percorso legacy) fail-closed", "status": "FAIL", "evidence": "ripiega su cassa simulata 100.00 e tenta l'ordine; non raggiungibile oggi (importo fisso spento)"},
+      {"id": "P17", "check": "ordine duplicato respinto", "status": "PASS", "evidence": "secondo claim event_cap respinto; bet aperta sullo stesso mercato -> True; DB rotto -> True"},
+      {"id": "P18", "check": "claim scaduti innocui", "status": "PASS", "evidence": "1 claim scaduto il 18/10 04:06, ripulito al primo claim successivo"}
+    ]
+  },
+  "candidates": {
+    "selection": "predictions 1X2 aperte con status giocabile = 35; con kickoff futuro = 3 (Porto, Napoli, Tigres); le altre 32 hanno kickoff gia' passato e attendono il settlement",
+    "quote_freshness_note": "market_quotes (ultimo campione 18:16:09Z) copre OU/AH/AH_OT/OU_OT/ML_OT: NON contiene 1X2 (0 righe). Il prezzo 1X2 va letto dall'order book SX, non dalla quota del segnale.",
+    "items": [
+      {
+        "n": 1, "match": "FC Porto - PSV Eindhoven", "league": "Champions League", "event_id": "L20527281",
+        "kickoff_utc": "2026-10-20T19:00:00Z", "minutes_to_kickoff_at_measure": 43,
+        "esito": "1", "signal_odds": 1.74, "signal_created_at": "2026-10-17T18:00:44Z", "signal_age_days": 3.01,
+        "model_prob": 0.6504, "ev_model_at_signal_pct": 13.17,
+        "live_best_price": 1.5414, "price_fetch_at_utc": "2026-10-20T18:16:46Z", "price_move_pct": -11.41,
+        "size_at_best_usdc": 2837.364, "depth_usdc": 10756.51, "inv_sum": 1.01,
+        "fair_prob_sx_devig": 0.6423,
+        "ev_model_at_live_price_pct": 0.25, "ev_at_fair_pct": -0.99,
+        "market_available": true, "in_execution_window": true,
+        "independent_probability": null,
+        "status": "FAIL",
+        "note": "il prezzo si e' accorciato dell'11.4% in 3 giorni (steam a favore); il modello ora concorda col mercato entro 0.8pp e l'EV e' 0.25%, sotto la soglia 1.0%"
+      },
+      {
+        "n": 2, "match": "Napoli - Bodo/Glimt", "league": "Champions League", "event_id": "L20528980",
+        "kickoff_utc": "2026-10-20T19:00:00Z", "minutes_to_kickoff_at_measure": 43,
+        "esito": "1", "signal_odds": 1.64, "signal_created_at": "2026-10-17T18:00:44Z", "signal_age_days": 3.01,
+        "model_prob": 0.6666, "ev_model_at_signal_pct": 9.32,
+        "live_best_price": 1.7167, "price_fetch_at_utc": "2026-10-20T18:16:46Z", "price_move_pct": 4.68,
+        "size_at_best_usdc": 815.821, "depth_usdc": 20144.82, "inv_sum": 1.005,
+        "fair_prob_sx_devig": 0.5796,
+        "ev_model_at_live_price_pct": 14.44, "ev_at_fair_pct": -0.5,
+        "market_available": true, "in_execution_window": true,
+        "independent_probability": null,
+        "status": "FAIL",
+        "note": "il +14.44% e' divergenza modello-vs-mercato (8.7pp), non edge dimostrato: al prezzo equo del book l'EV e' negativo (-0.50%)"
+      },
+      {
+        "n": 3, "match": "Tigres - Leon", "league": "Liga MX", "event_id": null,
+        "kickoff_utc": "2026-10-21T03:00:00Z", "minutes_to_kickoff_at_measure": 522,
+        "esito": "1", "signal_odds": 1.89, "signal_created_at": "2026-10-19T04:00:03Z", "signal_age_days": 1.59,
+        "model_prob": 0.6255, "ev_model_at_signal_pct": 18.22,
+        "live_best_price": null, "market_available": false,
+        "in_execution_window": true,
+        "independent_probability": null,
+        "status": "FAIL",
+        "note": "600 mercati SX scansionati, 0 con Tigres o Leon: Liga MX non e' nel palinsesto corrente. Nessun ordine possibile."
+      }
+    ],
+    "independent_probability": {
+      "status": "UNKNOWN",
+      "source": "Pinnacle h2h via line_oracle.fetch_h2h_for_pick (the-odds-api)",
+      "estimated_cost_credits": 1,
+      "coverage": "soccer_uefa_champs_league copre entrambe le partite in finestra",
+      "executed": false,
+      "why_not_executed": [
+        "31 crediti residui con hard stop a 5 e reset fra 11 giorni",
+        "scriverebbe una cache sul volume di produzione (fuori dal perimetro sola-lettura)",
+        "la decisione non cambierebbe: i candidati sono bloccati prima del gate prezzo (CB2 + kill-switch)"
+      ]
+    },
+    "checks": [
+      {"id": "C1", "check": "tre candidati identificati", "status": "PASS", "evidence": "Porto T-43, Napoli T-43, Tigres T-522: unici 3 con kickoff futuro fra i 35 giocabili"},
+      {"id": "C2", "check": "eventi non scaduti (kickoff futuro)", "status": "PASS"},
+      {"id": "C3", "check": "mercato effettivamente disponibile", "status": "FAIL", "evidence": "Tigres-Leon assente dal catalogo SX (0/600); gli altri due quotati con book pieno"},
+      {"id": "C4", "check": "quota del segnale usata come prezzo attuale", "status": "FAIL", "evidence": "quote di 3.01 e 1.59 giorni; nessun 1X2 in market_quotes"},
+      {"id": "C5", "check": "prezzo aggiornato misurato sull'order book", "status": "PASS", "evidence": "Porto 1.5414 (-11.41%), Napoli 1.7167 (+4.68%) alle 18:16:46Z"},
+      {"id": "C6", "check": "probabilita indipendente disponibile", "status": "UNKNOWN", "evidence": "costo stimato 1 credito; non speso (motivi sopra)"},
+      {"id": "C7", "check": "edge al prezzo equo del book", "status": "FAIL", "evidence": "Porto -0.99%, Napoli -0.50%"},
+      {"id": "C8", "check": "liquidita sufficiente (>= 20 USDC al floor)", "status": "PASS", "evidence": "size al best 2837 e 816 USDC; depth 10.7k e 20.1k"}
+    ]
+  },
+  "economics": {
+    "equity_usdc": 21.1004,
+    "max_risk_per_bet_usdc": 2.532,
+    "max_risk_per_bet_pct": 12.0,
+    "min_executable_stake_usdc": 1.0,
+    "risk_at_min_stake_pct": 4.74,
+    "daily_stop_usdc": 1.0552,
+    "weekly_stop_usdc": 2.532,
+    "open_enclosure_usdc": 14.7713,
+    "correlation_block_usdc": 6.3302,
+    "total_daily_cap_usdc": 12.6605,
+    "max_simultaneous_positions_at_cap": 5,
+    "max_simultaneous_positions_at_min": 14,
+    "worst_case_all_at_cap_usdc": 12.66,
+    "worst_case_all_at_cap_pct": 60.0,
+    "cb2_gap_usdc": 3.8996,
+    "cb2_gap_pct": 18.5,
+    "observations": [
+      "una perdita al tetto da 2.532 supera il giornaliero (1.0552) e coincide col settimanale (2.532)",
+      "solo uno stake <= 1.06 lascia margine: 2 perdite da 1.00 fanno gia' scattare il giornaliero",
+      "il tetto per evento (12%) coincide col tetto per ordine: un solo stake al tetto per evento",
+      "1.00 USDC e' il floor sia del motore sia dell'exchange: eseguibile, non assunto"
+    ],
+    "stop_thresholds": [
+      {"name": "stop giornaliero", "value": "-5% dell'equity di inizio giornata", "verifiable": true, "tested": true},
+      {"name": "stop settimanale", "value": "-12% dal picco rolling 168h", "verifiable": true, "tested": true},
+      {"name": "CB2", "value": "equity <= 25.00 USDC", "verifiable": true, "tested": true},
+      {"name": "rollback manuale", "value": "10 puntate con P/L < -3.00 oppure residuo di riconciliazione > 0.50/giorno", "verifiable": true, "tested": false},
+      {"name": "concentrazione", "value": "mai oltre il 12% dell'equity su un singolo evento", "verifiable": true, "tested": true}
+    ],
+    "checks": [
+      {"id": "E1", "check": "rischio massimo per puntata calcolato", "status": "PASS", "evidence": "2.532 USDC = 12% dell'equity"},
+      {"id": "E2", "check": "drawdown potenziale compatibile con un test limitato", "status": "FAIL", "evidence": "1 perdita al tetto = -12% = soglia settimanale; 5 posizioni al tetto = -60%"},
+      {"id": "E3", "check": "stake minimo compatibile con SX e con i limiti", "status": "PASS", "evidence": "1.00 = floor exchange; 4.74% < stop giornaliero"},
+      {"id": "E4", "check": "equity sopra il muro patrimoniale", "status": "FAIL", "evidence": "21.1004 <= 25.00: mancano 3.8996 USDC"},
+      {"id": "E5", "check": "soglie di arresto verificabili e testabili", "status": "PASS", "evidence": "7 scenari di stop eseguiti nei test"}
+    ]
+  },
+  "blocking_conditions_to_reach_C": [
+    "equity >= 25.01 (consigliato >= 30.00): sotto il muro CB2 ogni reset si riarma",
+    "/t60reset DOPO il deposito, poi /autobet live",
+    "crediti >= 60 e budget oracolo ridotti (linea 12 -> 2, gridiron -> 0: torneo chiuso)",
+    "chiudere i gap: CB2 in smart_hedging, fail-closed wallet nel percorso legacy",
+    "stake fisso 1.00 USDC finche' il capitale non sale",
+    "candidato con EV positivo sia col modello sia al prezzo equo (oggi: nessuno)"
+  ],
+  "tests": {
+    "new_file": "research_isolated/tests/test_recovery_gate2.py",
+    "new_file_result": "39 passed",
+    "regressions": {
+      "test_capital_enclosure + test_order_watch + test_event_cap": "103 passed",
+      "test_auto_bet + test_auto_bet_live + test_resting_orders": "174 passed"
+    },
+    "offline": true,
+    "network_used": false,
+    "credits_spent": 0,
+    "orders_placed": 0,
+    "production_modified": false
+  },
+  "files": {
+    "created": ["research_isolated/tests/test_recovery_gate2.py", "research_isolated/out/RECOVERY_GATE2.md", "research_isolated/out/RECOVERY_GATE2.json"],
+    "modified": ["conftest.py (solo test: eccezioni dichiarate per esercitare le protezioni vere; nessuna soglia toccata)"],
+    "production_code_modified": []
+  }
+}

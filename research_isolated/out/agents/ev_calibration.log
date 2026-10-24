@@ -1,0 +1,19 @@
+🎯 CALIBRAZIONE DELL'EV (modello vs mercato devigato)
+
+TUTTI    n=376 hit=62.2% p_usata=0.670 Brier prob-usata/mkt=0.2258/0.2241
+1X2      n= 71 hit=64.8% p_usata=0.641 Brier prob-usata/mkt=0.2255/0.2201
+AH       n= 75 hit=64.0% p_usata=0.689 Brier prob-usata/mkt=0.2285/0.2251
+OU       n=189 hit=62.4% p_usata=0.694 Brier prob-usata/mkt=0.2277/0.2276
+TENNIS   n= 41 hit=53.7% p_usata=0.574 Brier prob-usata/mkt=0.2132/0.2127
+
+shrink ottimale sul train: w=0.40 (1 = solo mercato)
+  validation n=94: Brier modello 0.2796 → shrink 0.2767 → mercato 0.2731
+  guadagno dello shrink: +0.29pp; mercato ancora migliore: True
+
+EV dichiarato +11.84% vs realizzato -3.24% → bias +15.1pp (n=397)
+  · 1X2     n= 71 EV +6.41% realizzato +7.39% bias -1.0pp
+  · AH      n= 78 EV +14.28% realizzato -3.25% bias +17.5pp
+  · OU      n=207 EV +14.05% realizzato -6.03% bias +20.1pp
+  · TENNIS  n= 41 EV +5.45% realizzato -7.53% bias +13.0pp
+
+verdetto (tie): Brier modello 0.2258 ~ mercato 0.2241 (dentro la banda ±0.002): nessuna differenza pratica; w=0.40 (1 = solo mercato), il mercato resta migliore anche dopo lo shrink

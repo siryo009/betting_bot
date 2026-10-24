@@ -1,0 +1,1715 @@
+{
+ "generated_at": "2026-10-20T23:18:52.215425+00:00",
+ "snapshot": "/home/siryo/quotaverace/research_isolated/snapshot/quotaverace_prod.db",
+ "snapshot_sha256": "e1cb0769393d15e5caaa7e3e38d9097a001c6290056e646bcf540d7873969928",
+ "definition": {
+  "formula": "clv_gross = quota_acquisto / quota_chiusura - 1",
+  "source": "market_calib.clv_raw (verificata riga per riga)",
+  "positive_means": "abbiamo comprato a un prezzo migliore della chiusura",
+  "vig_free": "solo con il mercato COMPLETO (market_calib.devig, power)"
+ },
+ "dataset": {
+  "measured": 57,
+  "totals": {
+   "live_bets": 81,
+   "measured": 57,
+   "pending": 24,
+   "excluded": {
+    "no_closing_row": 23,
+    "echo_signal": 1
+   }
+  },
+  "pending": [
+   {
+    "bet_id": 1,
+    "match_id": "sx-tennis-0xbf076838616aa1eed2cb93ef841a3cc06820f80cb26f46e63108d8a8e6aa94b3",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 2,
+    "match_id": "sx-tennis-0xacd8033f5a1bc5976cb16fe85faf14f93ebb8ad2c0b28cf680e1e57c82c355c0",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 3,
+    "match_id": "sx-tennis-0x8dfa567d1e2dcfd4b416bbeb804124cc7900e29ee482e46b532a251e3946c3da",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 4,
+    "match_id": "sx-tennis-0xf45edcca38f86beea9778d600615cf26ea56a3cb20a936d3d623913198c562b2",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 5,
+    "match_id": "sx-tennis-0xdc5765df24845b974153221488b9192ee09f695a78145a08ed8d6f6bfb9c862c",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 6,
+    "match_id": "sx-tennis-0x8958e924bbe02eed7790652522b1715e8b25d73891d014b8978049536f39f543",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 7,
+    "match_id": "sx-tennis-0xf648348e0e3ff7f5cd74263e1f55340da2caed46d4f0cde1a799e1b5eb318af2",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 8,
+    "match_id": "sx-tennis-0x95ca6963a19e67394aca7c8e9851c08456516595484d39b3560c198b9ac0d6e7",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 11,
+    "match_id": "sx-tennis-0xeeb5796403ffa0796a87768e2b6103411530bf0135a2e288afbbce89371ba712",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 16,
+    "match_id": "sx-tennis-0x7588f77e2cdc2ffe0850131d073f7d29cea876b4ded232fac97d7a6a3422dcd1",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 23,
+    "match_id": "sx-L20175937",
+    "reason": "echo_signal"
+   },
+   {
+    "bet_id": 26,
+    "match_id": "sx-tennis-0x53a44bb953e34a0701be4f825bef8d0e04821f8667bfae3aebd29d5f7fd1fb9d",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 27,
+    "match_id": "sx-L20216150",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 29,
+    "match_id": "sx-tennis-0xbb157315abdb34bf3ce83c0a00f6e49b6cf3b115e663ba7369e58c543a493c1e",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 30,
+    "match_id": "sx-tennis-0x4de2ec869a51bcfdd4fd117b397b0f9833437dae45e464ae63d0fa2a618a16aa",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 31,
+    "match_id": "b870dcfba5e5920d3f1551a3aa1ea435",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 32,
+    "match_id": "sx-tennis-0x862cb0a5146c7c62dd9f66e75edf978e27b687c46be65e8833ab27f6bbf642ad",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 33,
+    "match_id": "sx-L20149321",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 34,
+    "match_id": "sx-tennis-0xaf8522fdd361eadff8c124b04fe930a29ec74394a274bbf5d66effbb0024f3af",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 41,
+    "match_id": "sx-L19431533",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 45,
+    "match_id": "sx-tennis-0x2340689ca1d8538d6e91719069ff8220d95b6a70f6449b2fc897ff90141b1f4d",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 49,
+    "match_id": "sx-tennis-0x5af5b1cfdc32911947266a651611fb3defa5956c1f9c0d184bca6b4ee9fd0de2",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 59,
+    "match_id": "sx-L20482513",
+    "reason": "no_closing_row"
+   },
+   {
+    "bet_id": 81,
+    "match_id": "sx-L20525973",
+    "reason": "no_closing_row"
+   }
+  ],
+  "excluded": {
+   "no_closing_row": 23,
+   "echo_signal": 1
+  },
+  "degraded": [],
+  "schema": {
+   "bets": [
+    "away",
+    "bet_id",
+    "commence",
+    "created_at",
+    "esito",
+    "esito_finale",
+    "home",
+    "id",
+    "league",
+    "market_id",
+    "match_id",
+    "mercato",
+    "mode",
+    "price",
+    "profit",
+    "selection_id",
+    "settled_at",
+    "stake",
+    "status"
+   ],
+   "clv": [
+    "betfair_odds",
+    "closing_odds",
+    "closing_quota",
+    "closing_source",
+    "esito",
+    "match_id",
+    "pinnacle_quota",
+    "signal_quota",
+    "updated_at"
+   ],
+   "has_source_column": true
+  },
+  "error": null
+ },
+ "cohorts": [
+  {
+   "key": "C1:gross",
+   "n": 57,
+   "mean": 0.03725157485043581,
+   "median": 0.03582887700534765,
+   "ci95": [
+    0.02458177119075201,
+    0.049684514842632484
+   ],
+   "p_value": 9.951748141690664e-07,
+   "share_positive": 0.7894736842105263,
+   "share_ci95": [
+    0.6671387891680949,
+    0.8752545169696542
+   ],
+   "min_detectable": 0.018995485924319856,
+   "status": "verified",
+   "note": "",
+   "clusters": 53,
+   "n_positive": 45,
+   "sd": 0.051189866657965793,
+   "id": "C1",
+   "label": "tutte le puntate eseguite con chiusura misurata (PRIMARIA)",
+   "primary": true,
+   "rationale": "E' l'insieme su cui il progetto riporta il CLV: nessun filtro ex post, nessuna fascia scelta dopo aver visto i numeri.",
+   "roi": {
+    "n": 57,
+    "pnl": -17.85,
+    "staked": 158.1149,
+    "roi": -0.11289258634069275,
+    "ci95": [
+     -0.33866310064918437,
+     0.11241560041236609
+    ],
+    "hit_rate": 0.49122807017543857,
+    "hit_ci95": [
+     0.3661628241840743,
+     0.6174010150238727
+    ]
+   },
+   "vig_free": {
+    "n": 6,
+    "mean": 0.054857705029399684,
+    "gross_on_same_n": 6,
+    "gross_on_same": 0.10182173820419362,
+    "note": "mercato completo disponibile: confronto APPAIATO col grezzo sugli stessi campioni"
+   }
+  },
+  {
+   "key": "C2:gross",
+   "n": 24,
+   "mean": 0.03422354884532763,
+   "median": 0.037607361963190256,
+   "ci95": [
+    0.01693687608761923,
+    0.05080432146421397
+   ],
+   "p_value": 0.0008537271210553125,
+   "share_positive": 0.875,
+   "share_ci95": [
+    0.6899611872949993,
+    0.9565566591987655
+   ],
+   "min_detectable": 0.025023117861675187,
+   "status": "insufficient",
+   "note": "campione 24 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 22,
+   "n_positive": 21,
+   "sd": 0.043756563347312996,
+   "id": "C2",
+   "label": "solo chiusure con fonte DICHIARATA",
+   "primary": false,
+   "rationale": "La colonna `closing_source` esiste dal 13/10: solo queste chiusure sanno dire da dove vengono.",
+   "roi": {
+    "n": 24,
+    "pnl": -19.21,
+    "staked": 81.2197,
+    "roi": -0.23651897261378704,
+    "ci95": [
+     -0.6112277275188116,
+     0.02926434534368131
+    ],
+    "hit_rate": 0.4166666666666667,
+    "hit_ci95": [
+     0.24467602609811764,
+     0.6116533413477124
+    ]
+   },
+   "vig_free": {
+    "n": 3,
+    "mean": 0.04275069192274635,
+    "gross_on_same_n": 3,
+    "gross_on_same": 0.09044890184449923,
+    "note": "mercato completo disponibile: confronto APPAIATO col grezzo sugli stessi campioni"
+   }
+  },
+  {
+   "key": "C3:gross",
+   "n": 24,
+   "mean": 0.05621974937380512,
+   "median": 0.054832214765100806,
+   "ci95": [
+    0.03855285531589236,
+    0.073326417921456
+   ],
+   "p_value": 8.612125031080957e-05,
+   "share_positive": 0.9166666666666666,
+   "share_ci95": [
+    0.741511978067893,
+    0.9768411847029567
+   ],
+   "min_detectable": 0.033136583542837016,
+   "status": "insufficient",
+   "note": "campione 24 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 22,
+   "n_positive": 22,
+   "sd": 0.0579441388927147,
+   "id": "C3",
+   "label": "solo chiusure legacy (fonte non dichiarata)",
+   "primary": false,
+   "rationale": "Controllo di provenienza: se il segno cambia fra dichiarate e legacy, il numero dipende da come e' stato scritto il dato.",
+   "roi": {
+    "n": 24,
+    "pnl": 15.22,
+    "staked": 54.1552,
+    "roi": 0.28104411026087983,
+    "ci95": [
+     -0.19213574546200057,
+     0.533794483390305
+    ],
+    "hit_rate": 0.625,
+    "hit_ci95": [
+     0.42709962442674276,
+     0.7884063244045122
+    ]
+   },
+   "vig_free": {
+    "n": 3,
+    "mean": 0.06696471813605302,
+    "gross_on_same_n": 3,
+    "gross_on_same": 0.113194574563888,
+    "note": "mercato completo disponibile: confronto APPAIATO col grezzo sugli stessi campioni"
+   }
+  },
+  {
+   "key": "C4:gross",
+   "n": 28,
+   "mean": 0.027816862416848196,
+   "median": 0.00606249999999986,
+   "ci95": [
+    0.0032371791286214583,
+    0.04986628143976883
+   ],
+   "p_value": 0.03491894077848317,
+   "share_positive": 0.6071428571428571,
+   "share_ci95": [
+    0.42409044296597176,
+    0.764343134584204
+   ],
+   "min_detectable": 0.03508615354023357,
+   "status": "insufficient",
+   "note": "campione 28 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 24,
+   "n_positive": 17,
+   "sd": 0.066269079469096,
+   "id": "C4",
+   "label": "calcio 1X2",
+   "primary": false,
+   "rationale": "Le due popolazioni (calcio/tennis) hanno gate e staking diversi: mescolarle nasconde quale delle due porta il CLV.",
+   "roi": {
+    "n": 28,
+    "pnl": -18.06,
+    "staked": 80.1649,
+    "roi": -0.22528562999517243,
+    "ci95": [
+     -0.537260767868456,
+     0.06443227861319303
+    ],
+    "hit_rate": 0.42857142857142855,
+    "hit_ci95": [
+     0.26508547124123694,
+     0.6092921437253123
+    ]
+   },
+   "vig_free": {
+    "n": 6,
+    "mean": 0.054857705029399684,
+    "gross_on_same_n": 6,
+    "gross_on_same": 0.10182173820419362,
+    "note": "mercato completo disponibile: confronto APPAIATO col grezzo sugli stessi campioni"
+   }
+  },
+  {
+   "key": "C5:gross",
+   "n": 29,
+   "mean": 0.04636095237252041,
+   "median": 0.048457142857142754,
+   "ci95": [
+    0.036090680052210486,
+    0.0568100337196298
+   ],
+   "p_value": 2.0831487025773225e-09,
+   "share_positive": 0.9655172413793104,
+   "share_ci95": [
+    0.8282447812067973,
+    0.9938867857072374
+   ],
+   "min_detectable": 0.01499792080397631,
+   "status": "insufficient",
+   "note": "campione 29 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 29,
+   "n_positive": 28,
+   "sd": 0.028828776926573187,
+   "id": "C5",
+   "label": "tennis",
+   "primary": false,
+   "rationale": "Corsia che ha prodotto la maggior parte degli ordini reali dell'era.",
+   "roi": {
+    "n": 29,
+    "pnl": 0.21,
+    "staked": 77.95,
+    "roi": 0.00269403463758819,
+    "ci95": [
+     -0.34525516389554634,
+     0.3377803100526432
+    ],
+    "hit_rate": 0.5517241379310345,
+    "hit_ci95": [
+     0.37547963210970914,
+     0.7158683197696281
+    ]
+   },
+   "vig_free": {
+    "n": 0,
+    "mean": null,
+    "gross_on_same_n": 0,
+    "gross_on_same": null,
+    "note": "mercato incompleto: vig-free non calcolabile"
+   }
+  },
+  {
+   "key": "C6:gross",
+   "n": 8,
+   "mean": 0.02251087235654789,
+   "median": 0.037607361963190256,
+   "ci95": [
+    0.005569687529443368,
+    0.037154109485061954
+   ],
+   "p_value": 0.03646395080065137,
+   "share_positive": 0.75,
+   "share_ci95": [
+    0.40927543031016883,
+    0.9285207872478909
+   ],
+   "min_detectable": 0.024442743796814576,
+   "status": "insufficient",
+   "note": "campione 8 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 8,
+   "n_positive": 6,
+   "sd": 0.024676929015458676,
+   "id": "C6",
+   "label": "ordini con >= 6h di anticipo",
+   "primary": false,
+   "rationale": "Il meccanismo dichiarato del CLV e' il tempo fra acquisto e chiusura: senza anticipo non c'e' movimento da catturare.",
+   "roi": {
+    "n": 8,
+    "pnl": -10.35,
+    "staked": 21.58,
+    "roi": -0.4796107506950881,
+    "ci95": [
+     -0.7886740331491713,
+     0.3626277791122855
+    ],
+    "hit_rate": 0.375,
+    "hit_ci95": [
+     0.13684428582359742,
+     0.6942576053973727
+    ]
+   },
+   "vig_free": {
+    "n": 0,
+    "mean": null,
+    "gross_on_same_n": 0,
+    "gross_on_same": null,
+    "note": "mercato incompleto: vig-free non calcolabile"
+   }
+  },
+  {
+   "key": "C7:gross",
+   "n": 5,
+   "mean": -0.01889804858591133,
+   "median": -0.007206094296891008,
+   "ci95": [
+    -0.04452517123531148,
+    -0.004804779102838363
+   ],
+   "p_value": 0.2147806721529021,
+   "share_positive": 0.0,
+   "share_ci95": [
+    0.0,
+    0.43448246478317476
+   ],
+   "min_detectable": 0.03594683426693537,
+   "status": "insufficient",
+   "note": "campione 5 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 5,
+   "n_positive": 0,
+   "sd": 0.028690744253329067,
+   "id": "C7",
+   "label": "ordini con < 6h di anticipo",
+   "primary": false,
+   "rationale": "Controllo opposto al precedente: se il CLV e' lo stesso, il meccanismo dichiarato non e' quello che produce il numero.",
+   "roi": {
+    "n": 5,
+    "pnl": -5.71,
+    "staked": 10.79,
+    "roi": -0.5291936978683967,
+    "ci95": [
+     -1.0,
+     0.4609313338595106
+    ],
+    "hit_rate": 0.4,
+    "hit_ci95": [
+     0.11762077423264783,
+     0.769275718723987
+    ]
+   },
+   "vig_free": {
+    "n": 0,
+    "mean": null,
+    "gross_on_same_n": 0,
+    "gross_on_same": null,
+    "note": "mercato incompleto: vig-free non calcolabile"
+   }
+  },
+  {
+   "key": "C8:gross",
+   "n": 27,
+   "mean": 0.01816015311906358,
+   "median": 0.016887417218543144,
+   "ci95": [
+    0.009465834190188403,
+    0.02695389392112244
+   ],
+   "p_value": 0.0004992916210176492,
+   "share_positive": 0.7037037037037037,
+   "share_ci95": [
+    0.5151931703585185,
+    0.8414695953022023
+   ],
+   "min_detectable": 0.012800063736264246,
+   "status": "insufficient",
+   "note": "campione 27 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 27,
+   "n_positive": 19,
+   "sd": 0.023740517248583955,
+   "id": "C8",
+   "label": "fascia quota 1.30-1.80",
+   "primary": false,
+   "rationale": "Fascia dei favoriti netti, quella su cui il progetto ha concentrato la strategia.",
+   "roi": {
+    "n": 27,
+    "pnl": -9.01,
+    "staked": 90.0259,
+    "roi": -0.10008230964644618,
+    "ci95": [
+     -0.43692954242997845,
+     0.14868862053119447
+    ],
+    "hit_rate": 0.5555555555555556,
+    "hit_ci95": [
+     0.3731302451322448,
+     0.72414141822977
+    ]
+   },
+   "vig_free": {
+    "n": 1,
+    "mean": -0.03161631377111096,
+    "gross_on_same_n": 1,
+    "gross_on_same": -0.011874999999999969,
+    "note": "mercato completo disponibile: confronto APPAIATO col grezzo sugli stessi campioni"
+   }
+  },
+  {
+   "key": "C9:gross",
+   "n": 21,
+   "mean": 0.030472762332129803,
+   "median": 0.03766304347826077,
+   "ci95": [
+    0.015016043365730824,
+    0.04372852876398893
+   ],
+   "p_value": 0.0006554811893477895,
+   "share_positive": 0.8095238095238095,
+   "share_ci95": [
+    0.5999943530979508,
+    0.9233243494723822
+   ],
+   "min_detectable": 0.021182820673262878,
+   "status": "insufficient",
+   "note": "campione 21 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 21,
+   "n_positive": 17,
+   "sd": 0.03464891181617747,
+   "id": "C9",
+   "label": "fascia quota 1.80-2.20",
+   "primary": false,
+   "rationale": "Fascia intermedia: il tennis 2.00-2.30 e' stato misurato in perdita, il CLV dice la stessa cosa?",
+   "roi": {
+    "n": 21,
+    "pnl": -5.7,
+    "staked": 51.98,
+    "roi": -0.10965756060023088,
+    "ci95": [
+     -0.5296206745248557,
+     0.29812469687978826
+    ],
+    "hit_rate": 0.47619047619047616,
+    "hit_ci95": [
+     0.2834400610153417,
+     0.6763046541715557
+    ]
+   },
+   "vig_free": {
+    "n": 1,
+    "mean": -0.02167538250796963,
+    "gross_on_same_n": 1,
+    "gross_on_same": 0.005126903553299478,
+    "note": "mercato completo disponibile: confronto APPAIATO col grezzo sugli stessi campioni"
+   }
+  },
+  {
+   "key": "C10:gross",
+   "n": 9,
+   "mean": 0.11034306925393318,
+   "median": 0.0880198019801981,
+   "ci95": [
+    0.06625696246473943,
+    0.1431982433327893
+   ],
+   "p_value": 0.0029096919204976562,
+   "share_positive": 1.0,
+   "share_ci95": [
+    0.7008549515804559,
+    1.0
+   ],
+   "min_detectable": 0.0732280684310916,
+   "status": "insufficient",
+   "note": "campione 9 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 7,
+   "n_positive": 9,
+   "sd": 0.07841425057248302,
+   "id": "C10",
+   "label": "fascia quota >= 2.20",
+   "primary": false,
+   "rationale": "Quota alta: e' la fascia dove il CLV e' piu' facile da gonfiare (longshot bias dello sharp).",
+   "roi": {
+    "n": 9,
+    "pnl": -3.14,
+    "staked": 16.109,
+    "roi": -0.19492209323980386,
+    "ci95": [
+     -0.7952956041091994,
+     0.7759959498809816
+    ],
+    "hit_rate": 0.3333333333333333,
+    "hit_ci95": [
+     0.1205838183869109,
+     0.6457978644196036
+    ]
+   },
+   "vig_free": {
+    "n": 4,
+    "mean": 0.09560948161386967,
+    "gross_on_same_n": 4,
+    "gross_on_same": 0.15441963141796555,
+    "note": "mercato completo disponibile: confronto APPAIATO col grezzo sugli stessi campioni"
+   }
+  },
+  {
+   "key": "C11:gross",
+   "n": 9,
+   "mean": -0.005255487864927207,
+   "median": -0.004845208343958851,
+   "ci95": [
+    -0.009653334979644415,
+    -0.0013773945932974553
+   ],
+   "p_value": 0.04812338025967934,
+   "share_positive": 0.2222222222222222,
+   "share_ci95": [
+    0.06322510711784671,
+    0.5474110308930111
+   ],
+   "min_detectable": 0.006317801176363005,
+   "status": "insufficient",
+   "note": "campione 9 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 9,
+   "n_positive": 2,
+   "sd": 0.006765242551449227,
+   "id": "C11",
+   "label": "chiusura dell'EXCHANGE in cui compriamo (controllo)",
+   "primary": false,
+   "rationale": "Controllo interno: se il nostro prezzo batte anche la chiusura dello stesso exchange, l'edge e' nel prezzo; se no, il +4% e' un effetto del benchmark.",
+   "roi": {
+    "n": 9,
+    "pnl": -13.86,
+    "staked": 22.74,
+    "roi": -0.6094986807387863,
+    "ci95": [
+     -1.0,
+     0.1283833688990227
+    ],
+    "hit_rate": 0.3333333333333333,
+    "hit_ci95": [
+     0.1205838183869109,
+     0.6457978644196036
+    ]
+   },
+   "vig_free": {
+    "n": 0,
+    "mean": null,
+    "gross_on_same_n": 0,
+    "gross_on_same": null,
+    "note": "mercato incompleto: vig-free non calcolabile"
+   }
+  }
+ ],
+ "overall": {
+  "key": "all",
+  "n": 57,
+  "mean": 0.03725157485043581,
+  "median": 0.03582887700534765,
+  "ci95": [
+   0.02458177119075201,
+   0.049684514842632484
+  ],
+  "p_value": 9.951748141690664e-07,
+  "share_positive": 0.7894736842105263,
+  "share_ci95": [
+   0.6671387891680949,
+   0.8752545169696542
+  ],
+  "min_detectable": 0.018995485924319856,
+  "status": "verified",
+  "note": "",
+  "clusters": 53,
+  "n_positive": 45,
+  "sd": 0.051189866657965793
+ },
+ "by_source": {
+  "sharp_declared": {
+   "key": "sharp_declared",
+   "n": 24,
+   "mean": 0.03422354884532763,
+   "median": 0.037607361963190256,
+   "ci95": [
+    0.01693687608761923,
+    0.05080432146421397
+   ],
+   "p_value": 0.0008537271210553125,
+   "share_positive": 0.875,
+   "share_ci95": [
+    0.6899611872949993,
+    0.9565566591987655
+   ],
+   "min_detectable": 0.025023117861675187,
+   "status": "insufficient",
+   "note": "campione 24 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 22,
+   "n_positive": 21,
+   "sd": 0.043756563347312996,
+   "roi": {
+    "n": 24,
+    "pnl": -19.21,
+    "staked": 81.2197,
+    "roi": -0.23651897261378704,
+    "ci95": [
+     -0.6112277275188116,
+     0.02926434534368131
+    ],
+    "hit_rate": 0.4166666666666667,
+    "hit_ci95": [
+     0.24467602609811764,
+     0.6116533413477124
+    ]
+   }
+  },
+  "sharp_legacy": {
+   "key": "sharp_legacy",
+   "n": 24,
+   "mean": 0.05621974937380512,
+   "median": 0.054832214765100806,
+   "ci95": [
+    0.03855285531589236,
+    0.073326417921456
+   ],
+   "p_value": 8.612125031080957e-05,
+   "share_positive": 0.9166666666666666,
+   "share_ci95": [
+    0.741511978067893,
+    0.9768411847029567
+   ],
+   "min_detectable": 0.033136583542837016,
+   "status": "insufficient",
+   "note": "campione 24 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 22,
+   "n_positive": 22,
+   "sd": 0.0579441388927147,
+   "roi": {
+    "n": 24,
+    "pnl": 15.22,
+    "staked": 54.1552,
+    "roi": 0.28104411026087983,
+    "ci95": [
+     -0.19213574546200057,
+     0.533794483390305
+    ],
+    "hit_rate": 0.625,
+    "hit_ci95": [
+     0.42709962442674276,
+     0.7884063244045122
+    ]
+   }
+  },
+  "venue_internal": {
+   "key": "venue_internal",
+   "n": 9,
+   "mean": -0.005255487864927207,
+   "median": -0.004845208343958851,
+   "ci95": [
+    -0.009653334979644415,
+    -0.0013773945932974553
+   ],
+   "p_value": 0.04812338025967934,
+   "share_positive": 0.2222222222222222,
+   "share_ci95": [
+    0.06322510711784671,
+    0.5474110308930111
+   ],
+   "min_detectable": 0.006317801176363005,
+   "status": "insufficient",
+   "note": "campione 9 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 9,
+   "n_positive": 2,
+   "sd": 0.006765242551449227,
+   "roi": {
+    "n": 9,
+    "pnl": -13.86,
+    "staked": 22.74,
+    "roi": -0.6094986807387863,
+    "ci95": [
+     -1.0,
+     0.1283833688990227
+    ],
+    "hit_rate": 0.3333333333333333,
+    "hit_ci95": [
+     0.1205838183869109,
+     0.6457978644196036
+    ]
+   }
+  }
+ },
+ "by_sport": {
+  "football": {
+   "key": "football",
+   "n": 28,
+   "mean": 0.027816862416848196,
+   "median": 0.00606249999999986,
+   "ci95": [
+    0.0032371791286214583,
+    0.04986628143976883
+   ],
+   "p_value": 0.03491894077848317,
+   "share_positive": 0.6071428571428571,
+   "share_ci95": [
+    0.42409044296597176,
+    0.764343134584204
+   ],
+   "min_detectable": 0.03508615354023357,
+   "status": "insufficient",
+   "note": "campione 28 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 24,
+   "n_positive": 17,
+   "sd": 0.066269079469096,
+   "roi": {
+    "n": 28,
+    "pnl": -18.06,
+    "staked": 80.1649,
+    "roi": -0.22528562999517243,
+    "ci95": [
+     -0.537260767868456,
+     0.06443227861319303
+    ],
+    "hit_rate": 0.42857142857142855,
+    "hit_ci95": [
+     0.26508547124123694,
+     0.6092921437253123
+    ]
+   }
+  },
+  "tennis": {
+   "key": "tennis",
+   "n": 29,
+   "mean": 0.04636095237252041,
+   "median": 0.048457142857142754,
+   "ci95": [
+    0.036090680052210486,
+    0.0568100337196298
+   ],
+   "p_value": 2.0831487025773225e-09,
+   "share_positive": 0.9655172413793104,
+   "share_ci95": [
+    0.8282447812067973,
+    0.9938867857072374
+   ],
+   "min_detectable": 0.01499792080397631,
+   "status": "insufficient",
+   "note": "campione 29 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 29,
+   "n_positive": 28,
+   "sd": 0.028828776926573187,
+   "roi": {
+    "n": 29,
+    "pnl": 0.21,
+    "staked": 77.95,
+    "roi": 0.00269403463758819,
+    "ci95": [
+     -0.34525516389554634,
+     0.3377803100526432
+    ],
+    "hit_rate": 0.5517241379310345,
+    "hit_ci95": [
+     0.37547963210970914,
+     0.7158683197696281
+    ]
+   }
+  }
+ },
+ "by_odds_band": {
+  "1.30-1.80": {
+   "key": "1.30-1.80",
+   "n": 27,
+   "mean": 0.01816015311906358,
+   "median": 0.016887417218543144,
+   "ci95": [
+    0.009465834190188403,
+    0.02695389392112244
+   ],
+   "p_value": 0.0004992916210176492,
+   "share_positive": 0.7037037037037037,
+   "share_ci95": [
+    0.5151931703585185,
+    0.8414695953022023
+   ],
+   "min_detectable": 0.012800063736264246,
+   "status": "insufficient",
+   "note": "campione 27 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 27,
+   "n_positive": 19,
+   "sd": 0.023740517248583955,
+   "roi": {
+    "n": 27,
+    "pnl": -9.01,
+    "staked": 90.0259,
+    "roi": -0.10008230964644618,
+    "ci95": [
+     -0.43692954242997845,
+     0.14868862053119447
+    ],
+    "hit_rate": 0.5555555555555556,
+    "hit_ci95": [
+     0.3731302451322448,
+     0.72414141822977
+    ]
+   }
+  },
+  "1.80-2.20": {
+   "key": "1.80-2.20",
+   "n": 21,
+   "mean": 0.030472762332129803,
+   "median": 0.03766304347826077,
+   "ci95": [
+    0.015016043365730824,
+    0.04372852876398893
+   ],
+   "p_value": 0.0006554811893477895,
+   "share_positive": 0.8095238095238095,
+   "share_ci95": [
+    0.5999943530979508,
+    0.9233243494723822
+   ],
+   "min_detectable": 0.021182820673262878,
+   "status": "insufficient",
+   "note": "campione 21 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 21,
+   "n_positive": 17,
+   "sd": 0.03464891181617747,
+   "roi": {
+    "n": 21,
+    "pnl": -5.7,
+    "staked": 51.98,
+    "roi": -0.10965756060023088,
+    "ci95": [
+     -0.5296206745248557,
+     0.29812469687978826
+    ],
+    "hit_rate": 0.47619047619047616,
+    "hit_ci95": [
+     0.2834400610153417,
+     0.6763046541715557
+    ]
+   }
+  },
+  ">=2.20": {
+   "key": ">=2.20",
+   "n": 9,
+   "mean": 0.11034306925393318,
+   "median": 0.0880198019801981,
+   "ci95": [
+    0.06625696246473943,
+    0.1431982433327893
+   ],
+   "p_value": 0.0029096919204976562,
+   "share_positive": 1.0,
+   "share_ci95": [
+    0.7008549515804559,
+    1.0
+   ],
+   "min_detectable": 0.0732280684310916,
+   "status": "insufficient",
+   "note": "campione 9 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 7,
+   "n_positive": 9,
+   "sd": 0.07841425057248302,
+   "roi": {
+    "n": 9,
+    "pnl": -3.14,
+    "staked": 16.109,
+    "roi": -0.19492209323980386,
+    "ci95": [
+     -0.7952956041091994,
+     0.7759959498809816
+    ],
+    "hit_rate": 0.3333333333333333,
+    "hit_ci95": [
+     0.1205838183869109,
+     0.6457978644196036
+    ]
+   }
+  }
+ },
+ "by_lead_band": {
+  "<6h": {
+   "key": "<6h",
+   "n": 5,
+   "mean": -0.01889804858591133,
+   "median": -0.007206094296891008,
+   "ci95": [
+    -0.04452517123531148,
+    -0.004804779102838363
+   ],
+   "p_value": 0.2147806721529021,
+   "share_positive": 0.0,
+   "share_ci95": [
+    0.0,
+    0.43448246478317476
+   ],
+   "min_detectable": 0.03594683426693537,
+   "status": "insufficient",
+   "note": "campione 5 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 5,
+   "n_positive": 0,
+   "sd": 0.028690744253329067,
+   "roi": {
+    "n": 5,
+    "pnl": -5.71,
+    "staked": 10.79,
+    "roi": -0.5291936978683967,
+    "ci95": [
+     -1.0,
+     0.4609313338595106
+    ],
+    "hit_rate": 0.4,
+    "hit_ci95": [
+     0.11762077423264783,
+     0.769275718723987
+    ]
+   }
+  },
+  ">=6h": {
+   "key": ">=6h",
+   "n": 8,
+   "mean": 0.02251087235654789,
+   "median": 0.037607361963190256,
+   "ci95": [
+    0.005569687529443368,
+    0.037154109485061954
+   ],
+   "p_value": 0.03646395080065137,
+   "share_positive": 0.75,
+   "share_ci95": [
+    0.40927543031016883,
+    0.9285207872478909
+   ],
+   "min_detectable": 0.024442743796814576,
+   "status": "insufficient",
+   "note": "campione 8 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+   "clusters": 8,
+   "n_positive": 6,
+   "sd": 0.024676929015458676,
+   "roi": {
+    "n": 8,
+    "pnl": -10.35,
+    "staked": 21.58,
+    "roi": -0.4796107506950881,
+    "ci95": [
+     -0.7886740331491713,
+     0.3626277791122855
+    ],
+    "hit_rate": 0.375,
+    "hit_ci95": [
+     0.13684428582359742,
+     0.6942576053973727
+    ]
+   }
+  },
+  "n/d": {
+   "key": "n/d",
+   "n": 44,
+   "mean": 0.04631234160345488,
+   "median": 0.04133802816901411,
+   "ci95": [
+    0.032376142055591375,
+    0.06007141062305947
+   ],
+   "p_value": 5.793202190725944e-07,
+   "share_positive": 0.8863636363636364,
+   "share_ci95": [
+    0.7602084758339172,
+    0.950472193989075
+   ],
+   "min_detectable": 0.022131869885236726,
+   "status": "verified",
+   "note": "",
+   "clusters": 40,
+   "n_positive": 39,
+   "sd": 0.05240112479443872,
+   "roi": {
+    "n": 44,
+    "pnl": -1.79,
+    "staked": 125.7449,
+    "roi": -0.014235169776269256,
+    "ci95": [
+     -0.3114531814249434,
+     0.196810997872238
+    ],
+    "hit_rate": 0.5227272727272727,
+    "hit_ci95": [
+     0.3793546556062164,
+     0.662450089677489
+    ]
+   }
+  }
+ },
+ "realized": {
+  "n": 57,
+  "pnl": -17.85,
+  "staked": 158.1149,
+  "roi": -0.11289258634069275,
+  "ci95": [
+   -0.33866310064918437,
+   0.11241560041236609
+  ],
+  "hit_rate": 0.49122807017543857,
+  "hit_ci95": [
+   0.3661628241840743,
+   0.6174010150238727
+  ]
+ },
+ "closing_quality": {
+  "n": 13,
+  "missing": 44,
+  "median_min_before": 8.3,
+  "p90_min_before": 5.4,
+  "share_after_kickoff": 0.0,
+  "share_before_30": 0.0,
+  "note": ""
+ },
+ "reference_quality": {
+  "n": 57,
+  "by_source": {
+   "pinnacle_quota": 48,
+   "closing_quota": 9
+  },
+  "seme_copy": 9,
+  "timestamp_available": false,
+  "note": "`clv_history` non ha un timestamp per il prezzo di riferimento: `updated_at` e' l'istante della CHIUSURA. Il riferimento si usa come confronto di prezzo, mai come chiusura."
+ },
+ "cited": {
+  "cited": 0.0454,
+  "cited_n": 45,
+  "tolerance_pp": 0.1,
+  "available": true,
+  "n": 45,
+  "mean": 0.046120134978450564,
+  "delta_pp": 0.07201349784505609,
+  "reproduced": true,
+  "current": 0.037251574850435815,
+  "current_n": 57,
+  "note": ""
+ },
+ "gradient": {
+  "n": 57,
+  "pearson": 0.716007998473291,
+  "by_band": {
+   "1.30-1.80": {
+    "key": "1.30-1.80",
+    "n": 27,
+    "mean": 0.01816015311906358,
+    "median": 0.016887417218543144,
+    "ci95": [
+     0.009465834190188403,
+     0.02695389392112244
+    ],
+    "p_value": 0.0004992916210176492,
+    "share_positive": 0.7037037037037037,
+    "share_ci95": [
+     0.5151931703585185,
+     0.8414695953022023
+    ],
+    "min_detectable": 0.012800063736264246,
+    "status": "insufficient",
+    "note": "campione 27 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+    "clusters": 27,
+    "n_positive": 19,
+    "sd": 0.023740517248583955,
+    "roi": {
+     "n": 27,
+     "pnl": -9.01,
+     "staked": 90.0259,
+     "roi": -0.10008230964644618,
+     "ci95": [
+      -0.43692954242997845,
+      0.14868862053119447
+     ],
+     "hit_rate": 0.5555555555555556,
+     "hit_ci95": [
+      0.3731302451322448,
+      0.72414141822977
+     ]
+    }
+   },
+   "1.80-2.20": {
+    "key": "1.80-2.20",
+    "n": 21,
+    "mean": 0.030472762332129803,
+    "median": 0.03766304347826077,
+    "ci95": [
+     0.015016043365730824,
+     0.04372852876398893
+    ],
+    "p_value": 0.0006554811893477895,
+    "share_positive": 0.8095238095238095,
+    "share_ci95": [
+     0.5999943530979508,
+     0.9233243494723822
+    ],
+    "min_detectable": 0.021182820673262878,
+    "status": "insufficient",
+    "note": "campione 21 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+    "clusters": 21,
+    "n_positive": 17,
+    "sd": 0.03464891181617747,
+    "roi": {
+     "n": 21,
+     "pnl": -5.7,
+     "staked": 51.98,
+     "roi": -0.10965756060023088,
+     "ci95": [
+      -0.5296206745248557,
+      0.29812469687978826
+     ],
+     "hit_rate": 0.47619047619047616,
+     "hit_ci95": [
+      0.2834400610153417,
+      0.6763046541715557
+     ]
+    }
+   },
+   ">=2.20": {
+    "key": ">=2.20",
+    "n": 9,
+    "mean": 0.11034306925393318,
+    "median": 0.0880198019801981,
+    "ci95": [
+     0.06625696246473943,
+     0.1431982433327893
+    ],
+    "p_value": 0.0029096919204976562,
+    "share_positive": 1.0,
+    "share_ci95": [
+     0.7008549515804559,
+     1.0
+    ],
+    "min_detectable": 0.0732280684310916,
+    "status": "insufficient",
+    "note": "campione 9 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+    "clusters": 7,
+    "n_positive": 9,
+    "sd": 0.07841425057248302,
+    "roi": {
+     "n": 9,
+     "pnl": -3.14,
+     "staked": 16.109,
+     "roi": -0.19492209323980386,
+     "ci95": [
+      -0.7952956041091994,
+      0.7759959498809816
+     ],
+     "hit_rate": 0.3333333333333333,
+     "hit_ci95": [
+      0.1205838183869109,
+      0.6457978644196036
+     ]
+    }
+   }
+  },
+  "note": "il CLV cresce con la quota in modo monotono: la differenza di prezzo exchange/sharp sui longshot spiega il numero tanto quanto un vantaggio, e il ROI per fascia dice quale delle due regge",
+  "monotone": true
+ },
+ "cumulative": {
+  "available": true,
+  "points": [
+   {
+    "day": "2026-10-05",
+    "n": 2,
+    "mean": 0.0224895101359891,
+    "n_today": 2
+   },
+   {
+    "day": "2026-10-07",
+    "n": 7,
+    "mean": 0.05867025319677526,
+    "n_today": 5
+   },
+   {
+    "day": "2026-10-08",
+    "n": 11,
+    "mean": 0.04947028144565682,
+    "n_today": 4
+   },
+   {
+    "day": "2026-10-09",
+    "n": 14,
+    "mean": 0.047934037969624255,
+    "n_today": 3
+   },
+   {
+    "day": "2026-10-10",
+    "n": 15,
+    "mean": 0.04937101119589173,
+    "n_today": 1
+   },
+   {
+    "day": "2026-10-11",
+    "n": 21,
+    "mean": 0.05546037250536674,
+    "n_today": 6
+   },
+   {
+    "day": "2026-10-12",
+    "n": 30,
+    "mean": 0.051728416238807286,
+    "n_today": 9
+   },
+   {
+    "day": "2026-10-13",
+    "n": 31,
+    "mean": 0.05092064474723285,
+    "n_today": 1
+   },
+   {
+    "day": "2026-10-14",
+    "n": 41,
+    "mean": 0.04853483222386376,
+    "n_today": 10
+   },
+   {
+    "day": "2026-10-15",
+    "n": 43,
+    "mean": 0.04642802331123257,
+    "n_today": 2
+   },
+   {
+    "day": "2026-10-16",
+    "n": 49,
+    "mean": 0.04215168112521018,
+    "n_today": 6
+   },
+   {
+    "day": "2026-10-17",
+    "n": 51,
+    "mean": 0.04195300976725395,
+    "n_today": 2
+   },
+   {
+    "day": "2026-10-18",
+    "n": 57,
+    "mean": 0.037251574850435815,
+    "n_today": 6
+   }
+  ],
+  "stability": {
+   "first_half": {
+    "n": 28,
+    "mean": 0.0511778099157289
+   },
+   "second_half": {
+    "n": 29,
+    "mean": 0.02380555478739421
+   },
+   "delta": -0.02737225512833469
+  },
+  "crossing": {
+   "day": "2026-10-12",
+   "n": 30,
+   "mean": 0.051728416238807286,
+   "n_today": 9
+  },
+  "note": "la seconda meta' del campione vale -2.74pp della prima: la cumulata scende man mano che si aggiunge campione (il numero migliore e' quello iniziale)"
+ },
+ "selection_bias": {
+  "measured": {
+   "n": 57,
+   "pnl": -17.85,
+   "staked": 158.1149,
+   "roi": -0.11289258634069275
+  },
+  "missing": {
+   "n": 23,
+   "pnl": 2.46,
+   "staked": 51.87,
+   "roi": 0.04742625795257374
+  },
+  "coverage": 0.7037037037037037
+ },
+ "traps": {
+  "echo": {
+   "available": true,
+   "rows": 475,
+   "echo": 1,
+   "seme_copy": 411,
+   "share": 0.002105263157894737
+  },
+  "provenance": {
+   "reference:pinnacle_quota": 304,
+   "reference:closing_quota": 82,
+   "closing:sharp_legacy": 37,
+   "closing:sharp_declared": 43,
+   "closing:venue_internal": 9
+  }
+ },
+ "checks": {
+  "variants": {
+   "closing_odds": {
+    "n": 57,
+    "mean": 0.037251574850435815
+   },
+   "reference_as_closing": {
+    "n": 57,
+    "mean": 0.03808138872384537
+   },
+   "seme_as_closing": {
+    "n": 57,
+    "mean": -0.0003878463287488767
+   }
+  },
+  "formula": {
+   "checked": 57,
+   "mismatches": [],
+   "ok": true
+  },
+  "crosscheck": {
+   "available": true,
+   "error": null,
+   "our_n": 57,
+   "their_n": 58,
+   "our_mean": 0.037251574850435815,
+   "their_mean": 0.036714,
+   "max_abs_diff": 0.0,
+   "mismatches": [],
+   "compared": 57,
+   "match": true,
+   "delta_mean": 0.000537574850435818
+  },
+  "prospective": {
+   "rows": 7,
+   "signals": 7,
+   "days": 0,
+   "first_ts": "2026-10-20T22:59:25.640964+00:00",
+   "last_ts": "2026-10-20T22:59:25.640964+00:00",
+   "window_days": 7,
+   "ready": false,
+   "hypothesis_id": "H-CLV-1",
+   "by_day": {
+    "2026-10-20": 7
+   },
+   "selected": 3,
+   "note": "finestra in corso: 0/7 giorni, 7 segnali distinti (servono >= 30 con chiusura per concludere qualcosa)",
+   "pre_freeze": 45,
+   "frozen_at": "2026-10-20T21:00:00+00:00",
+   "days_calendar": 1
+  },
+  "gradient": {
+   "n": 57,
+   "pearson": 0.716007998473291,
+   "by_band": {
+    "1.30-1.80": {
+     "key": "1.30-1.80",
+     "n": 27,
+     "mean": 0.01816015311906358,
+     "median": 0.016887417218543144,
+     "ci95": [
+      0.009465834190188403,
+      0.02695389392112244
+     ],
+     "p_value": 0.0004992916210176492,
+     "share_positive": 0.7037037037037037,
+     "share_ci95": [
+      0.5151931703585185,
+      0.8414695953022023
+     ],
+     "min_detectable": 0.012800063736264246,
+     "status": "insufficient",
+     "note": "campione 27 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+     "clusters": 27,
+     "n_positive": 19,
+     "sd": 0.023740517248583955,
+     "roi": {
+      "n": 27,
+      "pnl": -9.01,
+      "staked": 90.0259,
+      "roi": -0.10008230964644618,
+      "ci95": [
+       -0.43692954242997845,
+       0.14868862053119447
+      ],
+      "hit_rate": 0.5555555555555556,
+      "hit_ci95": [
+       0.3731302451322448,
+       0.72414141822977
+      ]
+     }
+    },
+    "1.80-2.20": {
+     "key": "1.80-2.20",
+     "n": 21,
+     "mean": 0.030472762332129803,
+     "median": 0.03766304347826077,
+     "ci95": [
+      0.015016043365730824,
+      0.04372852876398893
+     ],
+     "p_value": 0.0006554811893477895,
+     "share_positive": 0.8095238095238095,
+     "share_ci95": [
+      0.5999943530979508,
+      0.9233243494723822
+     ],
+     "min_detectable": 0.021182820673262878,
+     "status": "insufficient",
+     "note": "campione 21 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+     "clusters": 21,
+     "n_positive": 17,
+     "sd": 0.03464891181617747,
+     "roi": {
+      "n": 21,
+      "pnl": -5.7,
+      "staked": 51.98,
+      "roi": -0.10965756060023088,
+      "ci95": [
+       -0.5296206745248557,
+       0.29812469687978826
+      ],
+      "hit_rate": 0.47619047619047616,
+      "hit_ci95": [
+       0.2834400610153417,
+       0.6763046541715557
+      ]
+     }
+    },
+    ">=2.20": {
+     "key": ">=2.20",
+     "n": 9,
+     "mean": 0.11034306925393318,
+     "median": 0.0880198019801981,
+     "ci95": [
+      0.06625696246473943,
+      0.1431982433327893
+     ],
+     "p_value": 0.0029096919204976562,
+     "share_positive": 1.0,
+     "share_ci95": [
+      0.7008549515804559,
+      1.0
+     ],
+     "min_detectable": 0.0732280684310916,
+     "status": "insufficient",
+     "note": "campione 9 < 30: nessuna conclusione, l'intervallo e' troppo largo",
+     "clusters": 7,
+     "n_positive": 9,
+     "sd": 0.07841425057248302,
+     "roi": {
+      "n": 9,
+      "pnl": -3.14,
+      "staked": 16.109,
+      "roi": -0.19492209323980386,
+      "ci95": [
+       -0.7952956041091994,
+       0.7759959498809816
+      ],
+      "hit_rate": 0.3333333333333333,
+      "hit_ci95": [
+       0.1205838183869109,
+       0.6457978644196036
+      ]
+     }
+    }
+   },
+   "note": "il CLV cresce con la quota in modo monotono: la differenza di prezzo exchange/sharp sui longshot spiega il numero tanto quanto un vantaggio, e il ROI per fascia dice quale delle due regge",
+   "monotone": true
+  },
+  "shopping": {
+   "n": 57,
+   "mean": 0.0019113688259169849,
+   "median": 0.0,
+   "worse_share": 0.2982456140350877,
+   "beyond_1pct": 0.24561403508771928
+  },
+  "second_benchmark": {
+   "available": true,
+   "n": 6
+  }
+ },
+ "prereg": {
+  "path": "/home/siryo/quotaverace/research_isolated/lab/clv_prereg.json",
+  "hypothesis": {
+   "id": "H-CLV-1",
+   "statement": "Sui segnali 1X2 giocabili (value/strong_value/moderate) nati dopo il 20/10/2026 21:00 UTC, il CLV grezzo contro la chiusura sharp T-0 e' > 0 con limite inferiore del CI95 > 0 su n >= 30.",
+   "one_hypothesis_only": true,
+   "why_this_one": "E' l'unica ipotesi che il campione esistente non puo' gia' soddisfare: il campione storico e' la stessa era che l'ha generata (nessun holdout).",
+   "falsification": "n >= 30 e CI95 interamente sotto zero -> ipotesi respinta. CI95 che include lo zero -> non conclusa, non promossa.",
+   "observation_window_days": 7,
+   "orders_allowed": false,
+   "record_unselected": true,
+   "do_not_reuse_old_holdout": "Le osservazioni gia' usate per generare l'ipotesi (snapshot <= 20/10/2026) restano nel campione storico e NON contano come dati prospettici."
+  },
+  "sha256": "a4fc00370c4cec2ce398fed896b070bbe8cc13ca3fa0ab368f7c4e2a0c6a6696",
+  "error": null,
+  "frozen_at": "2026-10-20T21:00:00+00:00",
+  "declared_primary": "C1",
+  "errors": []
+ },
+ "span": {
+  "first": "2026-10-05",
+  "last": "2026-10-18",
+  "days": 13
+ },
+ "verdict": {
+  "calculation_verified": true,
+  "primary_status": "verified",
+  "cohorts_verified": [
+   "C1"
+  ],
+  "cohorts_contradictory": [],
+  "replicable": false,
+  "overall": "dati_insufficienti",
+  "reasons": [
+   "la coorte primaria ha CI95 interamente sopra zero",
+   "copertura della chiusura 70%: il campione non descrive tutte le puntate eseguite",
+   "nessun campione PROSPETTICO: la finestra di 7 giorni non e' ancora stata percorsa",
+   "il CLV cresce in modo MONOTONO con la quota: la differenza di prezzo fra exchange e sharp sui longshot spiega il numero almeno quanto un vantaggio (il ROI per fascia dice che e' cosi')",
+   "contro la chiusura dello STESSO exchange in cui compriamo il CLV e' -0.53%: il vantaggio, se c'e', e' nel prezzo relativo al benchmark, non nell'esecuzione"
+  ],
+  "promotion_allowed": false,
+  "promotion_rule": "nessuna promozione: il CLV da solo non basta (direttiva 20/10/2026: non promuovere una strategia sulla sola base del CLV)"
+ },
+ "artifacts": {
+  "report": "CLV_VALIDATION.md",
+  "observations_csv": "CLV_OBSERVATIONS.csv",
+  "observations_n": 57,
+  "csv_fields": [
+   "obs_id",
+   "bet_id",
+   "event_id",
+   "match_id",
+   "sport",
+   "market",
+   "selection",
+   "odds_buy",
+   "buy_ts",
+   "odds_closing",
+   "closing_ts",
+   "closing_column",
+   "closing_source",
+   "closing_source_class",
+   "clv_gross",
+   "clv_vig_free",
+   "vig_method",
+   "signal_quota",
+   "reference_odds",
+   "reference_source",
+   "liquidity_usdc",
+   "liquidity_source",
+   "result",
+   "profit",
+   "stake",
+   "kickoff",
+   "lead_h",
+   "capture_lag_min",
+   "flags",
+   "shopping",
+   "odds_band",
+   "lead_band"
+  ]
+ }
+}

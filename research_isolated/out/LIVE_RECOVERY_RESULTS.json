@@ -1,0 +1,246 @@
+{
+  "audit": "LIVE_RECOVERY_AUDIT",
+  "generated_at_utc": "2026-10-20T17:20:00Z",
+  "environment": {
+    "project": "creative-vibrancy",
+    "service": "betting_bot",
+    "region": "ams",
+    "health_http": 200,
+    "source": "railway ssh (container) + GET /api/health, sola lettura"
+  },
+  "classification": "A",
+  "classification_label": "BLOCCATO",
+  "classification_reason": [
+    "CB2 (kill switch patrimoniale) ARMATO dal 2026-10-18T04:42:54Z con equity 23.69 <= soglia 25.00",
+    "equity attuale 21.1004 < 25.00: /t60reset lo riarma immediatamente (t60_check_wallet_kill), quindi nessun ordine reale e' possibile senza un deposito",
+    "kill-switch di modalita' su file = off (override esplicito), indipendente dal CB2",
+    "crediti the-odds-api 31 con hard stop a 5: l'oracolo indipendente (Pinnacle) diventa cieco entro ~26 fetch"
+  ],
+  "runtime": {
+    "wallet": {
+      "available_usdc": 21.1004,
+      "exposure_usdc": 0.0,
+      "equity_usdc": 21.1004,
+      "stale_snapshot": false,
+      "open_bets": 0,
+      "open_resting_orders": 0,
+      "open_bets_stake_usdc": 0.0
+    },
+    "kill_switch": {
+      "file_override": "off",
+      "env_mode": "live",
+      "effective": "off",
+      "provider_ready": true
+    },
+    "cb2": {
+      "triggered": true,
+      "threshold_usdc": 25.0,
+      "triggered_at": "2026-10-18T04:42:54.193310+00:00",
+      "wallet_equity_at_trigger": 23.6901,
+      "disarm_requires_equity_above": 25.0,
+      "soft_floor_configured": false
+    },
+    "daily_stop": {"stopped": false, "day": "2026-10-18", "start_bankroll": 26.9201},
+    "weekly_stop": {"stopped": false, "loss_pct": 12.0, "window_h": 168.0},
+    "settlement_paused": false,
+    "dry_run": false,
+    "window": {"open_min_before": 720, "close_min_before": 2, "label": "T-720..T-2"},
+    "limits": {
+      "order_ceiling_usdc": 2.532048,
+      "kelly_max_stake_pct": 0.12,
+      "min_ticket_usdc": 1.0,
+      "exchange_min_stake_usdc": 1.0,
+      "open_exposure_cap_pct": 0.7,
+      "open_exposure_cap_usdc": 14.7703,
+      "correlation_cap_pct": 0.3,
+      "required_depth_usdc_at_stake_1_5": 20.0,
+      "daily_stop_pct": 0.05,
+      "weekly_stop_pct": 0.12
+    },
+    "market_feed": {"blocked": false, "reason": "", "checked_at": null},
+    "credits": {
+      "remaining": 31,
+      "window_hours": 46.5,
+      "rate_per_day": 70.7,
+      "sustainable_per_day": 2.8,
+      "days_to_reset": 11,
+      "exhaustion_date": "2026-10-21",
+      "alert": true,
+      "hard_stop_threshold": 5,
+      "budgets": {
+        "oracle_line_per_day": 12,
+        "oracle_h2h_per_day": 40,
+        "oracle_h2h_used_today": 0,
+        "gridiron_credit_budget_day": 60
+      },
+      "burn_48h_by_path": {
+        "oracle_nfl_3cr": 48,
+        "oracle_ncaaf_3cr": 48,
+        "oracle_tennis_1cr": 5,
+        "settlement_2cr": 14,
+        "rotation_1cr": 10
+      }
+    }
+  },
+  "ledger": {
+    "live_bets_total": 80,
+    "live_bets_closed": 80,
+    "live_staked_usdc": 208.145,
+    "live_pnl_usdc": -15.39,
+    "live_roi_pct": -7.39,
+    "by_market": {
+      "1X2": {"bets": 34, "staked": 99.935, "pnl": -9.94, "roi_pct": -9.95},
+      "TENNIS": {"bets": 46, "staked": 108.21, "pnl": -5.45, "roi_pct": -5.04},
+      "AH": {"bets": 0, "staked": 0.0, "pnl": 0.0},
+      "OU": {"bets": 0, "staked": 0.0, "pnl": 0.0}
+    },
+    "last_settlement": {"bet_id": 80, "match": "1X2", "outcome": "won", "profit": 1.8, "settled_at": "2026-10-18T18:14:04Z"},
+    "open_predictions": 81,
+    "open_predictions_reasons": {"no_match_row": 16, "league_unmapped": 18, "not_started": 28, "awaiting_result": 19, "out_of_window": 0}
+  },
+  "reconciliation": {
+    "window": {"from": "2026-10-18T01:17:38Z", "to": "2026-10-18T22:33:23Z"},
+    "equity_start": 26.9201,
+    "equity_end": 21.1004,
+    "equity_delta": -5.8197,
+    "ledger_profit_in_window": -5.78,
+    "settlements_in_window": 6,
+    "residual_usdc": -0.0397,
+    "residual_pct_of_movement": 0.68,
+    "verdict": "riconciliato (differenza di arrotondamento)",
+    "since_last_sample": {"movements": 0, "equity_unchanged": true},
+    "historical_unresolved": {
+      "date": "2026-10-17",
+      "amount_usdc": 2.26,
+      "status": "non riproducibile nella finestra attuale; SX Bet non espone lo storico ordini (7 endpoint provati), quindi non e' attribuibile"
+    }
+  },
+  "signals": {
+    "playable_open_1x2_rows": 35,
+    "playable_open_1x2_selected": 3,
+    "order_ready_candidates": 3,
+    "candidates_detail": [
+      {"match": "Tigres - Leon", "league": "Liga MX", "kickoff_utc": "2026-10-21T03:00:00Z", "selection": "1", "quota": 1.89, "market_prob": 0.52, "model_prob": 0.6255, "model_ev": 0.1822, "verified_independent_prob": null},
+      {"match": "Porto - PSV", "league": "Champions League", "kickoff_utc": "2026-10-20T19:00:00Z", "selection": "1", "quota": 1.74, "market_prob": 0.5775, "model_prob": 0.6504, "model_ev": 0.1317, "verified_independent_prob": null},
+      {"match": "Napoli - Bodo/Glimt", "league": "Champions League", "kickoff_utc": "2026-10-20T19:00:00Z", "selection": "1", "quota": 1.64, "market_prob": 0.6068, "model_prob": 0.6666, "model_ev": 0.0923, "verified_independent_prob": null}
+    ],
+    "quotes": {
+      "market_quotes_rows": 21177,
+      "newest_updated_at": "2026-10-20T17:00:59Z",
+      "age_minutes": 19,
+      "types_present": ["AH", "AH_OT", "ML_OT", "OU", "OU_OT"],
+      "type_1x2_present": false,
+      "note": "il ledger market_quotes copre OU/AH/OT; per il 1X2 prezzo e profondita' sono letti al momento dell'ordine dal book pubblico SX"
+    },
+    "costs": {
+      "commission_modeled": false,
+      "commission_measured_pct": 0.0,
+      "commission_evidence": "profit == (quota-1) su 1294 righe saldate riconciliate con implementazione indipendente",
+      "slippage_modeled": false,
+      "slippage_measured": "80/80 fill a prezzo di segnale o migliore (max +4.6%); floor EV applicato al momento dell'ordine"
+    },
+    "protections": {
+      "stale_quotes": {"present": true, "mechanism": "decision/feeds gate, DECISION_FEED_MAX_AGE_MIN=20 + rilettura del book all'ordine"},
+      "suspended_market": {"present": true, "mechanism": "ri-risoluzione del mercato su /markets/active al momento dell'ordine (un mercato sospeso non e' risolvibile -> skip)"},
+      "duplicates": {"present": true, "mechanism": "bet_exists_open_market(market_id, selection_id) + claim atomico event_claims + dedup cross-corsia"},
+      "floor_ev": {"present": true, "mechanism": "riempimento solo a prezzo >= quota del segnale"},
+      "depth_guard": {"present": true, "mechanism": "max(stake x 1.6, 20) USDC al floor"}
+    }
+  },
+  "strategy_checks": {
+    "settlement_verified": {
+      "rows_checked": 1294,
+      "discrepancies": 0,
+      "coverage": "OU 840 (490 half, 350 integer con push) + AH 454 (10 quarter)",
+      "reference": "research_isolated/lab/ou_settlement.py + logica split AH"
+    },
+    "ou_quarter_line_defect": {
+      "status": "APERTO ma NON esercitato",
+      "detail": "tracker.ou_won tratta la quarter line come soglia secca: Over 2.75 con 3 gol paga +1.00 invece di +0.50 (simmetrico sull'Under)",
+      "rows_affected_historically": 0,
+      "test": "research_isolated/tests/test_ev_formula.py::test_ou_quarter_line_settlement_di_produzione (xfail strict)"
+    },
+    "ev_formula": {
+      "current": "EV = p_win*(quota-1) - p_lose (push-aware), verificata su tutti i candidati di analyze_fixture",
+      "legacy_artifact": {
+        "period": "fino al 2026-10-15",
+        "detail": "righe AH/OU con ev incoerente rispetto alla formula push-aware (max +11.64 su p*q-1, EV fino a +1278% con prob 11.5%)",
+        "impact": "le statistiche EV dichiarate per AH/OU su quelle righe NON sono utilizzabili",
+        "from": "2026-10-17 differenza esattamente 0 su tutte le righe"
+      }
+    },
+    "ah_ou_telemetry": {
+      "AH_strong_value": {"closed": 79, "pnl_units": -4.558, "roi_pct": -5.77, "declared_avg_ev": 0.1467, "declared_ev_valid": false},
+      "OU_strong_value": {"closed": 216, "pnl_units": -10.545, "roi_pct": -4.88, "declared_avg_ev": 0.1429, "declared_ev_valid": false},
+      "real_bets": 0,
+      "conclusion": "nessuna evidenza di edge: EV dichiarato non valido e nessun ordine realmente eseguito su questi mercati"
+    },
+    "clv": {
+      "trades": 80,
+      "samples": 58,
+      "pending": 22,
+      "avg_clv_pct": 3.6714,
+      "median_clv_pct": 3.2767,
+      "positive_share": 0.897,
+      "by_source": {"pinnacle_t0": {"n": 49, "avg": 0.044422}, "sx": {"n": 9, "avg": -0.005255}},
+      "status": "beating",
+      "min_samples": 30,
+      "caveat": "58 campioni: il minimo edge distinguibile a questa numerosita' e' molto sopra il +3.7% osservato; CLV positivo NON equivale a edge dimostrato"
+    }
+  },
+  "checks": {
+    "passed": [
+      "salute servizio: health 200, nessun 429/401/403/traceback nei log (unico ERROR = messaggio intenzionale 'modalita off')",
+      "nessun capitale immobilizzato: 0 bet aperte, 0 ordini resting",
+      "riconciliazione finestra corrente: residuo -0.04 USDC su -5.82 di movimento",
+      "aricmetica di settlement verificata su 1294 righe contro implementazione indipendente: 0 discrepanze",
+      "commissioni: 0% misurate, coerenti col P/L registrato",
+      "slippage: 80/80 fill a prezzo di segnale o migliore",
+      "protezioni presenti: dedup per (market_id, selection_id), claim atomico, gate freschezza 20', ri-risoluzione mercato, floor EV, guardia profondita', finestra T-720..T-2",
+      "feed di mercato non bloccato",
+      "una sola fonte di verita' per stake/tetto/recinto (order_ceiling 2.53 coerente con 12% di 21.10)"
+    ],
+    "failed": [
+      "CB2 armato con equity 21.10 < 25.00: il riavvio LIVE si auto-arresta (riarmo immediato dopo /t60reset)",
+      "crediti residui 31 (sostenibili 2.8/giorno, consumo misurato 70.7/giorno): oracolo indipendente non copre un test significativo",
+      "nessuna evidenza di edge a livello di denaro: 80 bet, -15.39 USDC, ROI -7.39%",
+      "EV dichiarato AH/OU non valido sulle righe pre-16/10 (fonte di ogni analisi 'EV vs ROI' su quei mercati)"
+    ]
+  },
+  "blocking_risks": [
+    {"id": "R1", "severity": "blocking", "risk": "CB2 armato e equity sotto la soglia: ogni tentativo LIVE viene arrestato al primo ciclo", "mitigation": "deposito (equity > 25.00, raccomandato >= 30.00) e poi /t60reset; NON abbassare la soglia"},
+    {"id": "R2", "severity": "blocking", "risk": "crediti 31 con hard stop a 5: il gate indipendente (Pinnacle) si spegne dopo ~26 fetch", "mitigation": "top-up prima del riavvio; ridurre ORACLE_BUDGET_DAY (12 -> 2) e azzerare il budget gridiron (torneo chiuso il 20/10 13:00Z)"},
+    {"id": "R3", "severity": "high", "risk": "edge non dimostrato sui mercati realmente giocati (ROI -7.39% su 208 staked; CLV +3.7% su 58 campioni sotto la soglia di rilevabilita')", "mitigation": "solo paper finche' non si accumulano >= 50 chiusure dell'era corrente con CLV e ROI coerenti"},
+    {"id": "R4", "severity": "medium", "risk": "OU quarter line non gestita dal settlement (latente: 0 righe storiche)", "mitigation": "correggere tracker.ou_won prima di qualunque ordine OU su linee .25/.75"},
+    {"id": "R5", "severity": "medium", "risk": "residuo storico -2.26 USDC non attribuibile (nessuno storico ordini su SX)", "mitigation": "accettato come limite, monitorare i nuovi residui con equity_reconciler"},
+    {"id": "R6", "severity": "low", "risk": "spazio volume 224M/434M (53%); book_flow_events.jsonl 68 MB in crescita", "mitigation": "rotazione/compattazione prima del riavvio"}
+  ],
+  "missing_data": [
+    "prezzo e profondita' eseguibili per i 3 candidati 1X2: non verificabili offline (letti dal book solo al momento dell'ordine)",
+    "probabilita' indipendente per i candidati correnti: non calcolata in questo audit (nessun credito speso; il gate la calcolerebbe on-demand)",
+    "storico ordini SX (accettati/cancellati): non esposto dall'exchange",
+    "39 push su TENNIS provengono da scadenza senza risultato: il ROI tennis e' calcolato con push a 0 e non riflette solo match conclusi"
+  ],
+  "restart_conditions": [
+    "equity wallet >= 30.00 USDC (margine >= 5.00 sul CB2 a 25.00, cioe' ~3 puntate da 1.50)",
+    "crediti the-odds-api >= 60 prima del primo ordine; ORACLE_BUDGET_DAY 12 -> 2; budget oracolo gridiron -> 0 (torneo chiuso)",
+    "CB2 disinnescato SOLO dopo il deposito: /t60reset (con equity > 25 non si riarma), poi /autobet live",
+    "perimetro ristretto: solo 1X2, stake fisso 1.00 USDC, massimo 1 bet aperta finche' non si contano 20 chiusure",
+    "nessun ordine OU/AH (0 bet reali in tutta la storia, EV storico non valido) e nessun ordine gridiron fuori torneo",
+    "gate di lega attivo (core; probation a stake ridotto), finestra T-720..T-2, stop giornaliero 5% e settimanale 12% invariati",
+    "accettazione di ogni ordine: fill >= prezzo del segnale, bet_id presente, settlement entro 24h, residuo di riconciliazione giornaliero < 0.10 USDC",
+    "rollback automatico: 10 puntate con P/L cumulato < -3.00 USDC oppure residuo inspiegato > 0.50 USDC -> /autobet off e nuovo audit"
+  ],
+  "do_not_do": [
+    "non disinnescare il CB2 senza un deposito (si riarma e l'arresto resta)",
+    "non abbassare T60_KILL_WALLET_USDC per far passare un ordine",
+    "non alzare KELLY_MAX_STAKE_PCT per aggirare il tetto di 2.53 USDC",
+    "non riaccendere l'oracolo a linea OU/AH senza line_intersection a supporto"
+  ],
+  "artifacts": {
+    "report": "research_isolated/out/LIVE_RECOVERY_REPORT.md",
+    "tests_added": "research_isolated/tests/test_ev_formula.py",
+    "reference_impl": "research_isolated/lab/ou_settlement.py",
+    "tests_status": "37 passed, 1 xfailed (bug quarter line documentato)"
+  }
+}

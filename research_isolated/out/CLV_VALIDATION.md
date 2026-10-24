@@ -1,0 +1,212 @@
+# CLV VALIDATION — verifica indipendente del CLV osservato
+
+Generato: `2026-10-20T23:18:52.215425+00:00` · snapshot `quotaverace_prod.db` · estratto 0.4h fa
+sha256 dello snapshot: `e1cb0769393d15e5caaa7e3e38d9097a…` (la copia e' la stessa su cui e' stata fatta la misura: senza questo un numero non e' riproducibile).
+
+## Conclusione obbligatoria
+
+**DATI INSUFFICIENTI**
+
+- calcolo riproducibile dalle colonne grezze: **sì**
+- coorte primaria: **verified**
+- replicabile: **no**
+- promozione consentita: **no** — nessuna promozione: il CLV da solo non basta (direttiva 20/10/2026: non promuovere una strategia sulla sola base del CLV)
+- la coorte primaria ha CI95 interamente sopra zero
+- copertura della chiusura 70%: il campione non descrive tutte le puntate eseguite
+- nessun campione PROSPETTICO: la finestra di 7 giorni non e' ancora stata percorsa
+- il CLV cresce in modo MONOTONO con la quota: la differenza di prezzo fra exchange e sharp sui longshot spiega il numero almeno quanto un vantaggio (il ROI per fascia dice che e' cosi')
+- contro la chiusura dello STESSO exchange in cui compriamo il CLV e' -0.53%: il vantaggio, se c'e', e' nel prezzo relativo al benchmark, non nell'esecuzione
+
+## 1. Definizione matematica
+
+`clv_gross = quota_acquisto / quota_chiusura - 1` — positivo = abbiamo comprato a un prezzo migliore della chiusura.
+
+Formula del progetto: `market_calib.clv_raw (verificata riga per riga)`. Il controllo riga per riga riporta **0 discrepanze** su 57 osservazioni.
+
+⚠️ Vig-free: solo con il mercato COMPLETO (market_calib.devig, power).
+
+## 2. Dataset e trappole
+
+- puntate LIVE: **81** · misurate: **57** · senza chiusura: **24**
+- escluse e contate: `echo_signal` 1, `no_closing_row` 23
+- provenienza delle chiusure a ledger: `closing:sharp_declared` 43, `closing:sharp_legacy` 37, `closing:venue_internal` 9, `reference:closing_quota` 82, `reference:pinnacle_quota` 304
+
+Convenzione delle fonti: `closing_odds?` (col punto interrogativo) = chiusura scritta PRIMA che la colonna `closing_source` esistesse (13/10): il numero e' misurabile, la fonte no. Nel CSV la classe sta in `closing_source_class`, cosi' un `?` non passa per una fonte.
+
+Distanza della chiusura dal fischio (`closing_ts` vs kickoff): mediana **8.3 min PRIMA**, p90 **5.4 min prima**; catturata DOPO il kickoff nel 0.00% (lì il prezzo è in-play, non una chiusura) e più di 30' prima nel 0.00% · 44 righe senza kickoff (non misurabili).
+
+Prezzo di riferimento (quale colonna lo fornisce): `closing_quota` 9, `pinnacle_quota` 48 — `clv_history` non ha un timestamp per il prezzo di riferimento: `updated_at` e' l'istante della CHIUSURA. Il riferimento si usa come confronto di prezzo, mai come chiusura.
+
+- ECHO (chiusura VERA = quota d'acquisto, CLV 0 per costruzione): **1/475** righe (0.21%) — escluse dal campione
+- SEME (`closing_quota` copiata da `signal_quota`, NON e' una chiusura): **411/475** righe — rifiutate come closing a monte
+
+## 3. Il confronto con la produzione
+
+| | valore | n |
+|---|---|---|
+| questo modulo (grezzo) | **+3.73%** | 57 |
+| `clv_tracker` (produzione) | +3.67% | 58 |
+
+Osservazioni confrontate una per una: **57** · discrepanze oltre 1e-6: **0** · differenza massima: 0.0
+
+### La stessa formula con le ALTRE definizioni di "chiusura"
+
+| colonna usata come chiusura | CLV | n | perché è sbagliata |
+|---|---|---|---|
+| `closing_odds` (usata) | **+3.73%** | 57 | è la chiusura vera, T-0 |
+| riferimento sharp (`pinnacle_quota`) | +3.81% | 57 | misura il movimento fino al SEGNALE, non fino al fischio |
+| `closing_quota` (seme del segnale) | -0.04% | 57 | è una COPIA della quota d'acquisto: CLV ≈ 0 per costruzione |
+
+Se le tre dessero lo stesso numero la scelta della colonna sarebbe irrilevante. Non la danno: il numero dipende dalla definizione, quindi la definizione va dichiarata (e lo è, nel protocollo congelato).
+
+## 4. CLV per coorti PREREGISTRATE
+
+Protocollo: `clv_prereg.json` · sha256 `a4fc00370c4cec2c…` · congelato `2026-10-20T21:00:00+00:00`
+
+| coorte | n | CLV grezzo | IC95 | positivi | ROI realizzato | stato |
+|---|---|---|---|---|---|---|
+| **C1** tutte le puntate eseguite con chiusura misurata (PRIMARIA) | 57 | +3.73% | [+2.46%, +4.97%] | 78.95% | -11.29% | verified |
+| C2 solo chiusure con fonte DICHIARATA | 24 | +3.42% | [+1.69%, +5.08%] | 87.50% | -23.65% | insufficient |
+| C3 solo chiusure legacy (fonte non dichiarata) | 24 | +5.62% | [+3.86%, +7.33%] | 91.67% | +28.10% | insufficient |
+| C4 calcio 1X2 | 28 | +2.78% | [+0.32%, +4.99%] | 60.71% | -22.53% | insufficient |
+| C5 tennis | 29 | +4.64% | [+3.61%, +5.68%] | 96.55% | +0.27% | insufficient |
+| C6 ordini con >= 6h di anticipo | 8 | +2.25% | [+0.56%, +3.72%] | 75.00% | -47.96% | insufficient |
+| C7 ordini con < 6h di anticipo | 5 | -1.89% | [-4.45%, -0.48%] | 0.00% | -52.92% | insufficient |
+| C8 fascia quota 1.30-1.80 | 27 | +1.82% | [+0.95%, +2.70%] | 70.37% | -10.01% | insufficient |
+| C9 fascia quota 1.80-2.20 | 21 | +3.05% | [+1.50%, +4.37%] | 80.95% | -10.97% | insufficient |
+| C10 fascia quota >= 2.20 | 9 | +11.03% | [+6.63%, +14.32%] | 100.00% | -19.49% | insufficient |
+| C11 chiusura dell'EXCHANGE in cui compriamo (controllo) | 9 | -0.53% | [-0.97%, -0.14%] | 22.22% | -60.95% | insufficient |
+
+Le coorti sono definite in un file congelato (predicati su variabili ex-ante; il campo `clv` e' rifiutato per costruzione). La primaria e' l'insieme misurato, non una fascia scelta guardando i risultati.
+
+## 5. Separazione delle quattro grandezze
+
+| grandezza | valore | n |
+|---|---|---|
+| CLV grezzo | +3.73% [+2.46%, +4.97%] | 57 |
+| CLV vig-free | +5.49% | 6 |
+| ↳ CLV grezzo sugli STESSI campioni | +10.18% | 6 |
+| ROI realizzato | -11.29% (IC95 [-33.87%, +11.24%]) | 57 |
+| slippage / line shopping | +0.19% (mediana +0.00%) | 57 |
+
+Line shopping: pagato **peggio** del segnale nel 29.82% dei casi; differenze oltre l'1% nel 24.56%. Non ci sono fee a ledger: questo e' l'unico costo misurabile.
+
+⚠️ Il vig-free copre **6/57** campioni (dove il mercato e' completo): la sua media NON si confronta con quella del campione intero, solo con il grezzo appaiato qui sopra. La direzione (grezzo vs vig-free) dipende da dove stanno le puntate rispetto al favorito: sui favoriti il de-vig alza la probabilita' fair e il vig-free scende, sui longshot succede l'opposto.
+
+Il vig-free non e' misurabile sul campione intero (mancano i mercati completi). Forchetta dichiarata, non misurata: con un overround del 3-5% il CLV vig-free sta in **[+2.33%, +2.73%]** — il grezzo sovrastima, non sottostima.
+
+Il ROI realizzato copre 57 puntate: con un CLV vero del +3.73% e una sd del P/L unitario di ~1, la deviazione standard della media supera il 10% — il ROI non e' una prova contro il CLV a questa dimensione, e il CLV non e' una prova per il ROI.
+
+## 6. Ripartizioni
+
+### Per provenienza della chiusura
+
+| gruppo | n | CLV | IC95 | ROI | stato |
+|---|---|---|---|---|---|
+| sharp_declared | 24 | +3.42% | [+1.69%, +5.08%] | -23.65% | insufficient |
+| sharp_legacy | 24 | +5.62% | [+3.86%, +7.33%] | +28.10% | insufficient |
+| venue_internal | 9 | -0.53% | [-0.97%, -0.14%] | -60.95% | insufficient |
+
+### Per sport
+
+| gruppo | n | CLV | IC95 | ROI | stato |
+|---|---|---|---|---|---|
+| football | 28 | +2.78% | [+0.32%, +4.99%] | -22.53% | insufficient |
+| tennis | 29 | +4.64% | [+3.61%, +5.68%] | +0.27% | insufficient |
+
+### Per fascia quota (confini fissi)
+
+| gruppo | n | CLV | IC95 | ROI | stato |
+|---|---|---|---|---|---|
+| 1.30-1.80 | 27 | +1.82% | [+0.95%, +2.70%] | -10.01% | insufficient |
+| 1.80-2.20 | 21 | +3.05% | [+1.50%, +4.37%] | -10.97% | insufficient |
+| >=2.20 | 9 | +11.03% | [+6.63%, +14.32%] | -19.49% | insufficient |
+
+### Per anticipo dell'ordine
+
+| gruppo | n | CLV | IC95 | ROI | stato |
+|---|---|---|---|---|---|
+| <6h | 5 | -1.89% | [-4.45%, -0.48%] | -52.92% | insufficient |
+| >=6h | 8 | +2.25% | [+0.56%, +3.72%] | -47.96% | insufficient |
+| n/d (kickoff non a ledger) | 44 | +4.63% | [+3.24%, +6.01%] | -1.42% | verified |
+
+⚠️ `n/d` = **44/57** campioni senza kickoff a ledger: la tabella `matches` viene potata (`clear_old_matches`), quindi l'anticipo dell'ordine NON e' ricostruibile per la maggior parte delle puntate. Le coorti C6/C7 sono leggibili solo sul residuo e non bastano a dire che il meccanismo sia il tempo.
+
+### Gradiente per quota (l'alternativa da escludere)
+
+| fascia | n | CLV | IC95 | ROI realizzato |
+|---|---|---|---|---|
+| 1.30-1.80 | 27 | +1.82% | [+0.95%, +2.70%] | -10.01% |
+| 1.80-2.20 | 21 | +3.05% | [+1.50%, +4.37%] | -10.97% |
+| >=2.20 | 9 | +11.03% | [+6.63%, +14.32%] | -19.49% |
+
+Correlazione quota/CLV: **0.716007998473291** (n=57). il CLV cresce con la quota in modo monotono: la differenza di prezzo exchange/sharp sui longshot spiega il numero tanto quanto un vantaggio, e il ROI per fascia dice quale delle due regge
+
+### Media CUMULATA per data d'acquisto (il numero e' stabile?)
+
+| fino al | n | CLV cumulato |
+|---|---|---|
+| 2026-10-05 | 2 | +2.25% |
+| 2026-10-07 | 7 | +5.87% |
+| 2026-10-08 | 11 | +4.95% |
+| 2026-10-09 | 14 | +4.79% |
+| 2026-10-10 | 15 | +4.94% |
+| 2026-10-11 | 21 | +5.55% |
+| 2026-10-12 | 30 | +5.17% |
+| 2026-10-13 | 31 | +5.09% |
+| 2026-10-14 | 41 | +4.85% |
+| 2026-10-15 | 43 | +4.64% |
+| 2026-10-16 | 49 | +4.22% |
+| 2026-10-17 | 51 | +4.20% |
+| 2026-10-18 | 57 | +3.73% |
+
+la seconda meta' del campione vale -2.74pp della prima: la cumulata scende man mano che si aggiunge campione (il numero migliore e' quello iniziale)
+
+**Riproduzione del numero citato** (`+4,54%` su 45 osservazioni, AGENTS.md 16/10): sulle prime **45** osservazioni per istante d'acquisto il CLV e' **+4.61%** (delta +0.07pp contro il citato, tolleranza 0.1pp) → **riprodotto**. Sull'intera serie di oggi (57 osservazioni) il valore e' **+3.73%**: il +4,54% e' una fotografia di un campione piu' piccolo, non un errore di calcolo — ed e' il motivo per cui la verifica si fa sull'intera serie.
+
+## 7. Selezione del campione (la trappola che falsa il CLV)
+
+- puntate con chiusura: **57** · P/L -17.85 su 158.1149 stake → ROI **-11.29%**
+- puntate senza chiusura: **23** · P/L 2.46 su 51.87 stake → ROI **+4.74%**
+- copertura: **70.37%**
+
+Se le due popolazioni hanno ROI diversi, il campione con chiusura NON e' casuale e il CLV descrive quel sottoinsieme, non la strategia.
+
+## 8. Raccolta prospettica (shadow)
+
+- giorni coperti: **0/7** · osservazioni PROSPETTICHE: 7 · pre-congelamento (storico, non contate): 45 · ipotesi congelata: `H-CLV-1`
+- **ipotesi (una sola)**: Sui segnali 1X2 giocabili (value/strong_value/moderate) nati dopo il 20/10/2026 21:00 UTC, il CLV grezzo contro la chiusura sharp T-0 e' > 0 con limite inferiore del CI95 > 0 su n >= 30.
+- falsificazione: n >= 30 e CI95 interamente sotto zero -> ipotesi respinta. CI95 che include lo zero -> non conclusa, non promossa.
+- pronta per l'analisi: **no** — finestra in corso: 0/7 giorni, 7 segnali distinti (servono >= 30 con chiusura per concludere qualcosa)
+
+Come si raccoglie (operativo, nessun ordine in nessun passo):
+
+```bash
+# 1) snapshot fresco del volume (sola copia, sqlite backup) — una volta al giorno
+#    railway ssh --service betting_bot -- python3 - <<'PY' > snapshot.b64
+# 2) registra i segnali APERTI del momento (idempotente per signal_id)
+QV_RESEARCH_DB=research_isolated/snapshot/quotaverace_prod.db \
+  venv/bin/python -m research_isolated.lab.clv_shadow record
+# 3) stato della finestra / analisi quando i 7 giorni sono percorsi
+  venv/bin/python -m research_isolated.lab.clv_shadow status
+  venv/bin/python -m research_isolated.lab.clv_shadow analyse
+```
+
+Il registro e' `research_isolated/out/clv_shadow/signals.jsonl` (append-only, fuori dal ledger): registra OGNI segnale 1X2 aperto, compresi quelli che la corsia non avrebbe giocato. Nessuna credenziale, nessuna scrittura, nessun ordine: la chiusura la scrive gia' la produzione (`closing_line`).
+
+## 9. Limiti (dichiarati, non aggirati)
+
+1. **Una sola era.** Le 57 osservazioni vengono da 2026-10-05 a 2026-10-18 (13 giorni) di un'unica configurazione (fascia 1.20-2.00, gate EV 1,5%, Kelly 12%). Non e' un holdout: e' il campione che ha generato l'ipotesi.
+2. **Chiusura sharp non certificata.** Il valore a T-0 viene dalla cache del provider sharp: `clv_history` non registra l'eta' di quella cache, quindi la chiusura e' "l'ultima lettura disponibile prima del fischio", non necessariamente il prezzo di chiusura ufficiale. Una cache stantia comprime il CLV verso zero (non lo gonfia), quindi la direzione resta.
+3. **Provenienza parziale.** Le chiusure scritte prima del 13/10 non dichiarano la fonte: sono tenute in una classe separata (`sharp_legacy`) e misurate anche da sole.
+4. **Nessun benchmark indipendente.** Il secondo sharp (Betfair) copre 6 osservazioni: insufficiente per una conferma.
+5. **Liquidita' non disponibile** per 1X2 e tennis (`market_quotes` persiste solo OU/AH): il campo e' `n/d` con il motivo, non stimato.
+6. **Risultato finale** e' quello del ledger (`bets.esito_finale`), non riverificato contro la fonte dell'exchange in questo modulo.
+
+## 10. Cosa serve per cambiare il verdetto
+
+- percorrere la finestra prospettica di **7 giorni** (>= 30 segnali con chiusura) sull'ipotesi congelata, senza ordini;
+- una chiusura con **fonte dichiarata** per ogni osservazione (il job la scrive dal 13/10: le nuove lo fanno);
+- il **secondo benchmark** popolato (Betfair) per la conferma indipendente;
+- **un'era diversa** per il test di replicabilita': stesso segno su un periodo che non ha contribuito a generare l'ipotesi.
+

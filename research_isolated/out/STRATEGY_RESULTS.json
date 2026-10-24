@@ -1,0 +1,2688 @@
+{
+  "generated_at": "2026-10-20T18:58:07.026198+00:00",
+  "snapshot": {
+    "path": "/home/siryo/quotaverace/research_isolated/snapshot/quotaverace_20261020_2040.db",
+    "quick_check": "ok",
+    "tables": {
+      "bets": 80,
+      "cassa": 0,
+      "clv_history": 475,
+      "decisions": 0,
+      "event_claims": 1,
+      "market_quotes": 21203,
+      "match_analysis": 1844,
+      "match_results": 17846,
+      "matches": 675,
+      "notifications": 155,
+      "predictions": 2212,
+      "price_snapshots": 10295,
+      "signals": 0,
+      "sqlite_sequence": 4,
+      "subscribers": 0,
+      "sync_state": 82,
+      "team_ratings": 786,
+      "tennis_elo_applied": 43,
+      "tennis_elo_ratings": 172,
+      "tennis_elo_surfaces": 38
+    }
+  },
+  "capital": {
+    "measured_at": "2026-10-20T03:25Z",
+    "sx_available_usdc": 21.1004,
+    "sx_exposure_usdc": 0.0,
+    "sx_escrow_usdc": 0.0,
+    "source": "execution_engine.py --provider sxbet --balance (SX user/balance-v3), dal container",
+    "exchange_constraints": {
+      "min_order_usdc": 1.0,
+      "min_ticket_motore_usdc": 1.0,
+      "cap_per_ordine_pct": 0.12,
+      "cap_per_ordine_usdc": 2.5321,
+      "recinto_esposizione_pct": 0.7
+    },
+    "kill_switch_patrimoniale": {
+      "armed": true,
+      "triggered_at": "2026-10-18T04:42:54Z",
+      "wallet_equity_usdc": 23.6901,
+      "threshold_usdc": 25.0,
+      "consequence": "nessun ordine reale da 2 giorni (ultima bet 18/10 04:01)"
+    }
+  },
+  "ledger": {
+    "n_bets": 80,
+    "stake_total": 208.14489999999998,
+    "pl": -15.39,
+    "roi": -0.07393887623477684,
+    "by_market": {
+      "1X2": {
+        "n": 34,
+        "stake": 99.9349,
+        "pl": -9.94,
+        "roi": -0.09946475155326116,
+        "avg_price": 2.0725676470588237,
+        "won": 17,
+        "lost": 17,
+        "push": 0
+      },
+      "TENNIS": {
+        "n": 46,
+        "stake": 108.21000000000002,
+        "pl": -5.45,
+        "roi": -0.050365030958321774,
+        "avg_price": 2.4781586956521737,
+        "won": 23,
+        "lost": 23,
+        "push": 0
+      }
+    },
+    "roi_ci95": [
+      -0.31083766037235777,
+      0.07103968357110624
+    ],
+    "price_bands": [
+      {
+        "n": 6,
+        "roi": 0.3298451234826287,
+        "ci95": [
+          0.3107426099495314,
+          0.3557571411051449
+        ],
+        "stake": 23.89,
+        "pl": 7.88,
+        "hit_rate": 1.0,
+        "avg_odds": 1.3361166666666666,
+        "clusters": 6,
+        "band": "1.2-1.4",
+        "status": "DA VERIFICARE"
+      },
+      {
+        "n": 11,
+        "roi": 0.031668299053215825,
+        "ci95": [
+          -0.47347664741212486,
+          0.3618482962217086
+        ],
+        "stake": 30.63,
+        "pl": 0.9700000000000006,
+        "hit_rate": 0.6363636363636364,
+        "avg_odds": 1.4778636363636364,
+        "clusters": 11,
+        "band": "1.4-1.6",
+        "status": "DA VERIFICARE"
+      },
+      {
+        "n": 18,
+        "roi": -0.18240768116740916,
+        "ci95": [
+          -0.5936043352702192,
+          0.2187860773209446
+        ],
+        "stake": 59.8659,
+        "pl": -10.92,
+        "hit_rate": 0.5,
+        "avg_odds": 1.6841,
+        "clusters": 18,
+        "band": "1.6-1.8",
+        "status": "DA VERIFICARE"
+      },
+      {
+        "n": 19,
+        "roi": 0.03423084950949697,
+        "ci95": [
+          -0.399798604688193,
+          0.5009339313385603
+        ],
+        "stake": 47.91,
+        "pl": 1.64,
+        "hit_rate": 0.5789473684210527,
+        "avg_odds": 1.9058105263157894,
+        "clusters": 19,
+        "band": "1.8-2.0",
+        "status": "DA VERIFICARE"
+      },
+      {
+        "n": 16,
+        "roi": -0.13396803808228494,
+        "ci95": [
+          -0.6728397241825913,
+          0.423446880057369
+        ],
+        "stake": 29.41,
+        "pl": -3.9400000000000004,
+        "hit_rate": 0.375,
+        "avg_odds": 2.2745375,
+        "clusters": 16,
+        "band": "2.0-2.5",
+        "status": "DA VERIFICARE"
+      },
+      {
+        "n": 10,
+        "roi": -0.6703570776811242,
+        "ci95": [
+          -1.000683254569265,
+          0.011830340464745553
+        ],
+        "stake": 16.439,
+        "pl": -11.02,
+        "hit_rate": 0.1,
+        "avg_odds": 5.72726,
+        "clusters": 8,
+        "band": "2.5-+",
+        "status": "DA VERIFICARE"
+      }
+    ]
+  },
+  "clv_process": {
+    "n": 475,
+    "mean": 0.005462957642911735,
+    "median": 0.0,
+    "share_positive": 0.2,
+    "p10": -0.005780346820809301,
+    "p90": 0.03350140056022411,
+    "ci95": [
+      0.00297028703766468,
+      0.008093717089056282
+    ],
+    "t": 4.118048957902188,
+    "non_echo": {
+      "n": 150,
+      "mean": 0.017299365869220498,
+      "share_positive": 0.6333333333333333
+    },
+    "by_source": {
+      "nan": {
+        "n": 423,
+        "mean": 0.0026746873073261695,
+        "ci95": [
+          0.0004455505625734682,
+          0.005059034808797231
+        ]
+      },
+      "sx": {
+        "n": 9,
+        "mean": -0.005255487864927207,
+        "ci95": [
+          -0.009526396226602722,
+          -0.0013073088398412652
+        ]
+      },
+      "pinnacle_t0": {
+        "n": 43,
+        "mean": 0.03513515209694069,
+        "ci95": [
+          0.02048417226063754,
+          0.05042088620032114
+        ]
+      }
+    }
+  },
+  "strategies": {
+    "value_1x2": {
+      "family": "value_betting",
+      "description": "1X2, favorito di mercato (p>=0.50), quota 1.20-2.00, edge>=1pp, EV>=1.5%",
+      "ex_ante": true,
+      "params": {
+        "odds_min": 1.2,
+        "odds_max": 2.0,
+        "min_edge": 0.01,
+        "min_ev": 0.015
+      },
+      "full": {
+        "n": 78,
+        "roi": 0.11381923076923077,
+        "roi_ci95": {
+          "n": 78,
+          "mean": 0.11381923076923077,
+          "lo": -0.052493589743589746,
+          "hi": 0.28002435897435896,
+          "clusters": 78
+        },
+        "sd": 0.7563675280031411,
+        "t": 1.3290155789700377,
+        "max_drawdown": 5.053700000000001,
+        "hit_rate": 0.6538461538461539,
+        "hit_ci95": [
+          0.543301943767048,
+          0.7499479609368923
+        ],
+        "avg_odds": 1.639819230769231,
+        "required_bets_for_2pct": 5495,
+        "label": "value_1x2 (tutto)",
+        "won": 51,
+        "lost": 23,
+        "push": 4,
+        "push_share": 0.05128205128205128,
+        "matches": 78,
+        "days_span": 16.06,
+        "bets_per_day": 4.856065650615567,
+        "clv": {
+          "n": 26,
+          "mean": -0.003002830152472948,
+          "median": -0.004778871506920468,
+          "positive_share": 0.38461538461538464,
+          "ci95": [
+            -0.024359417369388705,
+            0.021952861459073564
+          ],
+          "source_mix": {
+            "pinnacle_t0": "13",
+            "sx": "8"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 78,
+          "min_detectable_edge": 0.2399326836388083,
+          "required_n_for_2pct": 5495,
+          "required_n_for_1pct": 21977
+        }
+      },
+      "validation": {
+        "n": 58,
+        "roi": 0.03963620689655173,
+        "roi_ci95": {
+          "n": 58,
+          "mean": 0.03963620689655173,
+          "lo": -0.16057241379310344,
+          "hi": 0.24435,
+          "clusters": 58
+        },
+        "sd": 0.7935581617212961,
+        "t": 0.38038844921770454,
+        "max_drawdown": 5.053700000000001,
+        "hit_rate": 0.5862068965517241,
+        "hit_ci95": [
+          0.45798408170855665,
+          0.7037197362591668
+        ],
+        "avg_odds": 1.659101724137931,
+        "required_bets_for_2pct": 6048,
+        "label": "value_1x2 (validation)",
+        "won": 34,
+        "lost": 20,
+        "push": 4,
+        "push_share": 0.06896551724137931,
+        "matches": 58,
+        "days_span": 13.75,
+        "bets_per_day": 4.219036397829711,
+        "clv": {
+          "n": 22,
+          "mean": -0.0035610098517416203,
+          "median": -0.008081915807804596,
+          "positive_share": 0.36363636363636365,
+          "ci95": [
+            -0.0272640941774733,
+            0.023661007867424467
+          ],
+          "source_mix": {
+            "pinnacle_t0": "9",
+            "sx": "8"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 58,
+          "min_detectable_edge": 0.29192319475477446,
+          "required_n_for_2pct": 6048,
+          "required_n_for_1pct": 24191
+        }
+      },
+      "holdout": {
+        "n": 20,
+        "roi": 0.32894999999999996,
+        "roi_ci95": {
+          "n": 20,
+          "mean": 0.32894999999999996,
+          "lo": 0.049969999999999994,
+          "hi": 0.565205,
+          "clusters": 20
+        },
+        "sd": 0.6031232661824001,
+        "t": 2.4391516707833487,
+        "max_drawdown": 2.0,
+        "hit_rate": 0.85,
+        "hit_ci95": [
+          0.6395811352592431,
+          0.9476312541037835
+        ],
+        "avg_odds": 1.5838999999999999,
+        "required_bets_for_2pct": 3494,
+        "label": "value_1x2 (holdout)",
+        "won": 17,
+        "lost": 3,
+        "push": 0,
+        "push_share": 0.0,
+        "matches": 20,
+        "days_span": 2.32,
+        "bets_per_day": 8.638671534681798,
+        "clv": {
+          "n": 4,
+          "mean": 6.71581935047516e-05,
+          "median": 0.011043747791732395,
+          "positive_share": 0.5,
+          "ci95": [
+            -0.05042622269365288,
+            0.03958394948243474
+          ],
+          "source_mix": {
+            "pinnacle_t0": "4"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 20,
+          "min_detectable_edge": 0.3778286805765913,
+          "required_n_for_2pct": 3494,
+          "required_n_for_1pct": 13974
+        }
+      }
+    },
+    "value_tight_1x2": {
+      "family": "value_betting",
+      "description": "1X2, quota 1.60-1.80, edge>=2pp, favorito di mercato",
+      "ex_ante": true,
+      "params": {},
+      "full": {
+        "n": 27,
+        "roi": 0.18738148148148145,
+        "roi_ci95": {
+          "n": 27,
+          "mean": 0.18738148148148145,
+          "lo": -0.10338888888888889,
+          "hi": 0.44987777777777777,
+          "clusters": 27
+        },
+        "sd": 0.7516193907091729,
+        "t": 1.2954199306269638,
+        "max_drawdown": 2.0,
+        "hit_rate": 0.6296296296296297,
+        "hit_ci95": [
+          0.4422923441210239,
+          0.784674870390344
+        ],
+        "avg_odds": 1.7161259259259258,
+        "required_bets_for_2pct": 5426,
+        "label": "value_tight_1x2 (tutto)",
+        "won": 17,
+        "lost": 7,
+        "push": 3,
+        "push_share": 0.1111111111111111,
+        "matches": 27,
+        "days_span": 15.2,
+        "bets_per_day": 1.7760854601498874,
+        "clv": {
+          "n": 12,
+          "mean": -0.01320429147869446,
+          "median": -4.633517605578952e-05,
+          "positive_share": 0.5,
+          "ci95": [
+            -0.04069489233342794,
+            0.013301909357518895
+          ],
+          "source_mix": {
+            "pinnacle_t0": "6",
+            "sx": "2"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 27,
+          "min_detectable_edge": 0.40524711427942295,
+          "required_n_for_2pct": 5426,
+          "required_n_for_1pct": 21702
+        }
+      },
+      "validation": {
+        "n": 24,
+        "roi": 0.19452499999999998,
+        "roi_ci95": {
+          "n": 24,
+          "mean": 0.19452499999999998,
+          "lo": -0.11962500000000002,
+          "hi": 0.47307083333333333,
+          "clusters": 24
+        },
+        "sd": 0.74482001809016,
+        "t": 1.2794688129803171,
+        "max_drawdown": 2.0,
+        "hit_rate": 0.625,
+        "hit_ci95": [
+          0.42709962442674276,
+          0.7884063244045122
+        ],
+        "avg_odds": 1.7156166666666666,
+        "required_bets_for_2pct": 5328,
+        "label": "value_tight_1x2 (validation)",
+        "won": 15,
+        "lost": 6,
+        "push": 3,
+        "push_share": 0.125,
+        "matches": 24,
+        "days_span": 12.78,
+        "bets_per_day": 1.8785703464590378,
+        "clv": {
+          "n": 11,
+          "mean": -0.01644595322494501,
+          "median": -0.0021708083404741174,
+          "positive_share": 0.45454545454545453,
+          "ci95": [
+            -0.044194432580983815,
+            0.010629887689933348
+          ],
+          "source_mix": {
+            "pinnacle_t0": "5",
+            "sx": "2"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 24,
+          "min_detectable_edge": 0.4259411085479962,
+          "required_n_for_2pct": 5328,
+          "required_n_for_1pct": 21311
+        }
+      },
+      "holdout": {
+        "n": 3,
+        "roi": 0.13023333333333328,
+        "roi_ci95": {
+          "n": 3,
+          "mean": 0.13023333333333328,
+          "lo": -1.0,
+          "hi": 0.7241,
+          "clusters": 3
+        },
+        "sd": 0.9792329157730214,
+        "t": 0.23035454235555153,
+        "max_drawdown": 1.0,
+        "hit_rate": 0.6666666666666666,
+        "hit_ci95": [
+          0.2076596008020477,
+          0.9385080552796037
+        ],
+        "avg_odds": 1.7202,
+        "required_bets_for_2pct": 9209,
+        "label": "value_tight_1x2 (holdout)",
+        "won": 2,
+        "lost": 1,
+        "push": 0,
+        "push_share": 0.0,
+        "matches": 3,
+        "days_span": 1.95,
+        "bets_per_day": 1.5382204270841469,
+        "clv": {
+          "n": 1,
+          "mean": 0.022453987730061575,
+          "median": 0.022453987730061575,
+          "positive_share": 1.0,
+          "ci95": [
+            0.022453987730061575,
+            0.022453987730061575
+          ],
+          "source_mix": {
+            "pinnacle_t0": "1"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 3,
+          "min_detectable_edge": 1.583905304585162,
+          "required_n_for_2pct": 9209,
+          "required_n_for_1pct": 36836
+        }
+      }
+    },
+    "value_capped_ev": {
+      "family": "value_betting",
+      "description": "1X2 come produzione MA con tetto EV 10% (EV alti = stima gonfiata)",
+      "ex_ante": true,
+      "params": {
+        "odds_min": 1.2,
+        "odds_max": 2.0,
+        "min_edge": 0.01,
+        "min_ev": 0.015,
+        "max_ev": 0.1
+      },
+      "full": {
+        "n": 59,
+        "roi": 0.19600847457627119,
+        "roi_ci95": {
+          "n": 59,
+          "mean": 0.19600847457627119,
+          "lo": 0.016284745762711862,
+          "hi": 0.3615847457627119,
+          "clusters": 59
+        },
+        "sd": 0.7071075451755444,
+        "t": 2.1291947332622074,
+        "max_drawdown": 4.2475,
+        "hit_rate": 0.711864406779661,
+        "hit_ci95": [
+          0.5861915342706008,
+          0.811635003641777
+        ],
+        "avg_odds": 1.6024288135593223,
+        "required_bets_for_2pct": 4802,
+        "label": "value_capped_ev (tutto)",
+        "won": 42,
+        "lost": 14,
+        "push": 3,
+        "push_share": 0.05084745762711865,
+        "matches": 59,
+        "days_span": 16.06,
+        "bets_per_day": 3.67317786392716,
+        "clv": {
+          "n": 16,
+          "mean": -0.015470170122259846,
+          "median": -0.008081915807804596,
+          "positive_share": 0.3125,
+          "ci95": [
+            -0.03491886310543319,
+            0.003062031545267928
+          ],
+          "source_mix": {
+            "sx": "7",
+            "pinnacle_t0": "6"
+          }
+        },
+        "status": "PROMETTENTE",
+        "power": {
+          "n": 59,
+          "min_detectable_edge": 0.2579071028211715,
+          "required_n_for_2pct": 4802,
+          "required_n_for_1pct": 19208
+        }
+      },
+      "validation": {
+        "n": 43,
+        "roi": 0.1410279069767442,
+        "roi_ci95": {
+          "n": 43,
+          "mean": 0.1410279069767442,
+          "lo": -0.0815953488372093,
+          "hi": 0.35355581395348834,
+          "clusters": 43
+        },
+        "sd": 0.7552265942923801,
+        "t": 1.2245090906491027,
+        "max_drawdown": 4.2475,
+        "hit_rate": 0.6511627906976745,
+        "hit_ci95": [
+          0.5017178199285205,
+          0.775814100026473
+        ],
+        "avg_odds": 1.626141860465116,
+        "required_bets_for_2pct": 5478,
+        "label": "value_capped_ev (validation)",
+        "won": 28,
+        "lost": 12,
+        "push": 3,
+        "push_share": 0.06976744186046512,
+        "matches": 43,
+        "days_span": 13.75,
+        "bets_per_day": 3.1279062949427168,
+        "clv": {
+          "n": 14,
+          "mean": -0.019257872681401594,
+          "median": -0.009198231079816876,
+          "positive_share": 0.2857142857142857,
+          "ci95": [
+            -0.04000879634159936,
+            0.0012711809204701036
+          ],
+          "source_mix": {
+            "sx": "7",
+            "pinnacle_t0": "4"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 43,
+          "min_detectable_edge": 0.32266130365599566,
+          "required_n_for_2pct": 5478,
+          "required_n_for_1pct": 21911
+        }
+      },
+      "holdout": {
+        "n": 16,
+        "roi": 0.34376875,
+        "roi_ci95": {
+          "n": 16,
+          "mean": 0.34376875,
+          "lo": 0.05902500000000001,
+          "hi": 0.5734875,
+          "clusters": 16
+        },
+        "sd": 0.551683920034833,
+        "t": 2.4925051285039785,
+        "max_drawdown": 1.0,
+        "hit_rate": 0.875,
+        "hit_ci95": [
+          0.639771727342413,
+          0.9650225122567595
+        ],
+        "avg_odds": 1.5387,
+        "required_bets_for_2pct": 2923,
+        "label": "value_capped_ev (holdout)",
+        "won": 14,
+        "lost": 2,
+        "push": 0,
+        "push_share": 0.0,
+        "matches": 16,
+        "days_span": 2.32,
+        "bets_per_day": 6.910937227745438,
+        "clv": {
+          "n": 2,
+          "mean": 0.011043747791732395,
+          "median": 0.011043747791732395,
+          "positive_share": 0.5,
+          "ci95": [
+            -0.0003664921465967863,
+            0.022453987730061575
+          ],
+          "source_mix": {
+            "pinnacle_t0": "2"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 16,
+          "min_detectable_edge": 0.38639737886005127,
+          "required_n_for_2pct": 2923,
+          "required_n_for_1pct": 11692
+        }
+      }
+    },
+    "value_capped_ev_tight": {
+      "family": "value_betting",
+      "description": "1X2 come produzione MA con tetto EV 6% (banda in cui l'EV e' calibrato)",
+      "ex_ante": true,
+      "params": {
+        "odds_min": 1.2,
+        "odds_max": 2.0,
+        "min_edge": 0.01,
+        "min_ev": 0.015,
+        "max_ev": 0.06
+      },
+      "full": {
+        "n": 48,
+        "roi": 0.21367916666666667,
+        "roi_ci95": {
+          "n": 48,
+          "mean": 0.21367916666666667,
+          "lo": 0.010074999999999995,
+          "hi": 0.40436458333333336,
+          "clusters": 48
+        },
+        "sd": 0.7010326234428792,
+        "t": 2.1117600568601844,
+        "max_drawdown": 3.5375,
+        "hit_rate": 0.7291666666666666,
+        "hit_ci95": [
+          0.5900303501775939,
+          0.8343404237254355
+        ],
+        "avg_odds": 1.5946,
+        "required_bets_for_2pct": 4720,
+        "label": "value_capped_ev_tight (tutto)",
+        "won": 35,
+        "lost": 11,
+        "push": 2,
+        "push_share": 0.041666666666666664,
+        "matches": 48,
+        "days_span": 16.06,
+        "bets_per_day": 2.9883480926865027,
+        "clv": {
+          "n": 11,
+          "mean": -0.012300135513648574,
+          "median": -0.008776896942242374,
+          "positive_share": 0.36363636363636365,
+          "ci95": [
+            -0.03538048192376794,
+            0.01043712733752088
+          ],
+          "source_mix": {
+            "sx": "6",
+            "pinnacle_t0": "4"
+          }
+        },
+        "status": "PROMETTENTE",
+        "power": {
+          "n": 48,
+          "min_detectable_edge": 0.28347936253804495,
+          "required_n_for_2pct": 4720,
+          "required_n_for_1pct": 18879
+        }
+      },
+      "validation": {
+        "n": 33,
+        "roi": 0.1716848484848485,
+        "roi_ci95": {
+          "n": 33,
+          "mean": 0.1716848484848485,
+          "lo": -0.10517272727272726,
+          "hi": 0.4225090909090909,
+          "clusters": 33
+        },
+        "sd": 0.7641905198972031,
+        "t": 1.2905870223504867,
+        "max_drawdown": 3.5375,
+        "hit_rate": 0.6666666666666666,
+        "hit_ci95": [
+          0.4960789442780561,
+          0.8024977232077931
+        ],
+        "avg_odds": 1.631239393939394,
+        "required_bets_for_2pct": 5609,
+        "label": "value_capped_ev_tight (validation)",
+        "won": 22,
+        "lost": 9,
+        "push": 2,
+        "push_share": 0.06060606060606061,
+        "matches": 33,
+        "days_span": 13.75,
+        "bets_per_day": 2.4004862263513873,
+        "clv": {
+          "n": 10,
+          "mean": -0.01577554783801959,
+          "median": -0.009198231079816876,
+          "positive_share": 0.3,
+          "ci95": [
+            -0.03914274480962919,
+            0.009569104611759994
+          ],
+          "source_mix": {
+            "sx": "6",
+            "pinnacle_t0": "3"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 33,
+          "min_detectable_edge": 0.3726906635192346,
+          "required_n_for_2pct": 5609,
+          "required_n_for_1pct": 22434
+        }
+      },
+      "holdout": {
+        "n": 15,
+        "roi": 0.30606666666666665,
+        "roi_ci95": {
+          "n": 15,
+          "mean": 0.30606666666666665,
+          "lo": -0.0015999999999999903,
+          "hi": 0.5354733333333334,
+          "clusters": 15
+        },
+        "sd": 0.5492969476218366,
+        "t": 2.1580150917665377,
+        "max_drawdown": 1.0,
+        "hit_rate": 0.8666666666666667,
+        "hit_ci95": [
+          0.6211801716767764,
+          0.9626387408969346
+        ],
+        "avg_odds": 1.5139933333333333,
+        "required_bets_for_2pct": 2898,
+        "label": "value_capped_ev_tight (holdout)",
+        "won": 13,
+        "lost": 2,
+        "push": 0,
+        "push_share": 0.0,
+        "matches": 15,
+        "days_span": 2.32,
+        "bets_per_day": 6.4790036510113485,
+        "clv": {
+          "n": 1,
+          "mean": 0.022453987730061575,
+          "median": 0.022453987730061575,
+          "positive_share": 1.0,
+          "ci95": [
+            0.022453987730061575,
+            0.022453987730061575
+          ],
+          "source_mix": {
+            "pinnacle_t0": "1"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 15,
+          "min_detectable_edge": 0.39734284174468926,
+          "required_n_for_2pct": 2898,
+          "required_n_for_1pct": 11591
+        }
+      }
+    },
+    "market_only_favourite": {
+      "family": "benchmark",
+      "description": "Baseline senza modello: favorito di mercato 1.30-1.80 (p>=0.55)",
+      "ex_ante": true,
+      "params": {},
+      "full": {
+        "n": 310,
+        "roi": 0.01484290322580645,
+        "roi_ci95": {
+          "n": 310,
+          "mean": 0.01484290322580645,
+          "lo": -0.062125806451612905,
+          "hi": 0.08982387096774194,
+          "clusters": 310
+        },
+        "sd": 0.6762266527010447,
+        "t": 0.38646255327004525,
+        "max_drawdown": 8.2266,
+        "hit_rate": 0.532258064516129,
+        "hit_ci95": [
+          0.4766595045405094,
+          0.5870669389802191
+        ],
+        "avg_odds": 1.5732690322580645,
+        "required_bets_for_2pct": 4392,
+        "label": "market_only_favourite (tutto)",
+        "won": 165,
+        "lost": 87,
+        "push": 58,
+        "push_share": 0.1870967741935484,
+        "matches": 310,
+        "days_span": 22.21,
+        "bets_per_day": 13.958663319240946,
+        "clv": {
+          "n": 18,
+          "mean": -0.010407062880306671,
+          "median": -0.0054738526413582456,
+          "positive_share": 0.4444444444444444,
+          "ci95": [
+            -0.029208583401014634,
+            0.008653504891131671
+          ],
+          "source_mix": {
+            "sx": "7",
+            "pinnacle_t0": "6"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 310,
+          "min_detectable_edge": 0.10760074402925027,
+          "required_n_for_2pct": 4392,
+          "required_n_for_1pct": 17567
+        }
+      },
+      "validation": {
+        "n": 248,
+        "roi": 0.022144354838709666,
+        "roi_ci95": {
+          "n": 248,
+          "mean": 0.022144354838709666,
+          "lo": -0.06266411290322581,
+          "hi": 0.10264112903225805,
+          "clusters": 248
+        },
+        "sd": 0.6593473755065962,
+        "t": 0.5289012464209532,
+        "max_drawdown": 6.9954,
+        "hit_rate": 0.5040322580645161,
+        "hit_ci95": [
+          0.44222023841827296,
+          0.5657212657699788
+        ],
+        "avg_odds": 1.577917741935484,
+        "required_bets_for_2pct": 4176,
+        "label": "market_only_favourite (validation)",
+        "won": 125,
+        "lost": 65,
+        "push": 58,
+        "push_share": 0.23387096774193547,
+        "matches": 248,
+        "days_span": 19.87,
+        "bets_per_day": 12.479597912033446,
+        "clv": {
+          "n": 16,
+          "mean": -0.016417617683397515,
+          "median": -0.010638448471121165,
+          "positive_share": 0.375,
+          "ci95": [
+            -0.03592250217093778,
+            0.002904123111683865
+          ],
+          "source_mix": {
+            "sx": "7",
+            "pinnacle_t0": "4"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 248,
+          "min_detectable_edge": 0.11729845146063475,
+          "required_n_for_2pct": 4176,
+          "required_n_for_1pct": 16701
+        }
+      },
+      "holdout": {
+        "n": 62,
+        "roi": -0.014362903225806457,
+        "roi_ci95": {
+          "n": 62,
+          "mean": -0.014362903225806457,
+          "lo": -0.20480806451612904,
+          "hi": 0.1665967741935484,
+          "clusters": 62
+        },
+        "sd": 0.7449684636814888,
+        "t": -0.15180993371824508,
+        "max_drawdown": 8.226600000000001,
+        "hit_rate": 0.6451612903225806,
+        "hit_ci95": [
+          0.5208113075778423,
+          0.752572671489501
+        ],
+        "avg_odds": 1.5546741935483868,
+        "required_bets_for_2pct": 5330,
+        "label": "market_only_favourite (holdout)",
+        "won": 40,
+        "lost": 22,
+        "push": 0,
+        "push_share": 0.0,
+        "matches": 62,
+        "days_span": 2.34,
+        "bets_per_day": 26.54115340726323,
+        "clv": {
+          "n": 2,
+          "mean": 0.03767737554442008,
+          "median": 0.03767737554442008,
+          "positive_share": 1.0,
+          "ci95": [
+            0.022453987730061575,
+            0.05290076335877858
+          ],
+          "source_mix": {
+            "pinnacle_t0": "2"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 62,
+          "min_detectable_edge": 0.26506102980908147,
+          "required_n_for_2pct": 5330,
+          "required_n_for_1pct": 21320
+        }
+      }
+    },
+    "ou_gate": {
+      "family": "multi_market",
+      "description": "OU quota 1.30-2.00, edge>=1pp, EV>=1.5%",
+      "ex_ante": true,
+      "params": {
+        "odds_min": 1.2,
+        "odds_max": 2.0,
+        "min_edge": 0.01,
+        "min_ev": 0.015
+      },
+      "full": {
+        "n": 247,
+        "roi": -0.029343724696356266,
+        "roi_ci95": {
+          "n": 247,
+          "mean": -0.029343724696356266,
+          "lo": -0.14907086956521737,
+          "hi": 0.08598625954198474,
+          "clusters": 150
+        },
+        "sd": 0.6803861696034806,
+        "t": -0.6778104170253473,
+        "max_drawdown": 27.509699999999995,
+        "hit_rate": 0.5344129554655871,
+        "hit_ci95": [
+          0.47215496262768264,
+          0.5956169283504826
+        ],
+        "avg_odds": 1.545517004048583,
+        "required_bets_for_2pct": 4446,
+        "label": "ou_gate (tutto)",
+        "won": 132,
+        "lost": 75,
+        "push": 40,
+        "push_share": 0.16194331983805668,
+        "matches": 150,
+        "days_span": 18.06,
+        "bets_per_day": 13.675625962755158,
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 247,
+          "min_detectable_edge": 0.12128604590421026,
+          "required_n_for_2pct": 4446,
+          "required_n_for_1pct": 17784
+        }
+      },
+      "validation": {
+        "n": 144,
+        "roi": 0.04576249999999999,
+        "roi_ci95": {
+          "n": 144,
+          "mean": 0.04576249999999999,
+          "lo": -0.08560287769784172,
+          "hi": 0.1745872611464968,
+          "clusters": 96
+        },
+        "sd": 0.6432661694335885,
+        "t": 0.8536901613892424,
+        "max_drawdown": 7.2855,
+        "hit_rate": 0.5416666666666666,
+        "hit_ci95": [
+          0.4602598535051044,
+          0.6209081767329758
+        ],
+        "avg_odds": 1.5558715277777777,
+        "required_bets_for_2pct": 3974,
+        "label": "ou_gate (validation)",
+        "won": 78,
+        "lost": 35,
+        "push": 31,
+        "push_share": 0.2152777777777778,
+        "matches": 96,
+        "days_span": 12.98,
+        "bets_per_day": 11.091115907930847,
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 144,
+          "min_detectable_edge": 0.15018041596644113,
+          "required_n_for_2pct": 3974,
+          "required_n_for_1pct": 15896
+        }
+      },
+      "holdout": {
+        "n": 103,
+        "roi": -0.13434660194174758,
+        "roi_ci95": {
+          "n": 103,
+          "mean": -0.13434660194174758,
+          "lo": -0.3420412844036697,
+          "hi": 0.07231333333333333,
+          "clusters": 55
+        },
+        "sd": 0.7192011848415961,
+        "t": -1.8958104129732596,
+        "max_drawdown": 22.1325,
+        "hit_rate": 0.5242718446601942,
+        "hit_ci95": [
+          0.42869820922520113,
+          0.6181001034821461
+        ],
+        "avg_odds": 1.5310407766990286,
+        "required_bets_for_2pct": 4968,
+        "label": "ou_gate (holdout)",
+        "won": 54,
+        "lost": 40,
+        "push": 9,
+        "push_share": 0.08737864077669903,
+        "matches": 55,
+        "days_span": 5.08,
+        "bets_per_day": 20.283713806540955,
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 103,
+          "min_detectable_edge": 0.19853433208725388,
+          "required_n_for_2pct": 4968,
+          "required_n_for_1pct": 19870
+        }
+      }
+    },
+    "ah_gate": {
+      "family": "multi_market",
+      "description": "AH quota 1.30-2.00, edge>=1pp, EV>=1.5%",
+      "ex_ante": true,
+      "params": {
+        "odds_min": 1.2,
+        "odds_max": 2.0,
+        "min_edge": 0.01,
+        "min_ev": 0.015
+      },
+      "full": {
+        "n": 92,
+        "roi": -0.0065684782608695464,
+        "roi_ci95": {
+          "n": 92,
+          "mean": -0.0065684782608695464,
+          "lo": -0.16946063829787233,
+          "hi": 0.1532695652173913,
+          "clusters": 64
+        },
+        "sd": 0.7109224236946986,
+        "t": -0.08862096356437486,
+        "max_drawdown": 8.2393,
+        "hit_rate": 0.5869565217391305,
+        "hit_ci95": [
+          0.48483335095613705,
+          0.6821090161246245
+        ],
+        "avg_odds": 1.5481130434782613,
+        "required_bets_for_2pct": 4854,
+        "label": "ah_gate (tutto)",
+        "won": 54,
+        "lost": 29,
+        "push": 9,
+        "push_share": 0.09782608695652174,
+        "matches": 64,
+        "days_span": 20.16,
+        "bets_per_day": 4.562663160627874,
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 92,
+          "min_detectable_edge": 0.207650096105997,
+          "required_n_for_2pct": 4854,
+          "required_n_for_1pct": 19416
+        }
+      },
+      "validation": {
+        "n": 47,
+        "roi": 0.017725531914893622,
+        "roi_ci95": {
+          "n": 47,
+          "mean": 0.017725531914893622,
+          "lo": -0.19802391304347824,
+          "hi": 0.21492884615384614,
+          "clusters": 36
+        },
+        "sd": 0.6734785076032607,
+        "t": 0.18043652922103678,
+        "max_drawdown": 5.2039,
+        "hit_rate": 0.574468085106383,
+        "hit_ci95": [
+          0.4328191934549279,
+          0.7048637165632003
+        ],
+        "avg_odds": 1.5433468085106385,
+        "required_bets_for_2pct": 4356,
+        "label": "ah_gate (validation)",
+        "won": 27,
+        "lost": 13,
+        "push": 7,
+        "push_share": 0.14893617021276595,
+        "matches": 36,
+        "days_span": 12.84,
+        "bets_per_day": 3.659261531737179,
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 47,
+          "min_detectable_edge": 0.2752191499711351,
+          "required_n_for_2pct": 4356,
+          "required_n_for_1pct": 17424
+        }
+      },
+      "holdout": {
+        "n": 45,
+        "roi": -0.03194222222222222,
+        "roi_ci95": {
+          "n": 45,
+          "mean": -0.03194222222222222,
+          "lo": -0.30142244897959186,
+          "hi": 0.22557894736842107,
+          "clusters": 28
+        },
+        "sd": 0.7548523282702052,
+        "t": -0.28386338983004167,
+        "max_drawdown": 4.9211,
+        "hit_rate": 0.6,
+        "hit_ci95": [
+          0.45451854590351387,
+          0.7297511343499083
+        ],
+        "avg_odds": 1.5530911111111108,
+        "required_bets_for_2pct": 5473,
+        "label": "ah_gate (holdout)",
+        "won": 27,
+        "lost": 16,
+        "push": 2,
+        "push_share": 0.044444444444444446,
+        "matches": 28,
+        "days_span": 7.27,
+        "bets_per_day": 6.188259436544174,
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 45,
+          "min_detectable_edge": 0.31525325497253187,
+          "required_n_for_2pct": 5473,
+          "required_n_for_1pct": 21889
+        }
+      }
+    },
+    "tennis_band": {
+      "family": "tennis",
+      "description": "Tennis quota 1.30-2.00, EV>=2.5% (oracolo sharp come prezzo)",
+      "ex_ante": true,
+      "params": {
+        "odds_min": 1.3,
+        "odds_max": 2.3,
+        "min_ev": 0.025
+      },
+      "full": {
+        "n": 55,
+        "roi": -0.02606181818181818,
+        "roi_ci95": {
+          "n": 55,
+          "mean": -0.02606181818181818,
+          "lo": -0.20588363636363638,
+          "hi": 0.14504074074074075,
+          "clusters": 54
+        },
+        "sd": 0.6692184890659731,
+        "t": -0.2888139221029625,
+        "max_drawdown": 5.0428999999999995,
+        "hit_rate": 0.32727272727272727,
+        "hit_ci95": [
+          0.21813065595168937,
+          0.45896776443421317
+        ],
+        "avg_odds": 1.7201672727272728,
+        "required_bets_for_2pct": 4302,
+        "label": "tennis_band (tutto)",
+        "won": 18,
+        "lost": 14,
+        "push": 23,
+        "push_share": 0.41818181818181815,
+        "matches": 54,
+        "days_span": 19.05,
+        "bets_per_day": 2.8871253677315454,
+        "clv": {
+          "n": 41,
+          "mean": 0.0419901933688635,
+          "median": 0.04424581005586581,
+          "positive_share": 0.975609756097561,
+          "ci95": [
+            0.032406581156392784,
+            0.051429576368760374
+          ],
+          "source_mix": {
+            "pinnacle_t0": "17"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 55,
+          "min_detectable_edge": 0.2528077734053966,
+          "required_n_for_2pct": 4302,
+          "required_n_for_1pct": 17205
+        }
+      },
+      "validation": {
+        "n": 34,
+        "roi": -0.02743529411764706,
+        "roi_ci95": {
+          "n": 34,
+          "mean": -0.02743529411764706,
+          "lo": -0.22202941176470586,
+          "hi": 0.1564970588235294,
+          "clusters": 34
+        },
+        "sd": 0.5539908668333435,
+        "t": -0.2887662772048136,
+        "max_drawdown": 3.0675,
+        "hit_rate": 0.20588235294117646,
+        "hit_ci95": [
+          0.10349526899031913,
+          0.36798388051163594
+        ],
+        "avg_odds": 1.7096058823529412,
+        "required_bets_for_2pct": 2948,
+        "label": "tennis_band (validation)",
+        "won": 7,
+        "lost": 6,
+        "push": 21,
+        "push_share": 0.6176470588235294,
+        "matches": 34,
+        "days_span": 9.37,
+        "bets_per_day": 3.6267154947805884,
+        "clv": {
+          "n": 20,
+          "mean": 0.040701767102697815,
+          "median": 0.041270640176600426,
+          "positive_share": 1.0,
+          "ci95": [
+            0.02812148616702139,
+            0.05491172839477124
+          ],
+          "source_mix": {}
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 34,
+          "min_detectable_edge": 0.26617482899523426,
+          "required_n_for_2pct": 2948,
+          "required_n_for_1pct": 11790
+        }
+      },
+      "holdout": {
+        "n": 21,
+        "roi": -0.02383809523809524,
+        "roi_ci95": {
+          "n": 21,
+          "mean": -0.02383809523809524,
+          "lo": -0.37797142857142857,
+          "hi": 0.3334285714285714,
+          "clusters": 20
+        },
+        "sd": 0.8383322971687245,
+        "t": -0.13030617598900876,
+        "max_drawdown": 2.8874000000000004,
+        "hit_rate": 0.5238095238095238,
+        "hit_ci95": [
+          0.3236953458284443,
+          0.7165599389846583
+        ],
+        "avg_odds": 1.7372666666666665,
+        "required_bets_for_2pct": 6750,
+        "label": "tennis_band (holdout)",
+        "won": 11,
+        "lost": 8,
+        "push": 2,
+        "push_share": 0.09523809523809523,
+        "matches": 20,
+        "days_span": 9.38,
+        "bets_per_day": 2.239438848482785,
+        "clv": {
+          "n": 21,
+          "mean": 0.04321726600330701,
+          "median": 0.04941558441558436,
+          "positive_share": 0.9523809523809523,
+          "ci95": [
+            0.029823063783579344,
+            0.05687686555382453
+          ],
+          "source_mix": {
+            "pinnacle_t0": "17"
+          }
+        },
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 21,
+          "min_detectable_edge": 0.5125194929567267,
+          "required_n_for_2pct": 6750,
+          "required_n_for_1pct": 26998
+        }
+      }
+    },
+    "contrarian_ou_rejected": {
+      "family": "contrast",
+      "description": "CONTRASTO: scartati OU, misurati per verificare il segno del gate",
+      "ex_ante": false,
+      "params": {},
+      "full": {
+        "n": 803,
+        "roi": 0.0532244084682441,
+        "roi_ci95": {
+          "n": 803,
+          "mean": 0.0532244084682441,
+          "lo": -0.09635569306930694,
+          "hi": 0.21360570719602978,
+          "clusters": 338
+        },
+        "sd": 1.9232034416908845,
+        "t": 0.7842298857380162,
+        "max_drawdown": 44.9917,
+        "hit_rate": 0.22540473225404734,
+        "hit_ci95": [
+          0.19785060620329237,
+          0.2555736134140535
+        ],
+        "avg_odds": 5.200909589041097,
+        "required_bets_for_2pct": 35522,
+        "label": "contrarian_ou_rejected (tutto)",
+        "won": 181,
+        "lost": 406,
+        "push": 216,
+        "push_share": 0.26899128268991285,
+        "matches": 338,
+        "days_span": 18.06,
+        "bets_per_day": 44.45962604141929,
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 803,
+          "min_detectable_edge": 0.19013903795200773,
+          "required_n_for_2pct": 35522,
+          "required_n_for_1pct": 142085
+        }
+      },
+      "validation": {
+        "n": 596,
+        "roi": 0.0523776845637584,
+        "roi_ci95": {
+          "n": 596,
+          "mean": 0.0523776845637584,
+          "lo": -0.12138569157392688,
+          "hi": 0.24301656249999998,
+          "clusters": 262
+        },
+        "sd": 1.921874788755096,
+        "t": 0.6653410756951721,
+        "max_drawdown": 44.9917,
+        "hit_rate": 0.20469798657718122,
+        "hit_ci95": [
+          0.1742449449967274,
+          0.2389333293225531
+        ],
+        "avg_odds": 5.224813926174497,
+        "required_bets_for_2pct": 35473,
+        "label": "contrarian_ou_rejected (validation)",
+        "won": 122,
+        "lost": 277,
+        "push": 197,
+        "push_share": 0.33053691275167785,
+        "matches": 262,
+        "days_span": 12.98,
+        "bets_per_day": 45.904894696236475,
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 596,
+          "min_detectable_edge": 0.22054935760502922,
+          "required_n_for_2pct": 35473,
+          "required_n_for_1pct": 141889
+        }
+      },
+      "holdout": {
+        "n": 207,
+        "roi": 0.05566231884057972,
+        "roi_ci95": {
+          "n": 207,
+          "mean": 0.05566231884057972,
+          "lo": -0.235142328042328,
+          "hi": 0.3645518134715026,
+          "clusters": 86
+        },
+        "sd": 1.9316868969868572,
+        "t": 0.4145813233594947,
+        "max_drawdown": 30.337400000000002,
+        "hit_rate": 0.28502415458937197,
+        "hit_ci95": [
+          0.2278816184369777,
+          0.3500002625848744
+        ],
+        "avg_odds": 5.1320835748792275,
+        "required_bets_for_2pct": 35836,
+        "label": "contrarian_ou_rejected (holdout)",
+        "won": 59,
+        "lost": 129,
+        "push": 19,
+        "push_share": 0.09178743961352658,
+        "matches": 86,
+        "days_span": 5.08,
+        "bets_per_day": 40.76435847005184,
+        "status": "DA VERIFICARE",
+        "power": {
+          "n": 207,
+          "min_detectable_edge": 0.3761450911633011,
+          "required_n_for_2pct": 35836,
+          "required_n_for_1pct": 143341
+        }
+      }
+    }
+  },
+  "soft_book": {
+    "observations": 0,
+    "matches": 0,
+    "thresholds": [],
+    "status": "NON VERIFICABILE"
+  },
+  "diagnostics": {
+    "stage_returns": {
+      "rows_scanned": 2212,
+      "decided_rows": 2131,
+      "playable_rows": 490,
+      "playable_closed": 455,
+      "playable_share_of_decided": 0.22993899577663068,
+      "live_bets": 80,
+      "bets_per_playable_closed": 0.17582417582417584,
+      "ledger_roi_playable": -0.028263956043956043,
+      "live_roi": -0.07393887623477684
+    },
+    "live_vs_ledger": {
+      "n_live": 80,
+      "stake_total": 208.14489999999998,
+      "pl_total": -15.39,
+      "roi": -0.07393887623477684,
+      "roi_ci95": [
+        -0.31083766037235777,
+        0.07103968357110624
+      ],
+      "won": 40,
+      "lost": 40,
+      "push": 0,
+      "by_market": {
+        "1X2": {
+          "n": 34,
+          "stake": 99.9349,
+          "pl": -9.94,
+          "roi": -0.09946475155326116,
+          "roi_ci95": [
+            -0.3974229844408921,
+            0.1478478242652246
+          ],
+          "avg_price": 2.0725676470588237,
+          "won": 17,
+          "lost": 17,
+          "push": 0
+        },
+        "TENNIS": {
+          "n": 46,
+          "stake": 108.21000000000002,
+          "pl": -5.45,
+          "roi": -0.050365030958321774,
+          "roi_ci95": [
+            -0.3801136173630781,
+            0.16180124258322637
+          ],
+          "avg_price": 2.4781586956521737,
+          "won": 23,
+          "lost": 23,
+          "push": 0
+        }
+      },
+      "by_price_band": [
+        {
+          "band": "1.2-1.4",
+          "n": 6,
+          "stake": 23.89,
+          "pl": 7.88,
+          "roi": 0.3298451234826287,
+          "roi_ci95": [
+            0.3149112347148724,
+            0.3572688512606011
+          ],
+          "won": 6
+        },
+        {
+          "band": "1.4-1.6",
+          "n": 11,
+          "stake": 30.63,
+          "pl": 0.9700000000000006,
+          "roi": 0.031668299053215825,
+          "roi_ci95": [
+            -0.4725080517845711,
+            0.35179436469442843
+          ],
+          "won": 7
+        },
+        {
+          "band": "1.6-1.8",
+          "n": 18,
+          "stake": 59.8659,
+          "pl": -10.92,
+          "roi": -0.18240768116740916,
+          "roi_ci95": [
+            -0.5356251218537502,
+            0.22088407272849572
+          ],
+          "won": 9
+        },
+        {
+          "band": "1.8-2.0",
+          "n": 19,
+          "stake": 47.91,
+          "pl": 1.64,
+          "roi": 0.03423084950949697,
+          "roi_ci95": [
+            -0.31259285538947407,
+            0.4944150969975842
+          ],
+          "won": 11
+        },
+        {
+          "band": "2.0-2.5",
+          "n": 16,
+          "stake": 29.41,
+          "pl": -3.9400000000000004,
+          "roi": -0.13396803808228494,
+          "roi_ci95": [
+            -0.7069326241134751,
+            0.38264959482655386
+          ],
+          "won": 6
+        },
+        {
+          "band": "2.5-+",
+          "n": 10,
+          "stake": 16.439,
+          "pl": -11.02,
+          "roi": -0.6703570776811242,
+          "roi_ci95": [
+            -1.00072383293906,
+            -0.167227836955131
+          ],
+          "won": 1
+        }
+      ],
+      "join": {
+        "matched": 52,
+        "matched_share": 0.65,
+        "avg_ev_of_bets": 0.0656369237046944,
+        "ledger_playable_rows": 299,
+        "ledger_roi": -0.01422207357859532
+      }
+    },
+    "bands": {
+      "1X2": [
+        {
+          "band": "1X2 1.2-1.4",
+          "n": 14,
+          "roi": 0.019449999999999995,
+          "ci95": [
+            -0.2679357142857143,
+            0.2866214285714285
+          ],
+          "hit_rate": 0.7142857142857143,
+          "avg_odds": 1.328357142857143,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "1X2 1.4-1.6",
+          "n": 16,
+          "roi": 0.05078749999999999,
+          "ci95": [
+            -0.2924125,
+            0.3315125
+          ],
+          "hit_rate": 0.625,
+          "avg_odds": 1.48233125,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "1X2 1.6-1.8",
+          "n": 22,
+          "roi": 0.08184090909090912,
+          "ci95": [
+            -0.2906318181818182,
+            0.40465454545454543
+          ],
+          "hit_rate": 0.6363636363636364,
+          "avg_odds": 1.700372727272727,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "1X2 1.8-2.0",
+          "n": 15,
+          "roi": 0.13486666666666666,
+          "ci95": [
+            -0.32284999999999997,
+            0.5270199999999999
+          ],
+          "hit_rate": 0.6,
+          "avg_odds": 1.90472,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "1X2 2.0-2.5",
+          "n": 4,
+          "roi": 0.13024999999999998,
+          "ci95": [
+            -1.0,
+            1.2605
+          ],
+          "hit_rate": 0.5,
+          "avg_odds": 2.2672749999999997,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "1X2 2.5-+",
+          "n": 3,
+          "roi": -0.06103333333333335,
+          "ci95": [
+            -1.0,
+            1.8168999999999997
+          ],
+          "hit_rate": 0.3333333333333333,
+          "avg_odds": 2.7143333333333337,
+          "status": "DA VERIFICARE"
+        }
+      ],
+      "OU": [
+        {
+          "band": "OU 1.2-1.4",
+          "n": 64,
+          "roi": -0.0724109375,
+          "ci95": [
+            -0.24273142857142857,
+            0.09088032786885246
+          ],
+          "hit_rate": 0.640625,
+          "avg_odds": 1.32659375,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "OU 1.4-1.6",
+          "n": 73,
+          "roi": -0.04989589041095889,
+          "ci95": [
+            -0.21179189189189188,
+            0.10829178082191782
+          ],
+          "hit_rate": 0.547945205479452,
+          "avg_odds": 1.4926479452054795,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "OU 1.6-1.8",
+          "n": 71,
+          "roi": 0.013099999999999987,
+          "ci95": [
+            -0.15990704225352115,
+            0.19207464788732395
+          ],
+          "hit_rate": 0.49295774647887325,
+          "avg_odds": 1.6928859154929576,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "OU 1.8-2.0",
+          "n": 7,
+          "roi": -0.31402857142857143,
+          "ci95": [
+            -0.7426,
+            0.17245714285714284
+          ],
+          "hit_rate": 0.14285714285714285,
+          "avg_odds": 1.8856857142857142,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "OU 2.0-2.5",
+          "n": 5,
+          "roi": -0.58764,
+          "ci95": [
+            -1.0,
+            0.03090000000000004
+          ],
+          "hit_rate": 0.2,
+          "avg_odds": 2.04938,
+          "status": "DA VERIFICARE"
+        }
+      ],
+      "AH": [
+        {
+          "band": "AH 1.2-1.4",
+          "n": 30,
+          "roi": 0.04216666666666666,
+          "ci95": [
+            -0.14833749999999998,
+            0.24485357142857142
+          ],
+          "hit_rate": 0.7,
+          "avg_odds": 1.3426566666666668,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "AH 1.4-1.6",
+          "n": 25,
+          "roi": -0.192596,
+          "ci95": [
+            -0.482532,
+            0.10514583333333333
+          ],
+          "hit_rate": 0.48,
+          "avg_odds": 1.5103519999999997,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "AH 1.6-1.8",
+          "n": 19,
+          "roi": 0.05323684210526315,
+          "ci95": [
+            -0.33689444444444444,
+            0.40963333333333335
+          ],
+          "hit_rate": 0.631578947368421,
+          "avg_odds": 1.6942210526315788,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "AH 1.8-2.0",
+          "n": 5,
+          "roi": -0.010860000000000003,
+          "ci95": [
+            -0.8,
+            0.77828
+          ],
+          "hit_rate": 0.4,
+          "avg_odds": 1.9165800000000002,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "AH 2.0-2.5",
+          "n": 2,
+          "roi": 0.028249999999999997,
+          "ci95": [
+            -1.0,
+            1.0565
+          ],
+          "hit_rate": 0.5,
+          "avg_odds": 2.2330500000000004,
+          "status": "DA VERIFICARE"
+        }
+      ],
+      "TENNIS": [
+        {
+          "band": "TENNIS 1.2-1.4",
+          "n": 11,
+          "roi": 0.053790909090909084,
+          "ci95": [
+            -0.19066363636363637,
+            0.2328818181818182
+          ],
+          "hit_rate": 0.45454545454545453,
+          "avg_odds": 1.3356454545454548,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "TENNIS 1.4-1.6",
+          "n": 10,
+          "roi": -0.09491000000000002,
+          "ci95": [
+            -0.5018,
+            0.26975
+          ],
+          "hit_rate": 0.4,
+          "avg_odds": 1.5089700000000001,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "TENNIS 1.6-1.8",
+          "n": 15,
+          "roi": -0.22268,
+          "ci95": [
+            -0.4666666666666667,
+            0.021306666666666675
+          ],
+          "hit_rate": 0.06666666666666667,
+          "avg_odds": 1.6766200000000004,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "TENNIS 1.8-2.0",
+          "n": 11,
+          "roi": 0.2868727272727272,
+          "ci95": [
+            -0.14347272727272725,
+            0.6972272727272727
+          ],
+          "hit_rate": 0.5454545454545454,
+          "avg_odds": 1.8914818181818183,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "TENNIS 2.0-2.5",
+          "n": 17,
+          "roi": 0.0805470588235294,
+          "ci95": [
+            -0.32295882352941174,
+            0.5044352941176471
+          ],
+          "hit_rate": 0.29411764705882354,
+          "avg_odds": 2.2548294117647063,
+          "status": "DA VERIFICARE"
+        },
+        {
+          "band": "TENNIS 2.5-+",
+          "n": 14,
+          "roi": -0.2857142857142857,
+          "ci95": [
+            -0.5714285714285714,
+            -0.07142857142857142
+          ],
+          "hit_rate": 0.0,
+          "avg_odds": 6.986885714285713,
+          "status": "DA VERIFICARE"
+        }
+      ]
+    },
+    "ev_calibration": {
+      "n": 455,
+      "expected_roi": 0.11488150135596441,
+      "realized_roi": -0.028263956043956043,
+      "by_ev": [
+        {
+          "ev_band": [
+            0.0,
+            0.02
+          ],
+          "n": 25,
+          "expected_roi": 0.01760056,
+          "realized_roi": 0.067784,
+          "gap_pp": 5.018344,
+          "ci95": [
+            -0.24082142857142858,
+            0.3701892857142857
+          ]
+        },
+        {
+          "ev_band": [
+            0.02,
+            0.04
+          ],
+          "n": 70,
+          "expected_roi": 0.02987374462957387,
+          "realized_roi": 0.011794285714285722,
+          "gap_pp": -1.8079458915288147,
+          "ci95": [
+            -0.14675217391304346,
+            0.16052285714285716
+          ]
+        },
+        {
+          "ev_band": [
+            0.04,
+            0.06
+          ],
+          "n": 30,
+          "expected_roi": 0.04837269114226295,
+          "realized_roi": 0.12855999999999998,
+          "gap_pp": 8.018730885773703,
+          "ci95": [
+            -0.09748,
+            0.3635233333333333
+          ]
+        },
+        {
+          "ev_band": [
+            0.06,
+            0.1
+          ],
+          "n": 61,
+          "expected_roi": 0.0808435088637041,
+          "realized_roi": -0.06374098360655737,
+          "gap_pp": -14.458449247026147,
+          "ci95": [
+            -0.2726949152542373,
+            0.14266451612903225
+          ]
+        },
+        {
+          "ev_band": [
+            0.1,
+            0.2
+          ],
+          "n": 264,
+          "expected_roi": 0.15654611824977196,
+          "realized_roi": -0.04677613636363637,
+          "gap_pp": -20.332225461340833,
+          "ci95": [
+            -0.15847666666666665,
+            0.06607737226277373
+          ]
+        }
+      ],
+      "by_prob": [
+        {
+          "prob_band": [
+            0.4,
+            0.45
+          ],
+          "n": 6,
+          "predicted": 0.4296347,
+          "observed": 0.5,
+          "gap_pp": 7.036530000000002,
+          "observed_ci95": [
+            0.1876163064826506,
+            0.8123836935173494
+          ]
+        },
+        {
+          "prob_band": [
+            0.5,
+            0.55
+          ],
+          "n": 18,
+          "predicted": 0.519757159601616,
+          "observed": 0.4444444444444444,
+          "gap_pp": -7.531271515717153,
+          "observed_ci95": [
+            0.24559518127005633,
+            0.6628358435795723
+          ]
+        },
+        {
+          "prob_band": [
+            0.55,
+            0.6
+          ],
+          "n": 45,
+          "predicted": 0.5787241410795826,
+          "observed": 0.5333333333333333,
+          "gap_pp": -4.539080774624926,
+          "observed_ci95": [
+            0.3907745474012537,
+            0.670648679349887
+          ]
+        },
+        {
+          "prob_band": [
+            0.6,
+            0.65
+          ],
+          "n": 76,
+          "predicted": 0.6260957796909795,
+          "observed": 0.5657894736842105,
+          "gap_pp": -6.030630600676901,
+          "observed_ci95": [
+            0.4538575306835998,
+            0.6713906818078296
+          ]
+        },
+        {
+          "prob_band": [
+            0.65,
+            0.7
+          ],
+          "n": 52,
+          "predicted": 0.6691791287264635,
+          "observed": 0.5576923076923077,
+          "gap_pp": -11.148682103415574,
+          "observed_ci95": [
+            0.42339761787202884,
+            0.6840494318059871
+          ]
+        },
+        {
+          "prob_band": [
+            0.7,
+            1.01
+          ],
+          "n": 166,
+          "predicted": 0.7635309352303098,
+          "observed": 0.7349397590361446,
+          "gap_pp": -2.859117619416518,
+          "observed_ci95": [
+            0.6630355179440995,
+            0.7962163075029872
+          ]
+        }
+      ],
+      "verdict": "EV SOVRASTIMATO: atteso 11.5% contro realizzato -2.8% (gap -14.3pp) - alzare la soglia non salva"
+    },
+    "ev_monotonicity": {
+      "n": 455,
+      "spearman_rho": -0.021229412874710068,
+      "ci95": [
+        -0.12290796323659776,
+        0.08453062492862873
+      ],
+      "verdict": "EV NON ORDINA i risultati (rho<=0): non e' una misura di valore"
+    },
+    "clv_cohorts": {
+      "joined": 72,
+      "non_echo": 150,
+      "positive": {
+        "n": 54,
+        "clusters": 53,
+        "roi": 0.11260185185185184,
+        "ci95": [
+          -0.09460740740740742,
+          0.31680188679245286
+        ],
+        "status": "DA VERIFICARE"
+      },
+      "negative": {
+        "n": 18,
+        "clusters": 18,
+        "roi": -0.47896666666666665,
+        "ci95": [
+          -0.8093833333333333,
+          -0.10195000000000001
+        ],
+        "status": "DA VERIFICARE"
+      },
+      "verdict": "CLV ordina i risultati (coorte positiva migliore)"
+    },
+    "cells": {
+      "tests": 6,
+      "alpha_bonferroni": 0.008333333333333333,
+      "cells": [
+        {
+          "market": "OU",
+          "odds": [
+            1.4,
+            1.6
+          ],
+          "edge": [
+            0.1,
+            1.0
+          ],
+          "n": 40,
+          "roi": 0.0654275,
+          "ci95": [
+            -0.16423170731707318,
+            0.27766315789473683
+          ],
+          "t": 0.617352601718686,
+          "p_two_sided": 0.5370021782240006,
+          "hit_rate": 0.7,
+          "status": "DA VERIFICARE",
+          "survives_bonferroni": false
+        },
+        {
+          "market": "OU",
+          "odds": [
+            1.6,
+            1.8
+          ],
+          "edge": [
+            0.05,
+            0.1
+          ],
+          "n": 38,
+          "roi": 0.0647157894736842,
+          "ci95": [
+            -0.17115,
+            0.2916236842105263
+          ],
+          "t": 0.5433204529161606,
+          "p_two_sided": 0.5869091844801417,
+          "hit_rate": 0.5263157894736842,
+          "status": "DA VERIFICARE",
+          "survives_bonferroni": false
+        },
+        {
+          "market": "OU",
+          "odds": [
+            1.6,
+            1.8
+          ],
+          "edge": [
+            0.1,
+            1.0
+          ],
+          "n": 27,
+          "roi": 0.0010296296296296314,
+          "ci95": [
+            -0.28776296296296294,
+            0.2888814814814815
+          ],
+          "t": 0.0069725185524539095,
+          "p_two_sided": 0.9944367801740517,
+          "hit_rate": 0.48148148148148145,
+          "status": "DA VERIFICARE",
+          "survives_bonferroni": false
+        },
+        {
+          "market": "OU",
+          "odds": [
+            1.2,
+            1.4
+          ],
+          "edge": [
+            0.05,
+            0.1
+          ],
+          "n": 29,
+          "roi": -0.08437241379310341,
+          "ci95": [
+            -0.34876666666666667,
+            0.18717307692307694
+          ],
+          "t": -0.7243689665930159,
+          "p_two_sided": 0.4688392467996385,
+          "hit_rate": 0.6896551724137931,
+          "status": "DA VERIFICARE",
+          "survives_bonferroni": false
+        },
+        {
+          "market": "OU",
+          "odds": [
+            1.2,
+            1.4
+          ],
+          "edge": [
+            0.1,
+            1.0
+          ],
+          "n": 27,
+          "roi": -0.1200888888888889,
+          "ci95": [
+            -0.3565407407407407,
+            0.1066576923076923
+          ],
+          "t": -1.0459576931467325,
+          "p_two_sided": 0.2955805657128008,
+          "hit_rate": 0.5185185185185185,
+          "status": "DA VERIFICARE",
+          "survives_bonferroni": false
+        },
+        {
+          "market": "OU",
+          "odds": [
+            1.4,
+            1.6
+          ],
+          "edge": [
+            0.05,
+            0.1
+          ],
+          "n": 29,
+          "roi": -0.19805862068965516,
+          "ci95": [
+            -0.44384827586206893,
+            0.04374827586206897
+          ],
+          "t": -1.6010977414314533,
+          "p_two_sided": 0.10935527239293252,
+          "hit_rate": 0.3793103448275862,
+          "status": "DA VERIFICARE",
+          "survives_bonferroni": false
+        }
+      ],
+      "best_raw": {
+        "market": "OU",
+        "odds": [
+          1.4,
+          1.6
+        ],
+        "edge": [
+          0.1,
+          1.0
+        ],
+        "n": 40,
+        "roi": 0.0654275,
+        "ci95": [
+          -0.16423170731707318,
+          0.27766315789473683
+        ],
+        "t": 0.617352601718686,
+        "p_two_sided": 0.5370021782240006,
+        "hit_rate": 0.7,
+        "status": "DA VERIFICARE",
+        "survives_bonferroni": false
+      },
+      "survivors": 0,
+      "verdict": "nessuna cella sopravvive alla correzione per test multipli"
+    }
+  },
+  "leak_audit": {
+    "clean": true,
+    "method": "sign_flip(won<->lost, profit=-profit)",
+    "checked": [
+      {
+        "strategy": "value_1x2",
+        "identical": true,
+        "n": 78
+      },
+      {
+        "strategy": "value_tight_1x2",
+        "identical": true,
+        "n": 27
+      },
+      {
+        "strategy": "value_capped_ev",
+        "identical": true,
+        "n": 59
+      },
+      {
+        "strategy": "value_capped_ev_tight",
+        "identical": true,
+        "n": 48
+      },
+      {
+        "strategy": "market_only_favourite",
+        "identical": true,
+        "n": 310
+      },
+      {
+        "strategy": "ou_gate",
+        "identical": true,
+        "n": 247
+      },
+      {
+        "strategy": "ah_gate",
+        "identical": true,
+        "n": 92
+      },
+      {
+        "strategy": "tennis_band",
+        "identical": true,
+        "n": 55
+      },
+      {
+        "strategy": "contrarian_ou_rejected",
+        "identical": true,
+        "n": 803
+      }
+    ]
+  },
+  "protocol": {
+    "split": "cronologico 70/30 su created_at",
+    "min_validation_n": 30,
+    "walk_forward": "parametri scelti solo sul passato, warmup 8 giorni",
+    "dedup": "(match_id, esito), prima riga in ordine di created_at"
+  },
+  "grid_1x2": {
+    "chosen_on_validation": {
+      "params": {
+        "odds_min": 1.2,
+        "odds_max": 1.8,
+        "min_edge": 0.02,
+        "min_ev": 0.015
+      },
+      "table": [
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 1.8,
+            "min_edge": 0.01,
+            "min_ev": 0.015
+          },
+          "n": 45,
+          "roi": 0.005279999999999984,
+          "ci_lo": -0.2142177777777778
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 1.8,
+            "min_edge": 0.01,
+            "min_ev": 0.025
+          },
+          "n": 27,
+          "roi": 0.06695555555555556,
+          "ci_lo": -0.217
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 1.8,
+            "min_edge": 0.02,
+            "min_ev": 0.015
+          },
+          "n": 33,
+          "roi": 0.15237575757575755,
+          "ci_lo": -0.09068787878787879
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 1.8,
+            "min_edge": 0.02,
+            "min_ev": 0.025
+          },
+          "n": 26,
+          "roi": 0.1079923076923077,
+          "ci_lo": -0.1710846153846154
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 1.8,
+            "min_edge": 0.03,
+            "min_ev": 0.015
+          },
+          "n": 28,
+          "roi": 0.18714285714285714,
+          "ci_lo": -0.07329285714285715
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 1.8,
+            "min_edge": 0.03,
+            "min_ev": 0.025
+          },
+          "n": 24,
+          "roi": 0.13000416666666667,
+          "ci_lo": -0.15037916666666667
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 2.0,
+            "min_edge": 0.01,
+            "min_ev": 0.015
+          },
+          "n": 58,
+          "roi": 0.03963620689655173,
+          "ci_lo": -0.16057241379310344
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 2.0,
+            "min_edge": 0.01,
+            "min_ev": 0.025
+          },
+          "n": 36,
+          "roi": 0.007150000000000002,
+          "ci_lo": -0.2543222222222222
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 2.0,
+            "min_edge": 0.02,
+            "min_ev": 0.015
+          },
+          "n": 43,
+          "roi": 0.1013860465116279,
+          "ci_lo": -0.12891860465116278
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 2.0,
+            "min_edge": 0.02,
+            "min_ev": 0.025
+          },
+          "n": 34,
+          "roi": 0.012797058823529413,
+          "ci_lo": -0.2544441176470588
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 2.0,
+            "min_edge": 0.03,
+            "min_ev": 0.015
+          },
+          "n": 37,
+          "roi": 0.10098378378378378,
+          "ci_lo": -0.15016756756756758
+        },
+        {
+          "params": {
+            "odds_min": 1.2,
+            "odds_max": 2.0,
+            "min_edge": 0.03,
+            "min_ev": 0.025
+          },
+          "n": 32,
+          "roi": 0.023356250000000023,
+          "ci_lo": -0.25815937499999997
+        }
+      ],
+      "validation": {
+        "n": 33,
+        "roi": 0.15237575757575755,
+        "ci_lo": -0.09068787878787879
+      }
+    },
+    "holdout": {
+      "n": 6,
+      "roi": 0.27245,
+      "roi_ci95": {
+        "n": 6,
+        "mean": 0.27245,
+        "lo": -0.2737833333333333,
+        "hi": 0.619,
+        "clusters": 6
+      },
+      "sd": 0.643472096520121,
+      "t": 1.0371288576930682,
+      "max_drawdown": 1.0,
+      "hit_rate": 0.8333333333333334,
+      "hit_ci95": [
+        0.43649717781352987,
+        0.9699466302516935
+      ],
+      "avg_odds": 1.5674333333333335,
+      "required_bets_for_2pct": 3977,
+      "label": "griglia 1X2 (holdout)",
+      "won": 5,
+      "lost": 1,
+      "push": 0,
+      "push_share": 0.0,
+      "matches": 6,
+      "days_span": 2.32,
+      "bets_per_day": 2.591601460404539,
+      "clv": {
+        "n": 2,
+        "mean": 0.03767737554442008,
+        "median": 0.03767737554442008,
+        "positive_share": 1.0,
+        "ci95": [
+          0.022453987730061575,
+          0.05290076335877858
+        ],
+        "source_mix": {
+          "pinnacle_t0": "2"
+        }
+      },
+      "status": "DA VERIFICARE",
+      "power": {
+        "n": 6,
+        "min_detectable_edge": 0.7359663044886268,
+        "required_n_for_2pct": 3977,
+        "required_n_for_1pct": 15906
+      }
+    },
+    "walk_forward": {
+      "n": 16,
+      "roi": 0.05527500000000002,
+      "roi_ci95": {
+        "n": 16,
+        "mean": 0.05527500000000002,
+        "lo": -0.322525,
+        "hi": 0.40841875,
+        "clusters": 16
+      },
+      "sd": 0.7678325490192074,
+      "t": 0.28795340895931365,
+      "max_drawdown": 3.0,
+      "hit_rate": 0.625,
+      "hit_ci95": [
+        0.38641040545502714,
+        0.8151876744113636
+      ],
+      "avg_odds": 1.64049375,
+      "required_bets_for_2pct": 5662,
+      "label": "walk-forward 1X2",
+      "won": 10,
+      "lost": 5,
+      "push": 1,
+      "push_share": 0.0625,
+      "matches": 16,
+      "days_span": 4.5,
+      "bets_per_day": 3.554616427632456,
+      "clv": {
+        "n": 8,
+        "mean": 0.007575648454978351,
+        "median": 0.0075335265283473785,
+        "positive_share": 0.5,
+        "ci95": [
+          -0.04553664736108759,
+          0.06397952668461145
+        ],
+        "source_mix": {
+          "pinnacle_t0": "7",
+          "sx": "1"
+        }
+      },
+      "status": "DA VERIFICARE",
+      "power": {
+        "n": 16,
+        "min_detectable_edge": 0.5377870798295531,
+        "required_n_for_2pct": 5662,
+        "required_n_for_1pct": 22648
+      }
+    },
+    "walk_forward_days": 16,
+    "choices": [
+      {
+        "day": "2026-10-14",
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 2.0,
+          "min_edge": 0.02,
+          "min_ev": 0.015
+        },
+        "n_train": 1714,
+        "n_today": 7,
+        "roi_train": 0.2705590909090909
+      },
+      {
+        "day": "2026-10-15",
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.03,
+          "min_ev": 0.015
+        },
+        "n_train": 1828,
+        "n_today": 1,
+        "roi_train": 0.29124545454545453
+      },
+      {
+        "day": "2026-10-16",
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.03,
+          "min_ev": 0.015
+        },
+        "n_train": 1988,
+        "n_today": 1,
+        "roi_train": 0.3075652173913043
+      },
+      {
+        "day": "2026-10-17",
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.03,
+          "min_ev": 0.015
+        },
+        "n_train": 1999,
+        "n_today": 6,
+        "roi_train": 0.2530833333333333
+      },
+      {
+        "day": "2026-10-18",
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.03,
+          "min_ev": 0.015
+        },
+        "n_train": 2098,
+        "n_today": 1,
+        "roi_train": 0.21144666666666667
+      },
+      {
+        "day": "2026-10-19",
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.03,
+          "min_ev": 0.015
+        },
+        "n_train": 2163,
+        "n_today": 0,
+        "roi_train": 0.22612903225806452
+      },
+      {
+        "day": "2026-10-20",
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.03,
+          "min_ev": 0.015
+        },
+        "n_train": 2185,
+        "n_today": 0,
+        "roi_train": 0.22612903225806452
+      }
+    ]
+  }
+}

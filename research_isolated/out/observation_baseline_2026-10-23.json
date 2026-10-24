@@ -1,0 +1,102 @@
+{
+  "window": {
+    "protocol": "OBSERVATION-1 (nessun ordine reale)",
+    "started_at_utc": "2026-10-23T23:20:00Z",
+    "kill_switch": "off",
+    "provider_ready": true,
+    "note": "metrics misurate in sola lettura sul container AMS prima di aprire la finestra"
+  },
+  "git": {
+    "local_head": "59f0062",
+    "origin_main": "59f0062",
+    "ahead": 0,
+    "behind": 0,
+    "deployed_sha": "59f0062c7c598f458e70991f031911616d488be8",
+    "deploy_verified_by_code_markers": true
+  },
+  "bankroll": {
+    "available_usdc": 17.3978,
+    "exposure_usdc": 2.0,
+    "equity_usdc": 19.3978,
+    "exposure_source": "ledger",
+    "open_orders": 2,
+    "open_live_bets": 2,
+    "open_sim_bets": 1,
+    "ledger_live_rows": 88,
+    "ledger_live_stake": 216.9849,
+    "ledger_live_profit": -17.07,
+    "ledger_sim_rows": 1,
+    "ledger_sim_stake": 1.0,
+    "ledger_sim_profit": 0.0,
+    "sim_row_id": 89,
+    "reconciliation": "available + exposure = equity: esatto (17.3978 + 2.00 = 19.3978)"
+  },
+  "risk": {
+    "weekly_drawdown_pct": 8.07,
+    "weekly_peak": 21.1004,
+    "weekly_samples": 72,
+    "weekly_window_h": 168.0,
+    "weekly_stopped": false,
+    "daily_stopped": false,
+    "order_ceiling": "n/d nel processo fresco (cap 12% dell'equity, fail-closed a 0 senza bankroll)"
+  },
+  "clv_14d": {
+    "measured": 48,
+    "of_live_trades": 61,
+    "mean": 0.0346,
+    "ci95": [0.0186, 0.0506],
+    "p_value": 0.0001,
+    "positive": "34/48",
+    "min_detectable": 0.0223,
+    "by_source": {"pinnacle_t0": {"n": 36, "mean": 0.0448}, "sx": {"n": 11, "mean": -0.0061}, "pinnacle_cache": {"n": 1, "mean": 0.113}},
+    "by_sport": {"football": {"n": 23, "mean": 0.0404}, "football_usa": {"n": 6, "mean": -0.0079}, "tennis": {"n": 19, "mean": 0.041}},
+    "second_benchmark_betfair_t0": {"n": 10, "mean": -0.0048, "both_sharps_confirm": "5/10"},
+    "pending": 13
+  },
+  "significance_all_statuses": {
+    "closed": 2225,
+    "roi": 0.0019,
+    "roi_ci95": [-0.0555, 0.0593],
+    "p_value": 0.9475,
+    "hit_rate": 0.4527,
+    "min_detectable_edge": 0.082,
+    "required_n_for_2pct": [37421, 54117],
+    "by_market": {
+      "1X2": {"n": 540, "roi": -0.0091},
+      "AH": {"n": 581, "roi": -0.0292},
+      "OU": {"n": 1023, "roi": 0.0296},
+      "TENNIS": {"n": 81, "roi": -0.0505}
+    }
+  },
+  "funnel_24h": {
+    "matches_analysed": 222,
+    "by_tier": {"blocked": 53, "probation": 132, "core": 37},
+    "signals": 79,
+    "by_market": {"1X2": 76, "OU": 2, "TENNIS": 1},
+    "playable": 23,
+    "reject_reasons": {"ev_low": 28, "league_blocked": 24, "odds_min": 2, "edge_low": 1}
+  },
+  "slippage": {
+    "pairs_measured": 59,
+    "mean_price_vs_signal": 0.00334,
+    "median": 0.0,
+    "p10": -0.0211,
+    "p90": 0.04774,
+    "better_than_signal": "26/59",
+    "commission": "SX Bet: 0% dichiarata (nessun campo fee nel ledger)"
+  },
+  "settlement": {
+    "open_bets": 3,
+    "open_predictions": 103,
+    "reasons": {"no_match_row": 6, "league_unmapped": 32, "not_started": 61, "awaiting_result": 7},
+    "overdue_orphans": 0
+  },
+  "anomalies": {
+    "duplicate_market_groups": 2,
+    "duplicate_detail": ["bets 73+74 (0x0d356b2e..., sel 1) — prima della guardia del 14/10", "bets 22+23 (0xfee2b97f..., sel 1) — storica"],
+    "live_filled_without_bet_id": 0,
+    "live_stake_zero": 0,
+    "anomalous_verdicts": 0,
+    "db_integrity": "ok"
+  }
+}

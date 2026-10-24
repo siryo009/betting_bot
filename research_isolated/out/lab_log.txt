@@ -1,0 +1,516 @@
+QuotaVerace — laboratorio isolato
+============================================================
+generato: 2026-10-20T18:58:07.026198+00:00
+snapshot: /home/siryo/quotaverace/research_isolated/snapshot/quotaverace_20261020_2040.db (quick_check=ok)
+capitale SX disponibile: 21.1004 USDC
+
+LEDGER LIVE
+{
+  "n_bets": 80,
+  "stake_total": 208.14489999999998,
+  "pl": -15.39,
+  "roi": -0.07393887623477684,
+  "by_market": {
+    "1X2": {
+      "n": 34,
+      "stake": 99.9349,
+      "pl": -9.94,
+      "roi": -0.09946475155326116,
+      "avg_price": 2.0725676470588237,
+      "won": 17,
+      "lost": 17,
+      "push": 0
+    },
+    "TENNIS": {
+      "n": 46,
+      "stake": 108.21000000000002,
+      "pl": -5.45,
+      "roi": -0.050365030958321774,
+      "avg_price": 2.4781586956521737,
+      "won": 23,
+      "lost": 23,
+      "push": 0
+    }
+  },
+  "roi_ci95": [
+    -0.31083766037235777,
+    0.07103968357110624
+  ],
+  "price_bands": [
+    {
+      "n": 6,
+      "roi": 0.3298451234826287,
+      "ci95": [
+        0.3107426099495314,
+        0.3557571411051449
+      ],
+      "stake": 23.89,
+      "pl": 7.88,
+      "hit_rate": 1.0,
+      "avg_odds": 1.3361166666666666,
+      "clusters": 6,
+      "band": "1.2-1.4",
+      "status": "DA VERIFICARE"
+    },
+    {
+      "n": 11,
+      "roi": 0.031668299053215825,
+      "ci95": [
+        -0.47347664741212486,
+        0.3618482962217086
+      ],
+      "stake": 30.63,
+      "pl": 0.9700000000000006,
+      "hit_rate": 0.6363636363636364,
+      "avg_odds": 1.4778636363636364,
+      "clusters": 11,
+      "band": "1.4-1.6",
+      "status": "DA VERIFICARE"
+    },
+    {
+      "n": 18,
+      "roi": -0.18240768116740916,
+      "ci95": [
+        -0.5936043352702192,
+        0.2187860773209446
+      ],
+      "stake": 59.8659,
+      "pl": -10.92,
+      "hit_rate": 0.5,
+      "avg_odds": 1.6841,
+      "clusters": 18,
+      "band": "1.6-1.8",
+      "status": "DA VERIFICARE"
+    },
+    {
+      "n": 19,
+      "roi": 0.03423084950949697,
+      "ci95": [
+        -0.399798604688193,
+        0.5009339313385603
+      ],
+      "stake": 47.91,
+      "pl": 1.64,
+      "hit_rate": 0.5789473684210527,
+      "avg_odds": 1.9058105263157894,
+      "clusters": 19,
+      "band": "1.8-2.0",
+      "status": "DA VERIFICARE"
+    },
+    {
+      "n": 16,
+      "roi": -0.13396803808228494,
+      "ci95": [
+        -0.6728397241825913,
+        0.423446880057369
+      ],
+      "stake": 29.41,
+      "pl": -3.9400000000000004,
+      "hit_rate": 0.375,
+      "avg_odds": 2.2745375,
+      "clusters": 16,
+      "band": "2.0-2.5",
+      "status": "DA VERIFICARE"
+    },
+    {
+      "n": 10,
+      "roi": -0.6703570776811242,
+      "ci95": [
+        -1.000683254569265,
+        0.011830340464745553
+      ],
+      "stake": 16.439,
+      "pl": -11.02,
+      "hit_rate": 0.1,
+      "avg_odds": 5.72726,
+      "clusters": 8,
+      "band": "2.5-+",
+      "status": "DA VERIFICARE"
+    }
+  ]
+}
+
+CLV (processo)
+{
+  "n": 475,
+  "mean": 0.005462957642911735,
+  "median": 0.0,
+  "share_positive": 0.2,
+  "p10": -0.005780346820809301,
+  "p90": 0.03350140056022411,
+  "ci95": [
+    0.00297028703766468,
+    0.008093717089056282
+  ],
+  "t": 4.118048957902188,
+  "non_echo": {
+    "n": 150,
+    "mean": 0.017299365869220498,
+    "share_positive": 0.6333333333333333
+  },
+  "by_source": {
+    "nan": {
+      "n": 423,
+      "mean": 0.0026746873073261695,
+      "ci95": [
+        0.0004455505625734682,
+        0.005059034808797231
+      ]
+    },
+    "sx": {
+      "n": 9,
+      "mean": -0.005255487864927207,
+      "ci95": [
+        -0.009526396226602722,
+        -0.0013073088398412652
+      ]
+    },
+    "pinnacle_t0": {
+      "n": 43,
+      "mean": 0.03513515209694069,
+      "ci95": [
+        0.02048417226063754,
+        0.05042088620032114
+      ]
+    }
+  }
+}
+
+STRATEGIE
+- value_1x2: 1X2, favorito di mercato (p>=0.50), quota 1.20-2.00, edge>=1pp, EV>=1.5%
+    full       n=78 roi=0.11381923076923077 status=DA VERIFICARE
+    validation n=58 roi=0.03963620689655173 status=DA VERIFICARE
+    holdout    n=20 roi=0.32894999999999996 status=DA VERIFICARE
+- value_tight_1x2: 1X2, quota 1.60-1.80, edge>=2pp, favorito di mercato
+    full       n=27 roi=0.18738148148148145 status=DA VERIFICARE
+    validation n=24 roi=0.19452499999999998 status=DA VERIFICARE
+    holdout    n=3 roi=0.13023333333333328 status=DA VERIFICARE
+- value_capped_ev: 1X2 come produzione MA con tetto EV 10% (EV alti = stima gonfiata)
+    full       n=59 roi=0.19600847457627119 status=PROMETTENTE
+    validation n=43 roi=0.1410279069767442 status=DA VERIFICARE
+    holdout    n=16 roi=0.34376875 status=DA VERIFICARE
+- value_capped_ev_tight: 1X2 come produzione MA con tetto EV 6% (banda in cui l'EV e' calibrato)
+    full       n=48 roi=0.21367916666666667 status=PROMETTENTE
+    validation n=33 roi=0.1716848484848485 status=DA VERIFICARE
+    holdout    n=15 roi=0.30606666666666665 status=DA VERIFICARE
+- market_only_favourite: Baseline senza modello: favorito di mercato 1.30-1.80 (p>=0.55)
+    full       n=310 roi=0.01484290322580645 status=DA VERIFICARE
+    validation n=248 roi=0.022144354838709666 status=DA VERIFICARE
+    holdout    n=62 roi=-0.014362903225806457 status=DA VERIFICARE
+- ou_gate: OU quota 1.30-2.00, edge>=1pp, EV>=1.5%
+    full       n=247 roi=-0.029343724696356266 status=DA VERIFICARE
+    validation n=144 roi=0.04576249999999999 status=DA VERIFICARE
+    holdout    n=103 roi=-0.13434660194174758 status=DA VERIFICARE
+- ah_gate: AH quota 1.30-2.00, edge>=1pp, EV>=1.5%
+    full       n=92 roi=-0.0065684782608695464 status=DA VERIFICARE
+    validation n=47 roi=0.017725531914893622 status=DA VERIFICARE
+    holdout    n=45 roi=-0.03194222222222222 status=DA VERIFICARE
+- tennis_band: Tennis quota 1.30-2.00, EV>=2.5% (oracolo sharp come prezzo)
+    full       n=55 roi=-0.02606181818181818 status=DA VERIFICARE
+    validation n=34 roi=-0.02743529411764706 status=DA VERIFICARE
+    holdout    n=21 roi=-0.02383809523809524 status=DA VERIFICARE
+- contrarian_ou_rejected: CONTRASTO: scartati OU, misurati per verificare il segno del gate
+    full       n=803 roi=0.0532244084682441 status=DA VERIFICARE
+    validation n=596 roi=0.0523776845637584 status=DA VERIFICARE
+    holdout    n=207 roi=0.05566231884057972 status=DA VERIFICARE
+
+GRIGLIA 1X2
+{
+  "chosen_on_validation": {
+    "params": {
+      "odds_min": 1.2,
+      "odds_max": 1.8,
+      "min_edge": 0.02,
+      "min_ev": 0.015
+    },
+    "table": [
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.01,
+          "min_ev": 0.015
+        },
+        "n": 45,
+        "roi": 0.005279999999999984,
+        "ci_lo": -0.2142177777777778
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.01,
+          "min_ev": 0.025
+        },
+        "n": 27,
+        "roi": 0.06695555555555556,
+        "ci_lo": -0.217
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.02,
+          "min_ev": 0.015
+        },
+        "n": 33,
+        "roi": 0.15237575757575755,
+        "ci_lo": -0.09068787878787879
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.02,
+          "min_ev": 0.025
+        },
+        "n": 26,
+        "roi": 0.1079923076923077,
+        "ci_lo": -0.1710846153846154
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.03,
+          "min_ev": 0.015
+        },
+        "n": 28,
+        "roi": 0.18714285714285714,
+        "ci_lo": -0.07329285714285715
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 1.8,
+          "min_edge": 0.03,
+          "min_ev": 0.025
+        },
+        "n": 24,
+        "roi": 0.13000416666666667,
+        "ci_lo": -0.15037916666666667
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 2.0,
+          "min_edge": 0.01,
+          "min_ev": 0.015
+        },
+        "n": 58,
+        "roi": 0.03963620689655173,
+        "ci_lo": -0.16057241379310344
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 2.0,
+          "min_edge": 0.01,
+          "min_ev": 0.025
+        },
+        "n": 36,
+        "roi": 0.007150000000000002,
+        "ci_lo": -0.2543222222222222
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 2.0,
+          "min_edge": 0.02,
+          "min_ev": 0.015
+        },
+        "n": 43,
+        "roi": 0.1013860465116279,
+        "ci_lo": -0.12891860465116278
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 2.0,
+          "min_edge": 0.02,
+          "min_ev": 0.025
+        },
+        "n": 34,
+        "roi": 0.012797058823529413,
+        "ci_lo": -0.2544441176470588
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 2.0,
+          "min_edge": 0.03,
+          "min_ev": 0.015
+        },
+        "n": 37,
+        "roi": 0.10098378378378378,
+        "ci_lo": -0.15016756756756758
+      },
+      {
+        "params": {
+          "odds_min": 1.2,
+          "odds_max": 2.0,
+          "min_edge": 0.03,
+          "min_ev": 0.025
+        },
+        "n": 32,
+        "roi": 0.023356250000000023,
+        "ci_lo": -0.25815937499999997
+      }
+    ],
+    "validation": {
+      "n": 33,
+      "roi": 0.15237575757575755,
+      "ci_lo": -0.09068787878787879
+    }
+  },
+  "holdout": {
+    "n": 6,
+    "roi": 0.27245,
+    "roi_ci95": {
+      "n": 6,
+      "mean": 0.27245,
+      "lo": -0.2737833333333333,
+      "hi": 0.619,
+      "clusters": 6
+    },
+    "sd": 0.643472096520121,
+    "t": 1.0371288576930682,
+    "max_drawdown": 1.0,
+    "hit_rate": 0.8333333333333334,
+    "hit_ci95": [
+      0.43649717781352987,
+      0.9699466302516935
+    ],
+    "avg_odds": 1.5674333333333335,
+    "required_bets_for_2pct": 3977,
+    "label": "griglia 1X2 (holdout)",
+    "won": 5,
+    "lost": 1,
+    "push": 0,
+    "push_share": 0.0,
+    "matches": 6,
+    "days_span": 2.32,
+    "bets_per_day": 2.591601460404539,
+    "clv": {
+      "n": 2,
+      "mean": 0.03767737554442008,
+      "median": 0.03767737554442008,
+      "positive_share": 1.0,
+      "ci95": [
+        0.022453987730061575,
+        0.05290076335877858
+      ],
+      "source_mix": {
+        "pinnacle_t0": "2"
+      }
+    },
+    "status": "DA VERIFICARE",
+    "power": {
+      "n": 6,
+      "min_detectable_edge": 0.7359663044886268,
+      "required_n_for_2pct": 3977,
+      "required_n_for_1pct": 15906
+    }
+  },
+  "walk_forward": {
+    "n": 16,
+    "roi": 0.05527500000000002,
+    "roi_ci95": {
+      "n": 16,
+      "mean": 0.05527500000000002,
+      "lo": -0.322525,
+      "hi": 0.40841875,
+      "clusters": 16
+    },
+    "sd": 0.7678325490192074,
+    "t": 0.28795340895931365,
+    "max_drawdown": 3.0,
+    "hit_rate": 0.625,
+    "hit_ci95": [
+      0.38641040545502714,
+      0.8151876744113636
+    ],
+    "avg_odds": 1.64049375,
+    "required_bets_for_2pct": 5662,
+    "label": "walk-forward 1X2",
+    "won": 10,
+    "lost": 5,
+    "push": 1,
+    "push_share": 0.0625,
+    "matches": 16,
+    "days_span": 4.5,
+    "bets_per_day": 3.554616427632456,
+    "clv": {
+      "n": 8,
+      "mean": 0.007575648454978351,
+      "median": 0.0075335265283473785,
+      "positive_share": 0.5,
+      "ci95": [
+        -0.04553664736108759,
+        0.06397952668461145
+      ],
+      "source_mix": {
+        "pinnacle_t0": "7",
+        "sx": "1"
+      }
+    },
+    "status": "DA VERIFICARE",
+    "power": {
+      "n": 16,
+      "min_detectable_edge": 0.5377870798295531,
+      "required_n_for_2pct": 5662,
+      "required_n_for_1pct": 22648
+    }
+  },
+  "walk_forward_days": 16
+}
+
+SOFT BOOK vs SHARP
+{
+  "observations": 0,
+  "matches": 0,
+  "thresholds": [],
+  "status": "NON VERIFICABILE"
+}
+
+DIAGNOSTICA — funnel
+{
+  "rows_scanned": 2212,
+  "decided_rows": 2131,
+  "playable_rows": 490,
+  "playable_closed": 455,
+  "playable_share_of_decided": 0.22993899577663068,
+  "live_bets": 80,
+  "bets_per_playable_closed": 0.17582417582417584,
+  "ledger_roi_playable": -0.028263956043956043,
+  "live_roi": -0.07393887623477684
+}
+
+DIAGNOSTICA — fasce di prezzo PAGATO (puntate reali)
+   1.2-1.4 n=  6 partite=6 roi=33.0% ci=[31.1, 35.6] DA VERIFICARE
+   1.4-1.6 n= 11 partite=11 roi=3.2% ci=[-47.3, 36.2] DA VERIFICARE
+   1.6-1.8 n= 18 partite=18 roi=-18.2% ci=[-59.4, 21.9] DA VERIFICARE
+   1.8-2.0 n= 19 partite=19 roi=3.4% ci=[-40.0, 50.1] DA VERIFICARE
+   2.0-2.5 n= 16 partite=16 roi=-13.4% ci=[-67.3, 42.3] DA VERIFICARE
+     2.5-+ n= 10 partite=8 roi=-67.0% ci=[-100.1, 1.2] DA VERIFICARE
+
+DIAGNOSTICA — calibrazione EV
+  atteso 11.49% realizzato -2.83% — EV SOVRASTIMATO: atteso 11.5% contro realizzato -2.8% (gap -14.3pp) - alzare la soglia non salva
+  EV 0.0-0.02: n=25 atteso=1.8% realizzato=6.8% gap=5.0pp
+  EV 0.02-0.04: n=70 atteso=3.0% realizzato=1.2% gap=-1.8pp
+  EV 0.04-0.06: n=30 atteso=4.8% realizzato=12.9% gap=8.0pp
+  EV 0.06-0.1: n=61 atteso=8.1% realizzato=-6.4% gap=-14.5pp
+  EV 0.1-0.2: n=264 atteso=15.7% realizzato=-4.7% gap=-20.3pp
+
+DIAGNOSTICA — monotonicita' EV
+  spearman=-0.021229412874710068 ci=[-0.12290796323659776, 0.08453062492862873] — EV NON ORDINA i risultati (rho<=0): non e' una misura di valore
+
+DIAGNOSTICA — coorti CLV (il CLV ordina i risultati?)
+  agganciati 72 su 150 non-eco
+  positive  n=54 roi=0.11260185185185184 ci=[-0.09460740740740742, 0.31680188679245286] DA VERIFICARE
+  negative  n=18 roi=-0.47896666666666665 ci=[-0.8093833333333333, -0.10195000000000001] DA VERIFICARE
+  verdetto: CLV ordina i risultati (coorte positiva migliore)
+
+DIAGNOSTICA — celle ex ante (Bonferroni)
+  testate 6 | alpha 0.008333333333333333 | sopravvissute 0
+  nessuna cella sopravvive alla correzione per test multipli

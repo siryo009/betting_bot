@@ -1,0 +1,777 @@
+{
+  "generated_at": "2026-10-20T23:19:12.076331+00:00",
+  "audit": {
+    "snapshot": "/home/siryo/quotaverace/research_isolated/snapshot/quotaverace_prod.db",
+    "snapshot_at": "2026-10-20T22:55:20.891920+00:00",
+    "rows": {
+      "predictions": 2219,
+      "clv": 475,
+      "bets": 81,
+      "results": 17855,
+      "snapshots": 10345
+    },
+    "capital": {
+      "declared_value": 21.1004,
+      "declared_at": "2026-10-20T03:25:00+00:00",
+      "source": "execution_engine.py --provider sxbet --balance (availableBalance)",
+      "snapshot_at": null,
+      "verified": true,
+      "notes": [],
+      "settlements_after_declared": 0,
+      "profit_after_declared": 0.0,
+      "exposure_at_declared": 0.0,
+      "last_settlement": "2026-10-18T18:14:04.438550+00:00",
+      "last_bet_created": "2026-10-20T22:53:11.404979+00:00",
+      "open_bets": 1,
+      "open_stake": 1.84,
+      "stale": false,
+      "declared_kind": "available",
+      "anchor": {
+        "equity": 23.6901,
+        "at": "2026-10-18T04:42:00+00:00",
+        "source": "data/execution/t60_kill.json (equity all'innesco del CB2)",
+        "exposure": 12.100000000000001
+      },
+      "window_settlements": 5,
+      "window_inflow": 9.548636,
+      "window_profit": -2.55,
+      "expected_equity": 21.1401,
+      "expected_available": 21.1401,
+      "expected_value": 21.1401,
+      "residual": -0.039699999999999847,
+      "residual_pct": -0.001877947597220441,
+      "tolerance": 0.05,
+      "within_tolerance": true,
+      "ledger": {
+        "bets_live": 81,
+        "staked_total": 209.98489999999998,
+        "profit_total": -15.39,
+        "open_bets": 1,
+        "open_stake": 1.84
+      },
+      "declared": {
+        "value": 21.1004,
+        "at": "2026-10-20T03:25:00+00:00",
+        "source": "execution_engine.py --provider sxbet --balance (availableBalance)",
+        "note": "saldo LIBERO; escrow 0 al momento della lettura"
+      },
+      "equity_now": 22.9404,
+      "verdict": "RICONCILIATO"
+    },
+    "ev": {
+      "gap": {
+        "n": 376,
+        "by_market": {
+          "1X2": {
+            "n": 71,
+            "hit_rate": 0.647887323943662,
+            "mean_prob": 0.6408935240396014,
+            "mean_quota": 1.7069774647887326,
+            "ev_ledger": 0.06414846647889703,
+            "ev_repro": 0.06414845923241813,
+            "ev_market": -0.008096574738726483,
+            "realized": 0.07389154929577464,
+            "gap_total": -0.009743082816877607,
+            "calibration_gap": 0.00974309006335652,
+            "calibration_gap_ci95": [
+              -0.16732269688460563,
+              0.18759429153815055
+            ],
+            "realized_ci95": [
+              -0.09949142857142858,
+              0.2488128571428571
+            ],
+            "sd": 0.8339987671704624,
+            "min_detectable_edge": 0.27729374399055123,
+            "hit_ci95": [
+              0.5318206221160442,
+              0.7487725187834671
+            ],
+            "definition_gap": 7.24647890304464e-09,
+            "edge_claimed": 0.07224503397114461,
+            "residual": -0.08198812403450112,
+            "closure": 0.0,
+            "calibrated": true,
+            "market_calibrated": true
+          },
+          "AH": {
+            "n": 75,
+            "hit_rate": 0.64,
+            "mean_prob": 0.688703456942377,
+            "mean_quota": 1.5392573333333333,
+            "ev_ledger": 0.14349794828280257,
+            "ev_repro": 0.043328966138674145,
+            "ev_market": -0.015982199938077,
+            "realized": -0.033816000000000006,
+            "gap_total": 0.17731394828280259,
+            "calibration_gap": -0.07290496613867416,
+            "calibration_gap_ci95": [
+              -0.26295049337297405,
+              0.11143084844595981
+            ],
+            "realized_ci95": [
+              -0.22324880952380952,
+              0.15150394736842107
+            ],
+            "sd": 0.7466795439558809,
+            "min_detectable_edge": 0.24155023211476334,
+            "hit_ci95": [
+              0.5270066131909779,
+              0.7393507109138366
+            ],
+            "definition_gap": 0.10016898214412842,
+            "edge_claimed": 0.059311166076751146,
+            "residual": 0.017833800061923005,
+            "closure": 0.0,
+            "calibrated": true,
+            "market_calibrated": true
+          },
+          "OU": {
+            "n": 189,
+            "hit_rate": 0.6243386243386243,
+            "mean_prob": 0.6942506958797738,
+            "mean_quota": 1.5252195767195769,
+            "ev_ledger": 0.1395108037346751,
+            "ev_repro": 0.04434281738623756,
+            "ev_market": -0.010978234389483928,
+            "realized": -0.06604761904761902,
+            "gap_total": 0.2055584227822941,
+            "calibration_gap": -0.11039043643385661,
+            "calibration_gap_ci95": [
+              -0.257507745332273,
+              0.03197688200066028
+            ],
+            "realized_ci95": [
+              -0.21328844221105528,
+              0.07668087431693989
+            ],
+            "sd": 0.7379693123103793,
+            "min_detectable_edge": 0.1503873261395685,
+            "hit_ci95": [
+              0.5534641082992985,
+              0.6902594161306895
+            ],
+            "definition_gap": 0.09516798634843752,
+            "edge_claimed": 0.05532105177572149,
+            "residual": 0.055069384658135094,
+            "closure": 0.0,
+            "calibrated": false,
+            "market_calibrated": true
+          },
+          "TENNIS": {
+            "n": 41,
+            "hit_rate": 0.5365853658536586,
+            "mean_prob": 0.5742635365853658,
+            "mean_quota": 2.341543902439024,
+            "ev_ledger": 0.0544720975609756,
+            "ev_repro": 0.054472139712195125,
+            "ev_market": -0.012297812112840301,
+            "realized": -0.07529756097560976,
+            "gap_total": 0.12976965853658537,
+            "calibration_gap": -0.12976970068780486,
+            "calibration_gap_ci95": [
+              -0.402614603435,
+              0.15277782158500003
+            ],
+            "realized_ci95": [
+              -0.34282142857142855,
+              0.20393
+            ],
+            "sd": 0.9152473503069551,
+            "min_detectable_edge": 0.40045192822387715,
+            "hit_ci95": [
+              0.38746471267669474,
+              0.6794376602366394
+            ],
+            "definition_gap": -4.2151219521724403e-08,
+            "edge_claimed": 0.06676995182503542,
+            "residual": 0.06299974886276946,
+            "closure": 0.0,
+            "calibrated": true,
+            "market_calibrated": true
+          }
+        },
+        "decomposition": {
+          "n": 376,
+          "hit_rate": 0.6223404255319149,
+          "mean_prob": 0.6699850691456575,
+          "mean_quota": 1.6513550531914893,
+          "ev_ledger": 0.11680262007198264,
+          "ev_repro": 0.04898500872367327,
+          "ev_market": -0.011576112760756038,
+          "realized": -0.03420239361702128,
+          "gap_total": 0.15100501368900393,
+          "calibration_gap": -0.08234165765984347,
+          "calibration_gap_ci95": [
+            -0.17741155790994845,
+            0.014335704497853595
+          ],
+          "realized_ci95": [
+            -0.13058997289972898,
+            0.06355039787798408
+          ],
+          "sd": 0.7779086368768434,
+          "min_detectable_edge": 0.11239280450741837,
+          "hit_ci95": [
+            0.5723333581590933,
+            0.669872956774604
+          ],
+          "definition_gap": 0.06781761134830937,
+          "edge_claimed": 0.06056112148442931,
+          "residual": 0.02262628085626524,
+          "closure": 0.0,
+          "calibrated": false,
+          "market_calibrated": true
+        },
+        "roi_all_closed": -0.02826395604395605,
+        "roi_decided": -0.03420239361702128,
+        "push_dilution": -0.0059384375730652285
+      },
+      "identity": {
+        "n": 455,
+        "by_market": {
+          "1X2": {
+            "n": 74,
+            "mean_ev": 0.06602024486488768,
+            "mean_ev_calc": 0.06602023791218496,
+            "mean_abs_delta": 1.4887432433531578e-07,
+            "consistent_share": 1.0,
+            "implied_prob": 0.6463208172200847,
+            "stored_prob": 0.6463208136055634,
+            "market_prob": 0.6045479529703197
+          },
+          "AH": {
+            "n": 81,
+            "mean_ev": 0.14353467310364856,
+            "mean_ev_calc": 0.04331387182224447,
+            "mean_abs_delta": 0.10022080128140413,
+            "consistent_share": 0.012345679012345678,
+            "implied_prob": 0.758299345186756,
+            "stored_prob": 0.6912352160581269,
+            "market_prob": 0.6530353898339459
+          },
+          "OU": {
+            "n": 220,
+            "mean_ev": 0.1406503021616663,
+            "mean_ev_calc": 0.043467829777829765,
+            "mean_abs_delta": 0.09718247579838196,
+            "consistent_share": 0.022727272727272728,
+            "implied_prob": 0.7537338966610788,
+            "stored_prob": 0.689626100987218,
+            "market_prob": 0.6536090308369265
+          },
+          "TENNIS": {
+            "n": 80,
+            "mean_ev": 0.060202624999999996,
+            "mean_ev_calc": 0.0602026394725,
+            "mean_abs_delta": 2.30277499993492e-07,
+            "consistent_share": 1.0,
+            "implied_prob": 0.5559567048153181,
+            "stored_prob": 0.5559567,
+            "market_prob": 0.5244147792867959
+          }
+        },
+        "mean_abs_delta": 0.06483089894140169,
+        "median_delta": 0.07181451838259026,
+        "share_ev_above_calc": 0.6483516483516484,
+        "consistent_share": 0.3516483516483517,
+        "implied_prob": 0.702303255132036,
+        "stored_prob": 0.6593671888455119,
+        "market_prob": 0.6228122730185073
+      },
+      "population": {
+        "all_closed": {
+          "label": "tutte le chiuse (incluse scadenze)",
+          "n": 455,
+          "roi": -0.02826395604395605,
+          "roi_ci95": [
+            -0.10722755555555556,
+            0.051409492273730685
+          ],
+          "ev_ledger": 0.11488150135596441,
+          "hit_rate": 0.5142857142857142,
+          "wins": 234,
+          "losses": 142,
+          "pushes": 79
+        },
+        "traded": {
+          "label": "puntate effettive (scadenze escluse)",
+          "n": 399,
+          "roi": -0.03223082706766916,
+          "roi_ci95": [
+            -0.12456262376237624,
+            0.05709695550351288
+          ],
+          "ev_ledger": 0.11799896308965356,
+          "hit_rate": 0.5864661654135338,
+          "wins": 234,
+          "losses": 142,
+          "pushes": 23
+        },
+        "decided": {
+          "label": "solo decise (won/lost)",
+          "n": 376,
+          "roi": -0.03420239361702128,
+          "roi_ci95": [
+            -0.13058997289972898,
+            0.06355039787798408
+          ],
+          "ev_ledger": 0.11680262007198264,
+          "hit_rate": 0.6223404255319149,
+          "wins": 234,
+          "losses": 142,
+          "pushes": 0
+        },
+        "expiry_n": 56,
+        "expiry_share": 0.12307692307692308,
+        "expiry_ev_mean": 0.09266958650342914,
+        "expiry_drag": 0.011405487569652817,
+        "wrong_verdict_n": 0,
+        "duplicates_dropped": 0
+      },
+      "identity_example": {
+        "esito": "Under 4",
+        "mercato": "OU",
+        "quota": 1.5065,
+        "prob": 0.6794242878386766,
+        "ev": 0.19814319190187465,
+        "ev_calc": 0.023552689628966172,
+        "implied_prob": 0.7953157596427977,
+        "delta": 0.17459050227290848
+      },
+      "n_closed_playable": 455,
+      "summary": {
+        "ev_ledger": 0.11680262007198264,
+        "ev_market": -0.011576112760756038,
+        "realized": -0.03420239361702128,
+        "gap_total": 0.15100501368900393,
+        "definition_gap": 0.06781761134830937,
+        "edge_claimed": 0.06056112148442931,
+        "residual": 0.02262628085626524,
+        "calibration_gap": -0.08234165765984347,
+        "calibration_ci95": [
+          -0.17741155790994845,
+          0.014335704497853595
+        ],
+        "realized_ci95": [
+          -0.13058997289972898,
+          0.06355039787798408
+        ],
+        "min_detectable_edge": 0.11239280450741837
+      },
+      "who_predicts": {
+        "model_ev": 0.11680262007198264,
+        "blend_ev": 0.04898500872367327,
+        "market_ev": -0.011576112760756038,
+        "realized": -0.03420239361702128,
+        "distance_market": -0.02262628085626524,
+        "distance_model": -0.15100501368900393
+      }
+    },
+    "clv": {
+      "aggregate": {
+        "status": "CLV POSITIVO (da confermare sul realizzato)",
+        "n": 475,
+        "echo_n": 325,
+        "echo_share": 0.6842105263157895,
+        "mean": 0.005462957642911735,
+        "median": 0.0,
+        "share_positive": 0.2,
+        "ci95": [
+          0.0027459966428092356,
+          0.008184651367828616
+        ],
+        "non_echo": {
+          "n": 150,
+          "mean": 0.017299365869220498,
+          "median": 0.013121665806229532,
+          "share_positive": 0.6333333333333333,
+          "ci95": [
+            0.00907226182519016,
+            0.02532181572898977
+          ]
+        },
+        "by_source": {
+          "none": {
+            "n": 423,
+            "mean": 0.0026746873073261695,
+            "median": 0.0,
+            "share_positive": 0.13947990543735225,
+            "ci95": [
+              0.0004638539367141419,
+              0.005166386483564637
+            ],
+            "non_echo": 98
+          },
+          "pinnacle_t0": {
+            "n": 43,
+            "mean": 0.03513515209694069,
+            "median": 0.03582887700534765,
+            "share_positive": 0.7906976744186046,
+            "ci95": [
+              0.020389175584909453,
+              0.04963441700141749
+            ],
+            "non_echo": 43
+          },
+          "sx": {
+            "n": 9,
+            "mean": -0.005255487864927207,
+            "median": -0.004845208343958851,
+            "share_positive": 0.2222222222222222,
+            "ci95": [
+              -0.009526396226602722,
+              -0.0013073088398412652
+            ],
+            "non_echo": 9
+          }
+        },
+        "declared_source_share": 0.10947368421052632,
+        "by_week": {
+          "2026-W40": {
+            "n": 23,
+            "mean": -0.0008298608014657669,
+            "non_echo_n": 3,
+            "non_echo_mean": -0.006362266144570879
+          },
+          "2026-W41": {
+            "n": 135,
+            "mean": 0.010264957347063685,
+            "non_echo_n": 48,
+            "non_echo_mean": 0.028870192538616612
+          },
+          "2026-W42": {
+            "n": 236,
+            "mean": 0.004008698055788127,
+            "non_echo_n": 75,
+            "non_echo_mean": 0.012614036548879975
+          },
+          "2026-W43": {
+            "n": 81,
+            "mean": 0.0034835764913233496,
+            "non_echo_n": 24,
+            "non_echo_mean": 0.011757070658216304
+          }
+        },
+        "sign_flips": 1,
+        "weeks": 4,
+        "cohort_realized": {
+          "n": 60,
+          "roi": -0.04234833333333333,
+          "ci95": [
+            -0.25927333333333336,
+            0.17785666666666666
+          ],
+          "hit_rate": 0.55,
+          "mean_clv": 0.028813205634342195,
+          "mean_ev_ledger": 0.06175673077413266,
+          "mean_ev_repro": 0.061756765835799324,
+          "by_source": {
+            "none": {
+              "n": 24,
+              "roi": 0.15622500000000003,
+              "mean_clv": 0.039764956273596684,
+              "hit_rate": 0.625
+            },
+            "pinnacle_t0": {
+              "n": 28,
+              "roi": -0.050325000000000016,
+              "mean_clv": 0.029174556069092757,
+              "hit_rate": 0.5714285714285714
+            },
+            "sx": {
+              "n": 8,
+              "roi": -0.61015,
+              "mean_clv": -0.0053067728050482516,
+              "hit_rate": 0.25
+            }
+          }
+        },
+        "terciles": {
+          "basso": {
+            "n": 20,
+            "mean_clv": -0.01760153231425964,
+            "roi": -0.32001500000000005
+          },
+          "medio": {
+            "n": 20,
+            "mean_clv": 0.031296983617640425,
+            "roi": 0.068235
+          },
+          "alto": {
+            "n": 20,
+            "mean_clv": 0.07274416559964579,
+            "roi": 0.124735
+          }
+        },
+        "same_venue_control": {
+          "n": 9,
+          "mean": -0.005255487864927207,
+          "note": "chiusura SX: stessa venue dell'ingresso, nessun margine di book"
+        }
+      },
+      "cohorts": {
+        "non_echo": {
+          "label": "non-eco (chiusura != segnale)",
+          "n": 150,
+          "clv_mean": 0.017299365869220498,
+          "clv_ci95": [
+            0.009195344141423591,
+            0.025207498350584716
+          ],
+          "share_positive": 0.6333333333333333,
+          "weeks": 4,
+          "week_table": {
+            "2026-W39": {
+              "count": 3,
+              "mean": -0.006362
+            },
+            "2026-W40": {
+              "count": 48,
+              "mean": 0.02887
+            },
+            "2026-W41": {
+              "count": 75,
+              "mean": 0.012614
+            },
+            "2026-W42": {
+              "count": 24,
+              "mean": 0.011757
+            }
+          },
+          "realized_n": 72,
+          "realized_roi": -0.03529027777777779,
+          "realized_hit": 0.4583333333333333,
+          "unmatched": 78
+        },
+        "pinnacle_t0": {
+          "label": "closing Pinnacle a T-0",
+          "n": 43,
+          "clv_mean": 0.03513515209694069,
+          "clv_ci95": [
+            0.020187748256372248,
+            0.049743881065493385
+          ],
+          "share_positive": 0.7906976744186046,
+          "weeks": 2,
+          "week_table": {
+            "2026-W41": {
+              "count": 40,
+              "mean": 0.033421
+            },
+            "2026-W42": {
+              "count": 3,
+              "mean": 0.057988
+            }
+          },
+          "realized_n": 30,
+          "realized_roi": -0.04697000000000002,
+          "realized_hit": 0.5333333333333333,
+          "unmatched": 13
+        },
+        "sx": {
+          "label": "chiusura SX (stessa venue)",
+          "n": 9,
+          "clv_mean": -0.005255487864927207,
+          "clv_ci95": [
+            -0.009506468668051308,
+            -0.0013322557164947074
+          ],
+          "share_positive": 0.2222222222222222,
+          "weeks": 1,
+          "week_table": {
+            "2026-W41": {
+              "count": 9,
+              "mean": -0.005255
+            }
+          },
+          "realized_n": 8,
+          "realized_roi": -0.61015,
+          "realized_hit": 0.25,
+          "unmatched": 1
+        }
+      },
+      "fair": {
+        "book": "pinnacle",
+        "n": 34,
+        "status": "NON DISTINGUIBILE DA ZERO DOPO IL DE-VIG",
+        "fixtures": 27,
+        "margin_mean": 0.04112287274211268,
+        "clv_book": 0.026965310833297666,
+        "clv_book_ci95": [
+          0.005153500575600977,
+          0.04812044650289835
+        ],
+        "clv_fair": -0.01353520553606015,
+        "clv_fair_ci95": [
+          -0.034952225901199646,
+          0.007500889559583177
+        ],
+        "share_positive_book": 0.6470588235294118,
+        "share_positive_fair": 0.2647058823529412,
+        "margin_share_of_clv": 1.5019488045116998,
+        "non_echo": {
+          "n": 32,
+          "clv_book": 0.02865064276037877,
+          "clv_fair": -0.011432120764894055,
+          "ci_fair95": [
+            32,
+            -0.011432120764894055
+          ]
+        }
+      },
+      "by_source": {
+        "none": {
+          "n": 423,
+          "mean": 0.0026746873073261695,
+          "median": 0.0,
+          "share_positive": 0.13947990543735225,
+          "ci95": [
+            0.0004638539367141419,
+            0.005166386483564637
+          ],
+          "non_echo": 98
+        },
+        "pinnacle_t0": {
+          "n": 43,
+          "mean": 0.03513515209694069,
+          "median": 0.03582887700534765,
+          "share_positive": 0.7906976744186046,
+          "ci95": [
+            0.020389175584909453,
+            0.04963441700141749
+          ],
+          "non_echo": 43
+        },
+        "sx": {
+          "n": 9,
+          "mean": -0.005255487864927207,
+          "median": -0.004845208343958851,
+          "share_positive": 0.2222222222222222,
+          "ci95": [
+            -0.009526396226602722,
+            -0.0013073088398412652
+          ],
+          "non_echo": 9
+        }
+      }
+    }
+  },
+  "test": {
+    "protocol_hash": "a4bf0184f77a9589860302aad70a035b47e1471aa0cb7da32c616af56cf9623a",
+    "selected": {
+      "odds_min": 1.2,
+      "odds_max": 2.0,
+      "ev_min": 0.015,
+      "edge_min": 0.01,
+      "favourite_min": 0.5,
+      "markets": [
+        "1X2",
+        "OU",
+        "AH",
+        "TENNIS",
+        "ML"
+      ],
+      "label": "1X2<= 2.0 edge1% ev1.5% ALL",
+      "n": 100,
+      "roi": -0.06918600000000003,
+      "ci95": [
+        -0.2619190476190476,
+        0.10413076923076922
+      ],
+      "hit": 0.55,
+      "ev": 0.12860824167002238,
+      "eligible": true
+    },
+    "verdict": "INCONCLUSIVE",
+    "why": "IC95 contiene lo zero",
+    "test": {
+      "n": 179,
+      "roi": -0.04762681564245806,
+      "ci95": [
+        -0.18385813953488372,
+        0.08854022988505747
+      ],
+      "hit": 0.5810055865921788,
+      "ev": 0.1001930176611127
+    },
+    "benchmark_test": {
+      "n": 60,
+      "roi": 0.06414833333333331,
+      "ci95": [
+        -0.13662333333333335,
+        0.25691
+      ],
+      "hit": 0.65,
+      "ev": 0.06073237964634939
+    },
+    "benchmark_market": {
+      "n": 0,
+      "roi": null,
+      "ci95": [
+        null,
+        null
+      ],
+      "hit": null,
+      "ev": null
+    },
+    "beats_benchmark": false,
+    "window": [
+      "2026-10-12 15:49:31.791710+00:00",
+      "2026-10-19 22:43:54.910858+00:00"
+    ],
+    "n_for_confident": 200,
+    "confident_sample": false,
+    "sizes": {
+      "train": 1063,
+      "validation": 532,
+      "test": 532
+    },
+    "benchmark_validation": {
+      "n": 10,
+      "roi": 0.39444999999999997,
+      "ci95": [
+        0.0068599999999999885,
+        0.66963
+      ],
+      "hit": 0.7,
+      "ev": 0.07689029176410198
+    }
+  },
+  "decision": {
+    "decision": "nessun vantaggio dimostrato",
+    "reasons": [
+      "holdout INCONCLUSIVE: IC95 contiene lo zero"
+    ],
+    "pass_test": false,
+    "fair_clv_ok": false,
+    "beats_benchmark": false,
+    "n_test": 179,
+    "rules": {
+      "nessun_vantaggio": [
+        "il test pre-registrato sull'holdout NON passa (INCONCLUSIVE o FAIL)",
+        "oppure il CLV de-vigato non sopravvive (non distinguibile da zero)",
+        "oppure il candidato non batte il benchmark sulla stessa finestra"
+      ],
+      "shadow": [
+        "il test PASSA (IC95 > 0) e batte il benchmark",
+        "ma il campione e' sotto le 200 chiusure oppure il CLV de-vigato non e' positivo: il risultato puo' essere rumore o selezione"
+      ],
+      "candidato": [
+        "il test PASSA con n >= 200",
+        "e il CLV de-vigato e' positivo con IC95 > 0",
+        "e il candidato batte il benchmark sulla stessa finestra"
+      ]
+    },
+    "shadow_protocol": {
+      "min_closures": 200,
+      "shadow_days": 30,
+      "order_size_usdc": 1.0,
+      "cb2": "ARMATO (soglia invariata: nessun ordine finche' l'equity non la supera)",
+      "live": "DISABILITATO",
+      "success": "CLV de-vigato > 0 con IC95 > 0 sul campione shadow",
+      "abort": "CLV de-vigato < 0 dopo 100 chiusure"
+    }
+  },
+  "rebuilt_from": "/home/siryo/quotaverace/research_isolated/out/NEXT_PHASE_RESULTS.json"
+}

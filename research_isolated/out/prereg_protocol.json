@@ -1,0 +1,61 @@
+{
+  "hash": "a4bf0184f77a9589860302aad70a035b47e1471aa0cb7da32c616af56cf9623a",
+  "protocol": {
+    "version": "1.0",
+    "declared_at": "2026-10-20",
+    "question": "Esiste un sottoinsieme DICHIARATO di gate la cui performance supera il benchmark di produzione FUORI CAMPIONE?",
+    "universe": "predictions chiuse con profit, quota, ev e market_edge leggibili; dedup per (match_id, esito), la PRIMA creata",
+    "split": {
+      "train": 0.5,
+      "validation": 0.25,
+      "test": 0.25,
+      "order": "cronologico su created_at; il test e' l'ULTIMO tratto",
+      "note": "nessuna riga del test entra in selezione o soglie"
+    },
+    "candidates": {
+      "odds_max": [
+        1.8,
+        2.0
+      ],
+      "edge_min": [
+        0.01,
+        0.02,
+        0.03
+      ],
+      "ev_min": [
+        0.015,
+        0.035
+      ],
+      "markets": [
+        "1X2",
+        "ALL"
+      ],
+      "count": 24
+    },
+    "fixed_gates": [
+      "odds_min (produzione)",
+      "favourite_min (produzione, SOLO 1X2: e' una regola del calcio e applicarla a OU/AH scarterebbe i lati Under/Away)",
+      "soglia EV UNIFORME fra i candidati, per confrontabilita' (la produzione usa soglie per mercato: semplificazione dichiarata, non un dettaglio nascosto)",
+      "dedup per partita+esito"
+    ],
+    "selection_rule": "massimo ROI su VALIDATION con n >= 40; nessun'altra metrica, nessun tie-break a posteriori (a parita' vince il piu' semplice: odds_max piu' basso)",
+    "metrics": [
+      "n",
+      "ROI flat",
+      "IC95 bootstrap per partita",
+      "hit rate",
+      "EV medio a ledger",
+      "delta vs benchmark"
+    ],
+    "success": {
+      "primary": "profitto medio per unita' di stake (ROI flat)",
+      "pass": "estremo inferiore dell'IC95 bootstrap > 0 sul test",
+      "fail": "estremo superiore dell'IC95 < 0",
+      "inconclusive": "n_test < 40 oppure IC95 che contiene lo zero",
+      "must_beat_benchmark": "ROI sul test >= ROI del benchmark sulla STESSA finestra (se il benchmark ha n >= 20)",
+      "n_for_confident": 200
+    },
+    "holdout_policy": "un solo test, firmato su disco; un secondo tentativo rifiuta senza nuovo protocollo"
+  },
+  "written_at": "2026-10-20T12:38:55.751490+00:00"
+}

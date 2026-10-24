@@ -1,0 +1,10 @@
+=== FASE SUCCESSIVA ===
+capitale: 22.9404 USDC -> RICONCILIATO (residuo -0.0397)
+EV: modello +11.68% | mercato -1.16% | realizzato -3.42% | definizione +6.78%
+CLV: book +2.70% -> fair -1.35% (NON DISTINGUIBILE DA ZERO DOPO IL DE-VIG)
+test: INCONCLUSIVE (IC95 contiene lo zero) | candidato -4.76%
+DECISIONE: NESSUN VANTAGGIO DIMOSTRATO
+  report: /home/siryo/quotaverace/research_isolated/out/NEXT_PHASE_REPORT.md
+  json: /home/siryo/quotaverace/research_isolated/out/NEXT_PHASE_RESULTS.json
+  markets_csv: /home/siryo/quotaverace/research_isolated/out/next_phase_markets.csv
+  clv_csv: /home/siryo/quotaverace/research_isolated/out/next_phase_clv.csv

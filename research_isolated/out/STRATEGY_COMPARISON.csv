@@ -1,0 +1,30 @@
+strategy,family,split,status,n,roi_pct,roi_ci_lo_pct,roi_ci_hi_pct,hit_rate,avg_odds,max_dd_units,clv_mean_pct,clv_n,matches,min_detectable_edge_pct,required_n_for_2pct
+value_1x2,value_betting,full,DA VERIFICARE,78,11.38,-5.25,28.0,0.6538,1.64,5.05,-0.3,26.0,78.0,24.0,5495.0
+value_1x2,value_betting,validation,DA VERIFICARE,58,3.96,-16.06,24.44,0.5862,1.659,5.05,-0.36,22.0,58.0,29.2,6048.0
+value_1x2,value_betting,holdout,DA VERIFICARE,20,32.89,5.0,56.52,0.85,1.584,2.0,0.01,4.0,20.0,37.8,3494.0
+value_tight_1x2,value_betting,full,DA VERIFICARE,27,18.74,-10.34,44.99,0.6296,1.716,2.0,-1.32,12.0,27.0,40.5,5426.0
+value_tight_1x2,value_betting,validation,DA VERIFICARE,24,19.45,-11.96,47.31,0.625,1.716,2.0,-1.64,11.0,24.0,42.6,5328.0
+value_tight_1x2,value_betting,holdout,DA VERIFICARE,3,13.02,-100.0,72.41,0.6667,1.72,1.0,2.25,1.0,3.0,158.4,9209.0
+value_capped_ev,value_betting,full,PROMETTENTE,59,19.6,1.63,36.16,0.7119,1.602,4.25,-1.55,16.0,59.0,25.8,4802.0
+value_capped_ev,value_betting,validation,DA VERIFICARE,43,14.1,-8.16,35.36,0.6512,1.626,4.25,-1.93,14.0,43.0,32.3,5478.0
+value_capped_ev,value_betting,holdout,DA VERIFICARE,16,34.38,5.9,57.35,0.875,1.539,1.0,1.1,2.0,16.0,38.6,2923.0
+value_capped_ev_tight,value_betting,full,PROMETTENTE,48,21.37,1.01,40.44,0.7292,1.595,3.54,-1.23,11.0,48.0,28.3,4720.0
+value_capped_ev_tight,value_betting,validation,DA VERIFICARE,33,17.17,-10.52,42.25,0.6667,1.631,3.54,-1.58,10.0,33.0,37.3,5609.0
+value_capped_ev_tight,value_betting,holdout,DA VERIFICARE,15,30.61,-0.16,53.55,0.8667,1.514,1.0,2.25,1.0,15.0,39.7,2898.0
+market_only_favourite,benchmark,full,DA VERIFICARE,310,1.48,-6.21,8.98,0.5323,1.573,8.23,-1.04,18.0,310.0,10.8,4392.0
+market_only_favourite,benchmark,validation,DA VERIFICARE,248,2.21,-6.27,10.26,0.504,1.578,7.0,-1.64,16.0,248.0,11.7,4176.0
+market_only_favourite,benchmark,holdout,DA VERIFICARE,62,-1.44,-20.48,16.66,0.6452,1.555,8.23,3.77,2.0,62.0,26.5,5330.0
+ou_gate,multi_market,full,DA VERIFICARE,247,-2.93,-14.91,8.6,0.5344,1.546,27.51,,,150.0,12.1,4446.0
+ou_gate,multi_market,validation,DA VERIFICARE,144,4.58,-8.56,17.46,0.5417,1.556,7.29,,,96.0,15.0,3974.0
+ou_gate,multi_market,holdout,DA VERIFICARE,103,-13.43,-34.2,7.23,0.5243,1.531,22.13,,,55.0,19.9,4968.0
+ah_gate,multi_market,full,DA VERIFICARE,92,-0.66,-16.95,15.33,0.587,1.548,8.24,,,64.0,20.8,4854.0
+ah_gate,multi_market,validation,DA VERIFICARE,47,1.77,-19.8,21.49,0.5745,1.543,5.2,,,36.0,27.5,4356.0
+ah_gate,multi_market,holdout,DA VERIFICARE,45,-3.19,-30.14,22.56,0.6,1.553,4.92,,,28.0,31.5,5473.0
+tennis_band,tennis,full,DA VERIFICARE,55,-2.61,-20.59,14.5,0.3273,1.72,5.04,4.2,41.0,54.0,25.3,4302.0
+tennis_band,tennis,validation,DA VERIFICARE,34,-2.74,-22.2,15.65,0.2059,1.71,3.07,4.07,20.0,34.0,26.6,2948.0
+tennis_band,tennis,holdout,DA VERIFICARE,21,-2.38,-37.8,33.34,0.5238,1.737,2.89,4.32,21.0,20.0,51.3,6750.0
+contrarian_ou_rejected,contrast,full,DA VERIFICARE,803,5.32,-9.64,21.36,0.2254,5.201,44.99,,,338.0,19.0,35522.0
+contrarian_ou_rejected,contrast,validation,DA VERIFICARE,596,5.24,-12.14,24.3,0.2047,5.225,44.99,,,262.0,22.1,35473.0
+contrarian_ou_rejected,contrast,holdout,DA VERIFICARE,207,5.57,-23.51,36.46,0.285,5.132,30.34,,,86.0,37.6,35836.0
+grid_1x2,value_betting,holdout,DA VERIFICARE,6,27.25,,,,,,,,,,
+grid_1x2,value_betting,walk_forward,DA VERIFICARE,16,5.53,,,,,,,,,,

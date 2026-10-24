@@ -1,0 +1,673 @@
+{
+  "snapshot": {
+    "path": "research_isolated/snapshot/quotaverace_20261020_2040.db",
+    "quick_check": "ok",
+    "predictions": 2212,
+    "bets": 80
+  },
+  "thresholds": {
+    "odds_min": 1.2,
+    "odds_max": 2.0,
+    "ev_min": 0.015,
+    "edge_min": 0.01,
+    "cap_tested": 0.06
+  },
+  "multiple_testing": {
+    "hypotheses_listed": 24,
+    "tests_accounted": 60,
+    "bonferroni_alpha": 0.0008333333333333334
+  },
+  "universe": {
+    "n": 78,
+    "roi": 0.11381923076923077,
+    "roi_ci95": {
+      "n": 78,
+      "mean": 0.11381923076923077,
+      "lo": -0.052493589743589746,
+      "hi": 0.28002435897435896,
+      "clusters": 78
+    },
+    "sd": 0.7563675280031411,
+    "t": 1.3290155789700377,
+    "max_drawdown": 5.053700000000001,
+    "hit_rate": 0.6538461538461539,
+    "hit_ci95": [
+      0.543301943767048,
+      0.7499479609368923
+    ],
+    "avg_odds": 1.639819230769231,
+    "required_bets_for_2pct": 5495,
+    "label": "universo 1X2 produzione",
+    "won": 51,
+    "lost": 23,
+    "push": 4,
+    "push_share": 0.05128205128205128,
+    "matches": 78,
+    "days_span": 16.06,
+    "bets_per_day": 4.856065650615567,
+    "status": "DA VERIFICARE",
+    "power": {
+      "n": 78,
+      "min_detectable_edge": 0.2399326836388083,
+      "required_n_for_2pct": 5495,
+      "required_n_for_1pct": 21977
+    }
+  },
+  "cap_table": [
+    {
+      "cap": 0.04,
+      "cap_label": "4%",
+      "excluded_n": 33,
+      "excluded_roi": 0.01327575757575756,
+      "delta_vs_excluded": 0.17427535353535356,
+      "delta_ci": [
+        -0.16518363636363637,
+        0.5184668686868688
+      ],
+      "delta_status": "NESSUNA DIFFERENZA DIMOSTRATA",
+      "n": 45,
+      "share_of_universe": 0.5769230769230769,
+      "roi": 0.1875511111111111,
+      "ci_lo": -0.02942,
+      "ci_hi": 0.3933044444444444,
+      "ci_adj_lo": -0.22341111111111112,
+      "ci_adj_hi": 0.5047377777777778,
+      "significant_95": false,
+      "significant_adjusted": false,
+      "status": "DA VERIFICARE",
+      "avg_odds": 1.5938666666666668
+    },
+    {
+      "cap": 0.05,
+      "cap_label": "5%",
+      "excluded_n": 30,
+      "excluded_roi": -0.04595666666666666,
+      "delta_vs_excluded": 0.25963583333333334,
+      "delta_ci": [
+        -0.0896095833333333,
+        0.6099666666666667
+      ],
+      "delta_status": "NESSUNA DIFFERENZA DIMOSTRATA",
+      "n": 48,
+      "share_of_universe": 0.6153846153846154,
+      "roi": 0.21367916666666667,
+      "ci_lo": 0.010074999999999995,
+      "ci_hi": 0.40436458333333336,
+      "ci_adj_lo": -0.15256458333333334,
+      "ci_adj_hi": 0.5171895833333333,
+      "significant_95": true,
+      "significant_adjusted": false,
+      "status": "PROMETTENTE",
+      "avg_odds": 1.5946
+    },
+    {
+      "cap": 0.06,
+      "cap_label": "6%",
+      "excluded_n": 30,
+      "excluded_roi": -0.04595666666666666,
+      "delta_vs_excluded": 0.25963583333333334,
+      "delta_ci": [
+        -0.0896095833333333,
+        0.6099666666666667
+      ],
+      "delta_status": "NESSUNA DIFFERENZA DIMOSTRATA",
+      "n": 48,
+      "share_of_universe": 0.6153846153846154,
+      "roi": 0.21367916666666667,
+      "ci_lo": 0.010074999999999995,
+      "ci_hi": 0.40436458333333336,
+      "ci_adj_lo": -0.15256458333333334,
+      "ci_adj_hi": 0.5171895833333333,
+      "significant_95": true,
+      "significant_adjusted": false,
+      "status": "PROMETTENTE",
+      "avg_odds": 1.5946
+    },
+    {
+      "cap": 0.08,
+      "cap_label": "8%",
+      "excluded_n": 24,
+      "excluded_roi": -0.07641666666666667,
+      "delta_vs_excluded": 0.27478518518518524,
+      "delta_ci": [
+        -0.09650277777777777,
+        0.655250462962963
+      ],
+      "delta_status": "NESSUNA DIFFERENZA DIMOSTRATA",
+      "n": 54,
+      "share_of_universe": 0.6923076923076923,
+      "roi": 0.19836851851851856,
+      "ci_lo": 0.00671296296296296,
+      "ci_hi": 0.3796888888888889,
+      "ci_adj_lo": -0.17864074074074074,
+      "ci_adj_hi": 0.5041425925925926,
+      "significant_95": true,
+      "significant_adjusted": false,
+      "status": "PROMETTENTE",
+      "avg_odds": 1.6058407407407407
+    },
+    {
+      "cap": 0.1,
+      "cap_label": "10%",
+      "excluded_n": 19,
+      "excluded_roi": -0.1414,
+      "delta_vs_excluded": 0.3374084745762712,
+      "delta_ci": [
+        -0.06684157002676182,
+        0.7463038358608386
+      ],
+      "delta_status": "NESSUNA DIFFERENZA DIMOSTRATA",
+      "n": 59,
+      "share_of_universe": 0.7564102564102564,
+      "roi": 0.19600847457627119,
+      "ci_lo": 0.016284745762711862,
+      "ci_hi": 0.3615847457627119,
+      "ci_adj_lo": -0.1559,
+      "ci_adj_hi": 0.4739135593220339,
+      "significant_95": true,
+      "significant_adjusted": false,
+      "status": "PROMETTENTE",
+      "avg_odds": 1.6024288135593223
+    },
+    {
+      "cap": 0.12,
+      "cap_label": "12%",
+      "excluded_n": 12,
+      "excluded_roi": 0.0869083333333333,
+      "delta_vs_excluded": 0.03180378787878796,
+      "delta_ci": [
+        -0.45006136363636357,
+        0.5217681818181819
+      ],
+      "delta_status": "NESSUNA DIFFERENZA DIMOSTRATA",
+      "n": 66,
+      "share_of_universe": 0.8461538461538461,
+      "roi": 0.11871212121212125,
+      "ci_lo": -0.0649090909090909,
+      "ci_hi": 0.2895121212121212,
+      "ci_adj_lo": -0.1619651515151515,
+      "ci_adj_hi": 0.4369,
+      "significant_95": false,
+      "significant_adjusted": false,
+      "status": "DA VERIFICARE",
+      "avg_odds": 1.6134000000000004
+    },
+    {
+      "cap": 0.15,
+      "cap_label": "15%",
+      "excluded_n": 9,
+      "excluded_roi": 0.06879999999999997,
+      "delta_vs_excluded": 0.05089130434782613,
+      "delta_ci": [
+        -0.49044251207729467,
+        0.6252067632850242
+      ],
+      "delta_status": "NESSUNA DIFFERENZA DIMOSTRATA",
+      "n": 69,
+      "share_of_universe": 0.8846153846153846,
+      "roi": 0.1196913043478261,
+      "ci_lo": -0.05855797101449275,
+      "ci_hi": 0.2932840579710145,
+      "ci_adj_lo": -0.16747536231884058,
+      "ci_adj_hi": 0.3993579710144928,
+      "significant_95": false,
+      "significant_adjusted": false,
+      "status": "DA VERIFICARE",
+      "avg_odds": 1.6206072463768115
+    },
+    {
+      "cap": 0.2,
+      "cap_label": "20%",
+      "excluded_n": 5,
+      "excluded_roi": 0.4078399999999999,
+      "delta_vs_excluded": -0.31415917808219174,
+      "delta_ci": [
+        -0.8512887671232877,
+        0.4322468493150685
+      ],
+      "delta_status": "NESSUNA DIFFERENZA DIMOSTRATA",
+      "n": 73,
+      "share_of_universe": 0.9358974358974359,
+      "roi": 0.09368082191780822,
+      "ci_lo": -0.07817808219178082,
+      "ci_hi": 0.2651958904109589,
+      "ci_adj_lo": -0.20565342465753425,
+      "ci_adj_hi": 0.3665082191780822,
+      "significant_95": false,
+      "significant_adjusted": false,
+      "status": "DA VERIFICARE",
+      "avg_odds": 1.6289150684931508
+    },
+    {
+      "cap": null,
+      "cap_label": "production",
+      "excluded_n": 0,
+      "excluded_roi": null,
+      "delta_vs_excluded": null,
+      "delta_ci": null,
+      "delta_status": "NON VERIFICABILE",
+      "n": 78,
+      "share_of_universe": 1.0,
+      "roi": 0.11381923076923077,
+      "ci_lo": -0.052493589743589746,
+      "ci_hi": 0.28002435897435896,
+      "ci_adj_lo": -0.160275641025641,
+      "ci_adj_hi": 0.38398846153846156,
+      "significant_95": false,
+      "significant_adjusted": false,
+      "status": "DA VERIFICARE",
+      "avg_odds": 1.639819230769231
+    }
+  ],
+  "ev_buckets": [
+    {
+      "bucket": "-inf .. 2.0%",
+      "ev_lo": null,
+      "ev_hi": 0.02,
+      "n": 343,
+      "roi": -0.005876093294460637,
+      "ci_lo": -0.07924927113702625,
+      "ci_hi": 0.06612536443148688,
+      "ci_adj_lo": -0.13011661807580174,
+      "ci_adj_hi": 0.11282711370262391,
+      "hit_rate": 0.5189504373177842,
+      "avg_odds": 1.5877851311953355
+    },
+    {
+      "bucket": "2.0% .. 3.0%",
+      "ev_lo": 0.02,
+      "ev_hi": 0.03,
+      "n": 19,
+      "roi": 0.1475,
+      "ci_lo": -0.1867,
+      "ci_hi": 0.4535842105263158,
+      "ci_adj_lo": -0.43953157894736844,
+      "ci_adj_hi": 0.6581631578947369,
+      "hit_rate": 0.6842105263157895,
+      "avg_odds": 1.6154578947368419
+    },
+    {
+      "bucket": "3.0% .. 4.0%",
+      "ev_lo": 0.03,
+      "ev_hi": 0.04,
+      "n": 7,
+      "roi": 0.3788,
+      "ci_lo": -0.12191428571428573,
+      "ci_hi": 0.7428714285714285,
+      "ci_adj_lo": -0.6085714285714285,
+      "ci_adj_hi": 0.7913,
+      "hit_rate": 0.7142857142857143,
+      "avg_odds": 1.6686285714285716
+    },
+    {
+      "bucket": "4.0% .. 6.0%",
+      "ev_lo": 0.04,
+      "ev_hi": 0.06,
+      "n": 4,
+      "roi": 0.45419999999999994,
+      "ci_lo": 0.16665,
+      "ci_hi": 0.6771499999999999,
+      "ci_adj_lo": 0.0,
+      "ci_adj_hi": 0.6877,
+      "hit_rate": 0.75,
+      "avg_odds": 1.5317
+    },
+    {
+      "bucket": "6.0% .. 10.0%",
+      "ev_lo": 0.06,
+      "ev_hi": 0.1,
+      "n": 13,
+      "roi": 0.08983846153846153,
+      "ci_lo": -0.3425307692307692,
+      "ci_hi": 0.48463076923076925,
+      "ci_adj_lo": -0.6110769230769231,
+      "ci_adj_hi": 0.7044307692307693,
+      "hit_rate": 0.6153846153846154,
+      "avg_odds": 1.6609615384615386
+    },
+    {
+      "bucket": "10.0% .. 20.0%",
+      "ev_lo": 0.1,
+      "ev_hi": 0.2,
+      "n": 17,
+      "roi": -0.2521058823529412,
+      "ci_lo": -0.608835294117647,
+      "ci_hi": 0.10288823529411764,
+      "ci_adj_lo": -0.7894117647058824,
+      "ci_adj_hi": 0.3918235294117647,
+      "hit_rate": 0.35294117647058826,
+      "avg_odds": 1.6945588235294116
+    },
+    {
+      "bucket": "20.0% .. +inf",
+      "ev_lo": 0.2,
+      "ev_hi": null,
+      "n": 5,
+      "roi": 0.4078399999999999,
+      "ci_lo": -0.31974,
+      "ci_hi": 0.90046,
+      "ci_adj_lo": -1.0,
+      "ci_adj_hi": 0.9629999999999999,
+      "hit_rate": 0.8,
+      "avg_odds": 1.79902
+    }
+  ],
+  "spearman": {
+    "n": 408,
+    "clusters": 408,
+    "rho": 0.10396457291673726,
+    "ci95": [
+      0.005065216612554215,
+      0.1942302841806544
+    ],
+    "status": "INFORMATIVO (rho>0)"
+  },
+  "monotony": {
+    "verdict": "NON MONOTONO",
+    "usable_buckets": 4,
+    "rho_buckets": -0.39999999999999997,
+    "rho_max": -0.5,
+    "inversions": 1,
+    "rois": [
+      -0.0059,
+      0.1475,
+      0.0898,
+      -0.2521
+    ],
+    "ns": [
+      343,
+      19,
+      13,
+      17
+    ]
+  },
+  "walk_forward": {
+    "verdict": "NON DIMOSTRATO FUORI CAMPIONE",
+    "days": 14,
+    "choices": [
+      {
+        "day": "2026-10-07",
+        "cap": null,
+        "n_train": 2,
+        "train_roi": null,
+        "n_today": 1
+      },
+      {
+        "day": "2026-10-08",
+        "cap": null,
+        "n_train": 3,
+        "train_roi": null,
+        "n_today": 2
+      },
+      {
+        "day": "2026-10-09",
+        "cap": null,
+        "n_train": 5,
+        "train_roi": null,
+        "n_today": 3
+      },
+      {
+        "day": "2026-10-10",
+        "cap": null,
+        "n_train": 8,
+        "train_roi": null,
+        "n_today": 3
+      },
+      {
+        "day": "2026-10-11",
+        "cap": null,
+        "n_train": 11,
+        "train_roi": null,
+        "n_today": 6
+      },
+      {
+        "day": "2026-10-12",
+        "cap": null,
+        "n_train": 17,
+        "train_roi": null,
+        "n_today": 2
+      },
+      {
+        "day": "2026-10-13",
+        "cap": null,
+        "n_train": 19,
+        "train_roi": null,
+        "n_today": 5
+      },
+      {
+        "day": "2026-10-14",
+        "cap": 0.2,
+        "n_train": 24,
+        "train_roi": 0.24718333333333334,
+        "n_today": 10
+      },
+      {
+        "day": "2026-10-15",
+        "cap": 0.08,
+        "n_train": 35,
+        "train_roi": 0.1813761904761905,
+        "n_today": 5
+      },
+      {
+        "day": "2026-10-16",
+        "cap": 0.1,
+        "n_train": 40,
+        "train_roi": 0.15757741935483868,
+        "n_today": 6
+      },
+      {
+        "day": "2026-10-17",
+        "cap": 0.05,
+        "n_train": 46,
+        "train_roi": 0.15989285714285714,
+        "n_today": 14
+      },
+      {
+        "day": "2026-10-18",
+        "cap": 0.05,
+        "n_train": 69,
+        "train_roi": 0.23385476190476193,
+        "n_today": 5
+      },
+      {
+        "day": "2026-10-19",
+        "cap": 0.05,
+        "n_train": 77,
+        "train_roi": 0.23950212765957452,
+        "n_today": 1
+      },
+      {
+        "day": "2026-10-20",
+        "cap": 0.05,
+        "n_train": 78,
+        "train_roi": 0.21367916666666667,
+        "n_today": 0
+      }
+    ],
+    "result": {
+      "n": 63,
+      "roi": 0.17067142857142856,
+      "roi_ci95": {
+        "n": 63,
+        "mean": 0.17067142857142856,
+        "lo": -0.009236507936507939,
+        "hi": 0.3402428571428571,
+        "clusters": 63
+      },
+      "sd": 0.7198478744820418,
+      "t": 1.881873262023734,
+      "max_drawdown": 3.3563,
+      "hit_rate": 0.6984126984126984,
+      "hit_ci95": [
+        0.5763962768644041,
+        0.7976230883781149
+      ],
+      "avg_odds": 1.6166603174603178,
+      "required_bets_for_2pct": 4977,
+      "label": "walk-forward cap",
+      "won": 44,
+      "lost": 16,
+      "push": 3,
+      "push_share": 0.047619047619047616,
+      "matches": 63,
+      "days_span": 12.43,
+      "bets_per_day": 5.069908010841978,
+      "status": "DA VERIFICARE",
+      "power": {
+        "n": 63,
+        "min_detectable_edge": 0.25408222811229214,
+        "required_n_for_2pct": 4977,
+        "required_n_for_1pct": 19906
+      }
+    },
+    "cap_distribution": {
+      "production": 7,
+      "20%": 1,
+      "8%": 1,
+      "10%": 1,
+      "5%": 4
+    }
+  },
+  "eras": [
+    {
+      "era": "-inf .. 2026-09-11",
+      "n_prod": 0,
+      "roi_prod": null,
+      "n_cap": 0,
+      "roi_cap": null,
+      "delta": null
+    },
+    {
+      "era": "2026-09-11 .. 2026-10-14",
+      "n_prod": 24,
+      "roi_prod": 0.24718333333333334,
+      "n_cap": 11,
+      "roi_cap": 0.34728181818181814,
+      "delta": 0.1000984848484848
+    },
+    {
+      "era": "2026-10-14 .. +inf",
+      "n_prod": 54,
+      "roi_prod": 0.054546296296296294,
+      "n_cap": 37,
+      "roi_cap": 0.17395945945945948,
+      "delta": 0.1194131631631632
+    }
+  ],
+  "live_money": {
+    "n": 80,
+    "linked": 55,
+    "unlinked": 25,
+    "unlinked_stake": 0,
+    "cap": 0.06,
+    "usdc_total": -10.510000000000002,
+    "stake_total": 154.34589999999994,
+    "by_band": [
+      {
+        "band": "EV < 3%",
+        "n": 12,
+        "roi": -0.16275497117694107,
+        "ci_lo": -0.6363705072995565,
+        "ci_hi": 0.33791429296959063
+      },
+      {
+        "band": "EV 3-6%",
+        "n": 21,
+        "roi": 0.2133798170899564,
+        "ci_lo": -0.16838303968518345,
+        "ci_hi": 0.5967331334860261
+      },
+      {
+        "band": "EV 6-10%",
+        "n": 11,
+        "roi": -0.07391620635828734,
+        "ci_lo": -0.57741070508973,
+        "ci_hi": 0.46595441624927914
+      },
+      {
+        "band": "EV >= 10%",
+        "n": 11,
+        "roi": -0.6879590975664712,
+        "ci_lo": -1.0,
+        "ci_hi": -0.22658048354829974
+      }
+    ],
+    "cap_result": {
+      "n": 33,
+      "roi": 0.07660353044744823,
+      "usdc": 7.08,
+      "stake": 87.53
+    },
+    "prod_result": {
+      "n": 55,
+      "roi": -0.10641294251648277,
+      "usdc": -10.510000000000002,
+      "stake": 154.34589999999994
+    },
+    "status": "MISURATO"
+  },
+  "verdict": {
+    "usable": false,
+    "checks": [
+      {
+        "check": "in-sample cap",
+        "ok": true,
+        "detail": "miglior tetto 5% n=48 ROI +21.37%"
+      },
+      {
+        "check": "esclusi peggiori (contrasto)",
+        "ok": false,
+        "detail": "esclusi n=30 ROI -0.04595666666666666, delta CI [-0.0896095833333333, 0.6099666666666667]"
+      },
+      {
+        "check": "monotonia",
+        "ok": false,
+        "detail": "NON MONOTONO"
+      },
+      {
+        "check": "correlazione EV/profitto",
+        "ok": false,
+        "detail": "rho=0.10396457291673726 CI=[0.005065216612554215, 0.1942302841806544]"
+      },
+      {
+        "check": "walk-forward",
+        "ok": false,
+        "detail": "NON DIMOSTRATO FUORI CAMPIONE"
+      },
+      {
+        "check": "regge in piu' di un'era",
+        "ok": true,
+        "detail": "2 ere su 3 con delta>0"
+      },
+      {
+        "check": "denaro reale non peggiora",
+        "ok": true,
+        "detail": "live cap {'n': 33, 'roi': 0.07660353044744823, 'usdc': 7.08, 'stake': 87.53} vs prod {'n': 55, 'roi': -0.10641294251648277, 'usdc': -10.510000000000002, 'stake': 154.34589999999994}"
+      }
+    ],
+    "passed": 3,
+    "total": 7,
+    "critical": {
+      "monotonia": "NON MONOTONO",
+      "contrasto": false,
+      "walk_forward": "NON DIMOSTRATO FUORI CAMPIONE"
+    },
+    "decision": "NESSUNA REGOLA: nessun tetto promosso",
+    "best_cap": 0.05
+  },
+  "plan": {
+    "executed": false,
+    "trigger": "tetto EV <= 6% sui soli 1X2 con quota 1.20-2.00, favorito di mercato",
+    "shadow_days": 7,
+    "shadow_min_signals": 20,
+    "promotion_criteria": [
+      "shadow: nessuna divergenza di PREZZO fra pick e ordine",
+      "shadow: ROI delle righe selezionate con CI95 che esclude zero",
+      "live: massimo 1.00 USDC per ordine finche' l'equity non supera 50 USDC",
+      "live: stop se 10 puntate chiudono con P/L < -3.00 (rollback a produzione)",
+      "live: stop se il residuo dalla riconciliazione supera 0.50 USDC/giorno"
+    ],
+    "rollback": "rimuovere il tetto: e' un solo confronto (ev <= cap) nel gate",
+    "why_now": "misurato e non dimostrato"
+  }
+}
