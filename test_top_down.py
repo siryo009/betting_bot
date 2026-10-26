@@ -176,9 +176,15 @@ ALLOWED_LEAGUE = "Premier League"
 
 
 def _seed_pick(mid="m1", home="Osasuna", away="Getafe", esito="1",
-               quota=1.65, status="value"):
+               quota=1.85, status="value"):
     """Seeding del ledger come in test_auto_bet_live: candidato giocabile
-    (lega ammessa, favorito netto, quota in fascia)."""
+    (lega ammessa, favorito netto, quota in fascia).
+
+    Quota 1.85 e NON 1.65: dal 25/10/2026 la FASCIA MORTA 1.50-1.80 e' esclusa
+    (`value_filter.in_dead_band`) e il pre-filtro SX di `auto_bet` boccia quei
+    pick PRIMA dell'oracolo — con 1.65 i test del dry-run passavano per il
+    motivo sbagliato (nessun candidato per la fascia, non per l'EV).
+    """
     start = (datetime.now(timezone.utc)
              + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
     tracker.save_match(mid, ALLOWED_LEAGUE, home, away, start)
@@ -302,9 +308,9 @@ class TestWiringRunTodayBets:
                             lambda allow_sim=True: "live")
 
     def test_candidato_con_oracolo_arriva_al_dry_run(self, monkeypatch, temp_db):
-        # quota 1.75 in fascia favoriti (<= 1.80); p_true 0.60 -> true odd
-        # 1.6667, richiesto 1.70: EV = 0.60x0.75 - 0.40 = +5% -> trigger.
-        _seed_pick(quota=1.75)
+        # quota 1.85 (fuori dalla fascia morta); p_true 0.60 -> true odd
+        # 1.6667, richiesto 1.70: EV = 0.60x0.85 - 0.40 = +11% -> trigger.
+        _seed_pick(quota=1.85)
         _patch_load(monkeypatch, {"1": 0.60, "X": 0.25, "2": 0.15,
                                   "overround": 0.04})
         monkeypatch.setattr(auto_bet, "DRY_RUN", True)
@@ -315,8 +321,9 @@ class TestWiringRunTodayBets:
 
     def test_candidato_con_ev_basso_non_arriva_all_esecuzione(self, monkeypatch,
                                                               temp_db):
-        _seed_pick(quota=1.65)
-        _patch_load(monkeypatch, {"1": 0.60, "X": 0.25, "2": 0.15,
+        # quota 1.85 e p_true 0.52 -> true odd 1.923 > 1.85: EV -3.8%.
+        _seed_pick(quota=1.85)
+        _patch_load(monkeypatch, {"1": 0.52, "X": 0.28, "2": 0.20,
                                   "overround": 0.04})
         monkeypatch.setattr(auto_bet, "DRY_RUN", False)
         monkeypatch.setattr(auto_bet, "_live_fill",
@@ -345,7 +352,7 @@ class TestWiringRunTodayBets:
         assert len(placed) == 1 and called      # SIM storico, senza oracolo
 
     def test_log_dry_run_con_dettagli(self, monkeypatch, temp_db, caplog):
-        _seed_pick(quota=1.75)
+        _seed_pick(quota=1.85)
         _patch_load(monkeypatch, {"1": 0.60, "X": 0.25, "2": 0.15,
                                   "overround": 0.04})
         monkeypatch.setattr(auto_bet, "DRY_RUN", True)
@@ -357,7 +364,14 @@ class TestWiringRunTodayBets:
         # Il log porta il prezzo, lo stake e l'EV top-down: e' il report
         # richiesto dal proprietario (calcolare e loggare, non eseguire).
         detail = next(m for m in msgs if "INTERCETTATO" in m)
-        assert "1.75" in detail and "5.00" in detail and "+5.00%" in detail
+        import re
+        assert "1.85" in detail and "+11.00%" in detail
+        # Lo stake nel log e' quello che l'ordine userebbe DAVVERO, cioe' dopo
+        # i cap (tetto per-ordine / cap di portafoglio): qui si verifica che
+        # ci sia ed e' valido, non QUALE cap morda (quello ha i suoi test).
+        m = re.search(r"stake (\d+\.\d{2}) USDC", detail)
+        assert m, detail
+        assert 0.0 < float(m.group(1)) <= 5.0, detail
 
     def test_live_fill_bloccato_dal_flag_anche_chiamato_direttamente(self,
                                                                      monkeypatch,
@@ -411,7 +425,9 @@ class TestCorsiaTopDown:
         fuori (direttiva 12/09: leghe con ROI misurato negativo)."""
         monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", True)
         _seed_row("b1", "Osasuna", "Getafe", "Osasuna", 2.10)
-        _seed_row("b2", "Osasuna", "Getafe", "Osasuna", 1.65, lega="Serie A")
+        # 1.85 (fuori dalla fascia morta): l'unico motivo di esclusione deve
+        # essere la LEGA, non anche la quota.
+        _seed_row("b2", "Osasuna", "Getafe", "Osasuna", 1.85, lega="Serie A")
         picks = auto_bet._top_down_picks()
         assert [p["match_id"] for p in picks] == ["b1"]
 
@@ -826,3 +842,57 @@ class TestTripwire:
         src = Path(po.__file__).read_text(encoding="utf-8")
         for banned in ("auto_bet", "execution_engine", "_live_fill"):
             assert banned not in src
+
+
+# ---------------------------------------------------------------------------
+# PRE-FILTRO SX: la fascia MORTA non e' "fuori fascia" (25/10/2026)
+# ---------------------------------------------------------------------------
+
+class TestPrefilterFasciaMorta:
+    """Il pre-filtro SX boccia PRIMA di pagare l'oracolo — ma il motivo deve
+    dire la VERITA'.
+
+    Misurato il 25/10/2026: con la fascia morta 1.50-1.80 introdotta, una
+    quota 1.65 veniva scartata con il messaggio "fuori dalla fascia 1.20-2.00"
+    — che e' falso (1.65 e' dentro gli estremi) e manda l'operatore a cercare
+    un errore di fascia invece della banda misurata in perdita. Stessa classe
+    dei testi stantii del 13/09.
+    """
+
+    def test_fascia_morta_ha_il_suo_motivo(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", False)
+        morte = (vf.ODDS_EXCLUDE_MIN + vf.ODDS_EXCLUDE_MAX) / 2.0
+        out = auto_bet._sx_prefilter({"mercato": "1X2", "quota": morte})
+        assert out is not None
+        assert out["code"] == "fascia_morta"
+        assert out["reason"] == "sx_prefilter/fascia_morta"
+        assert "fascia morta" in out["detail"]
+
+    def test_fuori_fascia_resta_fuori_fascia(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", False)
+        alta = vf.ODDS_MAX + 0.10
+        bassa = vf.ODDS_MIN - 0.10
+        for price in (alta, bassa):
+            out = auto_bet._sx_prefilter({"mercato": "1X2", "quota": price})
+            assert out is not None and out["code"] == "quota_fuori_fascia"
+        # controprova: il messaggio nomina gli estremi veri, non la morta
+        out = auto_bet._sx_prefilter({"mercato": "1X2", "quota": alta})
+        assert f"{vf.ODDS_MAX:.2f}" in out["detail"]
+
+    def test_fuori_dalla_morta_passa(self, monkeypatch):
+        monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", False)
+        for price in (vf.ODDS_EXCLUDE_MIN - 0.05, vf.ODDS_EXCLUDE_MAX + 0.05):
+            assert auto_bet._sx_prefilter(
+                {"mercato": "1X2", "quota": price}) is None
+
+    def test_bypass_accende_la_corsia_anche_sulla_morta(self, monkeypatch):
+        """La corsia top-down esiste per far giudicare il PREZZO all'oracolo:
+        filtrarla qui la spegnerebbe in silenzio (direttiva 25/09)."""
+        monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", True)
+        morte = (vf.ODDS_EXCLUDE_MIN + vf.ODDS_EXCLUDE_MAX) / 2.0
+        assert auto_bet._sx_prefilter({"mercato": "1X2", "quota": morte}) is None
+
+    def test_morta_dentro_la_fascia_del_progetto(self):
+        """Invariante fra le due definizioni: la morta sta DENTRO la fascia."""
+        assert vf.ODDS_MIN <= vf.ODDS_EXCLUDE_MIN < vf.ODDS_EXCLUDE_MAX \
+            <= vf.ODDS_MAX

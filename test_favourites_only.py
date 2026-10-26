@@ -51,10 +51,17 @@ def _match(home_price, draw_price, away_price, mid="fx1"):
 def _analyze(monkeypatch, match, mid):
     """Esegue _analyze_match con i confini esterni stubbati."""
     import fixture_engine
+    import value_filter
     monkeypatch.setattr("fixture_engine.expected_goals", lambda h, a: (1.8, 1.2))
-    # Modello che stima il favorito a ~66% (segnale +EV sulla quota 1.65)
+    # Modello col favorito DENTRO la fascia EV giocabile: la probabilita' si
+    # deriva dal punto di mezzo fra `EV_MIN` e `EV_MAX` sulla quota 1.85. Un
+    # valore fisso (0.62 fino al 24/10) dava EV +14,7%, cioe' SOPRA il tetto,
+    # e il match usciva `rejected` per "EV troppo alto": il test avrebbe
+    # misurato il gate EV invece della strategia solo-favoriti.
+    _quota = 1.85
+    _p = round((1 + (value_filter.EV_MIN + value_filter.EV_MAX) / 2) / _quota, 4)
     monkeypatch.setattr("fixture_engine.prob_1x2",
-                        lambda lh, la: (0.66, 0.20, 0.14))
+                        lambda lh, la: (_p, round(1 - _p - 0.15, 4), 0.15))
     # Blend deterministico: prob finale = prob del modello (il devig del
     # mercato resta reale per market_prob/market_edge).
     monkeypatch.setattr("fixture_engine.adjusted_probability",
@@ -90,9 +97,14 @@ class TestFixtureEngineGate:
         assert saved["args"][11] == "rejected"
 
     def test_favorito_netto_analizzato(self, temp_db, monkeypatch):
-        """Favorito a 1.65 (prob. di mercato > 50%): il match resta giocabile."""
+        """Favorito a 1.85 (prob. di mercato > 50%): il match resta giocabile.
+
+        La quota sta FUORI dalla fascia morta 1.50-1.80 esclusa il 25/10: con
+        1.65 il match resterebbe `rejected` per la banda, e questo test
+        misurerebbe quel gate invece della strategia solo-favoriti.
+        """
         status, saved, preds = _analyze(
-            monkeypatch, _match(1.65, 3.90, 5.80), "fx_fav")
+            monkeypatch, _match(1.85, 3.75, 4.95), "fx_fav")
         assert status in ("value", "strong_value", "no_value")
         # Nel ledger entra SOLO il favorito (nessun esito sfavorito:
         # l'esito e' il nome della squadra di casa, come dal feed bookmaker).
@@ -101,9 +113,9 @@ class TestFixtureEngineGate:
         assert all(a[3] <= 2.00 for a, _ in preds)
 
     def test_sfavorita_fuori_dal_ledger(self, temp_db, monkeypatch):
-        """Favorito 1.60: X e 2 non compaiono tra le previsioni."""
+        """Favorito 1.85: X e 2 non compaiono tra le previsioni."""
         status, _, preds = _analyze(
-            monkeypatch, _match(1.60, 4.00, 6.00), "fx_fav2")
+            monkeypatch, _match(1.85, 3.75, 4.95), "fx_fav2")
         assert all(a[3] <= 2.00 for a, _ in preds)
 
 

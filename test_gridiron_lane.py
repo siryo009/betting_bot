@@ -192,8 +192,13 @@ def temp_db(monkeypatch, tmp_path):
 
 class TestConfig:
     def test_interruttore(self, monkeypatch):
+        # Default SPENTO dal 26/10/2026: la corsia ha reso -60% misurato sulle
+        # bet chiuse e il torneo Gridiron (il motivo per cui era stata
+        # costruita) si e' chiuso il 20/10. Riaccesa da env, senza redeploy.
         monkeypatch.delenv("GRIDIRON_LANE", raising=False)
-        assert gl.enabled() is True                    # assente = attiva
+        assert gl.enabled() is False                   # assente = spenta
+        monkeypatch.setenv("GRIDIRON_LANE", "1")
+        assert gl.enabled() is True
         monkeypatch.setenv("GRIDIRON_LANE", "0")
         assert gl.enabled() is False
         monkeypatch.setenv("GRIDIRON_LANE", "off")

@@ -148,7 +148,7 @@ class TestPropagazioneLega:
         con la chiave la lega vietata esce `rejected`, senza la chiave
         l'esito e' `value` (fail-open storico, il bug).
         """
-        cand = {"prob": 0.72, "quota": 1.65, "ev": 0.08,
+        cand = {"prob": 0.72, "quota": 1.85, "ev": 0.08,
                 "market_prob": 0.60, "market_edge": 0.07}
         assert fixture_engine._candidate_status(dict(cand)) == "value"
         assert fixture_engine._candidate_status(
@@ -164,7 +164,12 @@ class TestPropagazioneLega:
         copiato a mano smette di proteggere al primo ritocco). L'edge scelto sta
         FRA le due: rifiutato in probation, accettato in una lega core.
         """
-        prob, quota = 0.625, 1.65
+        # La prob. si DERIVA dall'EV voluto (meta' strada fra il pavimento e
+        # il tetto del gate): una `prob` fissa puo' cadere fuori dalla fascia
+        # e far misurare il gate EV invece di quello dell'edge.
+        quota = 1.85
+        ev_target = (value_filter.EV_MIN + value_filter.EV_MAX) / 2
+        prob = round((1 + ev_target) / quota, 4)
         probation_edge = value_filter.PROBATION_STRATEGY["min_edge"]
         core_edge = value_filter.STRATEGY_LEAGUES["Turkey Super Lig"]["min_edge"]
         assert probation_edge > core_edge, "la probation deve essere piu' severa"
@@ -175,9 +180,18 @@ class TestPropagazioneLega:
             {**cand, "league": PROBATION}) == "rejected"
         assert fixture_engine._candidate_status(
             {**cand, "league": "Turkey Super Lig"}) != "rejected"
-        # Sopra la soglia di probation: accettato come `value` (EV 6.4% < 8%).
-        forte = {**cand, "prob": 0.645, "ev": 0.645 * quota - 1,
-                 "market_edge": probation_edge + 0.02}
+        # Sopra la soglia di probation: accettato come `value` (EV ~6%, sotto
+        # la soglia di strong_value). La probabilita' si DERIVA dall'EV voluto:
+        # con una `prob` fissa il livello di EV dipende dalla quota, e il
+        # tier cambierebbe al primo ritocco della fascia quote.
+        prob_forte = round((1 + 0.06) / quota, 4)
+        edge_forte = probation_edge + 0.02
+        forte = {**cand, "prob": prob_forte, "ev": prob_forte * quota - 1,
+                 "market_edge": edge_forte,
+                 # `market_prob` va RIDEFINITO con la nuova prob: lasciando
+                 # quello di `cand` l'edge diventerebbe negativo e il rifiuto
+                 # arriverebbe dall'edge, non dal tier (falso testimone).
+                 "market_prob": prob_forte - edge_forte}
         assert fixture_engine._candidate_status(
             {**forte, "league": PROBATION}) == "value"
 
@@ -196,10 +210,10 @@ class TestPropagazioneLega:
         Con la lega propagata, `is_sane` boccia i candidati e il ledger li
         scrive come `rejected`: nessun segnale value salvato.
         """
-        from test_sx_signals import FakeSxProvider, _raw_markets
+        from test_sx_signals import FakeSxProvider, _MODEL_PROBS, _raw_markets
         monkeypatch.setattr(sx_signals, "expected_goals", lambda h, a: (1.9, 0.8))
         monkeypatch.setattr(sx_signals, "prob_1x2",
-                            lambda lh, la: (0.66, 0.20, 0.14))
+                            lambda lh, la: _MODEL_PROBS)
         monkeypatch.setattr(sx_signals, "adjusted_probability",
                             lambda model_prob, market_prob, price, league=None:
                             model_prob)
@@ -212,10 +226,10 @@ class TestPropagazioneLega:
 
     def test_scan_su_lega_ammessa_genera_segnali(self, temp_db, monkeypatch):
         """Controprova: la stessa fixture su lega ammessa produce il segnale."""
-        from test_sx_signals import FakeSxProvider, _raw_markets
+        from test_sx_signals import FakeSxProvider, _MODEL_PROBS, _raw_markets
         monkeypatch.setattr(sx_signals, "expected_goals", lambda h, a: (1.9, 0.8))
         monkeypatch.setattr(sx_signals, "prob_1x2",
-                            lambda lh, la: (0.66, 0.20, 0.14))
+                            lambda lh, la: _MODEL_PROBS)
         monkeypatch.setattr(sx_signals, "adjusted_probability",
                             lambda model_prob, market_prob, price, league=None:
                             model_prob)
@@ -386,7 +400,7 @@ class TestCorsiaTorneoApreLeLeghe:
 
     def test_is_sane_vietata_a_torneo_chiuso(self):
         """A torneo chiuso il rifiuto per lega resta quello di sempre."""
-        ok, why = value_filter.is_sane(0.60, 1.60, 0.05, 0.55,
+        ok, why = value_filter.is_sane(0.60, 1.85, 0.05, 0.55,
                                        league=BANNED, market="1X2")
         assert ok is False
         assert "esclusa" in why
@@ -396,7 +410,7 @@ class TestCorsiaTorneoApreLeLeghe:
         EV +5%): il filtro che resta e' quello di valore, non quello di lega."""
         monkeypatch.setenv("TOURNAMENT_MODE", "1")
         monkeypatch.setenv("TOURNAMENT_OPEN_LEAGUES", "1")
-        ok, why = value_filter.is_sane(0.60, 1.60, 0.05, 0.55,
+        ok, why = value_filter.is_sane(0.60, 1.85, 0.05, 0.55,
                                        league=BANNED, market="1X2")
         assert ok is True, why
 

@@ -89,7 +89,7 @@ ALLOWED_LEAGUES = ("Premier League", "Bundesliga", "Ligue 1",
 
 
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
-                      quota=1.65, status="value", commence=None):
+                      quota=1.85, status="value", commence=None):
     start = commence or (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
     # Lega AMMESSA dalla strategia: dal 15/09 la corsia ordini applica il
     # gate STRATEGY_LEAGUES (una lega vietata -> 0 puntate).
@@ -99,7 +99,9 @@ def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
                           best_esito, quota, "Pinnacle", status,
                           market_prob=0.60, market_edge=0.07)
     # Ledger previsioni: _today_value_picks legge da QUI dal 09/09.
-    # quota 1.65 / prob. 0.60 = favorito netto (strategia 11/09).
+    # quota 1.85 (fuori dalla FASCIA MORTA 1.50-1.80 esclusa il 25/10) /
+    # prob. 0.60 = favorito netto (strategia 11/09). Con 1.65 il pre-filtro SX
+    # bocciava il pick PRIMA dell'ordine e i test passavano per la fascia.
     tracker.save_prediction(mid, "1X2", best_esito, quota, 0.52, 0.08,
                             market_prob=0.60, market_edge=0.07, status=status)
 
@@ -156,7 +158,7 @@ class TestLiveMode:
         """AUTO_BET_MODE=live + ordine riempito: riga `bets` con mode='live',
         market_id/selection_id/bet_id reali e stake/prezzo matched."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_fill",
@@ -188,7 +190,7 @@ class TestLiveMode:
         l'exchange non ha emesso un id, la riga non si scrive (fail-closed).
         """
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         senza_id = dict(_filled())
@@ -205,7 +207,7 @@ class TestLiveMode:
         """Ordine rifiutato/non riempito dall'exchange: nessuna riga sul
         ledger (un FAILED verrebbe saldato come perdita reale)."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(
@@ -223,7 +225,7 @@ class TestLiveMode:
         """Mercato SX non trovato/ambiguo (o prezzo sotto il floor EV):
         _live_fill ritorna None -> nessun ordine, nessuna riga."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_fill",
@@ -247,7 +249,7 @@ class TestLiveBankroll:
         e' piu' uno stato in cui il sistema ordina.
         """
         import adaptive_staking
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         _stub_wallet(monkeypatch, 40.0)
@@ -268,7 +270,7 @@ class TestLiveBankroll:
     def test_wallet_sotto_minimo_nessuna_puntata(self, monkeypatch, temp_db):
         """Wallet sotto il minimo ordine (1 USDC): fail-closed, niente righe."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         _stub_wallet(monkeypatch, 0.5)
@@ -284,7 +286,7 @@ class TestLiveBankroll:
         micro con il tetto NON vincolante — non sarebbe piu' misurabile).
         """
         import adaptive_staking
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         _stub_wallet(monkeypatch, 40.0)
@@ -330,7 +332,7 @@ class TestLiveBankroll:
         scenderebbe sotto il ticket e nessun ordine partirebbe.
         """
         import adaptive_staking
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         _stub_wallet(monkeypatch, 2.0, exposure=43.0)
@@ -353,7 +355,7 @@ class TestLiveBankroll:
         """Wallet non leggibile (rete/errore): fallback sul bankroll cassa,
         il giro prosegue in live."""
         import adaptive_staking
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: None)
@@ -377,8 +379,8 @@ class TestLiveBankroll:
         dai giri precedenti (already_placed >= cap), il nuovo giro non
         piazza nulla (fail-closed)."""
         import adaptive_staking
-        _seed_value_match(mid="e1", home="Osasuna", away="Getafe", quota=1.65)
-        _seed_value_match(mid="e2", home="Bari", away="Crotone", quota=1.65)
+        _seed_value_match(mid="e1", home="Osasuna", away="Getafe", quota=1.85)
+        _seed_value_match(mid="e2", home="Bari", away="Crotone", quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         _stub_wallet(monkeypatch, 12.28)
@@ -395,7 +397,7 @@ class TestLiveBankroll:
         """Rippegno parziale: si registra lo stake/prezzo EFFETTIVAMENTE
         riempiti (non il richiesto)."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         filled = _filled()
@@ -429,7 +431,7 @@ class TestBankrollEquity:
         """Disponibile 35.98 -> 33.98 con 2.0 in escrow: l'equity resta
         35.98, quindi nessuno stop (regressione del bug)."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         self._live(monkeypatch)
         _stub_wallet(monkeypatch, 35.98)
         monkeypatch.setattr(auto_bet, "_live_fill",
@@ -448,7 +450,7 @@ class TestBankrollEquity:
         """Equity 35.98 -> 32.0 (-11%): lo stop scatta ancora, e il motivo
         dichiara su QUALE valore e' stata misurata la perdita."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         self._live(monkeypatch)
         _stub_wallet(monkeypatch, 35.98)
         auto_bet.run_today_bets(stake_eur=5.0)
@@ -467,7 +469,7 @@ class TestBankrollEquity:
         cassa e il vincolo in esame non sarebbe piu' quello misurato.
         """
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         self._live(monkeypatch)
         _stub_wallet(monkeypatch, 3.98, exposure=96.02)
         sent = {}
@@ -584,7 +586,7 @@ class TestBankrollEquity:
         assert snap["equity"] == pytest.approx(42.0143)
         # la stessa equity NON produce un drawdown: -14% sarebbe 36,22
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         self._live(monkeypatch)
         st = auto_bet.daily_stop_status()
         assert st["stopped"] is False
@@ -641,7 +643,7 @@ class TestFlatLive:
     def _seed_n(self, n, league_prefix=True):
         for i in range(n):
             _seed_value_match(mid=f"f{i}", home=f"Home{i}", away=f"Away{i}",
-                              esito="1" if i % 2 == 0 else "2", quota=1.65)
+                              esito="1" if i % 2 == 0 else "2", quota=1.85)
         if league_prefix:
             conn = tracker._get_conn()
             rows = conn.execute("SELECT id FROM matches WHERE id LIKE 'f%'")\
@@ -723,7 +725,7 @@ class TestFlatLive:
 class TestModeSelection:
     def test_default_senza_env_resta_sim(self, monkeypatch, temp_db):
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 1 and placed[0]["mode"] == "sim"
 
@@ -732,7 +734,7 @@ class TestModeSelection:
         nessun ordine reale — fallback SIM (allow_sim default True)."""
         monkeypatch.setenv("AUTO_BET_MODE", "live")
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         placed = auto_bet.run_today_bets(stake_eur=5.0)
         assert len(placed) == 1 and placed[0]["mode"] == "sim"
 
@@ -740,7 +742,7 @@ class TestModeSelection:
         """allow_sim=False senza provider configurato: nessuna puntata."""
         monkeypatch.setenv("AUTO_BET_MODE", "live")
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         placed = auto_bet.run_today_bets(stake_eur=5.0, allow_sim=False)
         assert placed == []
         assert tracker.get_bets() == []
@@ -962,7 +964,7 @@ class TestBaseStopLossDichiarata:
 
     def test_wallet_letto_dichiara_equity(self, monkeypatch, temp_db):
         calls = self._capture(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         _stub_wallet(monkeypatch, 33.5535)
@@ -978,7 +980,7 @@ class TestBaseStopLossDichiarata:
         """Regressione 21/09: col wallet illeggibile la lettura E' la cassa e
         va dichiarata come tale — mai etichettata 'equity wallet'."""
         calls = self._capture(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot", lambda: None)
@@ -1074,7 +1076,7 @@ class TestEquityRiconciliataNelSizing:
         """Il riferimento del giorno (e quindi Kelly, cap e recinto) e' il
         valore riconciliato, non il picco gonfiato."""
         _fixed_stake(monkeypatch)
-        _seed_value_match(quota=1.65)
+        _seed_value_match(quota=1.85)
         self._reconcile(monkeypatch, 30.0)
         monkeypatch.setattr(auto_bet, "_execution_mode",
                             lambda allow_sim=True: "live")

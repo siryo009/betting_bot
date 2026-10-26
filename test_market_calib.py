@@ -117,21 +117,21 @@ class TestValueFilterMarketGate:
         # EV ok (+3.7%) ma prob 60.5% vs mercato 60% -> +0.5pp, sotto la
         # soglia di +1pp in vigore dal 14/10/2026 (favorito netto: quota
         # 1.70, prob. di mercato 60%).
-        ok, reason = is_sane(0.605, 1.70, 0.037, market_prob=0.60)
+        ok, reason = is_sane(0.605, 1.85, 0.037, market_prob=0.60)
         assert not ok
         assert "non batte il mercato" in reason
 
     def test_sane_true_con_edge(self):
         from value_filter import is_sane
         # 0.62*1.70-1 = +5.4% EV, dentro la fascia 3-15%; edge +6pp sul mercato
-        ok, _ = is_sane(0.62, 1.70, 0.054, market_prob=0.56)
+        ok, _ = is_sane(0.62, 1.85, 0.054, market_prob=0.56)
         assert ok
 
     def test_sane_backward_compat(self):
         from value_filter import is_sane, ODDS_MAX
         # Senza market_prob il gate "favorito" non si applica, ma il cap
         # quota della strategia resta vincolante.
-        ok, _ = is_sane(0.60, 1.75, 0.05)
+        ok, _ = is_sane(0.60, 1.85, 0.05)
         assert ok
         # Il test segue il cap REALE (fascia 1.20-2.00 dal 14/10/2026):
         # una quota appena sopra il cap deve essere respinta.

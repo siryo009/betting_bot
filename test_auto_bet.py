@@ -37,7 +37,7 @@ ALLOWED_LEAGUE = "Premier League"   # in STRATEGY_LEAGUES
 
 
 def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
-                      quota=1.65, status="value", commence=None):
+                      quota=1.85, status="value", commence=None):
     start = commence or (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
     # Lega AMMESSA dalla strategia (value_filter.STRATEGY_LEAGUES): dal
     # 15/09 la corsia ordini applica il gate di lega, quindi un seed in una
@@ -52,7 +52,10 @@ def _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
     # Ledger previsioni: dal 09/09 _today_value_picks legge da QUI (status
     # per ogni esito), non da match_analysis (solo best, che puo' essere
     # rejected anche quando altri esiti dello stesso match sono value).
-    # quota 1.65 / prob. mercato 0.60 = favorito netto (strategia 11/09).
+    # quota 1.85 / prob. mercato 0.60 = favorito netto FUORI dalla fascia
+    # morta 1.50-1.80 (esclusa il 25/10/2026): con 1.65 la corsia ordini
+    # scarterebbe il seed per la banda e ogni test di flusso misurerebbe quel
+    # gate invece del proprio.
     tracker.save_prediction(mid, "1X2", best_esito, quota, 0.52, 0.08,
                             market_prob=0.60, market_edge=0.07, status=status)
 

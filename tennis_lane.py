@@ -30,8 +30,8 @@ Cosa fa:
 2. `discover()` — match SX tennis in finestra (lettura PUBBLICA: zero chiavi,
    zero crediti, zero ordini).
 3. `picks()` — per ogni match: oracolo a 2 esiti + gate EV + **fascia quota
-   `TENNIS_ODDS_MIN`-`TENNIS_ODDS_MAX`** (1.30-2.30 dal 14/10/2026, era
-   1.30-2.00 dal 13/10; storica 1.30-2.50).
+   `TENNIS_ODDS_MIN`-`TENNIS_ODDS_MAX`** (1.30-2.00, con la fascia morta
+   1.50-1.80 esclusa: misura del 25/10 nel commento di `ODDS_MAX`).
 4. `scan()` — registra la telemetria nel ledger (`predictions`, mercato
    `TENNIS`) con `match_id` `sx-tennis-<hash>`: il prefisso `sx-` fa si' che il
    settlement SX-native esistente (`sx_signals._results_from_sx`) la saldi
@@ -113,16 +113,24 @@ ODDS_MIN = float(os.getenv("TENNIS_ODDS_MIN", "1.30"))
 # ledger live: 1.30-1.80 ROI +19.9% (n=11), 1.80-2.00 +75.1% (n=7),
 # 2.00-2.50 **-15.1% (n=15)**, >2.50 -150% (n=5, gia' fuori banda).
 #
-# ⚠️ RIALLARGATA a **2.30** il 14/10/2026 (direttiva "aumentare il volume").
-# Il taglio del 13/10 aveva azzerato l'unica corsia che stava ordinando e la
-# fascia 2.00-2.30 non e' quella misurata in perdita: la perdita stava nel
-# tratto **2.00-2.50** con 15 campioni, e il sotto-tratto 2.00-2.30 ne
-# contiene la parte alta di varianza senza prendere il resto. Il pavimento
-# resta INVARIATO a 1.30 (e' la fascia 1.30-1.80 che ha reso +19,9%).
-# Per tornare al taglio del 13/10 basta `TENNIS_ODDS_MAX=2.00`.
+# Storia della banda: 1.30-2.50 (dal 02/10) -> 1.30-2.00 (13/10) -> 1.30-2.30
+# (14/10, "piu' volume") -> **1.30-2.00** (25/10/2026, dopo le perdite).
+#
+# PERCHE' RITORNA A 2.00 — misura sul ledger live del 25/10 (99 chiuse), per
+# fascia e SOLO sulla corsia tennis (`live_decomp.py`):
+#   1.20-1.50  n=9  +27,61%   <- l'unica banda positiva
+#   1.50-1.80  n=10 **-37,11%**
+#   1.80-2.00  n=9   +6,32%
+#   2.00-2.30  n=9   -6,33%
+#   2.30-2.50  n=7  -25,65%
+#   >= 2,50    n=6  -43,95%
+# Sopra 2.00 la somma e' **-75,9% su 22 bet**: non era "la parte alta di
+# varianza", era la fascia che perde di piu'. Il pavimento resta 1.30 e
+# 1.50-1.80 e' escluso a parte (`value_filter.in_dead_band`, -37,1%).
+# Per tornare a 2.30 basta `TENNIS_ODDS_MAX=2.30`.
 # ⚠️ Come `TENNIS_ODDS_MIN` e `TENNIS_EV_MIN`, l'env e' letta all'IMPORT del
 # modulo: il set su Railway richiede un redeploy (non basta `--skip-deploys`).
-ODDS_MAX = float(os.getenv("TENNIS_ODDS_MAX", "2.30"))
+ODDS_MAX = float(os.getenv("TENNIS_ODDS_MAX", "2.00"))
 
 
 def in_odds_band(price: Any) -> bool:
@@ -132,12 +140,23 @@ def in_odds_band(price: Any) -> bool:
     in profondita' (`auto_bet._tennis_picks`), cosi' il limite non puo' vivere
     in due posti e divergere. Fail-closed: una quota non numerica (o assente)
     NON e' nella banda.
+
+    La **fascia morta 1.50-1.80** e' esclusa anche qui (25/10/2026): sul
+    tennis ha reso **-37,1% su 10 bet**, mentre 1.20-1.50 (+27,6%, n=9) e
+    1.80-2.00 (+6,3%, n=9) sono sopra la pari. La definizione del buco resta
+    una sola (`value_filter.in_dead_band`), importata — mai ricopiata.
     """
     try:
         value = float(price)
     except (TypeError, ValueError):
         return False
-    return ODDS_MIN <= value <= ODDS_MAX
+    if not ODDS_MIN <= value <= ODDS_MAX:
+        return False
+    try:
+        from value_filter import in_dead_band
+        return not in_dead_band(value)
+    except Exception:  # fail-open sulla SOLA esclusione: il resto vale
+        return True
 
 
 #: Coerenza del mercato: 1/prezzo_1 + 1/prezzo_2 su un exchange ~1. Fuori banda

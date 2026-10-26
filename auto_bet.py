@@ -1598,11 +1598,27 @@ def _sx_prefilter(pick: dict) -> dict | None:
     try:
         mercato = str(pick.get("mercato") or "1X2").upper()
         if not TOP_DOWN_BYPASS:
-            from value_filter import odds_in_band, ODDS_MIN, ODDS_MAX
+            from value_filter import (odds_in_band, in_dead_band,
+                                      ODDS_MIN, ODDS_MAX,
+                                      ODDS_EXCLUDE_MIN, ODDS_EXCLUDE_MAX)
             price = pick.get("quota")
             if price is None:
                 price = pick.get("price")
             if not odds_in_band(price):
+                # FASCIA MORTA (25/10/2026): dire "fuori dalla fascia 1.20-2.00"
+                # per una quota 1.65 sarebbe un log che MENTE (1.65 e' dentro
+                # gli estremi) e manderebbe l'operatore a cercare un errore di
+                # fascia invece della banda misurata in perdita. Il motivo
+                # machine-readable distingue i due casi.
+                if in_dead_band(price):
+                    return {
+                        "reason": "sx_prefilter/fascia_morta",
+                        "detail": (f"quota {price!r} nella fascia morta "
+                                   f"{ODDS_EXCLUDE_MIN:.2f}-"
+                                   f"{ODDS_EXCLUDE_MAX:.2f} (misurata in "
+                                   f"perdita): nessuna spesa oracolo"),
+                        "code": "fascia_morta",
+                    }
                 return {
                     "reason": "sx_prefilter/quota_fuori_fascia",
                     "detail": (f"quota {price!r} fuori dalla fascia "
@@ -3118,6 +3134,24 @@ def _canonical_esito(esito: str, home: str, away: str) -> dict | None:
     return None
 
 
+#: Leghe che NON sono calcio: le loro righe nel ledger arrivano dalle corsie
+#: DEDICATE (football USA, eSports) e sono TELEMETRIA di quelle corsie.
+#: Perche' serve dichiararlo (25/10/2026): con la corsia football USA spenta
+#: (`GRIDIRON_LANE=0`) la riga resta nel ledger, il gate del calcio la
+#: rifiutava con "lega 'NFL' fuori dai campionati vincenti" e il log
+#: accusava la STRATEGIA invece della corsia: un operatore leggeva un veto di
+#: ROI dove c'era solo una corsia spenta (la stessa classe di difetto del
+#: 13/09 sui testi stantii).
+NON_FOOTBALL_LEAGUES = frozenset({
+    "NFL", "NCAAF", "NCAA", "CFL", "NBA", "MLB", "NHL",
+})
+
+
+def _non_football_league(league: str) -> bool:
+    """True se l'etichetta di lega appartiene a uno sport NON calcistico."""
+    return (league or "").strip().upper() in NON_FOOTBALL_LEAGUES
+
+
 def _today_value_picks() -> list[dict]:
     """Partite in programma nelle prossime 24h con segnale value/strong_value
     (esito canonico).
@@ -3195,6 +3229,11 @@ def _today_value_picks() -> list[dict]:
         if not league_name:
             logger.info("auto_bet: skip %s %s (lega assente: gate "
                         "STRATEGY_LEAGUES fail-closed)", mid, esito)
+            continue
+        if _non_football_league(league_name):
+            logger.info("auto_bet: skip %s %s (lega '%s' non calcistica: "
+                        "riga di TELEMETRIA di un'altra corsia, mai un pick "
+                        "1X2 calcio)", mid, esito, league_name)
             continue
         if not league_allowed(league_name):
             logger.info("auto_bet: skip %s %s (lega '%s' fuori dai "
@@ -3439,6 +3478,11 @@ def _top_down_picks() -> list[dict]:
         if not league_name:
             logger.debug("auto_bet: top-down skip %s (lega assente: gate "
                          "fail-closed)", mid)
+            continue
+        if _non_football_league(league_name):
+            logger.debug("auto_bet: top-down skip %s (lega '%s' non "
+                         "calcistica: telemetria di un'altra corsia)",
+                         mid, league_name)
             continue
         if not league_allowed(league_name):
             logger.debug("auto_bet: top-down skip %s (lega '%s' fuori dai "

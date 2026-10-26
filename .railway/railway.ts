@@ -357,10 +357,16 @@ export default defineRailway(() => {
       // mercati a cui applicarla (una sola definizione, in `value_filter`).
       EV_MIN_LIQUID: preserve(),
       EV_LIQUID_MARKETS: preserve(),
+      // TETTO dell'EV (26/10/2026, `value_filter.EV_MAX`): guardia
+      // all'OVERCONFIDENCE del modello, non una strategia. Misura sul ledger:
+      // la fascia EV >= 10% ha reso -65,1% su 12 bet, cioe' piu' della perdita
+      // totale delle 80 chiuse. Sopra il tetto il segnale e' marcato ANOMALIA.
+      EV_MAX: preserve(),
       // Soglia EV del TIER di lega (08/10/2026, `value_filter.ev_min`):
       // dimensione AGGIUNTIVA a quella per mercato, con precedenza "la piu'
-      // severa" (`max`) — il tier puo' solo stringere, mai allargare.
-      // `EV_MIN_CORE` = leghe Tier-1/Core, `EV_MIN_OTHER` = tutte le altre.
+      // PERMISSIVA" (`min`, revisione del proprietario nello stesso giorno) —
+      // la dimensione tier puo' solo ABBASSARE la soglia del mercato, mai
+      // alzarla. `EV_MIN_CORE` = leghe Tier-1/Core, `EV_MIN_OTHER` = le altre.
       EV_MIN_CORE: preserve(),
       EV_MIN_OTHER: preserve(),
       // Closing line a T-0 (04/10/2026, punto 5): la routine `closing_line.py`

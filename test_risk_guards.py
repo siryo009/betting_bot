@@ -46,16 +46,19 @@ class TestFasciaFavoriti:
                                   MARKET_EDGE_STRONG)
         assert vf.ODDS_MIN == 1.20
         assert vf.ODDS_MAX == 2.00         # fascia allargata (direttiva 14/10)
-        # Direttiva 14/10/2026 ("bot piu' aggressivo"): soglia di edge
-        # dimezzata a +1pp (strong +2pp) per aumentare il volume di pick.
-        # Uguaglianza ESATTA di proposito: un ulteriore abbassamento e' una
-        # decisione di strategia, non un dettaglio — va tracciata in
-        # AGENTS.md, non fatto in silenzio.
-        assert MARKET_EDGE_MIN == 0.01     # +1pp minimo vs mercato
-        assert MARKET_EDGE_MODERATE == 0.01
-        assert MARKET_EDGE_STRONG == 0.02  # +2pp per strong_value
-        # Il pavimento della soglia EV segue la direttiva (2.5% -> 1.5%).
-        assert vf.EV_MIN == pytest.approx(0.015)
+        # Soglie RIPORTATE SU il 26/10/2026 (+2pp/+4pp e EV +2,5%): la
+        # parentesi "piu' volume" del 14/10 (1pp/2pp, EV 1,5%) e' l'era che ha
+        # bruciato il capitale (-33,1% di ROI su 29 bet) e la fascia edge 1-2pp
+        # ha reso -70,5% su 8. Uguaglianza ESATTA di proposito: un ulteriore
+        # abbassamento e' una decisione di strategia da tracciare, non un
+        # dettaglio da cambiare in silenzio.
+        assert MARKET_EDGE_MIN == 0.02     # +2pp minimo vs mercato
+        assert MARKET_EDGE_MODERATE == 0.02
+        assert MARKET_EDGE_STRONG == 0.04  # +4pp per strong_value
+        # Il pavimento della soglia EV torna a +2,5% (era 1,5%).
+        assert vf.EV_MIN == pytest.approx(0.025)
+        # ...con un TETTO (10%) contro l'overconfidence del modello.
+        assert vf.EV_MAX == pytest.approx(0.10)
 
     def test_quota_sotto_il_minimo_bocciata(self):
         from value_filter import is_sane
@@ -70,17 +73,21 @@ class TestFasciaFavoriti:
 
     def test_edge_sotto_1pp_bocciato(self):
         from value_filter import is_sane
+        # Quota FUORI dalla fascia morta 1.50-1.80 (25/10/2026): qui si misura
+        # la soglia dell'EDGE, e con una quota nella morta risponderebbe il
+        # gate della banda.
+        LIVE_PRICE = 1.85
         # Direttiva 14/10/2026: +1pp minimo vs mercato (il fallback
         # DEFAULT_LEAGUE_STRATEGY e' allineato a +1pp).
         # NB: mezzo punto, non "+1pp esatto": con i float 0.61-0.60 =
         # 0.0099999... e un test sul bordo misurerebbe l'aritmetica.
-        ok, reason = is_sane(0.605, 1.65, 0.03, market_prob=0.60)
+        ok, reason = is_sane(0.605, LIVE_PRICE, 0.03, market_prob=0.60)
         assert not ok and "non batte il mercato" in reason
         # +2pp: OK (con la soglia a +2pp esatti questo caso era al bordo)
-        ok, reason = is_sane(0.62, 1.65, 0.03, market_prob=0.60)
+        ok, reason = is_sane(0.62, LIVE_PRICE, 0.03, market_prob=0.60)
         assert ok, reason
         # +2pp (fascia strong_value): OK
-        ok, _ = is_sane(0.62, 1.65, 0.05, market_prob=0.60)
+        ok, _ = is_sane(0.62, LIVE_PRICE, 0.05, market_prob=0.60)
         assert ok
 
 
@@ -265,7 +272,7 @@ class TestLiquiditaSx:
         import sx_signals
         from test_sx_signals import FakeSxProvider
         monkeypatch.setattr(sx_signals, "expected_goals", lambda h, a: (1.9, 0.8))
-        monkeypatch.setattr(sx_signals, "prob_1x2", lambda lh, la: (0.66, 0.20, 0.14))
+        monkeypatch.setattr(sx_signals, "prob_1x2", lambda lh, la: (0.62, 0.23, 0.15))
         monkeypatch.setattr(sx_signals, "adjusted_probability",
                             lambda mp, mkt, price, league=None: mp)
         monkeypatch.setattr(sx_signals, "MIN_DEPTH_USDC", 1_000_000.0)

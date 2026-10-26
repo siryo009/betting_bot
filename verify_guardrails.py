@@ -186,6 +186,21 @@ def _start(hours: float = 3.0) -> str:
 # lega e non il guardrail che vuole verificare.
 ALLOWED_LEAGUE = "Premier League"
 
+#: Quota dei seed della diagnostica: FUORI dalla fascia morta (1.50-1.80) e
+#: dentro la fascia di strategia, DERIVATA dalle costanti.
+#: Perche' non un numero a mano (25/10/2026): con la fascia morta attiva un
+#: seed a 1,65 viene scartato dal PRE-FILTRO SX **prima** del guardrail in
+#: esame, quindi C (cap Kelly), H (recinto), I (copula) e J (M6) misurerebbero
+#: la banda dei prezzi — H addirittura passerebbe per il motivo SBAGLIATO (0
+#: ordini per assenza di candidati invece che per il recinto pieno). E' la
+#: stessa lezione del 14/10 sullo scenario D.
+SEED_QUOTA = round(value_filter.ODDS_EXCLUDE_MAX + 0.10, 2)
+
+#: p_true dello stub dell'oracolo nella corsia top-down LIVE (scenario D):
+#: abbastanza alta da rendere EV-positiva anche una quota SOTTO il pavimento
+#: della fascia (1,20 - 0,10), che e' proprio il caso che lo scenario misura.
+P_TRUE_LIVE = 0.95
+
 
 def _seed(mid: str, esito: str, quota: float, market_prob: float,
           edge: float, home: str = "Osasuna", away: str = "Getafe",
@@ -284,7 +299,7 @@ def main() -> int:
           f"x{auto_bet.SX_DEPTH_MULTIPLIER:.1f} sullo stake")
 
     # Seed: un segnale perfettamente valido per la strategia favoriti.
-    _seed("g-valid", "Osasuna", 1.65, 0.60, 0.07)
+    _seed("g-valid", "Osasuna", SEED_QUOTA, 0.60, 0.07)
 
     # --------------------------------------------------------------- A. OFF ---
     _head("A. KILL-SWITCH OFF — il giro delle puntate non deve partire")
@@ -445,7 +460,7 @@ def main() -> int:
     print(f"  {DIM}is_sane(prob .80, quota 1.31): ok={sane2} "
           f"(dentro fascia){RESET}")
     # CORSIA TOP-DOWN LIVE (25/09): il filtro di prezzo e' BYPASSATO — l'unico
-    # giudice e' l'oracolo Pinnacle. Con p_true 0.92 TUTTE le quote fuori
+    # giudice e' l'oracolo Pinnacle. Con p_true 0.95 TUTTE le quote fuori
     # fascia (sopra il tetto, sotto il pavimento, 1.70-underdog con p_true
     # bassa) diventano candidati EV-positivi;
     # con p_true 0.20 (EV sempre negativo) NESSUNO passa: il gate oracolo
@@ -472,8 +487,14 @@ def main() -> int:
 
     calls_d = {"fill": 0}
     auto_bet._live_fill = _fill_ok
+    # p_true 0.95 (era 0.92): con la soglia di lega core a 1,5% (26/10) un
+    # 0,92 su una quota 1,10 (il seed "sotto il pavimento") rendeva EV +1,2%,
+    # cioe' sotto soglia: il candidato cadeva per EV e non per la FASCIA, che
+    # e' quello che lo scenario misura. 0,95 lascia il segnale fuori fascia
+    # con EV positivo su AMBO i lati.
     auto_bet._top_down_load = lambda home, away: {
-        "1": 0.92, "X": 0.92, "2": 0.92, "overround": 0.0}
+        "1": P_TRUE_LIVE, "X": P_TRUE_LIVE, "2": P_TRUE_LIVE,
+        "overround": 0.0}
     mark = len(_RECORDS)
     live_placed = auto_bet.run_today_bets()
     _print_logs(mark)
@@ -486,8 +507,8 @@ def main() -> int:
     ok_bypass = (set(ids_live) == {"g-high", "g-low", "g-nfav", "g-valid"}
                  and "g-legacy" not in ids_live)
     print(f"  {GREEN if ok_bypass else RED}→ corsia top-down LIVE (p_true "
-          f"0.92): candidati {ids_live} (atteso: le quote fuori fascia DI "
-          f"AMBO I LATI + g-valid, mai g-legacy){RESET}")
+          f"{P_TRUE_LIVE:.2f}): candidati {ids_live} (atteso: le quote fuori "
+          f"fascia DI AMBO I LATI + g-valid, mai g-legacy){RESET}")
     # Controprova: stesso board, oracolo con EV sempre negativo -> 0 ordini.
     conn = tracker._get_conn()
     conn.execute("DELETE FROM bets")     # DB temporaneo della diagnostica
@@ -632,7 +653,7 @@ def main() -> int:
     _conn_clean.execute("DELETE FROM matches")
     _conn_clean.commit()
     _conn_clean.close()
-    _seed("t60-nofin", "Osasuna", 1.65, 0.58, 0.07,
+    _seed("t60-nofin", "Osasuna", SEED_QUOTA, 0.58, 0.07,
           hours=auto_bet.T60_WINDOW_MIN_MIN / 60.0 + 1.0)
     auto_bet.T60_EXECUTION_ONLY = True
     mark = len(_RECORDS)
@@ -673,7 +694,7 @@ def main() -> int:
 
     # G3 — CB2 KILL SWITCH PATRIMONIALE: equity wallet <= 30 USDC = arresto.
     armed = auto_bet.t60_check_wallet_kill(25.0)
-    _seed("t60-kill", "Osasuna", 1.65, 0.58, 0.07)
+    _seed("t60-kill", "Osasuna", SEED_QUOTA, 0.58, 0.07)
     mark = len(_RECORDS)
     bloccato = auto_bet.run_today_bets(stake_eur=1.0)
     _print_logs(mark)
@@ -699,7 +720,7 @@ def main() -> int:
     conn.execute("DELETE FROM matches")
     conn.commit()
     conn.close()
-    _seed("h-valid", "Osasuna", 1.65, 0.58, 0.07)
+    _seed("h-valid", "Osasuna", SEED_QUOTA, 0.58, 0.07)
     equity_h = 33.55                                  # equity reale del wallet
     # Stake per ordine NEL MONDO NUOVO (04/10): il cap dinamico 12% del
     # bankroll (4.03 su 33.55), non piu' l'importo fisso 1.50 del 28/09.
@@ -790,8 +811,8 @@ def main() -> int:
     #     Esiti CANONICI ("1"/"2"): un nome squadra che non combacia con
     #     home/away verrebbe scartato dall'adapter della catena e la misura
     #     riguarderebbe un insieme diverso da quello su cui si ordina.
-    _seed("i-a", "1", 1.65, 0.60, 0.07, home="A", away="B", hours=5)
-    _seed("i-b", "1", 1.70, 0.58, 0.07, home="C", away="D", hours=5.2)
+    _seed("i-a", "1", SEED_QUOTA, 0.60, 0.07, home="A", away="B", hours=5)
+    _seed("i-b", "1", SEED_QUOTA, 0.58, 0.07, home="C", away="D", hours=5.2)
     os.environ["COPULA_GUARD"] = "1"
     _cp.reset_config_cache()
     mark = len(_RECORDS)
@@ -820,7 +841,7 @@ def main() -> int:
     #     L'esito APERTO e' DIVERSO dal candidato: `bet_exists_open` scatta su
     #     match_id+esito, quindi con lo stesso esito il blocco verrebbe dal
     #     dedup e non dalla copula (la controprova (3) lo dimostra).
-    _seed("i-same", "1", 1.65, 0.60, 0.07, home="Osasuna", away="Getafe",
+    _seed("i-same", "1", SEED_QUOTA, 0.60, 0.07, home="Osasuna", away="Getafe",
           hours=5)
     tracker.save_bet(match_id="i-same", mercato="1X2", esito="2",
                      market_id="0xsame", selection_id=1, price=1.90,
@@ -923,7 +944,7 @@ def main() -> int:
         conn.execute("DELETE FROM matches")
         conn.commit()
         conn.close()
-        _seed("j-1", "1", 1.65, 0.60, 0.07, hours=5)
+        _seed("j-1", "1", SEED_QUOTA, 0.60, 0.07, hours=5)
         calls_j["fill"] = 0
         calls_j["stakes"] = []
 

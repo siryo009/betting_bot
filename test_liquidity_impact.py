@@ -206,7 +206,7 @@ class TestRowForEvent:
         monkeypatch.setattr(poisson_engine, "expected_goals",
                             lambda h, a: (1.9, 0.8))
         monkeypatch.setattr(poisson_engine, "prob_1x2",
-                            lambda lh, la: (0.66, 0.20, 0.14))
+                            lambda lh, la: (0.62, 0.23, 0.15))
         import value_filter
         monkeypatch.setattr(value_filter, "adjusted_probability",
                             lambda mp, mkt, price, league=None: mp)

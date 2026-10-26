@@ -50,9 +50,25 @@ from typing import Dict, List, Optional, Tuple
 # guadagno tecnico. Il tripwire `test_risk_guards.TestFasciaFavoriti` asserisce
 # uguaglianza ESATTA: la protezione e' la DECISIONE tracciata qui, non un
 # numero che si puo' cambiare in silenzio.
-MARKET_EDGE_MIN = 0.01          # +1pp vs mercato (direttiva 14/10/2026)
-MARKET_EDGE_MODERATE = 0.01     # +1pp per moderate
-MARKET_EDGE_STRONG = 0.02       # +2pp vs mercato (strong_value)
+# Edge minimo: quanto il modello deve battere la probabilita' FAIR del
+# mercato. Riportato a **+2pp / +4pp** il 26/10/2026 (era +1pp/+2pp dal 14/10
+# "piu' volume").
+#
+# PERCHE' — misura sul ledger LIVE reale (80 puntate chiuse, snapshot di
+# produzione in sola lettura), per fascia di edge dichiarato:
+#   edge 1-2pp   n= 8  ROI **-70,5%**  (-14,22 USDC su 20,16 puntati)
+#   edge 2-3pp   n=19  ROI  +3,7%
+#   edge 3-5pp   n= 8  ROI  +7,3%
+#   edge >= 5pp  n=21  ROI  -2,7%
+# La fascia "quasi valore" e' l'UNICA con una perdita estrema: sono i segnali
+# in cui il modello dichiara un vantaggio marginale — cioe' rumore di stima
+# promosso a edge. A +2pp quella fascia non viene giocata.
+# ⚠️ Il tetto non sale con la soglia: la fascia >= 5pp NON e' la migliore
+# (l'edge enorme e' la firma dell'input cieco, non dell'edge) — vedi `EV_MAX`
+# in `value_filter`, che e' la guardia sullo stesso fenomeno.
+MARKET_EDGE_MIN = 0.02          # +2pp vs mercato (era 1pp)
+MARKET_EDGE_MODERATE = 0.02     # +2pp per moderate
+MARKET_EDGE_STRONG = 0.04       # +4pp vs mercato (strong_value)
 
 # Peso del modello nel blending modello+mercato (0.5 = pari peso).
 # Il mercato e' quasi sempre piu' calibrato del modello: non superare 0.6.

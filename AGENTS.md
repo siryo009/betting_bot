@@ -14246,3 +14246,160 @@ di sola lettura che RIFIUTA una `UPDATE`, classificazioni corsia/fascia/era,
 somme dei bucket = totale, fail-safe). Bug trovato dai test: una riga **senza
 data** finiva nell'era piu' vecchia (confronto fra stringhe) — ora ha il bucket
 dichiarato `(data assente)`.
+
+### 26/10/2026 — Riportare su le soglie dopo l'era "bot aggressivo": edge +2pp/+4pp, EV 2,5%, FASCIA MORTA 1.50-1.80, EV_MAX 10%
+
+**Direttiva del proprietario**: le perdite delle ultime due settimane (equity
+da ~45 a ~14 USDC) vanno chiuse alla radice, non compensate alzando lo stake.
+La regola di progetto e' "si misura, poi si stringe": quattro misure sul ledger
+LIVE reale (sola lettura, `research_isolated/snapshot/`) hanno prodotto quattro
+decisioni, tutte **tracciate nel codice** con il numero che le sostiene.
+
+**1) LE MISURE (99 puntate chiuse, `live_decomp.py`).**
+
+Per fascia di quota (`1X2` calcio + tennis, popolazione ammessa):
+```
+1.20-1.50  n=17  ROI +16,59%  hit 76%   <- l'unica banda positiva
+1.50-1.80  n=31  ROI -16,40%  hit 52%   <- la "fascia morta"
+1.80-2.00  n=24  ROI  -1,06%            <- in pareggio
+2.00-2.30  n= 9  ROI  -6,33%
+2.30-2.50  n= 8  ROI -31,97%
+>= 2,50    n=10  ROI -67,04%  hit 10%
+```
+per fascia di edge dichiarato (`MARKET_EDGE_*`):
+```
+edge 1-2pp   n= 8  ROI -70,5%  (-14,22 USDC su 20,16)   <- "quasi valore"
+edge 2-3pp   n=19  ROI  +3,7%
+edge 3-5pp   n= 8  ROI  +7,3%
+edge >= 5pp  n=21  ROI  -2,7%
+```
+per fascia di EV (`value_filter.EV_MIN`):
+```
+EV >= 1,5% (gate dell'era)                 n=56  ROI  -8,46%
+EV >= 2,5%                                 n=52  ROI  -3,11%
+EV >= 2,5% + edge >= 2pp                   n=46  ROI  -0,25%
+EV >= 2,5% + edge >= 2pp + no fascia morta n=29  ROI  +1,33%
+EV >= 3%   + edge >= 3pp + no fascia morta n=18  ROI -15,87%  <- NON meglio
+```
+per fascia di EV ALTO (la scoperta che ha aggiunto `EV_MAX`):
+```
+EV >= 10%  n=12  ROI -65,1%  (-24,98 USDC)  <- da sola piu' della perdita
+                                             totale delle 80 chiuse (-15,39)
+```
+Lettura onesta: **stringere ancora non migliora** (la riga `EV>=3% + edge>=3pp`
+e' peggiore): oltre una certa distanza dal mercato il modello non sta trovando
+valore, sta sbagliando — ed e' la stessa firma del bias tennis misurato
+(+13pp di EV dichiarato contro realizzato). E l'era con i gate allentati
+(14-20/10) ha reso **-33,1% su 29 bet** contro **+7,95%** delle 53 precedenti.
+
+**2) `value_filter.py` — le soglie tornano su, con il numero accanto.**
+
+| costante | 14/10 ("piu' volume") | **ora** | perché |
+|---|---|---|---|
+| `MARKET_EDGE_MIN` / `_MODERATE` | 0.01 | **0.02** | la fascia 1-2pp ha reso -70,5%: e' rumore di stima promosso a edge |
+| `MARKET_EDGE_STRONG` | 0.02 | **0.04** | la fascia 2-3pp e' la piu' solida (+3,7%) |
+| `EV_MIN` | 0.015 | **0.025** | +1,5% -> -8,46%, +2,5% -> -3,11% |
+| `EV_MAX` | 0.20 (costante) | **0.10 (env `EV_MAX`)** | EV >= 10% -> -65,1% |
+| `EV_MIN_LIQUID` | 0.005 | **0.010** | nessuna misura giustifica lo 0,5% sulle corsie OU/AH |
+| `EV_MIN_CORE` | 0.010 | **0.015** | idem: il vantaggio per il core resta, dimezzato |
+| `STRATEGY_LEAGUES[*].min_edge` | 1,0/1,25pp | **2,0/2,5pp** | stessa misura dell'edge |
+| `PROBATION_STRATEGY.min_edge` | 0.02 | **0.04** | le probation non hanno storico positivo MISURATO |
+| `DEFAULT_LEAGUE_STRATEGY.min_edge` | 0.01 | **0.02** | allineato |
+
+**`EV_MAX` non e' una strategia, e' una guardia all'overconfidence**: per avere
+EV > 10% a quota 1,2-2,0 il modello deve stimare una probabilita' molto sopra
+il mercato devigato, e su questo progetto quel caso coincide con un input
+cieco (rating assenti, campione piccolo), non con un edge. Sopra il tetto il
+segnale resta **ANOMALIA** e finisce in telemetria.
+
+**3) LA FASCIA MORTA 1.50-1.80 (`ODDS_EXCLUDE_MIN`/`MAX` + `in_dead_band`).**
+Non un taglio secco a 1,50 (che darebbe +16,6% ma su n=17: quello e' il numero
+di una **banda**, non di una strategia) ma un **buco** dentro la fascia
+1.20-2.00, perche' le fasce SOPRA la morta non sono in perdita e tagliarle
+costerebbe volume senza guadagno.
+- **UNA definizione** (`value_filter.in_dead_band`), riusata da `odds_in_band`
+  (solo quando si chiede la fascia DEL PROGETTO: chi passa confini a mano sta
+  facendo una domanda su quei numeri), da `is_sane` (solo mercati di
+  STRATEGIA: `is_liquid_market` escluso — OU/AH non hanno una misura
+  equivalente e non si stringono per analogia) e da `tennis_lane.in_odds_band`.
+- Effetto sulla popolazione ammessa: **n=72 a -2,57% -> n=41 a +7,53%**
+  (hit 63,4%).
+- Sul tennis la morta e' **-37,11% (n=10)**; `TENNIS_ODDS_MAX` torna a
+  **2.00** (sopra 2,00 la somma e' -75,9% su 22 bet: non era "varianza", era
+  la fascia che perde di piu').
+- ⚠️ CAVEAT dichiarato nel codice: la banda NON e' statisticamente conclusiva
+  (hit 51,6% contro break-even 60,2% a quota media 1,661, z ~ -0,96 su 31):
+  e' una scelta **prudente**, coerente con il "pantano 1.45-1.60" del backtest
+  12/09, da rimisurare con piu' chiusure.
+
+**4) DUE CORREZIONI DI ATTRIBUZIONE (log che mentono).**
+- `auto_bet._sx_prefilter`: una quota 1.65 veniva scartata con "fuori dalla
+  fascia 1.20-2.00" — falso (1.65 e' dentro gli estremi) e capace di mandare
+  l'operatore a cercare un errore di fascia. Nuovo motivo
+  `sx_prefilter/fascia_morta` con il dettaglio giusto.
+- `auto_bet.NON_FOOTBALL_LEAGUES` + `_non_football_league`: con
+  `GRIDIRON_LANE=0` la riga `NFL` resta nel ledger e il gate del calcio la
+  rifiutava con "lega fuori dai campionati vincenti", cioe' accusava la
+  STRATEGIA dove c'era solo una corsia spenta. Ora il motivo e' dichiarato
+  (in `_today_value_picks` e `_top_down_picks`).
+- `flow_measure`: nuovo bucket `odds_dead_band` (senza, un gate nuovo finiva in
+  "altro" e il suo peso nella diagnosi del flusso era invisibile).
+
+**5) `gridiron_lane.enabled()` SPENTA DI DEFAULT** (era accesa): la corsia e'
+stata costruita per il torneo chiuso il 20/10 e la sua misura e' la peggiore
+del progetto — **-59,8% di ROI su 7 bet** (-7,57 USDC, il 49% della perdita
+totale delle 99 chiuse), CLV **-0,79% con 0/6 positivi**. Direzione prudente:
+se l'env sparisce da Railway la corsia resta spenta. `GRIDIRON_LANE=0` era gia'
+impostata in produzione, quindi il comportamento non cambia — cambia il
+DEFAULT.
+
+**6) `agent_board.read_cycles` — l'ordine non si assume, si costruisce.**
+`telemetry_logs.read_lines` restituisce il file VIVO **per primo** e poi le
+generazioni `.gz` dalla piu' vecchia: la concatenazione non e' cronologica e
+`[-max_lines:]` tagliava la coda del FILE, cioe' la fine della generazione piu'
+recente. Sintomo misurato: la dashboard mostrava come "ultimo ciclo" quello
+delle 03:30 (il confine dell'ultima rotazione) mentre il registro veniva
+scritto ogni minuto. Ora si ordina sul timestamp e il limite si applica alla
+coda CRONOLOGICA.
+
+**7) TEST — derivati dalle costanti, non dai numeri.** Aggiornati
+`test_value_filter` (nuova classe sulla fascia morta: `odds_in_band`,
+`is_sane`, mercati liquidi esenti, tennis, env override, `EV_MAX`),
+`test_market_calib`/`test_risk_guards`/`test_favourites_only`/`test_league_gate`
+(edge e fascia derivati da `MARKET_EDGE_*`/`ODDS_*`), `test_book_flow`,
+`test_multi_market` (morta esclusa nei pick, liquidi esenti),
+`test_top_down` (gate EV e fascia), `test_tennis_lane` (banda 1.30-2.00 con la
+morta esclusa), `test_gridiron_lane` (corsia spenta di default +
+`_non_football_league`), `test_sx_signals`, `test_auto_bet*`,
+`test_aggressive_kelly`, `test_flow_measure` (bucket nuovo),
+`test_agent_board` (rotazione fuori ordine), `test_liquidity_*`,
+`test_league_mapping`.
+⚠️ **Test preesistente riparato** (`test_prematch_guillotine`): cercava la
+stringa `_seen_pick: set[tuple] = set()`, **rimossa** dal refactor del 12/10
+che ha estratto il dedup in `dedup_lanes(board)`. Il test era rosso a HEAD da
+allora (verificato: `git show HEAD:auto_bet.py | grep -c _seen_pick` -> 0) e
+difendeva un nome invece dell'**ordine** dei passi; ora asserisce
+`ghigliottina < dedup_lanes(board)`.
+
+**8) ENV da allineare su Railway** (lette all'IMPORT -> serve il redeploy;
+tutte gia' in `preserve()`, tranne `EV_MAX` aggiunta in questo giro,
+`config plan`: **0 to destroy**):
+`EV_MIN_LIQUID=0.010` (in produzione c'era **0.005**, che avrebbe annullato il
+default nuovo), `EV_MAX=0.10` (assente -> vale il default), `EV_MIN_CORE`
+(assente -> 0.015), `TENNIS_ODDS_MAX=2.00` (gia' coerente), `GRIDIRON_LANE=0`
+(gia' coerente). `EV_MIN`, `ODDS_*` e `MARKET_EDGE_*` sono costanti di codice:
+nessuna env le sovrascrive.
+
+**9) Verifica di questo giro**: `verify_guardrails.py` **A–J TUTTI BLOCCANO**
+(exit 0); lotti di regressione verdi su `agents` (analysis/brain/agent_kelly/
+hierarchy), `decision` (12 file), corsie e mercati (multi_market, esports,
+line_oracle, pinnacle, steam_move, market_shadow, quotes_store, ou_exclusion,
+gridiron), metriche (flow_measure, market_diagnose, significance,
+performance_report, reports, live_decomp, league_dynamic, gate_impact,
+agent_board), percorso denaro (order_watch, resting, weekly_stop, killswitch,
+smart_hedging, event_cap, fill_rate, wallet_cache, exposure_gate, stop_audit),
+infrastruttura (bot, railway_drift, secret_hygiene, storage_status,
+telemetry_logs, tournament, rush_final, capital_enclosure, t60_breakers),
+settlement (watchdog, sx_native, scores, pause, sanity, source, side, cassa),
+web_api + adaptive/lane weighting + research_lab + tennis_lane,
+`compileall` OK, **0 marker di conflitto**.

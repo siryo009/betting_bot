@@ -26,6 +26,7 @@ import pytest
 
 import multi_market as mm
 import tracker
+import value_filter
 from poisson_engine import ah_outcome_probs, ou_outcome_probs
 
 FIXTURE = "sx-L20067612"
@@ -56,9 +57,39 @@ def quote_row(market_type, selection, line, price, *, depth=120.0,
     }
 
 
+def blend_is_model(monkeypatch):
+    """Blend deterministico: probabilita' finale = probabilita' del MODELLO.
+
+    Questi test misurano l'EV, la scelta del lato e il gate di liquidita', NON
+    l'interazione fra blend e soglie di strategia. Con il blend reale la
+    probabilita' resta a ridosso di quella di mercato, quindi il campione
+    "giocabile" dipende da tre soglie insieme ed e' strettissimo (misurato il
+    26/10: l'unica combinazione che passa sta a EV 9,6%, a un passo dal tetto
+    `EV_MAX` 10%): il test diventerebbe un falso testimone al primo ritocco.
+    La semantica del blend ha i suoi test dedicati (`test_market_calib`).
+    """
+    monkeypatch.setattr(
+        mm, "adjusted_probability",
+        lambda model_prob, market_prob, price, league="", **kw: model_prob)
+
+
+def ou_quotes(depth=120.0, lam=(2.0, 1.4), line=2.5, under=2.60):
+    """Quote OU con l'Over prezzato a meta' strada fra `EV_MIN` e `EV_MAX`.
+
+    Il prezzo si DERIVA dalla probabilita' del modello e dall'EV voluto: un
+    prezzo fisso (1.75 fino al 24/10) dava EV +15,5%, cioe' SOPRA il tetto, e
+    il candidato usciva per "ANOMALIA: EV troppo alto" invece che per la
+    ragione che il test vuole misurare (lato favorito, libro sottile, lega).
+    """
+    p_win, _push, _lose = ou_outcome_probs(lam[0], lam[1], line, "over")
+    ev_target = (value_filter.EV_MIN + value_filter.EV_MAX) / 2
+    over = round((1 + ev_target) / p_win, 2)
+    return [quote_row("OU", "over", line, over, depth=depth),
+            quote_row("OU", "under", line, under, depth=depth)]
+
+
 class FakeProvider:
     """Provider SX finto: catalogo iniettabile, nessuna rete."""
-
     name = "sxbet"
 
     def __init__(self, markets):
@@ -170,11 +201,12 @@ class TestModello:
 # ---------------------------------------------------------------------------
 
 class TestAnalisi:
-    def test_ou_calcola_ev_e_lato_favorito(self):
-        # Modello (lam 2.0/1.4 = Over prob ~0.66) contro mercato che prezza
-        # l'Over a 1.75 (fair ~0.57): l'Over e' il favorito E batte il mercato.
-        quotes = [quote_row("OU", "over", 2.5, 1.75),
-                  quote_row("OU", "under", 2.5, 2.30)]
+    def test_ou_calcola_ev_e_lato_favorito(self, monkeypatch):
+        # Modello (lam 2.0/1.4 = Over prob ~0.66) contro un mercato che prezza
+        # l'Over 2 USDC sopra il fair del modello: l'Over e' il favorito E
+        # batte il mercato, restando dentro la fascia EV.
+        blend_is_model(monkeypatch)
+        quotes = ou_quotes()
         cands = mm.analyze_fixture(FIXTURE, 2.0, 1.4, quotes=quotes,
                                    league="Premier League")
         assert len(cands) == 2
@@ -186,11 +218,12 @@ class TestAnalisi:
         # EV esatto (niente push sul 2.5).
         over = by_sel["over"]
         assert over["ev"] == pytest.approx(
-            over["p_win"] * (1.75 - 1.0) - over["p_lose"])
+            over["p_win"] * (over["quota"] - 1.0) - over["p_lose"])
+        assert value_filter.EV_MIN <= over["ev"] <= value_filter.EV_MAX
 
-    def test_libro_sottile_non_e_giocabile(self):
-        quotes = [quote_row("OU", "over", 2.5, 1.75, depth=3.0),
-                  quote_row("OU", "under", 2.5, 2.30, depth=3.0)]
+    def test_libro_sottile_non_e_giocabile(self, monkeypatch):
+        blend_is_model(monkeypatch)
+        quotes = ou_quotes(depth=3.0)
         cands = mm.analyze_fixture(FIXTURE, 2.0, 1.4, quotes=quotes,
                                    league="Premier League")
         assert cands and all(c["playable"] is False for c in cands)
@@ -207,14 +240,19 @@ class TestAnalisi:
         assert all(c["market_prob"] is not None for c in cands)
         assert all(c["p_push"] > 0 for c in cands)
 
-    def test_lega_vietata_non_e_giocabile(self):
-        quotes = [quote_row("OU", "over", 2.5, 1.75),
-                  quote_row("OU", "under", 2.5, 2.30)]
-        cands = mm.analyze_fixture(FIXTURE, 1.9, 1.1, quotes=quotes,
+    def test_lega_vietata_non_e_giocabile(self, monkeypatch):
+        # Blend stubbato: senza, il rifiuto arriverebbe dal gate dell'edge
+        # (il blend avvicina la probabilita' a quella di mercato) e il test
+        # accuserebbe la soglia sbagliata.
+        blend_is_model(monkeypatch)
+        cands = mm.analyze_fixture(FIXTURE, 2.0, 1.4, quotes=ou_quotes(),
                                    league="Serie A")
         assert cands and all(c["playable"] is False for c in cands)
+        over = next(c for c in cands if c["selection"] == "over")
+        assert "lega" in over["reason"], over["reason"]
 
-    def test_linea_oltre_la_fascia_non_e_giocabile(self):
+    def test_linea_oltre_la_fascia_non_e_giocabile(self, monkeypatch):
+        blend_is_model(monkeypatch)
         quotes = [quote_row("OU", "over", 2.5, 2.60),
                   quote_row("OU", "under", 2.5, 1.55)]
         cands = mm.analyze_fixture(FIXTURE, 1.9, 1.1, quotes=quotes,
@@ -278,10 +316,9 @@ class TestLedger:
         assert tracker.count_market_quotes() == 2
 
     def test_scan_registra_le_previsioni(self, db, monkeypatch):
-        quotes = [quote_row("OU", "over", 2.5, 1.75),
-                  quote_row("OU", "under", 2.5, 2.30),
-                  quote_row("AH", "1", -0.75, 1.80),
-                  quote_row("AH", "2", -0.75, 2.10)]
+        blend_is_model(monkeypatch)
+        quotes = ou_quotes() + [quote_row("AH", "1", -0.75, 1.80),
+                                quote_row("AH", "2", -0.75, 2.10)]
         monkeypatch.setattr(mm, "ingest", lambda *a, **k: {"saved": 0})
         monkeypatch.setattr(mm, "_fixtures_with_quotes", lambda now: [{
             "id": FIXTURE, "home": HOME, "away": AWAY,

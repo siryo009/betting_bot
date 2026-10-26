@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 #   1) SOLO campionati con ROI positivo nel backtest
 #   2) Fascia quote ODDS_MIN-ODDS_MAX (default **1.20-2.00** dal 14/10/2026:
 #      era 1.30-1.80 dal 11/09, allargata dalla direttiva "piu' volume")
+#      CON UNA FASCIA MORTA esclusa all'interno (1.50-1.80, vedi sotto)
 #   3) Edge differenziato per efficienza lega
 #   4) Kelly adattivo per lega (kelly_mult + max_stake)
 #   5) Esclusione automatica leghe con CLV negativo cronico
@@ -44,20 +45,36 @@ logger = logging.getLogger(__name__)
 #: alta per scelta: sul tennis l'EV e' misurato allineato allo sharp entro
 #: ~0,7% (30/09) e la banda quota 1.30-2.30 basta da sola ad allargare.
 #:
-#: ⚠️ AGGRESSIVITA' (direttiva del proprietario, 14/10/2026): 2.5% -> **1.5%**.
-#: Direzione OPPOSTA alla prudenza del 21/09 (che aveva riportato le soglie
-#: su dopo il commit "FREQUENZA boost") e TRACCIATA qui di proposito: la
-#: protezione e' la decisione scritta, non un numero cambiabile in silenzio.
-#: MISURA che ha dimensionato la scelta (ledger di produzione, 14 giorni,
-#: 1506 righe): in fascia quota 513 righe, di cui 289 gia' oltre il 2.5% e 272
-#: gia' giocabili -> abbassare la SOLA soglia EV aggiungeva **+18 righe in 14
-#: giorni (+1,3/giorno)**. Il vero collo di bottiglia era l'EDGE (vedi
-#: `MARKET_EDGE_*`): con edge >= 2pp le righe 'nuove' restavano **18 a
-#: qualunque soglia EV** (2.5% -> 18, 1.5% -> 18, 1.0% -> 18), cioe' la
-#: modifica EV da sola era un NO-OP. Le due leve sono state quindi mosse
-#: INSIEME (EV + edge dimezzato): **28 pick nuovi in 14 giorni (2,0/giorno)**.
-EV_MIN = 0.015           # +1.5% minimo (era 2.5%)
-EV_MAX = 0.20            # +20% massimo (oltre = anomalia)
+#: STORIA (perche' e' tornata su): 2,5% (prudenza 21/09) -> **1,5%**
+#: (direttiva "piu' volume", 14/10/2026) -> **2,5%** (26/10/2026, dopo che il
+#: capitale e' sceso da ~45 a ~14 USDC).
+#:
+#: MISURA che ha riportato la soglia su — ledger LIVE reale, 80 puntate chiuse
+#: con la previsione agganciata (`research_isolated/snapshot/`, sola lettura).
+#: Ogni riga e' un SUBSET delle bet davvero piazzate, quindi e' un "cosa
+#: sarebbe successo", non un backtest:
+#:   gate attuale (EV >= 1,5%)            n=56  ROI  **-8,46%**
+#:   EV >= 2,5%                          n=52  ROI  -3,11%
+#:   EV >= 2,5% + edge >= 2pp            n=46  ROI  **-0,25%**
+#:   EV >= 2,5% + edge >= 2pp + no morta n=29  ROI  **+1,33%**
+#:   EV >= 3%   + edge >= 3pp + no morta n=18  ROI -15,87%  <- NON meglio:
+#:     stringere ancora seleziona i segnali a edge ENORME, che sono quelli
+#:     dove il modello si allontana di piu' dal mercato (e sbaglia).
+#: L'era "bot aggressivo" (14-20/10, gate allentati) e' quella che ha bruciato
+#: il capitale: **-33,1% su 29 bet**, contro +7,95% delle 53 precedenti.
+EV_MIN = 0.025           # +2,5% minimo (era 1,5% dal 14/10)
+
+#: TETTO DELL'EV (26/10/2026) — guardia all'OVERCONFIDENCE del modello, non
+#: una strategia. MISURA sul ledger reale: la fascia EV >= 10% ha reso
+#: **-65,1% su 12 bet (-24,98 USDC)**, cioe' da sola piu' della perdita totale
+#: delle 80 chiuse (-15,39). Il meccanismo e' dichiarato e noto: per avere
+#: EV > 10% a quota 1,2-2,0 il modello deve stimare una probabilita' MOLTO
+#: sopra il mercato devigato — e su questo progetto quel caso coincide con un
+#: input cieco (rating assenti, formazioni, campione piccolo), non con un
+#: edge. E' la stessa classe del bias tennis misurato (+13pp di EV dichiarato
+#: contro realizzato). `EV_MAX` era 20% ("anomalia"): a 10% la guardia morde
+#: dove il dato dice che si perde. Env `EV_MAX` per riaprirlo (es. 0.20).
+EV_MAX = float(os.getenv("EV_MAX", "0.10"))
 
 # ---------------------------------------------------------------------------
 # GATE EV DEDICATO AI MERCATI LIQUIDI (direttiva 04/10/2026, punto 4)
@@ -71,8 +88,11 @@ EV_MAX = 0.20            # +20% massimo (oltre = anomalia)
 # silenzioso). MLB e BTTS sono dichiarati liquidi ma oggi NON hanno un feed
 # attivo (BTTS: 0 mercati su SX; the-odds-api e' h2h-only), quindi la voce
 # resta pronta e senza effetto finche' non si collega un oracolo.
-#: Env: `EV_MIN_LIQUID` (default **0.5%**, era 1.0%) e `EV_LIQUID_MARKETS`.
-EV_MIN_LIQUID = float(os.getenv("EV_MIN_LIQUID", "0.005"))
+#: Env: `EV_MIN_LIQUID` (default **1.0%**: riportata su il 26/10/2026, era
+#: 0,5% dal 14/10) e `EV_LIQUID_MARKETS`. Nessuna misura separata giustifica
+#: lo 0,5% sui mercati liquidi: la prudenza si applica a tutta la pipeline
+#: finche' la corsia OU/AH non produce campione.
+EV_MIN_LIQUID = float(os.getenv("EV_MIN_LIQUID", "0.010"))
 _DEFAULT_LIQUID_MARKETS = "AH,OU,TOTALS,BTTS,ML"
 LIQUID_MARKETS = frozenset(
     m.strip().upper()
@@ -108,6 +128,57 @@ def ev_min_for_market(market: str | None) -> float:
 ODDS_MIN = 1.20          # quota minima: sotto, il ritorno non paga il rischio
 ODDS_MAX = 2.00          # quota massima: sopra e' "pantano" o sfavorita
 
+# ---------------------------------------------------------------------------
+# FASCIA MORTA 1.50-1.80 (25/10/2026) — l'unica banda che ha PERSO in ogni
+# misura indipendente, su corsie diverse e in ere diverse.
+# ---------------------------------------------------------------------------
+# Perche' esiste invece di un semplice `ODDS_MAX = 1.50`: le fasce che stanno
+# SOPRA la morta non sono in perdita, e tagliarle costerebbe volume senza
+# guadagno misurato.
+#
+# MISURA (ledger live, 99 puntate chiuse, `live_decomp.py`, 26/10/2026):
+#   1.20-1.50  n=17  ROI **+16,59%**  hit 76%   <- l'unica banda positiva
+#   1.50-1.80  n=31  ROI **-16,40%**  hit 52%   <- la morta, il bleed maggiore
+#   1.80-2.00  n=24  ROI  -1,06%      hit 54%   <- in pareggio
+#   2.00-2.30  n= 9  ROI  -6,33%
+#   2.30-2.50  n= 8  ROI -31,97%
+#   >= 2,50    n=10  ROI -67,04%      hit 10%
+# Per corsia, la morta e' negativa in ENTRAMBE quelle che spendono:
+#   calcio 1X2 -3,98% (n=20) · tennis -37,11% (n=10)
+# Esito: la popolazione che la strategia ammette oggi (<= 2,00, morta
+# INCLUSA) e' n=72 con **-2,57%**; togliendo la sola morta diventa n=41 con
+# **+7,53%** (hit 63,4%). Si tiene anche 1.80-2.00 (in pareggio) perche' un
+# taglio secco a 1,50 darebbe +16,6% ma su n=17: quello e' il numero di una
+# BANDA, non di una strategia.
+#
+# ⚠️ CAVEAT ONESTO (da non nascondere): la banda da sola NON e'
+# statisticamente conclusiva — hit 51,6% contro un break-even di 60,2% a quota
+# media 1,661, cioe' z ~ -0,96 su 31 bet. La scelta e' PRUDENTE (bleed
+# maggiore in assoluto, negativa in entrambe le corsie, coerente con il
+# "pantano 1.45-1.60" del backtest 12/09), non una certezza: va rimisurata
+# quando il ledger avra' piu' chiusure.
+#
+# ⚠️ Vale per i mercati di STRATEGIA (1X2 calcio, tennis): i mercati LIQUIDI
+# (OU/AH) NON hanno una misura equivalente alle spalle e restare fuori
+# dall'esclusione e' la scelta prudente (`is_liquid_market`).
+ODDS_EXCLUDE_MIN = 1.50  # inizio della banda misurata in perdita
+ODDS_EXCLUDE_MAX = 1.80  # fine (inclusa)
+
+
+def in_dead_band(price) -> bool:
+    """True se la quota cade nella fascia morta misurata (1.50-1.80).
+
+    UNICA definizione del buco: la usano `odds_in_band`, `is_sane` e la corsia
+    tennis (`tennis_lane.in_odds_band`), cosi' il confine non puo' vivere in
+    due posti e divergere. Fail-safe: un valore illeggibile NON e' nella
+    banda morta (lo esclude gia' `odds_in_band` con la sua regola).
+    """
+    try:
+        val = float(price)
+    except (TypeError, ValueError):
+        return False
+    return ODDS_EXCLUDE_MIN <= val <= ODDS_EXCLUDE_MAX
+
 
 def odds_in_band(price, *, odds_min: float | None = None,
                  odds_max: float | None = None) -> bool:
@@ -118,6 +189,12 @@ def odds_in_band(price, *, odds_min: float | None = None,
     diagnostica. I benchmark "quota entro ODDS_MIN..ODDS_MAX" sparsi nei
     moduli non devono piu' essere riscritti a mano: una fascia, un posto.
 
+    La FASCIA MORTA (`in_dead_band`, 1.50-1.80) e' esclusa solo quando si
+    chiede la fascia DEL PROGETTO (nessun confine passato a mano): un
+    chiamante che chiede "questa quota sta fra 1.9 e 2.1?" sta facendo una
+    domanda su quei numeri, e la risposta non deve dipendere da una banda
+    misurata su un'altra popolazione.
+
     FAIL-CLOSED su un valore assente o non numerico: una quota che non si sa
     leggere NON e' nella fascia (non e' una quota giocabile).
     """
@@ -127,7 +204,11 @@ def odds_in_band(price, *, odds_min: float | None = None,
         return False
     lo = ODDS_MIN if odds_min is None else float(odds_min)
     hi = ODDS_MAX if odds_max is None else float(odds_max)
-    return lo <= val <= hi
+    if not (lo <= val <= hi):
+        return False
+    if odds_min is None and odds_max is None and in_dead_band(val):
+        return False
+    return True
 
 # === DINAMIC KELLY ===
 # Stake proporzionale all'edge: piu' EV = piu' stake, meno rischio
@@ -181,11 +262,16 @@ MAX_DAILY_BETS = 10   # massimo per evitare over-exposure
 #: passano da 13 a **28 in 14 giorni (2,0/giorno)**.
 STRATEGY_LEAGUES = {
     # Leghe vincenti (backtest)
-    "Premier League":       {"min_edge": 0.010, "kelly_mult": 1.2, "max_stake": 0.020, "efficiency": 0.85},
-    "Bundesliga":           {"min_edge": 0.010, "kelly_mult": 1.3, "max_stake": 0.020, "efficiency": 0.78},
-    "Turkey Super Lig":     {"min_edge": 0.0125, "kelly_mult": 1.1, "max_stake": 0.018, "efficiency": 0.60},
-    "Ligue 1":              {"min_edge": 0.0125, "kelly_mult": 1.0, "max_stake": 0.018, "efficiency": 0.75},
-    "Eredivisie":           {"min_edge": 0.0125, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.65},
+    # ⚠️ EDGE DI LEGA riportato a +2pp/+2,5pp il 26/10/2026 (era +1pp/+1,25pp
+    # dal 14/10). MISURA sul ledger live: le bet con edge 1-2pp hanno reso
+    # **-70,5% su 8** (-14,22 USDC su 20,16 puntati), mentre 2-3pp hanno reso
+    # +3,73% e 3-5pp +7,30%. La fascia "quasi valore" e' quella che perde: e'
+    # l'unica banda in cui il modello dichiara un vantaggio che non c'e'.
+    "Premier League":       {"min_edge": 0.020, "kelly_mult": 1.2, "max_stake": 0.020, "efficiency": 0.85},
+    "Bundesliga":           {"min_edge": 0.020, "kelly_mult": 1.3, "max_stake": 0.020, "efficiency": 0.78},
+    "Turkey Super Lig":     {"min_edge": 0.025, "kelly_mult": 1.1, "max_stake": 0.018, "efficiency": 0.60},
+    "Ligue 1":              {"min_edge": 0.025, "kelly_mult": 1.0, "max_stake": 0.018, "efficiency": 0.75},
+    "Eredivisie":           {"min_edge": 0.025, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.65},
     # --- NAZIONALI IN CORSO (29/09/2026) — direttiva del proprietario: CORE ---
     # Perche': nelle 24h del 24/09 AFCON + UEFA Nations League erano l'88%
     # (111 su 126) delle righe scartate e l'UNICO motivo di stop del flusso:
@@ -202,8 +288,8 @@ STRATEGY_LEAGUES = {
     # Eredivisie, l'unica lega core con la differenza dentro il rumore) e il
     # campione va rimisurato sul ledger prima di qualunque allargamento
     # (`league_dynamic.py` fa esattamente questo, in sola lettura).
-    "UEFA Nations League":  {"min_edge": 0.0125, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.55},
-    "Africa Cup of Nations":{"min_edge": 0.0125, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.50},
+    "UEFA Nations League":  {"min_edge": 0.025, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.55},
+    "Africa Cup of Nations":{"min_edge": 0.025, "kelly_mult": 0.8, "max_stake": 0.015, "efficiency": 0.50},
     # Leghe perse nel backtest: generate NO segnali
     # "Serie A", "La Liga", "Belgian Pro League", "Liga Portugal",
     # "Greek Super League" — escluse per ROI negativo
@@ -217,10 +303,11 @@ STRATEGY_LEAGUES = {
 # saldabili) · `blocked` (tutto il resto).
 #
 # Le leghe in probation ricevono una strategia PIU' SEVERA del core, non
-# uguale: edge minimo +2pp (dal 14/10; era +4pp dal 21/09), Kelly ridotto
-# (0.4 contro 0.8-1.3) e cap di stake 0.5% (contro 1.5-2%). Cosi' il volume
-# aggiunto e' a taglia minima — se il ledger live le promuove, si potra'
-# allinearle al core (decisione futura, da misurare).
+# uguale: edge minimo +4pp (riportato su il 26/10/2026; era +2pp dal 14/10),
+# Kelly ridotto (0.4 contro 0.8-1.3) e cap di stake 0.5% (contro 1.5-2%).
+# Le leghe in probation non hanno uno storico positivo MISURATO: la soglia piu'
+# alta e' l'unica cosa che le distingue dal core, e i 14 giorni di gate a +2pp
+# hanno prodotto la peggiore era del ledger (-33,1% su 29 bet).
 # Dal 23/10/2026 la probation accoglie anche le due coppe europee (Europa e
 # Conference League): non hanno un ROI misurato, quindi non possono stare nel
 # core, ma "blocked" era un default e non una misura — e il loro board era il
@@ -258,15 +345,14 @@ PROBATION_LEAGUES = {
 }
 
 # Strategia di probation: piu' severa del core su edge, Kelly e cap.
-PROBATION_STRATEGY = {"min_edge": 0.02, "kelly_mult": 0.4, "max_stake": 0.005}
+PROBATION_STRATEGY = {"min_edge": 0.04, "kelly_mult": 0.4, "max_stake": 0.005}
 
 # Fallback per leghe SCONOSCIUTE o assenti (il segnale resta vietato a monte:
 # `league_allowed` rifiuta qualunque nome non in core/probation).
-# NB: min_edge allineato alla soglia di edge corrente (+1pp dal 14/10, era
-# +2pp dal 21/09): il fallback si applica alle leghe fuori whitelist aperte
-# dalla corsia torneo e ai segnali con lega VUOTA (che restano vietati a
-# monte da `league_allowed`).
-DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.01, "kelly_mult": 0.5, "max_stake": 0.005}
+# NB: min_edge riportato a +2pp il 26/10/2026 (era +1pp dal 14/10): il
+# fallback si applica alle leghe fuori whitelist aperte dalla corsia torneo e
+# ai segnali con lega VUOTA (che restano vietati a monte da `league_allowed`).
+DEFAULT_LEAGUE_STRATEGY = {"min_edge": 0.02, "kelly_mult": 0.5, "max_stake": 0.005}
 
 FAVOURITES_ONLY = True   # mantenere: evita sfavorite ad alta quota
 MIN_FAVOURITE_MARKET_PROB = 0.50   # prob. di mercato minima del favorito
@@ -460,9 +546,11 @@ def is_core_league(league: str = "") -> bool:
 # prima stesura (massimo fra le due dimensioni) rimetta `max`; chi vuole la
 # soglia protettiva sui mercati liquidi senza toccare il codice ha
 # `EV_MIN_LIQUID=0.025` (env, gia' in `preserve()` in `.railway/railway.ts`).
-#: Env: `EV_MIN_CORE` (default **1.0%**, era 1.5%) e `EV_MIN_OTHER`
-#: (default `EV_MIN` = 1.5%).
-EV_MIN_CORE = float(os.getenv("EV_MIN_CORE", "0.010"))
+#: Env: `EV_MIN_CORE` (default **1,5%**: riportata su il 26/10/2026, era 1,0%
+#: dal 14/10) e `EV_MIN_OTHER` (default `EV_MIN` = 2,5%).
+#: ⚠️ Il vantaggio per le leghe core resta, ma dimezzato rispetto al 14/10:
+#: la misura dice che a 1,0% il flusso peggiora, non che migliora.
+EV_MIN_CORE = float(os.getenv("EV_MIN_CORE", "0.015"))
 EV_MIN_OTHER = float(os.getenv("EV_MIN_OTHER", str(EV_MIN)))
 
 
@@ -665,6 +753,14 @@ def is_sane(prob: float, odds: float, ev: float,
         return False, f"quota troppo bassa ({odds:.2f} < {ODDS_MIN})"
     if odds > odds_max:
         return False, (f"quota troppo alta ({odds:.2f} > {odds_max})")
+    # FASCIA MORTA (25/10/2026): 1.50-1.80 e' l'unica banda che ha perso in
+    # OGNI misura indipendente (-16,4% su n=31, e negativa in entrambe le
+    # corsie che spendono). Si esclude SOLO sui mercati di strategia: i
+    # mercati liquidi (OU/AH) non hanno una misura equivalente e non si
+    # stringono per analogia.
+    if not is_liquid_market(market) and in_dead_band(odds):
+        return False, (f"quota nella fascia morta {ODDS_EXCLUDE_MIN:.2f}-"
+                       f"{ODDS_EXCLUDE_MAX:.2f} (misurata -16,4% su 31 bet)")
     if favourites_only and market_prob is not None \
             and market_prob < MIN_FAVOURITE_MARKET_PROB:
         return False, (f"non e' il favorito di mercato (prob. "

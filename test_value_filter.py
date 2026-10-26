@@ -15,6 +15,14 @@ import pytest
 
 from value_filter import compute_ev, filter_value_bets
 
+#: Quota FUORI dalla fascia morta 1.50-1.80 (`value_filter.in_dead_band`,
+#: 25/10/2026). I test che misurano EV / edge / tier usano QUESTA: con una
+#: quota nella morta leggerebbero il gate della fascia (che risponde "quota
+#: nella fascia morta") invece della soglia che vogliono verificare. La
+#: `ev` e' un argomento esplicito di `is_sane`, quindi il valore di EV non
+#: cambia: cambia solo quale gate risponde per primo.
+LIVE_PRICE = 1.90
+
 
 class TestComputeEv:
     """Test della funzione pura compute_ev."""
@@ -43,33 +51,40 @@ class TestFilterValueBets:
         dal 11/09/2026 qualsiasi quota
         superiore e' fuori strategia e viene scartata a monte.
         """
+        # ⚠️ Nessuna quota nella FASCIA MORTA 1.50-1.80: dal 25/10/2026
+        # `is_sane` la esclude, e un dataset tutto dentro la morta farebbe
+        # leggere a questi test il gate della fascia invece dell'EV.
         return [
             {"bookmaker": "Bet365", "evento": "Serie A – Roma vs Empoli", "sport": "calcio",
-             "esito": "1", "quota_decimale": 1.75, "probabilita": 0.620,
+             "esito": "1", "quota_decimale": 1.95, "probabilita": 0.550,
              "timestamp": "2024-09-17T15:00:00Z"},
             {"bookmaker": "Snai", "evento": "Serie A – Roma vs Empoli", "sport": "calcio",
              "esito": "2", "quota_decimale": 4.20, "probabilita": 0.220,
              "timestamp": "2024-09-17T15:00:00Z"},
             {"bookmaker": "Bet365", "evento": "Serie A – Inter vs Milan", "sport": "calcio",
-             "esito": "1", "quota_decimale": 1.55, "probabilita": 0.720,
+             "esito": "1", "quota_decimale": 1.45, "probabilita": 0.750,
              "timestamp": "2024-09-16T20:45:00Z"},
             {"bookmaker": "Snai", "evento": "Serie A – Inter vs Milan", "sport": "calcio",
              "esito": "X", "quota_decimale": 3.60, "probabilita": 0.170,
              "timestamp": "2024-09-16T20:45:00Z"},
+            # ⚠️ probabilita' 0,575 e NON 0,60: con 0,60 l'EV sarebbe +14%,
+            # cioe' SOPRA il tetto anti-overconfidence (`EV_MAX = 10%` dal
+            # 26/10/2026) e la riga verrebbe respinta come ANOMALIA — il test
+            # misurerebbe il tetto invece del filtro dei value bet.
             {"bookmaker": "Bet365", "evento": "Serie A – Atalanta vs Milan", "sport": "calcio",
-             "esito": "1", "quota_decimale": 1.70, "probabilita": 0.660,
+             "esito": "1", "quota_decimale": 1.90, "probabilita": 0.575,
              "timestamp": "2024-09-15T18:00:00Z"},
             {"bookmaker": "Snai", "evento": "Serie A – Atalanta vs Milan", "sport": "calcio",
              "esito": "2", "quota_decimale": 3.40, "probabilita": 0.220,
              "timestamp": "2024-09-15T18:00:00Z"},
             {"bookmaker": "Snai", "evento": "Serie A – Sassuolo vs Napoli", "sport": "calcio",
-             "esito": "2", "quota_decimale": 1.60, "probabilita": 0.600,
+             "esito": "2", "quota_decimale": 1.42, "probabilita": 0.650,
              "timestamp": "2024-09-14T20:45:00Z"},
             {"bookmaker": "Snai", "evento": "Serie A – Juventus vs Milan", "sport": "calcio",
-             "esito": "X", "quota_decimale": 1.75, "probabilita": 0.500,
+             "esito": "X", "quota_decimale": 1.92, "probabilita": 0.500,
              "timestamp": "2024-09-14T20:45:00Z"},
             {"bookmaker": "Bet365", "evento": "Serie A – Juventus vs Milan", "sport": "calcio",
-             "esito": "1", "quota_decimale": 1.80, "probabilita": 0.580,
+             "esito": "1", "quota_decimale": 1.85, "probabilita": 0.550,
              "timestamp": "2024-09-14T20:45:00Z"},
         ]
 
@@ -99,7 +114,9 @@ class TestFilterValueBets:
         assert not self._has(result, "Serie A – Juventus vs Milan", "1")
 
     def test_threshold_configurabile(self, odds_data):
-        result = filter_value_bets(odds_data, ev_threshold=0.12)
+        # Atalanta resta l'unica sopra +9% (EV +9,25%) e sotto il tetto
+        # `EV_MAX` (10%): la soglia sceglie LEI, il tetto non c'entra.
+        result = filter_value_bets(odds_data, ev_threshold=0.09)
         assert len(result) == 1
         assert result[0]["evento"] == "Serie A – Atalanta vs Milan"
         assert result[0]["esito"] == "1"
@@ -129,12 +146,15 @@ class TestStrategiaSoloFavoriti:
         """Le soglie non devono tornare indietro senza una decisione esplicita."""
         import value_filter as vf
         from market_calib import MARKET_EDGE_MIN
-        # Direttiva 14/10/2026 ("bot piu' aggressivo"): fascia allargata a
-        # 1.20-2.00 ed edge dimezzato a +1pp. Uguaglianza ESATTA di proposito:
-        # la protezione e' la decisione tracciata in AGENTS.md, non il valore.
-        assert vf.ODDS_MAX == 2.00         # fascia allargata (14/10/2026)
-        assert vf.ODDS_MIN == 1.20         # pavimento abbassato (era 1.30)
-        assert MARKET_EDGE_MIN == 0.01     # edge minimo +1pp (direttiva 14/10)
+        # Soglie RIPORTATE SU il 26/10/2026 dopo la misura sul ledger live
+        # (le bet con edge 1-2pp hanno reso -70,5% su 8). Uguaglianza ESATTA di
+        # proposito: la protezione e' la decisione tracciata, non il valore.
+        assert vf.ODDS_MAX == 2.00         # fascia (14/10/2026, invariata)
+        assert vf.ODDS_MIN == 1.20         # pavimento (14/10/2026, invariato)
+        assert MARKET_EDGE_MIN == 0.02     # edge minimo +2pp (era 1pp)
+        assert vf.EV_MIN == 0.025          # EV minimo +2,5% (era 1,5%)
+        assert vf.EV_MAX == 0.10           # tetto anti-overconfidence (era 20%)
+        assert vf.in_dead_band(1.65) is True   # fascia morta 1.50-1.80
         assert vf.FAVOURITES_ONLY is True
         assert vf.MIN_FAVOURITE_MARKET_PROB == 0.50
         # Test funzioni nuove
@@ -151,13 +171,13 @@ class TestStrategiaSoloFavoriti:
 
     def test_sfavorita_bocciata_anche_a_quota_bassa(self):
         from value_filter import is_sane
-        # Quota 1.70 ma il mercato la considera sfavorita (40%)
-        ok, reason = is_sane(0.60, 1.70, 0.02, market_prob=0.40)
+        # Quota bassa ma il mercato la considera sfavorita (40%)
+        ok, reason = is_sane(0.60, LIVE_PRICE, 0.02, market_prob=0.40)
         assert not ok and "favorito" in reason
 
     def test_favorito_netto_ammesso(self):
         from value_filter import is_sane
-        ok, _ = is_sane(0.62, 1.65, 0.026, market_prob=0.57)
+        ok, _ = is_sane(0.62, LIVE_PRICE, 0.026, market_prob=0.57)
         assert ok
 
     def test_eligible_favourites_solo_il_piu_probabile(self):
@@ -296,9 +316,9 @@ class TestStrategiaPerLega:
             assert vf.league_tier(lg) == "core", lg
             assert vf.league_allowed(lg) is True, lg
             strat = vf.get_league_strategy(lg)
-            # min_edge dimezzato il 14/10/2026 (era 0.025 per il percorso
-            # "core prudente" delle nazionali, 0.0125 = meta' esatta).
-            assert strat["min_edge"] == 0.0125, lg
+            # min_edge 0.025: e' il "core prudente" delle nazionali, riportato
+            # su il 26/10/2026 dopo la parentesi a 1,25pp del 14/10.
+            assert strat["min_edge"] == 0.025, lg
             assert strat["kelly_mult"] == 0.8, lg
             assert strat["max_stake"] == 0.015, lg
         # Le leghe MISURATE negative non devono essersi aperte per sbaglio.
@@ -332,23 +352,24 @@ class TestStrategiaPerLega:
                 f"alias {alias!r} -> {target!r} e' una lega vietata (alias inerte)"
 
     def test_is_sane_tier2_edge_meta(self):
-        """In probation l'edge minimo e' +2pp: +1.5pp passa nel core, non qui.
+        """In probation l'edge minimo e' +4pp: +2pp passa nel core, non qui.
 
-        Direttiva 14/10/2026: core 2,5pp -> 1,25pp (nazionali) e probation
-        4pp -> 2pp. La soglia del tier resta PIU' SEVERA di quella del core
-        (l'invariante e' asserito in
+        Soglie riportate su il 26/10/2026: core 2pp/2,5pp e probation 4pp (la
+        parentesi "piu' volume" del 14/10 le aveva a 1pp e 2pp). La soglia del
+        tier resta PIU' SEVERA di quella del core (invariante asserito in
         `test_tier2_probation_ammessa_con_parametri_severi`).
         """
         from value_filter import is_sane
-        # edge = 0.615 - 0.60 = +1.5pp
-        ok_core, _ = is_sane(0.615, 1.65, 0.031, market_prob=0.60,
-                             league="Turkey Super Lig")   # min_edge 1,25pp
-        ok_prob, reason = is_sane(0.615, 1.65, 0.031, market_prob=0.60,
-                                  league="Serie B")       # min_edge 2pp
-        assert ok_core is True
+        # edge = 0.63 - 0.60 = +3pp: passa nel core (Ligue 1, 2,5pp)...
+        ok_core, why_core = is_sane(0.63, LIVE_PRICE, 0.04, market_prob=0.60,
+                                    league="Ligue 1")
+        assert ok_core, why_core
+        # ...e NON in probation (2pp non bastano: servono 4pp).
+        ok_prob, reason = is_sane(0.63, LIVE_PRICE, 0.04, market_prob=0.60,
+                                  league="Serie B")
         assert ok_prob is False and "non batte il mercato" in reason
         # +4.5pp passa in probation.
-        ok_prob2, reason2 = is_sane(0.645, 1.65, 0.064, market_prob=0.60,
+        ok_prob2, reason2 = is_sane(0.645, LIVE_PRICE, 0.064, market_prob=0.60,
                                     league="Serie B")
         assert ok_prob2 is True, reason2
 
@@ -364,7 +385,7 @@ class TestStrategiaPerLega:
         strat = get_league_strategy("Premier League")
         assert strat["max_stake"] == 0.020
         assert strat["kelly_mult"] == 1.2
-        assert strat["min_edge"] == 0.010   # dimezzato il 14/10/2026 (era 0.020)
+        assert strat["min_edge"] == 0.020   # riportato a +2pp il 26/10/2026
 
     def test_unknown_league_strategy_severo(self):
         """Le leghe non in lista usano fallback severo (min_edge piu' basso)."""
@@ -372,7 +393,7 @@ class TestStrategiaPerLega:
         strat = get_league_strategy("Serie A")
         assert strat["max_stake"] == 0.005  # fallback severo
         assert strat["kelly_mult"] == 0.5
-        assert strat["min_edge"] == 0.01     # allineato alla soglia +1pp (14/10)
+        assert strat["min_edge"] == 0.02     # allineato alla soglia +2pp (26/10)
 
     def test_is_sane_league_filter(self):
         """Un segnale in Serie A viene rifiutato (ROI negativo)."""
@@ -385,7 +406,7 @@ class TestStrategiaPerLega:
     def test_is_sane_league_winning(self):
         """Un segnale in Premier League passa i filtri."""
         from value_filter import is_sane
-        ok, reason = is_sane(0.60, 1.65, 0.026, market_prob=0.57,
+        ok, reason = is_sane(0.60, LIVE_PRICE, 0.026, market_prob=0.57,
                               league="Premier League")
         assert ok, f"Expected ok, got: {reason}"
 
@@ -486,29 +507,28 @@ class TestSogliaEvPerTier:
             for mk in ("", "1X2", "AH", "OU", "TOTALS", "ML", "TENNIS"):
                 assert vf.ev_min(lg, mk) <= vf.ev_min_for_market(mk) + 1e-12, (lg, mk)
 
-    def test_gate_core_1x2_all_1_percento(self):
+    def test_gate_core_1x2_soglia_del_tier(self):
         import value_filter as vf
-        # EV +1.2%: sotto EV_MIN (1.5%), sopra EV_MIN_CORE (1.0%) -> PASSA
-        # (con la precedenza `max` veniva respinto: e' l'allargamento voluto)
-        ok, why = vf.is_sane(0.72, 1.55, 0.012, market_prob=0.65,
+        # EV +1.6%: sopra EV_MIN_CORE (1,5% dal 26/10) -> PASSA
+        ok, why = vf.is_sane(0.72, LIVE_PRICE, 0.016, market_prob=0.65,
                              league="Premier League", market="1X2",
                              favourites_only=False, market_edge_min=0.0)
         assert ok, why
-        # EV +0.8%: sotto EV_MIN_CORE -> respinto
-        no, why2 = vf.is_sane(0.71, 1.55, 0.008, market_prob=0.65,
+        # EV +1.2%: sotto EV_MIN_CORE (era sopra quando la soglia era 1,0%)
+        no, why2 = vf.is_sane(0.72, LIVE_PRICE, 0.012, market_prob=0.65,
                               league="Premier League", market="1X2",
                               favourites_only=False, market_edge_min=0.0)
         assert not no and "EV troppo basso" in why2, why2
 
     def test_gate_core_su_mercato_liquido_usa_la_soglia_del_mercato(self):
         import value_filter as vf
-        # AH core: la soglia e' EV_MIN_LIQUID (0.5%) -> +0.8% passa
-        ok, why = vf.is_sane(0.71, 1.55, 0.008, market_prob=0.65,
+        # AH core: la soglia e' EV_MIN_LIQUID (1,0% dal 26/10) -> +1,2% passa
+        ok, why = vf.is_sane(0.71, 1.55, 0.012, market_prob=0.65,
                              league="Premier League", market="AH",
                              favourites_only=False, market_edge_min=0.0)
         assert ok, why
-        # +0.3%: sotto la soglia del mercato liquido -> respinto
-        no, why2 = vf.is_sane(0.71, 1.55, 0.003, market_prob=0.65,
+        # +0.8%: sotto la soglia del mercato liquido -> respinto
+        no, why2 = vf.is_sane(0.71, 1.55, 0.008, market_prob=0.65,
                               league="Premier League", market="AH",
                               favourites_only=False, market_edge_min=0.0)
         assert not no and "EV troppo basso" in why2, why2
@@ -525,7 +545,7 @@ class TestSogliaEvPerTier:
         assert ok, why
         # ...ma il 1X2 di una lega non core resta alla soglia protettiva
         # (`EV_MIN`, 1.5%): +1.2% NON basta piu' li'.
-        no, why2 = vf.is_sane(0.71, 1.55, 0.012, market_prob=0.65,
+        no, why2 = vf.is_sane(0.71, LIVE_PRICE, 0.012, market_prob=0.65,
                               league="MLS", market="1X2",
                               favourites_only=False, market_edge_min=0.0)
         assert not no and "EV troppo basso" in why2, why2
@@ -553,7 +573,110 @@ class TestSogliaEvPerTier:
             importlib.reload(vf)
 
     def test_iac_dichiara_le_env(self):
+        """Ogni env LETTA dal modulo dev'essere in `preserve()`.
+
+        `EV_MAX` e' letta dall'ambiente dal 26/10/2026: senza la dichiarazione
+        un `config apply` la distruggerebbe e il tetto anti-overconfidence
+        tornerebbe al valore di codice **in silenzio**.
+        """
         from pathlib import Path
         src = Path(".railway/railway.ts").read_text(encoding="utf-8")
-        for env in ("EV_MIN_CORE", "EV_MIN_OTHER"):
+        for env in ("EV_MIN_CORE", "EV_MIN_OTHER", "EV_MIN_LIQUID",
+                    "EV_MAX"):
             assert f"{env}: preserve()" in src, env
+
+
+# ---------------------------------------------------------------------------
+# Fascia morta 1.50-1.80 (25/10/2026)
+# ---------------------------------------------------------------------------
+class TestFasciaMorta:
+    """L'unica banda che ha perso in OGNI misura indipendente.
+
+    Misura che l'ha motivata (ledger live, 99 chiuse, `live_decomp.py`):
+    1.20-1.50 **+16,6%** (n=17) · 1.50-1.80 **-16,4%** (n=31) · 1.80-2.00
+    -1,1% (n=24). La popolazione ammessa dalla strategia (<= 2.00, morta
+    inclusa) era n=72 con -2,57%: togliendo la sola morta diventa n=41 con
+    +7,53%.
+
+    ⚠️ Il caveat e' nei test, non solo nel commento del codice: la banda da
+    sola NON e' statisticamente conclusiva (z ~ -0,96 su 31 bet). Questi
+    test difendono la REGOLA (e la sua reversibilita'), non un risultato.
+    """
+
+    def test_valori_dichiarati(self):
+        import value_filter as vf
+        # Uguaglianza ESATTA: spostare la banda e' una decisione tracciata in
+        # AGENTS.md, non un ritocco silenzioso.
+        assert vf.ODDS_EXCLUDE_MIN == 1.50
+        assert vf.ODDS_EXCLUDE_MAX == 1.80
+
+    @pytest.mark.parametrize("price,expected", [
+        (1.50, True), (1.65, True), (1.80, True),
+        (1.49, False), (1.81, False), (1.30, False), (2.00, False),
+        (None, False), ("abc", False), ({}, False),
+    ])
+    def test_in_dead_band(self, price, expected):
+        import value_filter as vf
+        assert vf.in_dead_band(price) is expected
+
+    def test_stringa_numerica_riconosciuta(self):
+        """Una quota che arriva come stringa e' comunque una quota."""
+        import value_filter as vf
+        assert vf.in_dead_band("1.65") is True
+        assert vf.in_dead_band(" 1.65 ") is True
+
+    def test_odds_in_band_esclude_la_morta(self):
+        import value_filter as vf
+        assert vf.odds_in_band(1.45) is True
+        assert vf.odds_in_band(1.65) is False     # morta
+        assert vf.odds_in_band(1.90) is True
+        # ...e gli estremi del progetto restano inclusivi.
+        assert vf.odds_in_band(vf.ODDS_MIN) is True
+        assert vf.odds_in_band(vf.ODDS_MAX) is True
+
+    def test_confini_espliciti_non_ereditano_la_morta(self):
+        """Chi chiede "sta fra 1.6 e 1.7?" fa una domanda su QUEI numeri.
+
+        La banda morta e' misurata su una popolazione precisa: applicarla a un
+        intervallo arbitrario cambierebbe la risposta a una domanda diversa.
+        """
+        import value_filter as vf
+        assert vf.odds_in_band(1.65, odds_min=1.60, odds_max=1.70) is True
+
+    def test_is_sane_boccia_la_morta(self):
+        import value_filter as vf
+        # Tutti gli altri gate passano (EV +2%, edge +5pp, evita il cap).
+        ok, reason = vf.is_sane(0.60, 1.65, 0.02, market_prob=0.55)
+        assert not ok and "fascia morta" in reason
+
+    def test_controffensiva_ai_bordi(self):
+        """1.49 e 1.81 passano: e' una BANDA, non un taglio del volume.
+
+        EV +3% (> EV_MIN 2,5%, < EV_MAX 10%) e edge +5pp: il gate dell'EV non
+        c'entra, si misura SOLO il confine della banda.
+        """
+        import value_filter as vf
+        for price in (1.49, 1.81):
+            ok, reason = vf.is_sane(0.60, price, 0.03, market_prob=0.55)
+            assert ok, (price, reason)
+
+    @pytest.mark.parametrize("market", ["AH", "OU", "TOTALS", "BTTS"])
+    def test_mercati_liquidi_non_esclusi(self, market):
+        """OU/AH non hanno una misura equivalente: non si stringono per analogia."""
+        import value_filter as vf
+        assert vf.is_liquid_market(market) is True
+        ok, reason = vf.is_sane(0.60, 1.65, 0.02, market_prob=0.55,
+                               market=market)
+        assert ok, (market, reason)
+
+    def test_la_morta_e_negativa_in_entrambe_le_corsie(self):
+        """Il criterio che l'ha resa escludibile: non e' un caso di UNA corsia.
+
+        Se un giorno il tennis tornasse positivo nella morta, la decisione va
+        rimessa in discussione — questo test non la blocca, la ricorda.
+        """
+        import value_filter as vf
+        # La quota 1.65 e' esclusa sia con la lega del calcio sia su TENNIS
+        # (il mercato TENNIS e' di strategia, non liquido): un solo confine.
+        assert vf.in_dead_band(1.65) is True
+        assert vf.is_liquid_market("TENNIS") is False

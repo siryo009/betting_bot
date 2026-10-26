@@ -45,7 +45,7 @@ def _match(db: Path, mid: str, league: str = "Premier League", hours_ago: float 
 
 
 def _prediction(db: Path, mid: str, *, status: str, esito: str = "1",
-                mercato: str = "1X2", quota: float = 1.65, prob: float = 0.62,
+                mercato: str = "1X2", quota: float = 1.85, prob: float = 0.62,
                 ev: float = 0.05, market_prob: float = 0.60,
                 league: str = "Premier League", hours_ago: float = 1.0,
                 closed: bool = False):
@@ -117,7 +117,10 @@ class TestFinestra:
 
 class TestAttribuzione:
     def _row(self, **kw):
-        base = {"mercato": "1X2", "prob": 0.62, "quota": 1.65, "ev": 0.05,
+        # Quota FUORI dalla fascia morta 1.50-1.80 (25/10/2026): con 1.65 il
+        # gate risponderebbe "fascia morta" a ogni riga e l'attribuzione
+        # misurerebbe la banda invece del motivo seminato.
+        base = {"mercato": "1X2", "prob": 0.62, "quota": 1.85, "ev": 0.05,
                 "market_prob": 0.60, "league": "Premier League"}
         base.update(kw)
         return base
@@ -154,6 +157,18 @@ class TestAttribuzione:
     def test_non_favorito(self):
         code, _ = fm.attribute_reject(self._row(market_prob=0.45))
         assert code == "not_favourite"
+
+    def test_fascia_morta(self):
+        """La banda 1.50-1.80 ha un codice PROPRIO, non "altro".
+
+        Senza la voce in `REASON_CODES` il gate nuovo finiva in "altro" e il
+        suo peso nella diagnosi del flusso sarebbe stato invisibile proprio
+        quando serve (lezione del 24/09: un motivo non attribuito e' un
+        collo di bottiglia che non si vede).
+        """
+        code, reason = fm.attribute_reject(
+            self._row(quota=(vf.ODDS_EXCLUDE_MIN + vf.ODDS_EXCLUDE_MAX) / 2))
+        assert code == "odds_dead_band" and "fascia morta" in reason
 
     def test_gate_odierno_approva_ma_la_riga_e_scartata(self):
         """Un rifiuto arrivato fuori da `is_sane` (favourite gate, libro, feed)

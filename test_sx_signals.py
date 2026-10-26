@@ -10,9 +10,19 @@ import pytest
 
 import sx_signals
 import tracker
+import value_filter
 from execution_engine import SX_PROB_SCALE
 
 SX = "sx-LTEST1"
+
+# Probabilita' del modello DERIVATA dalla fascia EV giocabile. `is_sane` ha un
+# pavimento (`EV_MIN`) E un tetto (`EV_MAX`, 10%): un valore FISSO (0.62, usato
+# fino al 24/10) con quota 1.85 da' EV +14,7%, cioe' SOPRA il tetto -> ogni test
+# che pretende un segnale salvato misurava il gate EV invece del proprio.
+_EV_TARGET = (value_filter.EV_MIN + value_filter.EV_MAX) / 2
+_MODEL_PROB = round((1 + _EV_TARGET) / 1.85, 4)
+_MODEL_PROBS = (_MODEL_PROB, round(1 - _MODEL_PROB - 0.15, 4), 0.15)
+_PLAYABLE = ("value", "strong_value")
 
 
 def _pct(price: float) -> int:
@@ -45,15 +55,22 @@ def _raw_markets(league: str = "Italy Serie A") -> list:
 
 
 def _book_for(market_hash: str) -> dict:
-    """Order book taker canned: quote 1X2 [1.70, 3.90, 5.80] (inv_sum ~1.02).
+    """Order book taker canned: quote 1X2 [1.85, 3.75, 4.95] (inv_sum ~1.01).
 
-    Dal 11/09 la strategia ammette SOLO favoriti netti (quota <= 1.80): il
+    Dal 11/09 la strategia ammette SOLO favoriti netti (quota <= 2.00): il
     book deve avere un favorito giocabile, altrimenti scan() giustamente
     non produce segnali. Dal 11/09 sera la leg giocata pretende anche
-    `SX_MIN_EXEC_DEPTH_USDC` (25 USDC al floor): la fixture usa 40 USDC per
+    `SX_MIN_EXEC_DEPTH_USDC` (20 USDC al floor): la fixture usa 40 USDC per
     lato, cosi' il filtro di liquidita' non e' cio' che il test verifica.
+
+    ⚠️ Il favorito sta a **1.85**, fuori dalla FASCIA MORTA 1.50-1.80
+    esclusa dal 25/10/2026: con 1.70 (la quota usata fino a ieri) `is_sane`
+    risponderebbe "quota nella fascia morta" e ogni test che pretende un
+    segnale SALVATO misurerebbe quel gate invece del proprio. Il modello di
+    questi test (`prob_1x2` derivato) tiene l'EV a meta' strada fra `EV_MIN` e
+    `EV_MAX`, cioe' dentro la fascia giocabile e lontano da entrambi i bordi.
     """
-    prices = {"mkt1": 1.70, "mkt2": 3.90, "mkt3": 5.80}
+    prices = {"mkt1": 1.85, "mkt2": 3.75, "mkt3": 4.95}
     p = prices[market_hash]
     # outcomeOne = lato esito (back a quota p); outcomeTwo = complementare.
     return {"data": {
@@ -121,7 +138,7 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
     monkeypatch.setattr(sx_signals, "expected_goals",
                         lambda h, a: (1.9, 0.8))
     monkeypatch.setattr(sx_signals, "prob_1x2",
-                        lambda lh, la: (0.66, 0.20, 0.14))
+                        lambda lh, la: _MODEL_PROBS)
     # Blend deterministico: prob finale = prob modello (il devig SX resta
     # quello reale, usato per market_prob/market_edge).
     monkeypatch.setattr(sx_signals, "adjusted_probability",
@@ -135,7 +152,7 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
     assert len(saved) == 1
     sig = saved[0]
     assert sig["match_id"] == SX
-    assert sig["esito"] == "1" and sig["status"] == "strong_value"
+    assert sig["esito"] == "1" and sig["status"] in _PLAYABLE
 
     # Ledger: matches + match_analysis + UNICA prediction (il favorito).
     conn = tracker._get_conn()
@@ -150,7 +167,7 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
     assert mrow == ("Alpha", "Beta", "Premier League")
     # Strategia solo favoriti (11/09): X e 2 non entrano nemmeno nel ledger.
     assert [p[0] for p in preds] == ["1"]
-    assert dict(preds)["1"] == "strong_value"
+    assert dict(preds)["1"] in _PLAYABLE
     assert na == 1
 
     # Visibilita' auto-bet: il segnale SX entra nei candidati del giorno.
@@ -158,7 +175,7 @@ def test_scan_saves_value_signals(temp_db, monkeypatch):
     picks = [p for p in _today_value_picks() if p["match_id"] == SX]
     assert len(picks) == 1
     assert picks[0]["esito_key"] == "1"
-    assert picks[0]["quota"] == pytest.approx(1.70, abs=0.01)
+    assert picks[0]["quota"] == pytest.approx(1.85, abs=0.01)
 
 
 def test_scan_skips_incoherent_books(temp_db, monkeypatch):

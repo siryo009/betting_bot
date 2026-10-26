@@ -479,17 +479,20 @@ class TestNormalizzazioneEvDelK:
     """
 
     def test_soglia_reale_non_schiaccia_il_k_al_minimo(self):
-        # Riferimento generico (nessuna lega/mercato) = EV_MIN (1.5%) -> l'EV
-        # 0.8% non vale nulla; con lega core e mercato liquido il riferimento
-        # scende a EV_MIN_LIQUID (0.5%) -> la componente si accende. I valori
-        # assoluti seguono la direttiva del 14/10; cio' che il test difende e'
-        # che il riferimento sia la soglia REALE, non una costante generica.
-        ev = 0.008
+        # Riferimento generico (nessuna lega/mercato) = EV_MIN (2,5% dal 26/10)
+        # -> l'EV scelto non vale nulla; con lega core e mercato liquido il
+        # riferimento scende a EV_MIN_LIQUID (1,0%) -> la componente si
+        # accende. I valori assoluti seguono le soglie correnti (DERIVATE:
+        # un 0.008 scritto a mano e' scaduto in silenzio al ritocco del 26/10,
+        # quando la soglia liquida e' passata 0,5% -> 1,0%); cio' che il test
+        # difende e' che il riferimento sia la soglia REALE, non una generica.
+        ev = (vf.ev_min("Premier League", "1X2")
+              + vf.ev_min("Premier League", "AH")) / 2.0
         senza = se.dynamic_kelly_fraction(ev=ev)
         con = se.dynamic_kelly_fraction(ev=ev, league="Premier League",
                                         market="AH")
         assert senza["components"]["ev"] == 0.0      # riferimento EV_MIN
-        assert con["components"]["ev"] > 0.0         # riferimento 0.5%
+        assert con["components"]["ev"] > 0.0         # riferimento liquido
         assert con["kelly_fraction"] > senza["kelly_fraction"]
         assert con["kelly_fraction"] <= 0.25        # la banda non si allarga
 
@@ -508,8 +511,12 @@ class TestNormalizzazioneEvDelK:
         senza `market` l'1% finirebbe al minimo di banda (riferimento 1.5%),
         con `market` no — e' la propagazione che il chiamante deve fare.
         """
-        senza = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=0.010, league="MLS")
-        con = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=0.010,
+        # EV a meta' strada fra la soglia liquida e il generico (DERIVATO: con
+        # le soglie del 26/10 il vecchio 1,0% coincide con la soglia liquida e
+        # il test non distingueva piu' i due riferimenti).
+        ev = (vf.ev_min("MLS", "OU") + vf.ev_min("MLS", "1X2")) / 2.0
+        senza = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=ev, league="MLS")
+        con = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=ev,
                                       league="MLS", market="OU")
         assert senza["kelly_fraction"] == 0.15       # soglia 2.5% -> minimo
         assert con["kelly_fraction"] > senza["kelly_fraction"]

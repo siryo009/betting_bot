@@ -327,7 +327,13 @@ class TestSharpReference:
 # 7. Ciclo di misura (nessun ordine)
 # ---------------------------------------------------------------------------
 
-def _event(price_a=1.60, price_b=2.40):
+def _event(price_a=1.90, price_b=2.10):
+    # Prezzi FUORI dalla fascia morta 1.50-1.80 (25/10/2026): `candidate` in
+    # `tennis_quant` chiede `tennis_lane.in_odds_band`, che ora esclude la
+    # banda misurata in perdita. Con 1.60 il test misurava la banda invece del
+    # gate "entrambi i modelli confermano" (il vecchio 1.60/2.40 rendeva
+    # `both_confirm=1` ma `candidate=0`). EV del lato 1 a 1.90 con p 0.70 =
+    # +33%, ben sopra la soglia della corsia.
     return {"market_id": "m1", "event_id": "e1", "league_label": "ATP Beijing",
             "team_one": "A", "team_two": "B",
             "sides": [{"key": "1", "team": "A", "price": price_a, "depth": 100.0},

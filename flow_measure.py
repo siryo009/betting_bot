@@ -131,6 +131,10 @@ REASON_CODES: Tuple[Tuple[str, str], ...] = (
     ("lega ", "league_blocked"),
     ("quota troppo bassa", "odds_min"),
     ("quota troppo alta", "odds_max"),
+    # Fascia morta 1.50-1.80 (25/10/2026): senza questa voce un gate nuovo
+    # finirebbe in "altro" e il suo peso nella diagnosi del flusso sarebbe
+    # invisibile proprio quando serve (la lezione del 24/09).
+    ("fascia morta", "odds_dead_band"),
     ("non e' il favorito", "not_favourite"),
     ("ANOMALIA", "ev_anomaly"),
     ("EV troppo basso", "ev_low"),

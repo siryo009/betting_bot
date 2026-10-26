@@ -231,10 +231,22 @@ def _num_env(name: str, default: float) -> float:
 
 
 def enabled() -> bool:
-    """Interruttore della corsia (`GRIDIRON_LANE=0` per spegnerla)."""
+    """Interruttore della corsia (`GRIDIRON_LANE=1` per riaccenderla).
+
+    ⚠️ **SPENTA DI DEFAULT dal 26/10/2026** (era accesa): la corsia e' stata
+    costruita per un torneo SX (Gridiron Gauntlet) chiuso il 20/10 e la sua
+    misura e' la peggiore del progetto — **-59,8% di ROI su 7 bet** (-7,57 USDC,
+    il 49% della perdita totale delle 99 chiuse), CLV **-0,79% con 0/6 campioni
+    positivi**. Non e' un edge non ancora maturo: e' una corsia senza alcuna
+    misura a favore, tenuta viva da una promozione finita.
+
+    La direzione del default e' quella prudente: se l'env sparisce da Railway
+    (redeploy, `config apply`, dimenticanza) la corsia resta **spenta**. Per
+    riaccenderla serve un valore esplicito, e prima va rimisurata.
+    """
     raw = os.getenv("GRIDIRON_LANE")
-    if raw is None or raw == "":
-        return True
+    if raw is None or str(raw).strip() == "":
+        return False
     return str(raw).strip().lower() not in ("0", "false", "no", "off")
 
 

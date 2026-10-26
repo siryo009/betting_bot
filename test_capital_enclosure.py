@@ -512,8 +512,14 @@ def _chief_candidates(monkeypatch, *, stake: float = 3.70, price: float = 1.65,
     return auto_bet._chief_live_candidates(bankroll=100.0)
 
 
-def _seed_one(monkeypatch, quota=1.65, strong=False):
-    """Un segnale value/aprovato come in test_auto_bet (lega AMMESSA)."""
+def _seed_one(monkeypatch, quota=1.85, strong=False):
+    """Un segnale value/aprovato come in test_auto_bet (lega AMMESSA).
+
+    Quota 1.85 e NON 1.65: la FASCIA MORTA 1.50-1.80 e' esclusa dal 25/10/2026
+    (`value_filter.in_dead_band`), quindi un seed a 1.65 verrebbe scartato dal
+    gate della banda e ogni test qui misurerebbe quel gate invece del recinto
+    che vuole verificare (le stesse soglie di `test_auto_bet`).
+    """
     from test_auto_bet import _seed_value_match
     _seed_value_match(mid="m1", home="Osasuna", away="Getafe", esito="1",
                       quota=quota,

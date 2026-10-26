@@ -158,7 +158,11 @@ class TestCablaggioNelGiroOrdini:
     def test_chiamata_prima_del_dedup_e_del_gate(self):
         src = self._src()
         call = src.index("prematch_guillotine(board)")
-        assert call < src.index("_seen_pick: set[tuple] = set()"), \
+        # Il marcatore del dedup cross-corsia e' `dedup_lanes(board)`: il 12/10
+        # il blocco `_seen_pick` e' stato ESTRATTO in quella funzione pura (per
+        # poterla testare sui board reali) e il test cercava ancora la vecchia
+        # stringa, cioe' un nome che nel sorgente non esisteva piu'.
+        assert call < src.index("board = dedup_lanes(board)"), \
             "il dedup cross-corsia verrebbe alimentato coi fantasmi"
         # la DEFINIZIONE della funzione sta prima nel file: si cerca la
         # chiamata dentro `run_today_bets`, cioe' DOPO la ghigliottina

@@ -182,7 +182,7 @@ class TestSettlementLeghe:
                 raise AssertionError(path)
 
         monkeypatch.setattr(sx_signals, "expected_goals", lambda h, a: (1.9, 0.8))
-        monkeypatch.setattr(sx_signals, "prob_1x2", lambda lh, la: (0.66, 0.20, 0.14))
+        monkeypatch.setattr(sx_signals, "prob_1x2", lambda lh, la: (0.62, 0.23, 0.15))
         monkeypatch.setattr(sx_signals, "adjusted_probability",
                             lambda mp, mkt, price, league=None: mp)
         sx_signals.scan(provider=_Prov())

@@ -229,6 +229,18 @@ def read_cycles(days: Optional[float] = None, *,
     Rotation-aware (`telemetry_logs.read_lines` legge vivo + `.gz`, lezione del
     03/10) e fail-safe. `records` e' in ordine cronologico (il piu' recente per
     ultimo): e' quello che serve a "stato attuale" + "aggregati".
+
+    ⚠️ L'ORDINE VA COSTRUITO, non assunto (25/10/2026).
+    `telemetry_logs.read_lines` restituisce il file VIVO **per primo** e poi le
+    generazioni `.gz` in ordine di nome (dalla piu' vecchia alla piu' recente):
+    la concatenazione NON e' cronologica, e con una rotazione presente
+    `[-max_lines:]` tagliava la coda **del file concatenato** — cioe' la fine
+    della generazione piu' recente, non i cicli appena scritti. Sintomo
+    misurato in produzione: la dashboard mostrava come "ultimo ciclo" quello
+    del 25/10 03:30 (il confine dell'ultima rotazione) mentre il registro
+    veniva scritto ogni minuto.
+    Ora i record vengono ORDINATI sul timestamp e il limite si applica alla
+    coda CRONOLOGICA (i piu' recenti), qualunque sia l'ordine dei file.
     """
     log_path = path or cycle_log_path()
     window = float(days if days is not None else window_days())
@@ -237,14 +249,14 @@ def read_cycles(days: Optional[float] = None, *,
                            "path": str(log_path), "error": ""}
     try:
         from telemetry_logs import read_lines
-        lines = read_lines(log_path)[-int(max_lines):]
+        lines = read_lines(log_path)
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
         logger.warning("agent_board: registro cicli non leggibile (%s): %s",
                        log_path, exc)
         return out
     out["total"] = len(lines)
-    records = []
+    parsed: list[tuple[Optional[datetime], dict]] = []
     for line in lines:
         try:
             rec = json.loads(line)
@@ -257,7 +269,14 @@ def read_cycles(days: Optional[float] = None, *,
             continue
         if ts is not None:
             rec["_ts"] = ts.isoformat()
-        records.append(rec)
+        parsed.append((ts, rec))
+    # Cronologico: i record senza timestamp leggibile in TESTA (non si sa
+    # dove stiano), poi il piu' vecchio -> il piu' recente.
+    _floor = datetime.min.replace(tzinfo=timezone.utc)
+    parsed.sort(key=lambda p: (p[0] is None, p[0] or _floor))
+    records = [rec for _ts, rec in parsed]
+    if max_lines and len(records) > int(max_lines):
+        records = records[-int(max_lines):]   # coda CRONOLOGICA, non del file
     out["records"] = records
     return out
 

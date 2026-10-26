@@ -17,6 +17,7 @@ Cosa difendono questi test (il perche' di ognuno):
 
 from __future__ import annotations
 
+import gzip
 import json
 import subprocess
 import sys
@@ -140,6 +141,56 @@ class TestLetturaRegistro:
         assert agent_board.window_days() == agent_board.DEFAULT_DAYS
         monkeypatch.setenv("AGENT_BOARD_DAYS", "abc")
         assert agent_board.window_days() == agent_board.DEFAULT_DAYS
+
+
+class TestRegistroRotato:
+    """Il registro si ROTA: l'ordine cronologico va COSTRUITO, non assunto.
+
+    Difetto misurato in produzione il 25/10/2026: `telemetry_logs.read_lines`
+    mette il file vivo per primo e le generazioni `.gz` dopo, quindi la coda
+    del concatenato e' la fine di una generazione VECCHIA. Il taglio
+    `[-max_lines:]` scartava cosi' i cicli appena scritti e la dashboard
+    mostrava come "ultimo ciclo" quello del confine dell'ultima rotazione
+    (25/10 03:30) mentre il registro veniva scritto ogni minuto.
+    """
+
+    @staticmethod
+    def _gen(path: Path, records) -> Path:
+        """Scrive una generazione `.gz` (nome con timbro, come la rotazione)."""
+        target = path.parent / f"{path.name}.20261025033000.gz"
+        with gzip.open(target, "wt", encoding="utf-8") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec) + "\n")
+        return target
+
+    def test_ultimo_ciclo_e_il_piu_recente_non_la_coda_della_generazione(
+            self, log):
+        # Generazione VECCHIA (2 ore fa) ruotata + file vivo (adesso).
+        self._gen(log, [_record(_ago(180), blocked="old"),
+                        _record(_ago(150), blocked="old2")])
+        _write(log, [_record(_ago(2), blocked="nuovo"),
+                     _record(_ago(1), blocked="ultimo")])
+        out = agent_board.read_cycles(7, path=log)
+        assert [r["blocked_reason"] for r in out["records"]] == [
+            "old", "old2", "nuovo", "ultimo"]
+        assert out["records"][-1]["blocked_reason"] == "ultimo"
+
+    def test_il_limite_taglia_i_piu_vecchi(self, log):
+        self._gen(log, [_record(_ago(180)), _record(_ago(150))])
+        _write(log, [_record(_ago(2)), _record(_ago(1))])
+        out = agent_board.read_cycles(7, path=log, max_lines=2)
+        assert len(out["records"]) == 2
+        # La coda CRONOLOGICA: i due piu' recenti, non la coda del file.
+        assert out["records"][-1]["ts"] > out["records"][0]["ts"]
+        assert out["records"][-1]["ts"] >= _ago(3)[:19]
+
+    def test_le_generazioni_vecchie_restano_nella_finestra(self, log):
+        """Una rotazione non deve far SPARIRE i cicli che stanno nella finestra."""
+        self._gen(log, [_record(_ago(60), blocked="gen")])
+        _write(log, [_record(_ago(1), blocked="vivo")])
+        out = agent_board.read_cycles(7, path=log)
+        assert len(out["records"]) == 2
+        assert {r["blocked_reason"] for r in out["records"]} == {"gen", "vivo"}
 
 
 # ---------------------------------------------------------------------------
