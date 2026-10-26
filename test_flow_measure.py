@@ -158,17 +158,30 @@ class TestAttribuzione:
         code, _ = fm.attribute_reject(self._row(market_prob=0.45))
         assert code == "not_favourite"
 
-    def test_fascia_morta(self):
+    def test_fascia_morta(self, monkeypatch):
         """La banda 1.50-1.80 ha un codice PROPRIO, non "altro".
 
-        Senza la voce in `REASON_CODES` il gate nuovo finiva in "altro" e il
-        suo peso nella diagnosi del flusso sarebbe stato invisibile proprio
-        quando serve (lezione del 24/09: un motivo non attribuito e' un
-        collo di bottiglia che non si vede).
+        Senza la voce in `REASON_CODES` un rifiuto per quella banda finiva in
+        "altro" e il suo peso nella diagnosi del flusso sarebbe stato
+        invisibile proprio quando serve (lezione del 24/09: un motivo non
+        attribuito e' un collo di bottiglia che non si vede).
+
+        Dal 26/10/2026 la banda e' SPENTA di default, quindi la si riaccende
+        qui: il codice di attribuzione deve restare corretto anche per chi la
+        configura.
         """
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
         code, reason = fm.attribute_reject(
             self._row(quota=(vf.ODDS_EXCLUDE_MIN + vf.ODDS_EXCLUDE_MAX) / 2))
         assert code == "odds_dead_band" and "fascia morta" in reason
+
+    def test_fascia_morta_spenta_non_attribuisce_nulla(self):
+        """Con la banda spenta la stessa quota passa i gate: nessun motivo
+        inventato in `odds_dead_band` (che resterebbe a 0, com'e' giusto)."""
+        assert vf.dead_band_active() is False
+        code, _ = fm.attribute_reject(self._row(quota=1.65))
+        assert code != "odds_dead_band"
 
     def test_gate_odierno_approva_ma_la_riga_e_scartata(self):
         """Un rifiuto arrivato fuori da `is_sane` (favourite gate, libro, feed)

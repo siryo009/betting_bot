@@ -15,11 +15,12 @@ import pytest
 
 from value_filter import compute_ev, filter_value_bets
 
-#: Quota FUORI dalla fascia morta 1.50-1.80 (`value_filter.in_dead_band`,
-#: 25/10/2026). I test che misurano EV / edge / tier usano QUESTA: con una
-#: quota nella morta leggerebbero il gate della fascia (che risponde "quota
-#: nella fascia morta") invece della soglia che vogliono verificare. La
-#: `ev` e' un argomento esplicito di `is_sane`, quindi il valore di EV non
+#: Quota FUORI dalle bande escluse configurabili (`value_filter.in_dead_band`,
+#: spenta di default dal 26/10/2026). I test che misurano EV / edge / tier
+#: usano QUESTA: se un giorno la banda 1.50-1.80 venisse riaccesa da env, con
+#: una quota nella banda leggerebbero il gate della fascia (che risponde
+#: "quota nella fascia morta") invece della soglia che vogliono verificare.
+#: La `ev` e' un argomento esplicito di `is_sane`, quindi il valore di EV non
 #: cambia: cambia solo quale gate risponde per primo.
 LIVE_PRICE = 1.90
 
@@ -154,7 +155,10 @@ class TestStrategiaSoloFavoriti:
         assert MARKET_EDGE_MIN == 0.02     # edge minimo +2pp (era 1pp)
         assert vf.EV_MIN == 0.025          # EV minimo +2,5% (era 1,5%)
         assert vf.EV_MAX == 0.10           # tetto anti-overconfidence (era 20%)
-        assert vf.in_dead_band(1.65) is True   # fascia morta 1.50-1.80
+        # Fascia morta 1.50-1.80: meccanismo conservato, SPENTA di default
+        # (26/10/2026 — il CLV +2,59% su 199 campioni non confermava il taglio).
+        assert vf.dead_band_active() is False
+        assert vf.in_dead_band(1.65) is False
         assert vf.FAVOURITES_ONLY is True
         assert vf.MIN_FAVOURITE_MARKET_PROB == 0.50
         # Test funzioni nuove
@@ -590,93 +594,130 @@ class TestSogliaEvPerTier:
 # Fascia morta 1.50-1.80 (25/10/2026)
 # ---------------------------------------------------------------------------
 class TestFasciaMorta:
-    """L'unica banda che ha perso in OGNI misura indipendente.
+    """La banda 1.50-1.80: meccanismo conservato, applicazione SPENTA.
 
-    Misura che l'ha motivata (ledger live, 99 chiuse, `live_decomp.py`):
-    1.20-1.50 **+16,6%** (n=17) · 1.50-1.80 **-16,4%** (n=31) · 1.80-2.00
-    -1,1% (n=24). La popolazione ammessa dalla strategia (<= 2.00, morta
-    inclusa) era n=72 con -2,57%: togliendo la sola morta diventa n=41 con
-    +7,53%.
+    Ciclo completo, perche' e' quello che conta:
+      25/10 — esclusa sulla misura del P/L: 1.20-1.50 +16,6% (n=17) ·
+              1.50-1.80 **-16,4%** (n=31) · 1.80-2.00 -1,1% (n=24), con il
+              caveat dichiarato nel codice (z ~ -0,96, intervallo che include
+              lo zero).
+      26/10 — **rimisura del CLV** (473 campioni con closing sharp): la banda
+              da' **+2,59%** (n=199, 88% positivi), identico a 1.20-1.50
+              (+2,23%) e 1.80-2.00 (+2,58%), e il P/L sulla QUOTA-SEGNALE
+              scende a -5,55% (n=29). Il taglio toglieva una popolazione con
+              edge: meccanismo conservato, **default OFF**.
 
-    ⚠️ Il caveat e' nei test, non solo nel commento del codice: la banda da
-    sola NON e' statisticamente conclusiva (z ~ -0,96 su 31 bet). Questi
-    test difendono la REGOLA (e la sua reversibilita'), non un risultato.
+    Questi test difendono le due cose che possono rompersi in silenzio: che la
+    banda sia spenta quando nessuno la configura, e che riaccenderla da env
+    torni a escludere esattamente 1.50-1.80 (niente di piu', niente di meno).
     """
 
-    def test_valori_dichiarati(self):
+    def test_default_spento(self):
+        """Su un processo pulito la banda non esiste (env non impostata)."""
         import value_filter as vf
-        # Uguaglianza ESATTA: spostare la banda e' una decisione tracciata in
-        # AGENTS.md, non un ritocco silenzioso.
-        assert vf.ODDS_EXCLUDE_MIN == 1.50
-        assert vf.ODDS_EXCLUDE_MAX == 1.80
+        assert vf.ODDS_EXCLUDE_MIN == 0.0
+        assert vf.ODDS_EXCLUDE_MAX == 0.0
+        assert vf.dead_band_active() is False
+
+    def test_default_spento_non_esclude_nulla(self):
+        """La fascia 1.20-2.00 torna CONTINUA, 1.65 compreso."""
+        import value_filter as vf
+        for price in (1.45, 1.50, 1.65, 1.75, 1.80, 1.90):
+            assert vf.in_dead_band(price) is False
+            assert vf.odds_in_band(price) is True, price
+        ok, reason = vf.is_sane(0.60, 1.65, 0.03, market_prob=0.55)
+        assert ok, reason
+
+    def test_riaccensione_da_env(self, monkeypatch):
+        """Con `ODDS_EXCLUDE_MIN/MAX` la banda torna a escludere 1.50-1.80."""
+        import value_filter as vf
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
+        assert vf.dead_band_active() is True
+        for price in (1.50, 1.65, 1.80):
+            assert vf.in_dead_band(price) is True, price
+            assert vf.odds_in_band(price) is False, price
+        for price in (1.49, 1.81, 1.30, 2.00):
+            assert vf.in_dead_band(price) is False, price
+            assert vf.odds_in_band(price) is True, price
 
     @pytest.mark.parametrize("price,expected", [
-        (1.50, True), (1.65, True), (1.80, True),
-        (1.49, False), (1.81, False), (1.30, False), (2.00, False),
-        (None, False), ("abc", False), ({}, False),
+        (None, False), ("abc", False), ({}, False), (1.49, False),
+        (1.81, False),
     ])
-    def test_in_dead_band(self, price, expected):
+    def test_in_dead_band_fail_safe(self, price, expected, monkeypatch):
+        """Un valore illeggibile non e' MAI "nella banda" (fail-open sul gate:
+        lo esclude gia' `odds_in_band` con la sua regola)."""
         import value_filter as vf
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
         assert vf.in_dead_band(price) is expected
 
-    def test_stringa_numerica_riconosciuta(self):
+    def test_stringa_numerica_riconosciuta(self, monkeypatch):
         """Una quota che arriva come stringa e' comunque una quota."""
         import value_filter as vf
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
         assert vf.in_dead_band("1.65") is True
         assert vf.in_dead_band(" 1.65 ") is True
 
-    def test_odds_in_band_esclude_la_morta(self):
-        import value_filter as vf
-        assert vf.odds_in_band(1.45) is True
-        assert vf.odds_in_band(1.65) is False     # morta
-        assert vf.odds_in_band(1.90) is True
-        # ...e gli estremi del progetto restano inclusivi.
-        assert vf.odds_in_band(vf.ODDS_MIN) is True
-        assert vf.odds_in_band(vf.ODDS_MAX) is True
-
-    def test_confini_espliciti_non_ereditano_la_morta(self):
+    def test_confini_espliciti_non_ereditano_la_morta(self, monkeypatch):
         """Chi chiede "sta fra 1.6 e 1.7?" fa una domanda su QUEI numeri.
 
-        La banda morta e' misurata su una popolazione precisa: applicarla a un
-        intervallo arbitrario cambierebbe la risposta a una domanda diversa.
+        La banda esclusa e' misurata su una popolazione precisa: applicarla a
+        un intervallo arbitrario cambierebbe la risposta a una domanda diversa.
         """
         import value_filter as vf
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
         assert vf.odds_in_band(1.65, odds_min=1.60, odds_max=1.70) is True
 
-    def test_is_sane_boccia_la_morta(self):
+    def test_is_sane_boccia_la_morta_solo_se_attiva(self, monkeypatch):
         import value_filter as vf
-        # Tutti gli altri gate passano (EV +2%, edge +5pp, evita il cap).
-        ok, reason = vf.is_sane(0.60, 1.65, 0.02, market_prob=0.55)
+        ok, reason = vf.is_sane(0.60, 1.65, 0.03, market_prob=0.55)
+        assert ok, reason
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
+        ok, reason = vf.is_sane(0.60, 1.65, 0.03, market_prob=0.55)
         assert not ok and "fascia morta" in reason
 
-    def test_controffensiva_ai_bordi(self):
-        """1.49 e 1.81 passano: e' una BANDA, non un taglio del volume.
-
-        EV +3% (> EV_MIN 2,5%, < EV_MAX 10%) e edge +5pp: il gate dell'EV non
-        c'entra, si misura SOLO il confine della banda.
-        """
-        import value_filter as vf
-        for price in (1.49, 1.81):
-            ok, reason = vf.is_sane(0.60, price, 0.03, market_prob=0.55)
-            assert ok, (price, reason)
-
     @pytest.mark.parametrize("market", ["AH", "OU", "TOTALS", "BTTS"])
-    def test_mercati_liquidi_non_esclusi(self, market):
+    def test_mercati_liquidi_non_esclusi(self, market, monkeypatch):
         """OU/AH non hanno una misura equivalente: non si stringono per analogia."""
         import value_filter as vf
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
         assert vf.is_liquid_market(market) is True
         ok, reason = vf.is_sane(0.60, 1.65, 0.02, market_prob=0.55,
                                market=market)
         assert ok, (market, reason)
 
-    def test_la_morta_e_negativa_in_entrambe_le_corsie(self):
-        """Il criterio che l'ha resa escludibile: non e' un caso di UNA corsia.
-
-        Se un giorno il tennis tornasse positivo nella morta, la decisione va
-        rimessa in discussione — questo test non la blocca, la ricorda.
-        """
+    def test_il_tennis_e_mercato_di_strategia(self, monkeypatch):
+        """TENNIS non e' liquido: quando la banda e' attiva vale anche per lui."""
         import value_filter as vf
-        # La quota 1.65 e' esclusa sia con la lega del calcio sia su TENNIS
-        # (il mercato TENNIS e' di strategia, non liquido): un solo confine.
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
         assert vf.in_dead_band(1.65) is True
         assert vf.is_liquid_market("TENNIS") is False
+
+    def test_banda_non_valida_e_spenta(self, monkeypatch):
+        """Estremi incoerenti (0 o invertiti) = banda NON configurata.
+
+        Un env sbagliato non deve accendere un gate di strategia: la direzione
+        e' prudente sul RISCHIO di configurazione, non sull'esclusione.
+        """
+        import value_filter as vf
+        for lo, hi in ((0.0, 1.80), (1.50, 0.0), (1.80, 1.50), (-1.0, 1.0)):
+            monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", lo)
+            monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", hi)
+            assert vf.dead_band_active() is False, (lo, hi)
+            assert vf.in_dead_band(1.65) is False, (lo, hi)
+
+    def test_env_illeggibile_ricade_sul_default_spento(self, monkeypatch):
+        """Un env non numerico non accende nulla e non solleva."""
+        import value_filter as vf
+        monkeypatch.setenv("ODDS_EXCLUDE_MIN", "abc")
+        monkeypatch.setenv("ODDS_EXCLUDE_MAX", "")
+        assert vf._env_float("ODDS_EXCLUDE_MIN", 0.0) == 0.0
+        assert vf._env_float("ODDS_EXCLUDE_MAX", 0.0) == 0.0
+        assert vf._env_float("ODDS_EXCLUDE_NON_ESISTE", 0.0) == 0.0

@@ -849,24 +849,39 @@ class TestTripwire:
 # ---------------------------------------------------------------------------
 
 class TestPrefilterFasciaMorta:
-    """Il pre-filtro SX boccia PRIMA di pagare l'oracolo — ma il motivo deve
-    dire la VERITA'.
+    """Il pre-filtro SX distingue "fuori fascia" da "banda esclusa" — ma la
+    banda e' SPENTA di default dal 26/10/2026.
 
-    Misurato il 25/10/2026: con la fascia morta 1.50-1.80 introdotta, una
-    quota 1.65 veniva scartata con il messaggio "fuori dalla fascia 1.20-2.00"
-    — che e' falso (1.65 e' dentro gli estremi) e manda l'operatore a cercare
-    un errore di fascia invece della banda misurata in perdita. Stessa classe
-    dei testi stantii del 13/09.
+    Storia: col gate attivo (25/10) una quota 1.65 veniva scartata con il
+    messaggio "fuori dalla fascia 1.20-2.00", che e' falso (1.65 e' dentro gli
+    estremi) e manda l'operatore a cercare un errore di fascia invece della
+    banda esclusa. Il motivo machine-readable distinto resta, e questi test lo
+    verificano col gate RIACCESO a mano: e' cosi' che va letto un env che un
+    giorno lo riattivasse.
     """
+
+    @staticmethod
+    def _accendi(monkeypatch):
+        import value_filter as vf
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
 
     def test_fascia_morta_ha_il_suo_motivo(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", False)
+        self._accendi(monkeypatch)
         morte = (vf.ODDS_EXCLUDE_MIN + vf.ODDS_EXCLUDE_MAX) / 2.0
         out = auto_bet._sx_prefilter({"mercato": "1X2", "quota": morte})
         assert out is not None
         assert out["code"] == "fascia_morta"
         assert out["reason"] == "sx_prefilter/fascia_morta"
         assert "fascia morta" in out["detail"]
+
+    def test_default_spento_1_65_passa(self, monkeypatch):
+        """Di default il pre-filtro non boccia 1.65: il pick e' ordinabile."""
+        monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", False)
+        assert vf.dead_band_active() is False
+        assert auto_bet._sx_prefilter(
+            {"mercato": "1X2", "quota": 1.65}) is None
 
     def test_fuori_fascia_resta_fuori_fascia(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", False)
@@ -875,12 +890,13 @@ class TestPrefilterFasciaMorta:
         for price in (alta, bassa):
             out = auto_bet._sx_prefilter({"mercato": "1X2", "quota": price})
             assert out is not None and out["code"] == "quota_fuori_fascia"
-        # controprova: il messaggio nomina gli estremi veri, non la morta
+        # controprova: il messaggio nomina gli estremi veri, non la banda
         out = auto_bet._sx_prefilter({"mercato": "1X2", "quota": alta})
         assert f"{vf.ODDS_MAX:.2f}" in out["detail"]
 
     def test_fuori_dalla_morta_passa(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", False)
+        self._accendi(monkeypatch)
         for price in (vf.ODDS_EXCLUDE_MIN - 0.05, vf.ODDS_EXCLUDE_MAX + 0.05):
             assert auto_bet._sx_prefilter(
                 {"mercato": "1X2", "quota": price}) is None
@@ -889,10 +905,12 @@ class TestPrefilterFasciaMorta:
         """La corsia top-down esiste per far giudicare il PREZZO all'oracolo:
         filtrarla qui la spegnerebbe in silenzio (direttiva 25/09)."""
         monkeypatch.setattr(auto_bet, "TOP_DOWN_BYPASS", True)
+        self._accendi(monkeypatch)
         morte = (vf.ODDS_EXCLUDE_MIN + vf.ODDS_EXCLUDE_MAX) / 2.0
         assert auto_bet._sx_prefilter({"mercato": "1X2", "quota": morte}) is None
 
-    def test_morta_dentro_la_fascia_del_progetto(self):
-        """Invariante fra le due definizioni: la morta sta DENTRO la fascia."""
+    def test_morta_dentro_la_fascia_del_progetto(self, monkeypatch):
+        """Invariante fra le due definizioni, quando la banda e' configurata."""
+        self._accendi(monkeypatch)
         assert vf.ODDS_MIN <= vf.ODDS_EXCLUDE_MIN < vf.ODDS_EXCLUDE_MAX \
             <= vf.ODDS_MAX

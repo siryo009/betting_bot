@@ -186,15 +186,19 @@ def _start(hours: float = 3.0) -> str:
 # lega e non il guardrail che vuole verificare.
 ALLOWED_LEAGUE = "Premier League"
 
-#: Quota dei seed della diagnostica: FUORI dalla fascia morta (1.50-1.80) e
-#: dentro la fascia di strategia, DERIVATA dalle costanti.
-#: Perche' non un numero a mano (25/10/2026): con la fascia morta attiva un
-#: seed a 1,65 viene scartato dal PRE-FILTRO SX **prima** del guardrail in
-#: esame, quindi C (cap Kelly), H (recinto), I (copula) e J (M6) misurerebbero
-#: la banda dei prezzi — H addirittura passerebbe per il motivo SBAGLIATO (0
+#: Quota dei seed della diagnostica: dentro la fascia di strategia, DERIVATA
+#: dalle costanti e **fuori da qualunque banda esclusa configurabile**.
+#: Perche' non un numero a mano (25/10/2026): un seed dentro una banda
+#: esclusa viene scartato dal PRE-FILTRO SX **prima** del guardrail in esame,
+#: quindi C (cap Kelly), H (recinto), I (copula) e J (M6) misurerebbero la
+#: banda dei prezzi — H addirittura passerebbe per il motivo SBAGLIATO (0
 #: ordini per assenza di candidati invece che per il recinto pieno). E' la
 #: stessa lezione del 14/10 sullo scenario D.
-SEED_QUOTA = round(value_filter.ODDS_EXCLUDE_MAX + 0.10, 2)
+#: Dal 26/10 la fascia morta e' SPENTA di default, ma la diagnostica non deve
+#: dipendere da quel default: se qualcuno la riaccende con `ODDS_EXCLUDE_*`,
+#: il seed resta valido perche' si sceglie SOPRA l'estremo alto configurato.
+_EXCLUDE_HI = value_filter.ODDS_EXCLUDE_MAX if value_filter.dead_band_active() else 0.0
+SEED_QUOTA = round(max(_EXCLUDE_HI + 0.10, 1.90), 2)
 
 #: p_true dello stub dell'oracolo nella corsia top-down LIVE (scenario D):
 #: abbastanza alta da rendere EV-positiva anche una quota SOTTO il pavimento

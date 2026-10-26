@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 #   1) SOLO campionati con ROI positivo nel backtest
 #   2) Fascia quote ODDS_MIN-ODDS_MAX (default **1.20-2.00** dal 14/10/2026:
 #      era 1.30-1.80 dal 11/09, allargata dalla direttiva "piu' volume")
-#      CON UNA FASCIA MORTA esclusa all'interno (1.50-1.80, vedi sotto)
+#      con una FASCIA MORTA OPZIONALE (1.50-1.80) **spenta di default** dal
+#      26/10/2026: vedi il blocco `ODDS_EXCLUDE_*` piu' sotto
 #   3) Edge differenziato per efficienza lega
 #   4) Kelly adattivo per lega (kelly_mult + max_stake)
 #   5) Esclusione automatica leghe con CLV negativo cronico
@@ -129,50 +130,90 @@ ODDS_MIN = 1.20          # quota minima: sotto, il ritorno non paga il rischio
 ODDS_MAX = 2.00          # quota massima: sopra e' "pantano" o sfavorita
 
 # ---------------------------------------------------------------------------
-# FASCIA MORTA 1.50-1.80 (25/10/2026) — l'unica banda che ha PERSO in ogni
-# misura indipendente, su corsie diverse e in ere diverse.
+# FASCIA MORTA 1.50-1.80 — **SPENTA DI DEFAULT dal 26/10/2026**
 # ---------------------------------------------------------------------------
-# Perche' esiste invece di un semplice `ODDS_MAX = 1.50`: le fasce che stanno
-# SOPRA la morta non sono in perdita, e tagliarle costerebbe volume senza
-# guadagno misurato.
+# Il MECCANISMO resta (ed e' testato); l'APPLICAZIONE e' opt-in da env.
 #
-# MISURA (ledger live, 99 puntate chiuse, `live_decomp.py`, 26/10/2026):
-#   1.20-1.50  n=17  ROI **+16,59%**  hit 76%   <- l'unica banda positiva
-#   1.50-1.80  n=31  ROI **-16,40%**  hit 52%   <- la morta, il bleed maggiore
-#   1.80-2.00  n=24  ROI  -1,06%      hit 54%   <- in pareggio
-#   2.00-2.30  n= 9  ROI  -6,33%
-#   2.30-2.50  n= 8  ROI -31,97%
-#   >= 2,50    n=10  ROI -67,04%      hit 10%
-# Per corsia, la morta e' negativa in ENTRAMBE quelle che spendono:
-#   calcio 1X2 -3,98% (n=20) · tennis -37,11% (n=10)
-# Esito: la popolazione che la strategia ammette oggi (<= 2,00, morta
-# INCLUSA) e' n=72 con **-2,57%**; togliendo la sola morta diventa n=41 con
-# **+7,53%** (hit 63,4%). Si tiene anche 1.80-2.00 (in pareggio) perche' un
-# taglio secco a 1,50 darebbe +16,6% ma su n=17: quello e' il numero di una
-# BANDA, non di una strategia.
+# STORIA. Introdotta il 25/10 come esclusione dell'unica banda che aveva perso
+# in ogni misura indipendente del P/L:
+#   1.20-1.50 n=17 +16,59% · 1.50-1.80 n=31 **-16,40%** · 1.80-2.00 n=24 -1,06%
+#   (per corsia: calcio 1X2 -3,98% n=20 · tennis -37,11% n=10)
+# Il caveat era scritto nel codice stesso: z ~ -0,96 su 31 bet, cioe' un
+# intervallo che include lo zero.
 #
-# ⚠️ CAVEAT ONESTO (da non nascondere): la banda da sola NON e'
-# statisticamente conclusiva — hit 51,6% contro un break-even di 60,2% a quota
-# media 1,661, cioe' z ~ -0,96 su 31 bet. La scelta e' PRUDENTE (bleed
-# maggiore in assoluto, negativa in entrambe le corsie, coerente con il
-# "pantano 1.45-1.60" del backtest 12/09), non una certezza: va rimisurata
-# quando il ledger avra' piu' chiusure.
+# LA RIMISURA del 26/10 (CLV + P/L per fascia, richiesta dal proprietario) ha
+# CONTRADDETTO quella giustificazione sul piano dell'edge:
+#
+#   CLV per fascia (473 campioni con closing sharp, `scripts/clv_brier_analytics`
+#   + ledger agganciato, CI95 nel report):
+#     1.20-1.50  n=135  **+2,23%**
+#     1.50-1.80  n=199  **+2,59%**  (88% dei campioni positivi)
+#     1.80-2.00  n=105  **+2,58%**
+#     2.00-2.30  n=  9   +6,05%
+#     >= 2,50    n=  4  +15,44%   <- gonfiato dalla definizione su quote alte
+#   La banda esclusa batte la closing line quanto le fasce VICINE: non e' una
+#   banda senza edge, e' una banda che ha perso MOMENTANEAMENTE.
+#
+#   P/L della stessa popolazione misurato sulla QUOTA-SEGNALE (la popolazione
+#   che il gate taglia davvero, non i prezzi di riempimento):
+#     1.50-1.80  n=29  **-5,55%**   (era -16,4% sui fill price, n=31)
+#     1.80-2.00  n=18  -35,55%
+#   Anche il bleed si riduce a un terzo quando si toglie il rumore dei prezzi
+#   di riempimento: un taglio guidato dal P/L a n=31, non dall'edge.
+#
+# DECISIONE (proprietario, 26/10/2026): meccanismo conservato, applicazione
+# SPENTA -> la fascia 1.20-2.00 torna continua. Si riaccende senza toccare il
+# codice con `ODDS_EXCLUDE_MIN=1.50 ODDS_EXCLUDE_MAX=1.80` (entrambe in
+# `preserve()` in `.railway/railway.ts`): la prossima misura potra' riaprire la
+# domanda con un campione piu' grande.
 #
 # ⚠️ Vale per i mercati di STRATEGIA (1X2 calcio, tennis): i mercati LIQUIDI
-# (OU/AH) NON hanno una misura equivalente alle spalle e restare fuori
-# dall'esclusione e' la scelta prudente (`is_liquid_market`).
-ODDS_EXCLUDE_MIN = 1.50  # inizio della banda misurata in perdita
-ODDS_EXCLUDE_MAX = 1.80  # fine (inclusa)
+# (OU/AH) NON hanno una misura equivalente alle spalle e restavano fuori
+# dall'esclusione anche quando era attiva (`is_liquid_market`).
+#
+# Default 0.0 = banda NON configurata = nessuna esclusione. Un valore
+# illeggibile ricade sul default con un warning (una guardia non si spegne e
+# non si accende per un env sbagliato).
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("%s=%r non numerico: uso il default %s", name, raw,
+                       default)
+        return default
+
+
+ODDS_EXCLUDE_MIN = _env_float("ODDS_EXCLUDE_MIN", 0.0)
+ODDS_EXCLUDE_MAX = _env_float("ODDS_EXCLUDE_MAX", 0.0)
+
+
+def dead_band_active() -> bool:
+    """True solo se la banda morta e' CONFIGURATA (entrambi gli estremi > 0).
+
+    UNICA definizione dell'attivazione: la usano `in_dead_band` e la
+    diagnostica, cosi' "banda spenta" e "banda configurata male" non possono
+    dare risposte diverse in due percorsi.
+    """
+    return (ODDS_EXCLUDE_MIN > 0.0 and ODDS_EXCLUDE_MAX > 0.0
+            and ODDS_EXCLUDE_MIN < ODDS_EXCLUDE_MAX)
 
 
 def in_dead_band(price) -> bool:
-    """True se la quota cade nella fascia morta misurata (1.50-1.80).
+    """True se la quota cade nella fascia morta ED e' stata configurata.
 
     UNICA definizione del buco: la usano `odds_in_band`, `is_sane` e la corsia
     tennis (`tennis_lane.in_odds_band`), cosi' il confine non puo' vivere in
-    due posti e divergere. Fail-safe: un valore illeggibile NON e' nella
-    banda morta (lo esclude gia' `odds_in_band` con la sua regola).
+    due posti e divergere. Con la banda spenta (default dal 26/10/2026)
+    risponde sempre False: il gate non esiste finche' non lo si accende.
+    Fail-safe: un valore illeggibile NON e' nella banda morta (lo esclude gia'
+    `odds_in_band` con la sua regola).
     """
+    if not dead_band_active():
+        return False
     try:
         val = float(price)
     except (TypeError, ValueError):
@@ -189,11 +230,12 @@ def odds_in_band(price, *, odds_min: float | None = None,
     diagnostica. I benchmark "quota entro ODDS_MIN..ODDS_MAX" sparsi nei
     moduli non devono piu' essere riscritti a mano: una fascia, un posto.
 
-    La FASCIA MORTA (`in_dead_band`, 1.50-1.80) e' esclusa solo quando si
-    chiede la fascia DEL PROGETTO (nessun confine passato a mano): un
-    chiamante che chiede "questa quota sta fra 1.9 e 2.1?" sta facendo una
-    domanda su quei numeri, e la risposta non deve dipendere da una banda
-    misurata su un'altra popolazione.
+    La FASCIA MORTA (`in_dead_band`, 1.50-1.80) e' esclusa solo quando (a) si
+    chiede la fascia DEL PROGETTO (nessun confine passato a mano) e (b) la
+    banda e' CONFIGURATA: un chiamante che chiede "questa quota sta fra 1.9 e
+    2.1?" sta facendo una domanda su quei numeri, e la risposta non deve
+    dipendere da una banda misurata su un'altra popolazione (ne' da un gate
+    spento di default).
 
     FAIL-CLOSED su un valore assente o non numerico: una quota che non si sa
     leggere NON e' nella fascia (non e' una quota giocabile).
@@ -753,14 +795,16 @@ def is_sane(prob: float, odds: float, ev: float,
         return False, f"quota troppo bassa ({odds:.2f} < {ODDS_MIN})"
     if odds > odds_max:
         return False, (f"quota troppo alta ({odds:.2f} > {odds_max})")
-    # FASCIA MORTA (25/10/2026): 1.50-1.80 e' l'unica banda che ha perso in
-    # OGNI misura indipendente (-16,4% su n=31, e negativa in entrambe le
-    # corsie che spendono). Si esclude SOLO sui mercati di strategia: i
-    # mercati liquidi (OU/AH) non hanno una misura equivalente e non si
-    # stringono per analogia.
+    # FASCIA MORTA (25/10/2026, SPENTA di default dal 26/10): 1.50-1.80 e' la
+    # banda che aveva perso di piu' nel P/L (-16,4% su n=31) ma che il CLV
+    # rimisurato (+2,59% su 199 campioni) NON distingue dalle fasce vicine.
+    # Il gate si applica solo se qualcuno lo configura via `ODDS_EXCLUDE_*`.
+    # Si esclude SOLO sui mercati di strategia: i mercati liquidi (OU/AH) non
+    # hanno una misura equivalente e non si stringono per analogia.
     if not is_liquid_market(market) and in_dead_band(odds):
         return False, (f"quota nella fascia morta {ODDS_EXCLUDE_MIN:.2f}-"
-                       f"{ODDS_EXCLUDE_MAX:.2f} (misurata -16,4% su 31 bet)")
+                       f"{ODDS_EXCLUDE_MAX:.2f} (P/L negativo del 25/10 su "
+                       f"31 bet, NON confermato dal CLV)")
     if favourites_only and market_prob is not None \
             and market_prob < MIN_FAVOURITE_MARKET_PROB:
         return False, (f"non e' il favorito di mercato (prob. "

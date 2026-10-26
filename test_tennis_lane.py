@@ -347,23 +347,46 @@ class TestFasciaQuota:
 
     Storia della banda: 1.30-2.50 (02/10) -> 1.30-2.00 (13/10) -> 1.30-2.30
     (14/10, "piu' volume") -> **1.30-2.00** (25/10/2026, dopo le perdite:
-    2.00-2.30 -6,3% e >=2,50 -44,0%) con la FASCIA MORTA 1.50-1.80 esclusa
-    dentro (tennis -37,1% su n=10).
+    2.00-2.30 -6,3% e >=2,50 -44,0%).
+
+    ⚠️ La FASCIA MORTA 1.50-1.80 (che il 25/10 escludeva anche qui, tennis
+    -37,1% su n=10) e' **SPENTA di default dal 26/10**: il CLV rimisurato da'
+    +2,59% sulla banda, identico alle fasce vicine, quindi 1.50-1.80 E' giocabile
+    finche' qualcuno non riaccende `ODDS_EXCLUDE_MIN/MAX`. Il test copre
+    entrambi gli stati: e' l'unica cosa che impedisce a un env dimenticato di
+    cambiare la banda in silenzio.
     """
 
     @pytest.mark.parametrize("price,expected", [
-        (1.30, True), (1.49, True), (1.85, True), (1.95, True), (2.00, True),
-        # FASCIA MORTA 1.50-1.80 (bordi inclusi): misurata -37,1% sul tennis.
-        (1.50, False), (1.65, False), (1.80, False),
+        (1.30, True), (1.49, True), (1.50, True), (1.65, True),
+        (1.80, True), (1.85, True), (1.95, True), (2.00, True),
         (1.29, False), (2.01, False), (2.29, False), (2.30, False),
         (2.42, False), (2.50, False),
         (4.28, False), (17.02, False),
         (1.0, False), (0.0, False), (-1.0, False),
-        ("1.85", True), ("1.65", False), ("17.02", False),
+        ("1.85", True), ("1.65", True), ("17.02", False),
         (None, False), ("", False), ("abc", False),
     ])
     def test_banda(self, price, expected):
         assert tl.in_odds_band(price) is expected
+
+    @pytest.mark.parametrize("price,expected", [
+        (1.50, False), (1.65, False), (1.80, False),
+        (1.49, True), (1.81, True), (1.90, True),
+    ])
+    def test_banda_con_fascia_morta_riaccesa(self, price, expected, monkeypatch):
+        """Se la banda viene riaccesa da env, il tennis la segue (una sola
+        definizione: `value_filter.in_dead_band`, mai ricopiata)."""
+        import value_filter as vf
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MIN", 1.50)
+        monkeypatch.setattr(vf, "ODDS_EXCLUDE_MAX", 1.80)
+        assert tl.in_odds_band(price) is expected
+
+    def test_default_spento(self):
+        """Di default 1.65 e' nella banda: nessun gate nascosto sul prezzo."""
+        import value_filter as vf
+        assert vf.dead_band_active() is False
+        assert tl.in_odds_band(1.65) is True
 
     def test_estremi_inclusivi(self):
         # I bordi sono INCLUSI: una soglia e' una decisione, non un intervallo

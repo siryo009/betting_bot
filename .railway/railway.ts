@@ -369,6 +369,15 @@ export default defineRailway(() => {
       // alzarla. `EV_MIN_CORE` = leghe Tier-1/Core, `EV_MIN_OTHER` = le altre.
       EV_MIN_CORE: preserve(),
       EV_MIN_OTHER: preserve(),
+      // FASCIA MORTA 1.50-1.80 (`value_filter.in_dead_band`): meccanismo
+      // conservato, **SPENTO di default** (26/10/2026). L'esclusione nacque dal
+      // P/L (-16,4% su 31 bet) ma la rimisura del CLV ha dato **+2,59% su 199
+      // campioni** nella banda, identico alle fasce vicine: il gate tagliava
+      // una popolazione con edge, non una senza. Si riaccende con
+      // `ODDS_EXCLUDE_MIN=1.50` + `ODDS_EXCLUDE_MAX=1.80` (entrambi > 0 =
+      // attiva; valore illeggibile -> default spento con warning).
+      ODDS_EXCLUDE_MIN: preserve(),
+      ODDS_EXCLUDE_MAX: preserve(),
       // Closing line a T-0 (04/10/2026, punto 5): la routine `closing_line.py`
       // scrive `clv_history.closing_odds` DENTRO la finestra T-PRE..T+POST
       // rispetto al kickoff (default 10' prima / 5' dopo). Sola lettura dalle

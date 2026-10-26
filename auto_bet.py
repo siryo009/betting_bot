@@ -1605,11 +1605,12 @@ def _sx_prefilter(pick: dict) -> dict | None:
             if price is None:
                 price = pick.get("price")
             if not odds_in_band(price):
-                # FASCIA MORTA (25/10/2026): dire "fuori dalla fascia 1.20-2.00"
-                # per una quota 1.65 sarebbe un log che MENTE (1.65 e' dentro
-                # gli estremi) e manderebbe l'operatore a cercare un errore di
-                # fascia invece della banda misurata in perdita. Il motivo
-                # machine-readable distingue i due casi.
+                # FASCIA MORTA (25/10/2026, applicata solo se configurata: dal
+                # 26/10 e' spenta di default, vedi `value_filter`). Quando e'
+                # attiva, dire "fuori dalla fascia 1.20-2.00" per una quota
+                # 1.65 sarebbe un log che MENTE (1.65 e' dentro gli estremi) e
+                # manderebbe l'operatore a cercare un errore di fascia invece
+                # della banda esclusa. I due motivi restano distinti.
                 if in_dead_band(price):
                     return {
                         "reason": "sx_prefilter/fascia_morta",

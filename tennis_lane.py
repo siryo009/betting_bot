@@ -125,8 +125,12 @@ ODDS_MIN = float(os.getenv("TENNIS_ODDS_MIN", "1.30"))
 #   2.30-2.50  n=7  -25,65%
 #   >= 2,50    n=6  -43,95%
 # Sopra 2.00 la somma e' **-75,9% su 22 bet**: non era "la parte alta di
-# varianza", era la fascia che perde di piu'. Il pavimento resta 1.30 e
-# 1.50-1.80 e' escluso a parte (`value_filter.in_dead_band`, -37,1%).
+# varianza", era la fascia che perde di piu'. Il pavimento resta 1.30.
+# ⚠️ La fascia morta 1.50-1.80 NON e' piu' esclusa di default (26/10/2026): la
+# rimisura del CLV sul tennis da' **+2,59%** nella banda, identico alle fasce
+# vicine, e il -37,1% su 10 bet e' un campione il cui intervallo include lo
+# zero. Il meccanismo resta in `value_filter.in_dead_band` e si riaccende da
+# env (`ODDS_EXCLUDE_MIN`/`ODDS_EXCLUDE_MAX`), mai da qui.
 # Per tornare a 2.30 basta `TENNIS_ODDS_MAX=2.30`.
 # ⚠️ Come `TENNIS_ODDS_MIN` e `TENNIS_EV_MIN`, l'env e' letta all'IMPORT del
 # modulo: il set su Railway richiede un redeploy (non basta `--skip-deploys`).
@@ -141,10 +145,12 @@ def in_odds_band(price: Any) -> bool:
     in due posti e divergere. Fail-closed: una quota non numerica (o assente)
     NON e' nella banda.
 
-    La **fascia morta 1.50-1.80** e' esclusa anche qui (25/10/2026): sul
-    tennis ha reso **-37,1% su 10 bet**, mentre 1.20-1.50 (+27,6%, n=9) e
-    1.80-2.00 (+6,3%, n=9) sono sopra la pari. La definizione del buco resta
-    una sola (`value_filter.in_dead_band`), importata — mai ricopiata.
+    La **fascia morta 1.50-1.80** e' esclusa anche qui, ma SOLO quando e'
+    configurata (default: spenta dal 26/10/2026, vedi `value_filter`): sul
+    tennis ha reso -37,1% su 10 bet, ma il CLV rimisurato (+2,59% sulla banda)
+    non conferma l'assenza di edge e il campione e' troppo piccolo.
+    La definizione del buco resta una sola (`value_filter.in_dead_band`),
+    importata — mai ricopiata.
     """
     try:
         value = float(price)

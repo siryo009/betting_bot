@@ -14403,3 +14403,115 @@ telemetry_logs, tournament, rush_final, capital_enclosure, t60_breakers),
 settlement (watchdog, sx_native, scores, pause, sanity, source, side, cassa),
 web_api + adaptive/lane weighting + research_lab + tennis_lane,
 `compileall` OK, **0 marker di conflitto**.
+
+### 26/10/2026 — `railway ssh` che "cade sull'agente": la causa era la SECONDA chiave nell'agent
+
+**Sintomo**: `railway ssh --service betting_bot -- <cmd>` restituiva
+`{"description":"The agent path is temporarily unavailable. Try again later.","status":"error"}`
+**invece** dell'output del container — a intermittenza: il primo comando della
+sessione aveva funzionato, tutti i successivi no (anche un `echo ok`).
+
+**Causa radice (misurata, non ipotizzata)**: nell'**SSH agent condiviso**
+convivono due chiavi, e la prima e' quella del **vecchio account**:
+```
+ssh-add -l
+  256 SHA256:BiOgUUW+…  quotaverace-debug   <- account SIRYOCHY (progetto scaduto il 26/09)
+  256 SHA256:c6d/airw…  betting-bot-debug   <- account giusto (creative-vibrancy)
+```
+`railway ssh` senza `-i` fa la scansione locale delle chiavi e delega a `ssh`,
+che offre le identita' **in ordine**: il server autentica come il **vecchio
+account**, il quale non ha (piu') quel container e risponde con l'errore
+dell'"agent path". Il primo comando aveva funzionato solo perche' girava
+nello **stesso shell** di un `eval $(ssh-agent -s); ssh-add id_ed25519_railway`:
+un agente con la SOLA chiave nuova (workaround documentato il 27/09). Ogni
+comando successivo (shell nuova -> agente di default con entrambe le chiavi)
+tornava a sbagliare account.
+
+**Fix permanente (due livelli, nessuna modifica all'agent condiviso).**
+1. **Flag `-i`** — la via senza stato, valida anche senza agent:
+   `railway ssh --service betting_bot -i ~/.ssh/id_ed25519_railway -- <cmd>`
+   (verificato con `env -u SSH_AUTH_SOCK` -> funziona). "Skips the local ~/.ssh
+   scan; forwarded directly to ssh".
+2. **Blocco OpenSSH dedicato** (la forma comoda e ripetibile):
+   `railway ssh config -s betting_bot -i ~/.ssh/id_ed25519_railway --alias betting_bot`
+   scrive in `~/.ssh/config` un `Host betting_bot` con `HostName
+   ssh.railway.com`, `User <serviceInstanceId>` e `IdentityFile` **pinnata**.
+   Da li' in poi: `ssh betting_bot '<cmd>'` — bypassa CLI e scansione.
+   ⚠️ Il `User` e' il **serviceInstance id** (`fc1503a9-…`), stabile fra i
+   redeploy; cambia solo se il servizio viene ricreato — in quel caso si
+   rigenera il blocco con lo stesso comando (o `railway ssh config remove -s
+   betting_bot`).
+
+**Regola**: su questo progetto `railway ssh` va SEMPRE invocato con `-i` (o via
+alias `betting_bot`). Il fallimento silenzioso e' insidioso — sembra un guasto
+della piattaforma, e' un **errore di identita'**.
+
+### 26/10/2026 (sera) — Rimisura CLV + P/L per fascia: LA FASCIA MORTA TORNA SPENTA
+
+Direttiva del proprietario: verificare, dopo il deploy delle soglie nuove, che
+la fascia morta 1.50-1.80 e le soglie stiano riducendo il bleed. **La verifica
+ha promosso due delle tre modifiche e RESPINTO la terza.**
+
+**1) CLV per fascia (misura INDIPENDENTE dalla varianza, 599 righe
+`clv_history`).** Tre definizioni di chiusura, stesso verdetto:
+
+| fascia | solo sharp T-0 | + `pinnacle_quota` | + bookmaker |
+|---|---|---|---|
+| 1.20-1.50 | +2,13% (n=26) | +2,16% (n=144) | +1,82% (n=170) |
+| **1.50-1.80** | **+1,64% (n=48)** | **+2,45% (n=214, 81% pos.)** | **+2,07% (n=254)** |
+| 1.80-2.00 | +1,58% (n=31) | +2,49% (n=110) | +2,06% (n=133) |
+| tot | +2,75% (n=124) | **+2,59% (n=502)** | +2,17% (n=599) |
+
+La banda esclusa **non ha alcun deficit di CLV**: e' identica alle fasce
+vicine, con l'81% dei campioni positivi. Il modello batte la closing line anche
+li'. ⚠️ Nota di lettura: a quota >= 2,50 il CLV e' +15,44% (n=4) mentre il P/L
+e' -67% (n=10) — su quote alte la percentuale di CLV e' **meccanicamente
+gonfiata**, quindi il CLV NON serve a giustificare l'apertura delle fasce alte.
+
+**2) P/L per fascia (bets live chiuse, prezzi di FILL, n=99).**
+1.20-1.50 **+16,59%** (n=17) · 1.50-1.80 **-16,40%** (n=31) · 1.80-2.00
+-1,06% (n=24) · 2.00-2.30 -6,33% · 2.30-2.50 -31,97% · >=2,50 -67,04% ·
+totale **-9,04%**.
+Sulla popolazione che il gate taglia davvero (predictions giocabili chiuse,
+quota-segnale, n=514): 1.50-1.80 **-2,59% (n=216)**, 1.80-2.00 -8,75% (n=50),
+1.20-1.50 -3,68% (n=201). Cioe': il -16,4% e' in buona parte rumore dei
+prezzi di riempimento — a livello di SEGNALE la morta non e' peggiore delle
+fasce ammesse.
+
+**3) Verdetto sulle tre modifiche del 25/10.**
+- **`EV_MAX` 10% PROMOSSO**: da solo taglia **7 delle 30** bet chiuse
+  agganciabili a una previsione 1X2 (EV 10,7%-26,2%, P/L -5,92 USDC).
+- **`EV_MIN` 2,5% + edge +2pp PROMOSSI come direzione ma il gate e' ora
+  MOLTO stretto**: sul controfattuale delle stesse 30 bet ammette **0**
+  candidati (P/L 0 contro -7,53 realizzato); il gate pre-26/10 ne ammetteva 10
+  (+2,00). Il bleed evitato e' reale, il costo in volume e' **totale** su quel
+  campione: va sorvegliato sul FLUSSO (quante giocate arrivano), non sul P/L.
+- **FASCIA MORTA RESPINTA**: nessuna misura indipendente la sostiene. Il
+  P/L che l'aveva giustificata e' un campione il cui intervallo include lo
+  zero (z ~ -0,96) e il CLV dice l'opposto.
+
+**4) Cosa e' stato fatto** (`value_filter.py`, `tennis_lane.py`,
+`auto_bet._sx_prefilter`, `verify_guardrails.py`, IaC): il MECCANISMO resta
+(`in_dead_band`, riusato da `odds_in_band`/`is_sane`/tennis), l'APPLICAZIONE
+e' **spenta di default**: `ODDS_EXCLUDE_MIN`/`ODDS_EXCLUDE_MAX` diventano env
+con default **0** (banda non configurata) e nuova `dead_band_active()` come
+unica definizione dell'attivazione (estremi <= 0 o invertiti = spenta; env
+illeggibile = default spento con warning). La fascia 1.20-2.00 torna continua;
+si riaccende con `ODDS_EXCLUDE_MIN=1.50 ODDS_EXCLUDE_MAX=1.80`, senza toccare
+il codice. Entrambe le env sono `preserve()` in `.railway/railway.ts`.
+`verify_guardrails.py` deriva il proprio seed da `dead_band_active()` (non piu'
+da `ODDS_EXCLUDE_MAX`, che ora vale 0): un env che riaccendesse la banda non
+deve far misurare ai guardrail la banda invece del guardrail.
+
+**5) P/L post-deploy: NON ancora misurabile.** Nessuna bet chiusa dopo il
+deploy delle 11:55 (2 aperte da 1,00 USDC, tennis @1.4311 e @1.4035). Il flusso
+invece si vede: 15 previsioni nate dopo il deploy, **4 giocabili** (3 tennis +
+Ligue 1 @1,87 EV +8,9%) e 11 scarti (5 EV basso, 1 non batte il mercato, 5 per
+lega).
+
+**Test**: `test_value_filter.TestFasciaMorta` riscritto (default spento,
+riaccensione da env, banda non valida = spenta, `_env_float` fail-safe),
+`test_top_down.TestPrefilterFasciaMorta` (gate attivo via monkeypatch + 1.65
+che passa di default), `test_tennis_lane.TestFasciaQuota` (banda continua + la
+variante con la morta riaccesa), `test_flow_measure` (attribuzione
+`odds_dead_band` con la banda accesa, nessun motivo inventato a banda spenta).
