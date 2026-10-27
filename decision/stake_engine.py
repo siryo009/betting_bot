@@ -53,6 +53,7 @@ KELLY_FRACTION_ENV = "KELLY_AGGRESSIVE_FRACTION"
 KELLY_MIN_FRACTION_ENV = "KELLY_AGGRESSIVE_MIN_FRACTION"
 KELLY_CAP_PCT_ENV = "KELLY_MAX_STAKE_PCT"
 KELLY_MIN_TICKET_ENV = "KELLY_MIN_TICKET_USDC"
+KELLY_FLOOR_RAISE_ENV = "KELLY_FLOOR_RAISE"
 #: BANDA del Kelly dinamico (direttiva 04/10/2026, punto 2): k non e' piu'
 #: fisso. Il MAX e' `KELLY_AGGRESSIVE_FRACTION` (0.25), il MIN
 #: `KELLY_AGGRESSIVE_MIN_FRACTION` (0.15); il valore effettivo e' scalato
@@ -72,6 +73,20 @@ DEFAULT_KELLY_MAX_STAKE_PCT = 0.05
 #: precedente; con k piu' basso (0.15-0.25) il ticket 2.00 avrebbe scartato
 #: quasi tutto il flusso, quindi il proprietario ha chiesto l'allineamento.
 DEFAULT_KELLY_MIN_TICKET = 1.00
+#: FLOOR ESEGUIBILE (direttiva 28/10/2026): quando il Kelly chiede MENO del
+#: ticket — che e' anche il minimo ordine dell'exchange (1.00 USDC) — il
+#: motore punta il FLOOR e lo dichiara, invece di restituire 0.
+#:
+#: PERCHE' NON E' UNA SCORCIATOIA. Sotto il minimo ordine non esiste una
+#: taglia eseguibile: `stake = 0` non e' "prudenza", e' "non si punta mai"
+#: (misurato in produzione il 27/10/2026: con 16,24 USDC ogni pick chiedeva
+#: 0.05-0.10 e TUTTI finivano a 0). Il codice nuovo rende il vincolo
+#: ESPLICITO: o si punta il minimo di mercato, o si dichiara che il tetto di
+#: rischio non lo permette (`floor_above_cap`, fail-closed).
+#: Il rischio effettivo viaggia col risultato (`effective_risk_pct`) — un
+#: overbet rispetto al Kelly voluto deve essere LEGGIBILE, non mascherato.
+#: `KELLY_FLOOR_RAISE=0` ripristina il comportamento precedente (stake 0).
+DEFAULT_KELLY_FLOOR_RAISE = True
 #: Riferimenti per NORMALIZZARE edge ed EV dentro la banda di k. Letti da
 #: `value_filter`/`market_calib` (mai copiati): qui solo i fallback.
 _KELLY_EV_REF_FALLBACK = 0.04
@@ -96,6 +111,24 @@ def _num_env(name: str, default: float) -> float:
         return default
 
 
+def floor_raise_enabled() -> bool:
+    """Il motore alza al floor eseguibile invece di scartare l'operazione?
+
+    Default ON (direttiva 28/10/2026): il minimo ordine dell'exchange non e'
+    negoziabile, quindi un motore che chiede meno di quello chiede
+    l'impossibile. Lettura a RUNTIME; per tornare al comportamento precedente
+    serve un OFF **esplicito** (`0/false/no/off`), mentre un valore
+    irriconoscibile ricade sul default: una protezione non si spegne con un
+    env sbagliato.
+    """
+    raw = (os.getenv(KELLY_FLOOR_RAISE_ENV) or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return DEFAULT_KELLY_FLOOR_RAISE
+
+
 def aggressive_config() -> dict[str, float]:
     """Parametri del motore, letti a RUNTIME (tarabili da env).
 
@@ -116,6 +149,7 @@ def aggressive_config() -> dict[str, float]:
         "kelly_min_fraction": k_min,
         "max_stake_pct": min(max(pct, 0.0), 1.0),
         "min_ticket": max(ticket, 0.0),
+        "floor_raise": floor_raise_enabled(),
     }
 
 
@@ -233,8 +267,15 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
        override);
     2. cap dinamico: `bankroll x max_stake_pct` (5% dal 13/10/2026) — TRONCA,
        mai alza;
-    3. ticket minimo (1.00 USDC): sotto soglia lo stake e' **0.0**
-       (operazione scartata) — mai un ordine piu' piccolo del ticket.
+    3. ticket minimo (1.00 USDC) = **minimo ordine dell'exchange**: sotto
+       soglia il motore applica il FLOOR eseguibile (`stake = ticket`,
+       `floor_applied`, `reason="ok_at_floor"`) e dichiara il rischio
+       effettivo (`effective_risk_pct`) — sotto il minimo di mercato non
+       esiste una taglia, quindi "0" significherebbe "non si punta mai"
+       (misurato il 27/10/2026). Con `KELLY_FLOOR_RAISE=0` si torna a
+       `stake=0.0`/`below_min_ticket`. Se e' il TETTO a stare sotto il minimo
+       di mercato (`cap_usdc < ticket`) l'esito e' `floor_above_cap`: nessun
+       ordine e nessun tetto alzato in silenzio.
 
     Ritorna SEMPRE un dict (mai eccezioni): `executable` dice se l'operazione
     puo' partire, `reason` il motivo machine-readable. Il bankroll entra a
@@ -255,6 +296,11 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
         "kelly_fraction": frac, "max_stake_pct": pct, "min_ticket": ticket,
         "cap_usdc": 0.0, "bankroll": 0.0, "capped": False,
         "executable": False, "reason": "",
+        # Floor eseguibile: `kelly_stake` e' cio' che la FORMULA chiede,
+        # `stake` cio' che si puo' eseguire; `effective_risk_pct` il rischio
+        # reale per ordine quando il floor vince (telemetria del sizing).
+        "floor_applied": False, "floor_raise": cfg["floor_raise"],
+        "kelly_stake": 0.0, "effective_risk_pct": None,
         # Provenienza del k applicato (telemetria del sizing: il Cervello
         # alimenta EV/edge/lega e la Finanza li passa qui — tracciabile).
         "kelly_dynamic": bool(dyn is not None),
@@ -293,13 +339,27 @@ def calculate_kelly_stake(true_prob: float, offered_odds: float,
         stake = out["cap_usdc"]       # TRONCA al cap: mai sopra il tetto
         out["capped"] = True
     stake = round(stake, 2)
+    out["kelly_stake"] = stake          # cio' che la formula chiede
     if stake < ticket:
-        out["stake"] = 0.0
-        out["reason"] = "below_min_ticket"
-        return out
+        if not cfg["floor_raise"]:
+            out["stake"] = 0.0
+            out["reason"] = "below_min_ticket"
+            return out
+        if out["cap_usdc"] + 1e-9 < ticket:
+            # Il TETTO di rischio sta sotto il minimo di mercato: con questo
+            # capitale non si puo' ordinare nulla. FAIL-CLOSED dichiarato —
+            # alzare il cap in silenzio sarebbe una decisione di rischio
+            # presa da una formula (il tetto si alza con una scelta, non con
+            # un arrotondamento).
+            out["stake"] = 0.0
+            out["reason"] = "floor_above_cap"
+            return out
+        stake = round(ticket, 2)
+        out["floor_applied"] = True
+        out["effective_risk_pct"] = round(stake / bankroll_f, 6)
     out["stake"] = stake
     out["executable"] = True
-    out["reason"] = "ok"
+    out["reason"] = "ok_at_floor" if out["floor_applied"] else "ok"
     return out
 
 
@@ -454,4 +514,4 @@ def size(signal: Signal, risk: RiskDecision, *, bankroll: float,
 
 
 __all__ = ["aggressive_cap_usdc", "aggressive_config", "calculate_kelly_stake",
-           "kelly_stake", "size"]
+           "floor_raise_enabled", "kelly_stake", "size"]

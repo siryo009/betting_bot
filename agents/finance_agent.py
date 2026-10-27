@@ -190,6 +190,13 @@ class FinanceAgent:
         trade.max_stake_pct = as_float(res.get("max_stake_pct") or 0.0)
         trade.min_ticket = as_float(res.get("min_ticket") or 0.0)
         trade.capped = bool(res.get("capped"))
+        # Floor eseguibile (28/10/2026): se il Kelly chiede meno del minimo
+        # ordine dell'exchange si punta il minimo e il rischio effettivo
+        # viaggia col trade (mai un overbet silenzioso).
+        trade.floor_applied = bool(res.get("floor_applied"))
+        trade.kelly_stake = as_float(res.get("kelly_stake") or 0.0)
+        trade.effective_risk_pct = (None if res.get("effective_risk_pct") is None
+                                    else as_float(res["effective_risk_pct"]))
         stake = as_float(res.get("stake") or 0.0)
         if not res.get("executable"):
             trade.stake = 0.0
@@ -209,7 +216,10 @@ class FinanceAgent:
             return trade
         trade.stake = stake
         trade.executable = True
-        trade.reason = trade.reason or "ok"
+        # Il motivo del MOTORE sopravvive (`ok_at_floor` dice che lo stake e'
+        # il minimo di mercato, non il rischio voluto): un trade coperto dal
+        # floor non deve leggersi come un trade dimensionato dal Kelly.
+        trade.reason = trade.reason or str(res.get("reason") or "ok")
         return trade
 
     def process_trades(self, trades: list[ValidatedTrade], *,

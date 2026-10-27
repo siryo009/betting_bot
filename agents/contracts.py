@@ -195,6 +195,13 @@ class ValidatedTrade(BaseModel):
     max_stake_pct: float = 0.0
     min_ticket: float = 0.0
     capped: bool = False
+    #: Floor eseguibile (28/10/2026): il Kelly chiedeva meno del minimo ordine
+    #: dell'exchange e la Finanza ha puntato il minimo. `kelly_stake` e' cio'
+    #: che la formula chiedeva, `effective_risk_pct` il rischio reale per
+    #: ordine: la provenienza viaggia col trade, non resta solo nei log.
+    floor_applied: bool = False
+    kelly_stake: float = 0.0
+    effective_risk_pct: Optional[float] = None
     bankroll: float = 0.0
     executable: bool = False
     reason: str = ""

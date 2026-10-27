@@ -74,11 +74,39 @@ class TestSizeTrade:
         assert trade.min_ticket == 1.00
         assert trade.reason == "ok"
 
-    def test_motore_sotto_il_ticket_non_esegue(self):
-        fin = FinanceAgent(bankroll=10.0)          # raw ~0.74 < ticket 1.00
+    def test_tetto_sotto_il_minimo_ordine_non_esegue(self):
+        """Il tetto 5% di 10 USDC (0.50) sta sotto il minimo di mercato (1.00):
+        la Finanza non alza il tetto in silenzio per far passare l'ordine
+        (direttiva 28/10/2026) e il motivo lo dichiara."""
+        fin = FinanceAgent(bankroll=10.0)
         trade = fin.size_trade(_trade())
         assert trade.stake == 0.0 and trade.executable is False
-        assert trade.reason == "below_min_ticket"
+        assert trade.reason == "floor_above_cap"
+
+    def test_floor_eseguibile_arriva_al_trade(self, monkeypatch):
+        """Con tetto capiente e un edge debole (il Kelly chiede 0.7-0.9) il
+        trade punta il MINIMO di mercato e la provenienza viaggia col
+        contratto, non solo nei log."""
+        monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.12")
+        fin = FinanceAgent(bankroll=15.0)
+        trade = fin.size_trade(_trade(price=1.80, true_prob=0.5639, ev=0.015))
+        assert trade.executable is True
+        assert trade.stake == 1.00
+        assert trade.floor_applied is True
+        assert trade.kelly_stake < 1.00
+        assert trade.reason == "ok_at_floor"
+        assert trade.effective_risk_pct == pytest.approx(1.00 / 15.0, abs=1e-6)
+
+    def test_edge_forte_lo_dimensiona_il_kelly(self, monkeypatch):
+        """L'altra faccia: con un edge forte il floor non c'entra e la taglia
+        la decide la formula (1.37 a 15 USDC), sopra il minimo di mercato."""
+        monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.12")
+        fin = FinanceAgent(bankroll=15.0)
+        trade = fin.size_trade(_trade())
+        assert trade.executable is True
+        assert trade.stake > 1.00
+        assert trade.floor_applied is False
+        assert trade.reason == "ok"
 
     def test_shield_block_ha_la_precedenza(self):
         """Un blocco del blocco correlato non si \"aggiusta\" col Kelly: il

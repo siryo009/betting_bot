@@ -14904,3 +14904,79 @@ riga del giro `esposizione aperta 1.00/7.00 USDC su 1 ordini (cap 30%, stake
 fisso 1.00 USDC)`, `/api/health` 200. Nessuna modifica di codice: **2 env**,
 gia' `preserve()` in `.railway/railway.ts` (`railway config plan` = already up
 to date).
+
+### Riallineamento del motore Kelly al capitale: FLOOR ESEGUIBILE (28/10/2026)
+
+**Direttiva del proprietario**: «riallinea il motore Kelly perche' dimensioni
+ordini sensati a questo capitale, invece di chiedere quote sotto il ticket
+minimo».
+
+**1) IL DIFETTO (misurato con le env REALI, non dedotto).** A equity **15,24
+USDC** il Kelly corretto chiede **0,03-0,38 USDC** per pick: il minimo ordine
+dell'exchange e' **1,00**, quindi il divario e' di **7-30x**. La misura sui casi
+reali di produzione (p 0.5663 @1.81 EV +2,5% · p 0.5550 @1.92 · p 0.6200
+@1.70), con banda k 0,15-0,25 e cap 12%:
+
+| EV | quota | Kelly chiede | esito PRIMA | esito ORA |
+|---|---|---|---|---|
+| 2,5% | 1,81 | **0,07** | `below_min_ticket` -> 0 | **1,00** (floor, 6,56%) |
+| 5,4% | 1,70 | 0,29 | `below_min_ticket` -> 0 | **1,00** (floor) |
+| 6,6% | 1,92 | 0,27 | `below_min_ticket` -> 0 | **1,00** (floor) |
+| 5,0% | 1,50 | 0,38 | `below_min_ticket` -> 0 | **1,00** (floor) |
+
+Nessun k e nessun cap cambia il quadro: perche' il Kelly chieda >= 1,00 con EV
+2,5% e k 0,25 serve un'equity di **~128 USDC** (con EV 5% ~40). Non e' taratura:
+e' **scala del capitale**.
+
+**2) LA CAUSA ERA UN DRIFT FRA DUE PERCORSI.** La catena `decision/` aveva GIA'
+la logica giusta: `stake_engine.size()` alza al floor quando `STAKE_CAP_HARD=0`
+(il valore di produzione) con il dettaglio «floor applicato: stake X = Y% del
+bankroll». Il motore usato dalla corsia principale (`calculate_kelly_stake`)
+invece restituiva **0**. Due comportamenti per lo stesso concetto — la classe di
+difetto che il progetto paga piu' cara (doppio Kelly 13/09, doppio ordine 26/09,
+stop-loss fantasma 21/09).
+
+**3) IL FIX: IL MINIMO DI MERCATO E' UNA TAGLIA, NON UNA DECISIONE.** Sotto il
+minimo ordine **non esiste** un importo eseguibile, quindi «stake 0» non era
+prudenza: era **«non si punta mai»**. Ora il motore, quando il Kelly chiede meno
+del ticket:
+- **punta il floor** e lo dichiara: `stake = ticket`, `floor_applied=True`,
+  `reason="ok_at_floor"`, `kelly_stake` = cio' che la formula chiedeva,
+  **`effective_risk_pct`** = rischio reale per ordine (6,56% a questo capitale);
+- se e' il **TETTO** a stare sotto il minimo (`cap_usdc < ticket`, es. cap 5% =
+  0,76) -> **`floor_above_cap`** e nessun ordine: alzare il cap in silenzio
+  sarebbe una decisione di rischio presa da una formula;
+- `KELLY_FLOOR_RAISE=0` ripristina il comportamento del 27/10
+  (`below_min_ticket`). Un valore **irriconoscibile** ricade sul default ON: una
+  protezione non si spegne con un env sbagliato (corretto dopo che il mio stesso
+  test aveva colto la direzione opposta).
+
+**4) PROPAGAZIONE (la provenienza non resta nei log).** `ValidatedTrade` porta
+`floor_applied`, `kelly_stake`, `effective_risk_pct`; il **motivo del motore
+sopravvive** alla Finanza (`ok_at_floor` non diventa piu' un generico `ok`); il
+log di `auto_bet` distingue i due casi e stampa ENTRAMBI i valori («Kelly 0.07
+USDC -> FLOOR eseguibile 1.00 USDC (6.56% del capitale 15.24): sotto il minimo
+ordine non c'e' taglia»).
+
+**5) ATTIVAZIONE IN PRODUZIONE.** `ORDER_FIXED_STAKE_USDC` **1.00 -> 0** (env,
+gia' `preserve()`): il motore torna a governare. **`ORDER_MAX_STAKE_USDC` resta
+1.00** — il tetto di rischio e' una scelta del proprietario (21/10) e non si
+allarga da una formula; il cap percentuale resta 12%.
+⚠️ **Limite dichiarato, con l'equity di oggi il risultato pratico e' lo stesso
+di prima (1,00 per ordine)** — ed e' il punto: non e' piu' un importo fisso
+scritto a mano, e' il motore che lo decide, lo dichiara e **scala da solo**
+quando il capitale cresce (a 200 USDC con EV 10% la taglia la fa la formula:
+6,25 USDC, `floor_applied=False`). Il rischio per ordine resta quello del
+27/10 (1,00 = 6,56%); cambia che ora e' scritto in telemetria invece di essere
+implicito.
+
+**6) TEST.** 92 (`test_aggressive_kelly` + `test_agent_kelly`: nuova classe
+`TestFloorEseguibile` — caso di produzione, floor == minimo ordine, mai sopra
+uno stake gia' eseguibile, compounding che lo fa smettere di mordere, pick reale
+end-to-end, cassa ancora vincolo separato) + 116 (`capital_enclosure`,
+`auto_bet`, `money_decimal`) + 119 (`auto_bet_live`, `order_watch`,
+`exposure_gate`) + 252 (`resting_orders`, `t60_breakers`, `agent_hierarchy`,
+`decision_pipeline`, `decision_limits`) + 46 (`chief_shadow_wiring`,
+`decision_shadow`, `advisor_agent`, `secret_hygiene`) = **625 verdi**.
+`verify_guardrails.py`: **A-J TUTTI BLOCCANO** (exit 0); `compileall` OK, 0
+marker di conflitto;

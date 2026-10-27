@@ -2607,14 +2607,29 @@ def kelly_size_for_pick(pick: dict, *, price: float, bankroll: float,
                 res["executable"] = False
                 res["reason"] = "below_min_ticket_cassa"
     if res.get("stake", 0.0) > 0:
-        logger.info("auto_bet: %s %s (%s): k=%.2f p=%.3f -> stake %.2f USDC "
-                    "(raw %.2f, cap %.2f = %.1f%% di %.2f, bankroll)",
-                    label, pick.get("match_id"), pick.get("esito_key"),
-                    float(res.get("kelly_fraction", 0.0)), prob,
-                    float(res["stake"]), float(res.get("raw_stake", 0.0)),
-                    float(res.get("cap_usdc", 0.0)),
-                    float(res.get("max_stake_pct", 0.0)) * 100.0,
-                    float(res.get("bankroll", 0.0)))
+        if res.get("floor_applied"):
+            # FLOOR ESEGUIBILE (28/10/2026): il Kelly chiede meno del minimo
+            # ordine dell'exchange, quindi si punta il minimo. Il log dice
+            # ENTRAMBI i valori e il rischio effettivo: un overbet rispetto
+            # al Kelly voluto deve essere leggibile, non mascherato dietro lo
+            # stake finale (lezione del 27/10: il motore zittiva, non spiegava).
+            logger.info("auto_bet: %s %s (%s): Kelly %.2f USDC -> FLOOR "
+                        "eseguibile %.2f USDC (%.2f%% del capitale %.2f): "
+                        "sotto il minimo ordine non c'e' taglia",
+                        label, pick.get("match_id"), pick.get("esito_key"),
+                        float(res.get("kelly_stake", 0.0)),
+                        float(res["stake"]),
+                        float(res.get("effective_risk_pct") or 0.0) * 100.0,
+                        float(res.get("bankroll", 0.0)))
+        else:
+            logger.info("auto_bet: %s %s (%s): k=%.2f p=%.3f -> stake %.2f USDC "
+                        "(raw %.2f, cap %.2f = %.1f%% di %.2f, bankroll)",
+                        label, pick.get("match_id"), pick.get("esito_key"),
+                        float(res.get("kelly_fraction", 0.0)), prob,
+                        float(res["stake"]), float(res.get("raw_stake", 0.0)),
+                        float(res.get("cap_usdc", 0.0)),
+                        float(res.get("max_stake_pct", 0.0)) * 100.0,
+                        float(res.get("bankroll", 0.0)))
     return res
 
 

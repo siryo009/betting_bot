@@ -18,6 +18,8 @@ punto di verita' per la corsia): qui e' ACCESO, quindi questi test misurano il
 comportamento che va in produzione.
 """
 
+import pytest
+
 import auto_bet
 import value_filter as vf
 from decision import stake_engine as se
@@ -39,15 +41,29 @@ class TestConfigurazione:
         assert cfg["kelly_min_fraction"] == 0.15  # MINIMO della banda
         assert cfg["max_stake_pct"] == 0.05       # tetto per ordine (13/10/2026)
         assert cfg["min_ticket"] == 1.00
+        # Floor eseguibile (28/10/2026): sotto il minimo di mercato il motore
+        # punta il floor invece di zittirsi.
+        assert cfg["floor_raise"] is True
 
     def test_env_tara_i_parametri(self, monkeypatch):
         monkeypatch.setenv("KELLY_AGGRESSIVE_FRACTION", "0.5")
         monkeypatch.setenv("KELLY_AGGRESSIVE_MIN_FRACTION", "0.2")
         monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.05")
         monkeypatch.setenv("KELLY_MIN_TICKET_USDC", "1.0")
+        monkeypatch.delenv("KELLY_FLOOR_RAISE", raising=False)
         cfg = se.aggressive_config()
         assert cfg == {"kelly_fraction": 0.5, "kelly_min_fraction": 0.2,
-                       "max_stake_pct": 0.05, "min_ticket": 1.0}
+                       "max_stake_pct": 0.05, "min_ticket": 1.0,
+                       "floor_raise": True}
+
+    def test_floor_raise_da_env(self, monkeypatch):
+        """L'interruttore e' una env: un valore non riconosciuto non spegne
+        una protezione (resta il default)."""
+        monkeypatch.setenv("KELLY_FLOOR_RAISE", "0")
+        assert se.floor_raise_enabled() is False
+        assert se.aggressive_config()["floor_raise"] is False
+        monkeypatch.setenv("KELLY_FLOOR_RAISE", "forse")
+        assert se.floor_raise_enabled() is True
 
     def test_valore_impossibile_ricade_sul_default(self, monkeypatch):
         """Una soglia di rischio non si spegne con una variabile sbagliata."""
@@ -110,9 +126,20 @@ class TestCalculateKellyStake:
         assert res["capped"] is False
         assert res["stake"] == round(res["raw_stake"], 2)
 
-    def test_ticket_minimo_scarta_l_operazione(self):
-        """Sotto il ticket del motore (1.00) lo stake e' 0.0: mai un ordine
-        piu' piccolo del ticket (bankroll 10 -> k=0.20 -> raw 0.74)."""
+    def test_tetto_sotto_il_minimo_ordine_fail_closed(self):
+        """Con bankroll 10 il tetto 5% (0.50) sta SOTTO il minimo di mercato
+        (1.00): il motore NON alza il tetto in silenzio — dichiara
+        `floor_above_cap` e non ordina (direttiva 28/10/2026)."""
+        res = se.calculate_kelly_stake(0.75, 1.66, 10.0)
+        assert res["stake"] == 0.0
+        assert res["executable"] is False
+        assert res["reason"] == "floor_above_cap"
+
+    def test_floor_ripristinabile_con_env(self, monkeypatch):
+        """`KELLY_FLOOR_RAISE=0` ripristina il comportamento precedente (stake
+        0 sotto il ticket), con un tetto capiente per isolare il caso."""
+        monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.12")
+        monkeypatch.setenv("KELLY_FLOOR_RAISE", "0")
         res = se.calculate_kelly_stake(0.75, 1.66, 10.0)
         assert res["stake"] == 0.0
         assert res["executable"] is False
@@ -166,6 +193,73 @@ class TestCalculateKellyStake:
 # ---------------------------------------------------------------------------
 # 3. aggressive_cap_usdc — UNICA fonte del tetto dinamico
 # ---------------------------------------------------------------------------
+
+class TestFloorEseguibile:
+    """Direttiva 28/10/2026: a questo capitale il Kelly chiede MENO del minimo
+    ordine dell'exchange (1.00 su SX Bet, misurato il 27/10: 0.05-0.10 per
+    pick). Il motore non puo' chiedere l'impossibile: o punta il floor
+    dichiarandolo, o dichiara che il TETTO non lo permette. Il caso di
+    produzione e' equity 15,24 con cap 12% (tetto 1.83, sopra il minimo)."""
+
+    @pytest.fixture(autouse=True)
+    def _cap_di_produzione(self, monkeypatch):
+        # Il tetto deve stare SOPRA il minimo di mercato: cosi' la misura
+        # isola il ticket (se mordesse il cap sarebbe un problema di capitale).
+        monkeypatch.setenv("KELLY_MAX_STAKE_PCT", "0.12")
+
+    def test_caso_di_produzione_punta_il_floor(self):
+        """Equity 15,24 + EV 2,5%: la formula chiede 0.07, si punta 1.00."""
+        res = se.calculate_kelly_stake((0.025 + 1) / 1.81, 1.81, 15.24,
+                                       ev=0.025)
+        assert res["executable"] is True
+        assert res["stake"] == 1.00
+        assert res["floor_applied"] is True
+        assert res["kelly_stake"] < 1.00
+        assert res["effective_risk_pct"] == round(1.00 / 15.24, 6)
+        assert res["reason"] == "ok_at_floor"
+
+    def test_il_floor_e_il_minimo_ordine(self):
+        """Il floor applicato e' ESATTAMENTE il ticket del motore, che e' il
+        minimo eseguibile: non un importo inventato dalla formula."""
+        cfg = se.aggressive_config()
+        res = se.calculate_kelly_stake((0.05 + 1) / 1.70, 1.70, 15.24, ev=0.05)
+        assert res["stake"] == cfg["min_ticket"] == 1.00
+        assert res["floor_applied"] is True
+
+    def test_non_alza_mai_uno_stake_gia_eseguibile(self):
+        """Con capitale adeguato il Kelly governa: il floor non tocca nulla."""
+        res = se.calculate_kelly_stake((0.10 + 1) / 1.80, 1.80, 200.0, ev=0.10)
+        assert res["floor_applied"] is False
+        assert res["stake"] > 1.00
+        assert res["reason"] == "ok"
+        assert res["effective_risk_pct"] is None
+
+    def test_a_capitale_maggiore_il_floor_smette_di_mordere(self):
+        """Compounding: a 40 USDC con EV 10% il Kelly supera il minimo di
+        mercato e la taglia la decide la formula."""
+        res = se.calculate_kelly_stake((0.10 + 1) / 1.80, 1.80, 40.0, ev=0.10)
+        assert res["stake"] > 1.00
+        assert res["floor_applied"] is False
+
+    def test_un_pick_reale_del_ledger_trova_una_taglia(self):
+        """End-to-end sul pick misurato in produzione il 27/10 (p 0.5663 su
+        quota 1.81): prima usciva `below_min_ticket`, ora ha una taglia."""
+        auto_bet.set_last_bankroll(15.24)
+        pick = {"p_true": 0.5663, "top_down_ev": 0.025, "mercato": "1X2"}
+        res = auto_bet.kelly_size_for_pick(pick, price=1.81, bankroll=15.24)
+        assert res["stake"] == 1.00
+        assert res["floor_applied"] is True
+        assert res["effective_risk_pct"] == pytest.approx(0.065617, abs=1e-6)
+
+    def test_la_cassa_resta_un_vincolo_separato(self):
+        """Il floor non scavalca i fondi liberi: con 0.50 disponibili non si
+        ordina 1.00 (fail-closed, il motivo lo dichiara)."""
+        pick = {"p_true": 0.5663, "top_down_ev": 0.025, "mercato": "1X2"}
+        res = auto_bet.kelly_size_for_pick(pick, price=1.81, bankroll=15.24,
+                                           spendable=0.50)
+        assert res["stake"] == 0.0
+        assert res["reason"] == "below_min_ticket_cassa"
+
 
 class TestAggressiveCap:
     def test_e_il_5_percento(self):
