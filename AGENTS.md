@@ -14515,3 +14515,172 @@ riaccensione da env, banda non valida = spenta, `_env_float` fail-safe),
 che passa di default), `test_tennis_lane.TestFasciaQuota` (banda continua + la
 variante con la morta riaccesa), `test_flow_measure` (attribuzione
 `odds_dead_band` con la banda accesa, nessun motivo inventato a banda spenta).
+
+### 🔴 27/10/2026 — LA FORMULA DI KELLY NON ERA KELLY. Il conto del saldo e la soglia di top-up
+
+**Direttiva del proprietario**: controllo del bot (piazzamento in corso e
+precedente), controllo del saldo dall'inizio a oggi («penso che ti accorgerai
+delle perdite»), revisione di struttura e agenti, ricerca web.
+
+**1) IL CONTO, misurato e non dedotto** (`GET /api/dashboard`, `/api/agents`,
+`/api/credits`, container AMS, sola lettura — 27/10):
+
+| grandezza | valore |
+|---|---|
+| equity wallet SX | **16,2441 USDC** (era 47,16 il 09/09, picco **50,30** il 13/10) |
+| puntate live | **100** (50 vinte / 50 perse) + 1 SIM |
+| stake totale | **228,98 USDC** |
+| **P/L live** | **−20,19 USDC** (totale **−21,19** con la SIM) |
+| **ROI** | **−9,21%** |
+| per mercato | **1X2 n=49 −15,89 (−13,7%)** · **TENNIS n=51 −5,54 (−4,9%)** · ML n=1 +0,24 |
+| **CLV sulle puntate** | **+3,59%** (IC95 **+2,43/+4,76**, p≈0, **78,2% positive**, n=78 → `beating`) |
+| closing line | 200 chiuse, 41 con chiusura, 23 battute, beat medio **+1,49%** |
+| streak attuale | **9 vinte** (max storico 13) |
+| bet aperte | **2** · previsioni aperte 76 · `overdue_orphans` **0** |
+| crediti | **331** residui, reset fra **4 giorni**, ritmo 22/g (sostenibile 82,8) |
+| storage | volume 285/433 MB (66%), 2 backup `ok`, ultimo 0,8h |
+
+**Lettura onesta**: il PROCESSO batte il mercato (CLV +3,59% con IC tutto sopra
+zero, 78% dei campioni positivi) e il RISULTATO no (−9,21%). A 101 puntate
+questa combinazione e' compatibile con varianza **solo se lo stake era
+proporzionato**: qui non lo era, ed e' il punto 2.
+
+**2) CAUSA STRUTTURALE — `value_filter.kelly_fraction` NON era il Kelly.**
+
+    vecchia: (p*o − q) / o        con q = 1 − p
+    vera:    (p*o − 1) / (o − 1)  = edge / (o − 1)
+
+Due conseguenze, entrambe MISURATE sulle quote che giochiamo (1.30-2.00):
+
+| p | quota | EV | vecchia | vera | fattore |
+|---|---|---|---|---|---|
+| 0,5395 | 1,90 | +2,5% | 29,7% | **2,78%** | **10,7x** |
+| 0,60 | 1,66 | **−0,4%** | **35,9%** | **0** (`no_edge`) | ∞ |
+
+Cioe': sovrastima di 2,5-7x sui casi normali e **alloca denaro su scommesse a
+EV NEGATIVO**. Prova che era una COPIA divergente: il fallback della schedina
+(`web_api._schedina_json`) aveva gia' la formula **giusta**, mentre il motore
+(`adaptive_staking`), `decision/stake_engine` e il backtest usavano quella
+sbagliata.
+**Fix (una sola definizione)**: `value_filter.kelly_fraction` corretta +
+docstring con la storia; `adaptive_staking.adaptive_stake` **delega** (era una
+copia, ora importa `value_filter`); il fallback della schedina delega pure lui.
+`decision/stake_engine` usava gia' la funzione condivisa, quindi si e' corretto
+da solo.
+⚠️ **Nota di tempistica (per non attribuire la colpa a chi non ce l'ha)**: dal
+21/10 `ORDER_MAX_STAKE_USDC=1.00` e' il tetto che morde, quindi oggi la
+formula sbagliata era **mascherata** dal cap. Ha pesato nei giorni
+**14-21/10**, quando il tetto era il 12% dinamico (2,5-5,6 USDC): li' stanno le
+perdite singole piu' grosse del ledger (#55 −5,61 · #56 −5,14 · #73 −4,98 ·
+#60 −4,47 · #76/#78 −3,23). Il fix e' di **correttezza**: conta nel momento in
+cui il cap verra' rialzato.
+
+**3) `capital_adequacy.py` (NUOVO, 27 test offline) — la soglia di top-up,
+calcolata.** Risponde a una domanda sola: *quanto capitale serve perche' il
+minimo ordine dell'exchange (1 USDC) non sia un rischio piu' grande di quello
+che il Kelly giustifica?*
+
+    required_bankroll = floor / (kelly_full(p, odds) × k)
+
+Derivato dalle fonti di produzione (`value_filter.kelly_fraction`,
+`stake_engine.dynamic_kelly_fraction`), **mai** un numero copiato; le quote
+vengono dal **ledger** (mediana delle ultime 200 puntate live, fallback
+dichiarato). Nessuna lettura di rete, nessun ordine, nessuna scrittura.
+
+**Misura al 27/10 (equity 16,2441, quota tipica 1,90):**
+
+```
+🔴 CAPITALE: equity 16.24 USDC · floor 1.00 = 6.16% per puntata
+   rischio voluto (Kelly frazionato, EV 2.5%) = 0.42% → servono 240.00 USDC
+   stato: overbet · mancano 223.76 USDC
+```
+
+| livello EV | capitale minimo (floor 1 USDC, quota 1,90) |
+|---|---|
+| EV 2,5% (soglia di produzione) | **~240 USDC** |
+| EV 5% | ~120 USDC |
+| EV 10% | ~60 USDC |
+
+**Soglia di top-up consigliata: portare l'equity a ~150-240 USDC.** A ~150
+il floor da 1 USDC vale lo 0,67% (vicino allo 0,42-0,56% voluto) e il Kelly
+riprende a dimensionare davvero; sotto ~60 USDC il minimo dell'exchange resta
+almeno 5x il rischio giustificato e **nessuna taratura di Kelly puo'
+compensarlo** (il floor e' un vincolo dell'exchange, non una scelta).
+⚠️ Con 16,24 USDC la scelta vera non e' "quanto puntare" ma **"puntare o
+fermarsi"**: ogni puntata rischia il 6,2% di un patrimonio che serve a
+sopravvivere a ~16 puntate perse di fila (il ledger ne ha una serie da 8).
+
+**4) Superfici collegate** (perche' il numero deve essere VISIBILE):
+`GET /api/dashboard` espone `capital_adequacy` e **`bankroll_source`** — prima
+la dashboard mostrava `bankroll: 100.00` (il default) mentre il wallet aveva
+16,24: un numero che non era ne' patrimonio ne' errore. Ora legge l'**equity**
+(`order_watch.current_equity`), poi la cassa, poi il default, **dichiarando la
+fonte**. `GET /api/agents` porta lo stesso blocco dentro `capital` (e' una
+proprieta' del CAPITALE, non di una corsia); la pagina `/dashboard` della
+webapp mostra card "Capitale adeguato" con rischio reale vs voluto e il deficit.
+
+**5) RICERCA WEB — cosa e' stato assorbito e cosa no.**
+- **Thorp** (*The Kelly criterion in blackjack, sports betting, and the stock
+  market*, ripreso e simulato in Downey 2023): «overbetting is worse than
+  underbetting; **half-Kelly** protegge dal tasso di crescita negativo al costo
+  di ≤25% di crescita», e la ragione del Kelly frazionato non e' l'incertezza
+  di `p` (σ=5% sposta l'ottimo da 0,40 a 0,38: poco) ma **la tendenza
+  sistematica a SOVRASTIMARE p**.
+  → **Conferma la nostra configurazione** (k 0,15-0,25 = 60-100% sotto il pieno
+  Kelly) e, soprattutto, spiega il bias tennis misurato (EV dichiarato +5,45%
+  contro realizzato −7,53% = **+13pp di sovrastima**): il frazionamento
+  protettivo e' **giustificato dai dati**, non e' prudenza generica.
+- **Gestione multi-posizione** (Trademate Sports): «dimensionare 10 bet aperte
+  come se ognuna fosse sola sul bankroll intero committa piu' rischio di una
+  sequenza» → e' esattamente cio' che fanno **gia'** il recinto 30%, il cap di
+  correlazione 30% e il gate copula (M6). **Nulla da aggiungere**: misurato e
+  presente.
+- **Rischio di rovina / floor minimo**: la letteratura non ha una formula
+  "quanto capitale serve perche' il floor sia sostenibile" — `capital_adequacy`
+  la deriva dal Kelly stesso. E' l'unico pezzo nuovo che la ricerca non aveva.
+- **Scartato di proposito**: alzare il Kelly pieno o passare a k > 0,25. Con
+  CLV positivo ma ROI negativo su 101 campioni, e un bias di sovrastima di p
+  documentato, **aumentare la frazione e' l'unica mossa che la letteratura
+esclude esplicitamente**.
+
+**6) STRUTTURA E AGENTI — cosa e' stato guardato e l'esito.** Catena
+`Capo → Dati → Strategia → Analisi → Cervello → Finanza → Sizing → Advisor →
+Esecuzione`: tutti `ok` su `/api/agents`, Advisor `idle` («nessun piano
+bloccato») che e' lo stato corretto. Isolamento verificato: nessun agente
+importa un fratello (unica eccezione ammessa `.contracts`), i dati passano solo
+dal Capo, il lettore dell'esposizione lo inietta il Capo. Guardrail
+**A-J tutti bloccanti** dopo le modifiche (`verify_guardrails.py`, exit 0).
+**Nessuna modifica di struttura**: il difetto era la formula, non
+l'orchestrazione — e toccare la catena per un bug di una riga sarebbe stato il
+modo peggiore di risolverlo.
+
+**7) Residuo di riconciliazione (dichiarato, non corretto).** Il P/L del ledger
+(−20,19 live) e la caduta dell'equity dal picco (50,30 → 16,24 = −34,06) non
+coincidono: esiste un residuo storico non attribuibile gia' documentato
+(18/10: −2,26 in un solo giorno), coerente con riempimenti parziali su mercati
+``duplicati`. **SX Bet non espone lo storico ordini** (`/orders-v3` solo aperti,
+`/orders` 400 "OrderBook V2 no longer supported"), quindi la ricostruzione
+puntuale non e' possibile: si dichiara, non si "aggiusta" il ledger a mano.
+
+**Test**: `test_capital_adequacy.py` **27 verdi, tutti OFFLINE** (formula
+chiusa, regressione del bug con il fattore 10,7x, EV negativo che non alloca,
+derivazione del capitale minimo dalle fonti, ordine di grandezza al floor,
+stati adequate/thin/overbet, equity non determinabile che non solleva, mediana
+delle quote dal ledger temporaneo, fallback dichiarato, report, tripwire
+sola-lettura/nessuna-rete/nessuna-scrittura/import leggero, cablaggio
+dashboard e agenti). Aggiornati di proposito al Kelly corretto:
+`test_aggressive_kelly`, `test_agent_kelly`. Regressioni verdi: 288
+(`value_filter`, `adaptive_staking`, `agent_kelly`, `aggressive_kelly`),
+132 (`web_api`, `agent_board`, `order_watch`), 190 (`auto_bet_live`,
+`capital_enclosure`, `t60_breakers`), 155 (`decision_limits`,
+`decision_pipeline`, `lane_weighting`, `adaptive_weighting`, `risk_guards`),
+111 (`backtest_mc`, `decision_compare`, `decision_shadow`, `agent_hierarchy`).
+`verify_guardrails.py`: **A-J TUTTI BLOCCANO**. `compileall` OK, 0 marker di
+conflitto.
+
+⚠️ **Cosa NON e' stato fatto, e perche'**: nessun aumento di stake (la
+letteratura e il bias misurato lo escludono), nessuna modifica alle soglie di
+strategia (EV/edge/fascia restano quelli del 22/09 congelati), nessuna
+"correzione" a mano del ledger. La leva per uscire dalla buca non e' il sizing:
+e' **il capitale** (top-up a ~150-240) e la **selettivita'** gia' in corso (9
+vittorie di fila, CLV +3,59%).

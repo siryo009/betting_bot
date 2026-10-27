@@ -33,7 +33,7 @@ from agents.finance_agent import FinanceAgent
 from decision.models import DataQuality, Signal
 
 
-def _signal(match_id="sx-1", outcome="1", price=1.66, blended=0.65,
+def _signal(match_id="sx-1", outcome="1", price=1.66, blended=0.75,
             tier="strong_value", league="Premier League"):
     return Signal(
         match_id=match_id, outcome=outcome, market="1X2", price=price,
@@ -49,7 +49,7 @@ def _signal(match_id="sx-1", outcome="1", price=1.66, blended=0.65,
 def _trade(**kw):
     base = dict(signal_id="s1", match_id="sx-1", esito="1", market="1X2",
                 league="Premier League", home="Home", away="Away",
-                price=1.66, true_prob=0.60, ev=0.10)
+                price=1.66, true_prob=0.75, ev=0.10)
     base.update(kw)
     return ValidatedTrade(**base)
 
@@ -65,7 +65,7 @@ class TestSizeTrade:
         assert trade.executable is True
         # k dinamico (EV 10% + lega core -> verso il massimo della banda)
         assert 0.15 <= trade.kelly_fraction <= 0.25
-        full = vf.kelly_fraction(0.60, 1.66, fraction=1.0)
+        full = vf.kelly_fraction(0.75, 1.66, fraction=1.0)
         # Tetto per ordine 5% (13/10/2026): il Kelly pieno (8.85) viene troncato.
         assert trade.cap_usdc == 5.0
         assert trade.stake == min(round(100.0 * full * trade.kelly_fraction, 2),
@@ -75,7 +75,7 @@ class TestSizeTrade:
         assert trade.reason == "ok"
 
     def test_motore_sotto_il_ticket_non_esegue(self):
-        fin = FinanceAgent(bankroll=10.0)          # raw ~0.88 < ticket 1.00
+        fin = FinanceAgent(bankroll=10.0)          # raw ~0.74 < ticket 1.00
         trade = fin.size_trade(_trade())
         assert trade.stake == 0.0 and trade.executable is False
         assert trade.reason == "below_min_ticket"
@@ -243,7 +243,7 @@ class TestCatenaEndToEnd:
                                 if t.shield_action != "block"])
         assert s.executable == 1
         trade = s.trades[0]
-        # Kelly pieno 10.88 troncato dal tetto per ordine del 5% (5.00).
+        # Kelly pieno 37.08 troncato dal tetto per ordine del 5% (5.00).
         assert trade.stake == min(
             round(100.0 * trade.kelly_full * trade.kelly_fraction, 2), 5.0)
         assert trade.stake == 5.0

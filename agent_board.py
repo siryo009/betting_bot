@@ -627,6 +627,25 @@ def capital_snapshot() -> dict[str, Any]:
         })
     except Exception as exc:
         out["error"] = f"recinto non leggibile: {type(exc).__name__}: {exc}"
+    # Adeguatezza: con 1 USDC di floor e 16,24 di equity ogni puntata rischia
+    # il 6,2% del patrimonio contro lo 0,56% voluto dal Kelly. Il dato sta qui
+    # perche' e' una proprieta' del CAPITALE, non di una corsia.
+    try:
+        import capital_adequacy as _ca
+        _res = _ca.evaluate(float(equity))
+        out["capital_adequacy"] = {
+            "status": _res.get("status"),
+            "risk_pct_now": _res.get("risk_pct_now"),
+            "risk_pct_wanted": _res.get("risk_pct_wanted"),
+            "required_bankroll": _res.get("required_bankroll"),
+            "deficit": _res.get("deficit"),
+            "odds": _res.get("odds"),
+            "odds_source": _res.get("odds_source"),
+            "error": _res.get("error") or "",
+        }
+    except Exception as exc:
+        out["capital_adequacy"] = {"status": None,
+                                   "error": f"{type(exc).__name__}: {exc}"}
     return out
 
 

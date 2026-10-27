@@ -727,11 +727,34 @@ def multipla_stake(bankroll: float, prob: float, odds: float) -> float:
 
 
 def kelly_fraction(prob: float, odds: float, fraction: float = KELLY_BASE) -> float:
-    """Kelly Criterion frazionario (default: KELLY_BASE)"""
+    """Kelly Criterion frazionario (default: KELLY_BASE) sulle quote DECIMALI.
+
+    Formula CORRETTA (fix 27/10/2026): `f* = (p*o - 1) / (o - 1)`, cioe'
+    `edge / (o - 1)` con `edge = p*o - 1` (il valore atteso per unita').
+
+    ⚠️ STORIA — perche' questa riga e' cambiata. Fino al 27/10/2026 il
+    progetto usava `(p*o - q) / o` (con `q = 1 - p`), che NON e' il Kelly:
+    divide per `o` invece che per `o - 1` e **non usa il valore assoluto**
+    dell'edge. Due conseguenze misurate sul ledger di produzione:
+
+    1. **sovrastima di 2,5-7x** sulle quote che giochiamo (1.30-2.00): con
+       p 0,5395 e quota 1,90 (EV +2,5%) la vecchia formula diceva 29,7% di
+       bankroll, quella vera 2,78% — un fattore 10,7;
+    2. **alloca denaro su scommesse a EV NEGATIVO**: con p 0,60 e quota 1,66
+       (EV **-0,4%**) la vecchia formula dava 35,9% di bankroll, la vera
+       **-0,6%** (cioe' zero, `no_edge`).
+
+    Il risultato operativo era che il floor dell'exchange (1 USDC) sembrava
+    "Kelly frazionato" quando invece era ~11x il rischio voluto: con 16,24
+    USDC di equity ogni puntata rischiava il 6,2% del capitale contro lo
+    0,56% di un quarto di Kelly. Da qui la serie di perdite del 21-26/10.
+
+    La formula vive SOLO qui: `decision/stake_engine`, `adaptive_staking`,
+    la schedina e i backtest delegano (tripwire in `test_aggressive_kelly`).
+    """
     if odds <= 1.0:
         return 0.0
-    q = 1.0 - prob
-    kelly_full = (prob * odds - q) / odds
+    kelly_full = (prob * odds - 1.0) / (odds - 1.0)
     return max(0.0, kelly_full * fraction)
 
 

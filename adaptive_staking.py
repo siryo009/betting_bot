@@ -222,9 +222,12 @@ def adaptive_stake(bankroll: float, prob: float, odds: float,
         has_clv_positive=has_clv_positive,
         status=status)
 
-    # 2. Kelly completo e stake
-    q = 1.0 - prob
-    kelly_full = (prob * odds - q) / odds
+    # 2. Kelly completo e stake. La formula vive in `value_filter.kelly_fraction`
+    # (fix 27/10/2026): fino a ieri qui c'era una COPIA della formula sbagliata
+    # `(p*o - q)/o`, che sovrastimava lo stake di 2,5-7x sulle quote basse e
+    # allocava denaro anche su scontri a EV negativo. Una sola definizione.
+    import value_filter as _vf
+    kelly_full = float(_vf.kelly_fraction(prob, odds, fraction=1.0))
     kelly_raw = max(0.0, kelly_full * fraction)
     raw_stake = bankroll * kelly_raw
 

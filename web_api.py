@@ -281,17 +281,31 @@ def _dashboard_json(params=None):
         }
     except Exception:
         pass
-    # Bankroll REALE (SUM cassa.importo) invece del default env: si usa il
-    # valore reale SOLO se c'e' del movimento in cassa, altrimenti resta il
-    # bankroll di riferimento (BANKROLL_DEFAULT).
+    # Bankroll REALE, in ordine di autorevolezza (fix 27/10/2026): prima
+    # l'EQUITY del wallet SX (la stessa base su cui il bot dimensiona), poi la
+    # cassa simulata, poi `BANKROLL_DEFAULT`. Prima si leggeva solo la cassa e
+    # la dashboard mostrava **100.00** mentre il wallet conteneva 16,24 USDC:
+    # un numero che non era ne' il patrimonio ne' un errore — la classe di
+    # testo che mente del 13/09. `bankroll_source` dichiara da dove viene.
     bankroll = _bankroll()
+    bankroll_source = "default"
     try:
-        from adaptive_staking import bankroll_stats
-        _bs = bankroll_stats()
-        if _bs.get("current"):
-            bankroll = _bs["current"]
+        from order_watch import current_equity
+        _eq = current_equity()
+        if _eq and float(_eq) > 0:
+            bankroll = round(float(_eq), 4)
+            bankroll_source = "live_equity"
     except Exception:
         pass
+    if bankroll_source == "default":
+        try:
+            from adaptive_staking import bankroll_stats
+            _bs = bankroll_stats()
+            if _bs.get("current"):
+                bankroll = _bs["current"]
+                bankroll_source = "cassa"
+        except Exception:
+            pass
     # Segnali di mercato (RLM/steam/crollo) sugli stessi segnali value attivi:
     # la dashboard li mostra come monitor, stessi dati del report Telegram.
     market = {}
@@ -348,8 +362,20 @@ def _dashboard_json(params=None):
         storage = storage_status()
     except Exception as e:
         storage = {"ok": False, "level": "unknown", "error": str(e)}
+    # ADEGUATEZZA DEL CAPITALE (27/10/2026): il minimo ordine dell'exchange
+    # vale il 6,2% di un patrimonio di 16,24 USDC contro lo 0,56% chiesto dal
+    # Kelly. E' il motivo per cui lo stake non puo' essere "gestito": la
+    # dashboard lo dice insieme al capitale che servirebbe.
+    capital_adequacy = {}
+    try:
+        import capital_adequacy as _ca
+        capital_adequacy = _ca.evaluate(bankroll)
+    except Exception as e:
+        capital_adequacy = {"ok": False, "error": str(e)}
     return {
         "bankroll": bankroll,
+        "bankroll_source": bankroll_source,
+        "capital_adequacy": capital_adequacy,
         "roi_30gg": roi,
         "segnali_oggi": today_count,
         "chiusi_30gg": closed,
@@ -417,9 +443,14 @@ def _schedina_json(params=None):
             pick_data["stake_kelly"] = as_result["kelly_fraction"]
             pick_data["stake_reason"] = as_result["reason"]
         else:
-            # Fallback: 1/4 Kelly cap 3%
-            kelly_full = (prob * p["quota"] - 1) / (p["quota"] - 1) if p["quota"] > 1 else 0
-            stake = max(0, kelly_full * 0.25 * bankroll)
+            # Fallback: 1/4 Kelly cap 3%. La formula arriva da value_filter
+            # (definizione unica): una copia locale puo' divergere in silenzio.
+            try:
+                import value_filter as _vf
+                stake = max(0.0, bankroll
+                            * _vf.kelly_fraction(prob, p["quota"], 0.25))
+            except Exception:
+                stake = 0.0
             pick_data["stake"] = round(min(stake, bankroll * 0.03), 2)
             pick_data["stake_kelly"] = 0.25
             pick_data["stake_reason"] = "fallback (1/4 Kelly)"

@@ -7,6 +7,8 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 
 const DEMO = {
   bankroll: 500.0,
+  bankroll_source: 'demo',
+  capital_adequacy: { ok: true, status: 'adequate', risk_pct_now: 0.002, risk_pct_wanted: 0.0056, required_bankroll: 178.0, deficit: 0, equity: 500 },
   roi_30gg: 12.4,
   segnali_oggi: 3,
   chiusi_30gg: 18,
@@ -65,6 +67,16 @@ export default function Dashboard() {
   const ab = d.auto_bets || {}
   const pm = d.per_mercato || {}
   const bs = d.bankroll_stats || {}
+  // La fonte del saldo si dichiara: prima la card diceva "Saldo cassa reale"
+  // mentre mostrava il default di 100,00 con 16,24 USDC nel wallet (13/09 e
+  // 27/10: un testo che mente costa piu' di un numero mancante).
+  const bankrollSource = d.bankroll_source || ''
+  const bankrollLabel = bankrollSource === 'live_equity'
+    ? '\ud83d\udcb0 Equity wallet SX'
+    : bankrollSource === 'cassa' ? '\ud83d\udcb0 Saldo cassa (sim)' : '\ud83d\udcb0 Bankroll di riferimento'
+  const ca = d.capital_adequacy || {}
+  const caStatus = ca.status || 'unknown'
+  const caColor = caStatus === 'adequate' ? 'text-emerald-400' : caStatus === 'thin' ? 'text-amber-400' : 'text-red-400'
   const ms = d.market_signals || { summary: DEMO.market_signals.summary, signals: [] }
   const msSummary = ms.summary || {}
   const alerts: Signal[] = ms.signals || []
@@ -89,7 +101,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
         <div className="p-6 rounded-xl bg-gray-800 border-l-4 border-emerald-500 shadow-lg col-span-1 md:col-span-2">
           <div className="flex items-center justify-between mb-1">
-            <span className="text-gray-400 text-sm">💰 Saldo cassa reale</span>
+            <span className="text-gray-400 text-sm">{bankrollLabel}</span>
             <span className={`text-xs px-2 py-1 rounded ${Number(bs.drawdown_pct ?? 0) > 10 ? 'bg-red-900 text-red-300' : 'bg-emerald-900 text-emerald-300'}`}>
               {bs.risk_level || '🟢 OK'}
             </span>
@@ -101,6 +113,15 @@ export default function Dashboard() {
               {Number(bs.drawdown_pct ?? 0).toFixed(1)}%
             </span>
           </div>
+          {ca.ok !== false && Number(ca.required_bankroll) > 0 && (
+            <div className={`text-sm mt-2 ${caColor}`}>
+              {caStatus === 'adequate' ? '✅' : caStatus === 'thin' ? '⚠️' : '🔴'}{' '}
+              min. ordine = {(Number(ca.risk_pct_now ?? 0) * 100).toFixed(2)}% del capitale
+              {' · '}rischio voluto {(Number(ca.risk_pct_wanted ?? 0) * 100).toFixed(2)}%
+              {' → '}servono €{Number(ca.required_bankroll).toFixed(2)}
+              {Number(ca.deficit ?? 0) > 0 && <> {'·'} mancano €{Number(ca.deficit).toFixed(2)}</>}
+            </div>
+          )}
         </div>
         <Card title="📈 ROI 30gg" value={`${Number(d.roi_30gg).toFixed(1)}%`} color="blue" />
         <Card title="🎯 Segnali Oggi" value={String(d.segnali_oggi)} color="purple" />

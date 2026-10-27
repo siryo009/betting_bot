@@ -89,8 +89,8 @@ class TestCalculateKellyStake:
         verificato col Kelly pieno letto dalla STESSA fonte di produzione.
         Senza EV/edge/lega k cade al CENTRO della banda (0.20).
         """
-        full = vf.kelly_fraction(0.60, 1.66, fraction=1.0)
-        res = se.calculate_kelly_stake(0.60, 1.66, 30.0)
+        full = vf.kelly_fraction(0.75, 1.66, fraction=1.0)
+        res = se.calculate_kelly_stake(0.75, 1.66, 30.0)
         assert res["kelly_full"] == full
         assert res["kelly_fraction"] == 0.20          # centro banda
         assert res["kelly_dynamic"] is True
@@ -98,7 +98,7 @@ class TestCalculateKellyStake:
 
     def test_cap_dinamico_tronca(self):
         """Con k esplicito alto il cap vince sul Kelly: stake = cap, capped True."""
-        res = se.calculate_kelly_stake(0.60, 1.66, 100.0, kelly_fraction=0.65)
+        res = se.calculate_kelly_stake(0.75, 1.66, 100.0, kelly_fraction=0.65)
         assert res["cap_usdc"] == 5.0        # 5% di 100 (13/10/2026)
         assert res["capped"] is True
         assert res["stake"] == 5.0
@@ -112,8 +112,8 @@ class TestCalculateKellyStake:
 
     def test_ticket_minimo_scarta_l_operazione(self):
         """Sotto il ticket del motore (1.00) lo stake e' 0.0: mai un ordine
-        piu' piccolo del ticket (bankroll 10 -> k=0.20 -> raw 0.72)."""
-        res = se.calculate_kelly_stake(0.60, 1.66, 10.0)
+        piu' piccolo del ticket (bankroll 10 -> k=0.20 -> raw 0.74)."""
+        res = se.calculate_kelly_stake(0.75, 1.66, 10.0)
         assert res["stake"] == 0.0
         assert res["executable"] is False
         assert res["reason"] == "below_min_ticket"
@@ -121,7 +121,7 @@ class TestCalculateKellyStake:
     def test_sopra_il_ticket_passa(self):
         """Un raw sopra il ticket che sta ANCHE sotto il tetto del 5% passa
         intatto (raw 4.00 su equity 100, cap 5.00): il cap morde solo quando
-        il Kelly lo supera — che con p 0.60/quota 1.66 succede sempre."""
+        il Kelly lo supera — con p 0.75/quota 1.66 succede sempre."""
         res = se.calculate_kelly_stake(0.40, 3.00, 100.0)
         assert res["capped"] is False
         assert res["stake"] == round(res["raw_stake"], 2)  # 3.50 >= ticket 1.00
@@ -132,8 +132,8 @@ class TestCalculateKellyStake:
     def test_compounding_sul_bankroll(self):
         """Il capitale scala col capitale: raddoppia il bankroll, raddoppia il
         tetto (e' il senso del cap dinamico rispetto all'importo fisso)."""
-        a = se.calculate_kelly_stake(0.60, 1.66, 100.0)
-        b = se.calculate_kelly_stake(0.60, 1.66, 200.0)
+        a = se.calculate_kelly_stake(0.75, 1.66, 100.0)
+        b = se.calculate_kelly_stake(0.75, 1.66, 200.0)
         assert a["cap_usdc"] == 5.0 and b["cap_usdc"] == 10.0
         assert b["stake"] == 2 * a["stake"]
 
@@ -146,7 +146,7 @@ class TestCalculateKellyStake:
         assert se.calculate_kelly_stake(0.0, 1.66, 30.0)["reason"] == "invalid_inputs"
 
     def test_override_esplicito_dei_parametri(self):
-        res = se.calculate_kelly_stake(0.60, 1.66, 100.0,
+        res = se.calculate_kelly_stake(0.75, 1.66, 100.0,
                                        kelly_fraction=0.5,
                                        max_stake_pct=0.20,
                                        min_ticket=1.0)
@@ -261,18 +261,18 @@ class TestTrueProbability:
 
 class TestKellySizeForPick:
     def test_size_dal_motore(self):
-        pick = {"match_id": "m1", "esito_key": "1", "p_true": 0.60}
+        pick = {"match_id": "m1", "esito_key": "1", "p_true": 0.75}
         res = auto_bet.kelly_size_for_pick(pick, price=1.66, bankroll=100.0)
         # k = centro banda (0.20) senza EV/edge/lega nel pick: il raw e' la
         # formula del motore, il tetto del 5% lo tronca a 5.00.
         assert res["raw_stake"] == round(100.0 * res["kelly_full"] * 0.20, 6)
         assert res["stake"] == 5.0 and res["capped"] is True
         assert res["kelly_fraction"] == 0.20
-        assert res["true_prob"] == 0.60
+        assert res["true_prob"] == 0.75
 
     def test_ev_e_lega_alzano_il_k_dentro_la_banda(self):
         """EV forte + lega core -> k verso il massimo della banda (0.25)."""
-        base = {"match_id": "m1", "esito_key": "1", "p_true": 0.60}
+        base = {"match_id": "m1", "esito_key": "1", "p_true": 0.75}
         forte = {**base, "ev": 0.20, "market_edge": 0.05,
                  "league": "Premier League"}
         a = auto_bet.kelly_size_for_pick(base, price=1.66, bankroll=100.0)
@@ -288,14 +288,14 @@ class TestKellySizeForPick:
         """Con MENO fondi liberi del tetto e' la cassa a tagliare (il tetto del
         5% resta comunque il massimo: i soldi in escrow non si spendono due
         volte)."""
-        pick = {"p_true": 0.60}
+        pick = {"p_true": 0.75}
         res = auto_bet.kelly_size_for_pick(pick, price=1.66, bankroll=100.0,
                                            spendable=3.0)
         assert res["stake"] == 3.0 and res.get("cassa_capped") is True
 
     def test_cassa_sotto_ticket_scarta(self):
         """Anche col vincolo di cassa il ticket minimo vale."""
-        pick = {"p_true": 0.60}
+        pick = {"p_true": 0.75}
         res = auto_bet.kelly_size_for_pick(pick, price=1.66, bankroll=100.0,
                                            spendable=0.50)
         assert res["stake"] == 0.0
@@ -322,7 +322,7 @@ class TestRefreshLiveStakes:
     def test_ri_kelly_fresco_col_saldo(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
                             lambda **kw: _snapshot(available=100.0))
-        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
+        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.75,
                  "price": 1.66, "stake": 1.0}]
         kept, info = auto_bet.refresh_live_stakes(cand)
         assert info["ok"] is True and info["equity"] == 100.0
@@ -335,7 +335,7 @@ class TestRefreshLiveStakes:
     def test_il_capitale_fresco_alimenta_il_compounding(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
                             lambda **kw: _snapshot(available=200.0))
-        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
+        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.75,
                  "price": 1.66, "stake": 1.0}]
         kept, _ = auto_bet.refresh_live_stakes(cand)
         # Il compounding resta visibile anche col tetto del 5% che morde:
@@ -346,7 +346,7 @@ class TestRefreshLiveStakes:
         """corr_cap/total_cap decidono SE e QUANTO: il Kelly non li scavalca."""
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
                             lambda **kw: _snapshot(available=100.0))
-        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
+        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.75,
                  "price": 1.66, "stake": 9.0, "corr_cap": True}]
         kept, _ = auto_bet.refresh_live_stakes(cand)
         assert kept[0]["stake"] == 5.0      # solo min(stake, cap 5.00)
@@ -396,7 +396,7 @@ class TestRefreshLiveStakes:
         # controprova: una chiave qualsiasi NON dichiarata torna a passare dal
         # Kelly sul saldo fresco — il blocco `kelly` viene scritto (qui il
         # tetto del 5% morde comunque, quindi la discriminante e' il blocco).
-        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
+        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.75,
                  "price": 1.66, "stake": 9.0, "non_dichiarata": True}]
         kept, _ = auto_bet.refresh_live_stakes(cand)
         assert kept and "kelly" in kept[0]
@@ -404,7 +404,7 @@ class TestRefreshLiveStakes:
     def test_scarta_sotto_il_ticket(self, monkeypatch):
         monkeypatch.setattr(auto_bet, "_live_wallet_snapshot",
                             lambda **kw: _snapshot(available=10.0))   # raw 0.72 < ticket
-        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.60,
+        cand = [{"match_id": "m1", "esito_key": "1", "p_true": 0.75,
                  "price": 1.66, "stake": 1.0}]
         kept, info = auto_bet.refresh_live_stakes(cand)
         assert kept == [] and info["skipped"] == 1
@@ -515,8 +515,8 @@ class TestNormalizzazioneEvDelK:
         # le soglie del 26/10 il vecchio 1,0% coincide con la soglia liquida e
         # il test non distingueva piu' i due riferimenti).
         ev = (vf.ev_min("MLS", "OU") + vf.ev_min("MLS", "1X2")) / 2.0
-        senza = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=ev, league="MLS")
-        con = se.calculate_kelly_stake(0.60, 1.66, 30.0, ev=ev,
+        senza = se.calculate_kelly_stake(0.75, 1.66, 30.0, ev=ev, league="MLS")
+        con = se.calculate_kelly_stake(0.75, 1.66, 30.0, ev=ev,
                                       league="MLS", market="OU")
         assert senza["kelly_fraction"] == 0.15       # soglia 2.5% -> minimo
         assert con["kelly_fraction"] > senza["kelly_fraction"]
@@ -527,7 +527,7 @@ class TestNormalizzazioneEvDelK:
         la normalizzazione tornerebbe al 2.5% generico)."""
         monkeypatch.setenv("KELLY_AGGRESSIVE_ENABLED", "1")
         monkeypatch.setattr(auto_bet, "_LAST_BANKROLL", 100.0)
-        base = {"match_id": "m1", "esito_key": "1", "p_true": 0.60,
+        base = {"match_id": "m1", "esito_key": "1", "p_true": 0.75,
                 "quota": 1.66, "price": 1.66, "league": "MLS", "ev": 0.02}
         senza = auto_bet.kelly_size_for_pick({**base}, price=1.66, bankroll=100.0)
         con = auto_bet.kelly_size_for_pick({**base, "mercato": "OU"},
