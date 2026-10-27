@@ -14685,7 +14685,93 @@ strategia (EV/edge/fascia restano quelli del 22/09 congelati), nessuna
 e' **il capitale** (top-up a ~150-240) e la **selettivita'** gia' in corso (9
 vittorie di fila, CLV +3,59%).
 
-**8) DEPLOY ED ESITO VERIFICATO (27/10/2026).** Commit **`320d2d1`**
+**8) IL NUMERO CHE DECIDE: IL RISCHIO DI AUTO-ARRESTO (`scripts/stress_test_bankroll.py`).**
+Con equity **16,2441**, stake **1,00** (il floor), recinto 30%, **edge assunto
+ZERO** (l'ipotesi neutra corretta, visto che `significance` dice `no_edge`
+ovunque) e 300 puntate:
+
+| bankroll | RoR (toccare i 10 USDC del CB2) | MaxDD med | MaxDD p95 |
+|---|---|---|---|
+| **16,24** (oggi) | **64,8%** | 68,1% | **98,9%** |
+| **50** | **0,74%** | 28,2% | 58,3% |
+| 100 | ~0% | 13,6% | 29,3% |
+| **216** (capitale adeguato) | ~0% | 5,7% | 13,6% |
+
+**Lettura**: con 16,24 USDC il bot ha il **65% di probabilita' di auto-arrestarsi**
+(il pavimento CB2 a 10 USDC) prima di aver raccolto 300 ordini — cioe' prima di
+poter concludere qualcosa. **Da 16,24 a 50 USDC il rischio di rovina crolla di
+88x** (64,8% → 0,74%) al costo di ~34 USDC. E' il salto di qualita' piu' grande
+per dollaro speso di tutta la configurazione, e **non richiede una singola riga
+di codice**: lo stake non si puo' ridurre (1 USDC e' il minimo
+dell'exchange), quindi con 16 USDC "rischiare meno" e' aritmeticamente
+impossibile.
+**Il tetto dello stake NON e' la leva**: 1 USDC su 16,24 E' il 6,16%, e nessuna
+soglia di Kelly cambia un vincolo dell'exchange.
+
+**9) SIGNIFICATIVITA' — `no_edge` OVUNQUE (misurato, non dedotto).**
+`GET /api/significance` sull'intero ledger e su 4 fasce di quota: **tutte**
+`status = no_edge`, tutte con IC95 che attraversa lo zero (globale: ROI −4,14%,
+IC95 **−10,29/+2,00**). Per mercato: 1X2 **+0,56%**, AH −3,13%, OU −6,52%,
+TENNIS −6,20% — **nessuno** distinguibile da zero. Cioe': non c'e' prova che il
+sistema perda **ne'** che vinca, e quindi **non esiste evidenza per cambiare
+strategia**. L'unica conclusione che i dati sostengono e' sul CAPITALE e sul
+rischio di rovina.
+⚠️ Nota che vale la pena indagare in futuro: la telemetria delle **previsioni**
+1X2 sta a **+0,56%** mentre le **puntate reali** 1X2 stanno a **−13,7%**: le due
+popolazioni divergono, compatibile con la selezione avversa del riempimento (si
+riempiono solo le quote che il mercato offre contro di noi). Non e' un difetto
+dimostrato, e' un'ipotesi con un numero che la sostiene.
+
+**10) ⚠️ IL FIX DI KELLY HA FERMATO TUTTE LE PUNTATE — e non e' un bug.**
+Verificato con le **env REALI di produzione** (`railway run --service
+betting_bot`), non dedotto:
+
+```
+ORDER_FIXED_STAKE_USDC   = 0     aggressive_live_active() = True
+p 0.5550 @1.92 EV +6.56%  -> stake 0.0 (below_min_ticket)
+p 0.5663 @1.81 EV +2.50%  -> stake 0.0 (below_min_ticket)
+p 0.6200 @1.70 EV +5.40%  -> stake 0.0 (below_min_ticket)
+```
+
+Con 16,24 USDC il Kelly corretto chiede **0,05-0,10 USDC** per pick, sotto il
+ticket minimo del motore (1,00) — che e' anche il **minimo ordine
+dell'exchange**. Non esiste una via di mezzo: **o si punta 1 USDC (6,16% del
+patrimonio, ~13x il rischio voluto), o non si punta.** Il codice nuovo ha reso
+questo vincolo **esplicito e automatico** invece di mascherarlo dietro una
+formula gonfiata.
+→ Lezione operativa: dopo un fix di CORRETTEZZA su una formula che governa il
+denaro, va verificato **cosa cambia nel percorso reale**, non solo che i test
+passino. Il fix era giusto e ha cambiato il comportamento in modo sostanziale.
+
+**11) DECISIONE DEL PROPRIETARIO (27/10) e stato finale.** Presentata la scelta
+con i numeri (`ask_user`): l'opzione "nessun top-up, continuare come ora" non
+era piu' realizzabile cosi' com'era, perche' "come ora" era il comportamento
+PRIMA del fix. Scelta esplicita: **riattivare l'importo fisso a 1 USDC**, con
+consapevolezza del 6,16% per puntata e del 64,8% di auto-arresto a 10 USDC
+entro 300 ordini.
+
+`ORDER_FIXED_STAKE_USDC=1.00` (env su Railway, **gia' in `preserve()`** riga
+325 di `.railway/railway.ts`) + **redeploy `1d212924` SUCCESS**. Il valore e'
+letto **all'IMPORT** (`auto_bet` riga 268), quindi il set da solo non basta.
+**Verifica in PRODUZIONE** (`railway run`):
+
+```
+fixed_order_stake()      = 1.0
+fixed_stake_active()     = True
+aggressive_live_active() = False          <- il Kelly non governa piu' la corsia live
+order_stake(5.0, 14.24)  = 1.0            <- importo fisso, tetto rispettato
+order_stake(5.0, 0.50)   = 0.0            <- fondi insufficienti: fail-closed
+```
+
+Il percorso LEGACY **bypassa il Kelly ma non i guardrail**: restano attivi
+gate EV, oracolo top-down, finestra T-720..T-2, fascia quota, dedup, cap di
+correlazione 30%, recinto 30%, cap per evento, stops giornaliero/settimanale,
+CB2, gate copula e `portfolio_sizing`. Cambia **solo** la formula della taglia.
+⚠️ **Il fix di Kelly resta nel codice** e sara' quello a governare quando il
+capitale cresce (a ~162 USDC il Kelly corretto produce 1,00 USDC e torna sopra
+il ticket: `railway variables --set ORDER_FIXED_STAKE_USDC=0`).
+
+**12) DEPLOY ED ESITO VERIFICATO (27/10/2026).** Commit **`320d2d1`**
 pushato su `main` (`333d37c..320d2d1`) -> deployment **`2cebf508` SUCCESS**
 (04:09:50), `/api/health` **200**. Verifica in PRODUZIONE, con la prova
 numerica che il fix e' attivo (non dedotta):
