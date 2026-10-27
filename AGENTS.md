@@ -14979,4 +14979,26 @@ end-to-end, cassa ancora vincolo separato) + 116 (`capital_enclosure`,
 `decision_pipeline`, `decision_limits`) + 46 (`chief_shadow_wiring`,
 `decision_shadow`, `advisor_agent`, `secret_hygiene`) = **625 verdi**.
 `verify_guardrails.py`: **A-J TUTTI BLOCCANO** (exit 0); `compileall` OK, 0
-marker di conflitto;
+marker di conflitto.
+
+**7) IL LOG DICEVA LA COSA SBAGLIATA (trovato nella verifica end-to-end).** La
+riga del giro stampava ancora `stake fisso 0.00 USDC` — un residuo del percorso
+legacy (`fixed_order_stake()` a 0) che, con il motore Kelly a dimensionare,
+faceva leggere **un parametro di rischio inesistente** e nascondeva quello
+vero. Nuova **`auto_bet.stake_lane_label()`**: il testo si DERIVA da chi
+comanda davvero la corsia — `stake fisso X` se l'importo fisso e' attivo,
+`Kelly cap Y%, ticket Z USDC` se governa il motore, `nessuno stake automatico`
+se la corsia e' spenta (stessa lezione dei testi stantii del 13/09: un
+messaggio derivato non puo' divergere dalla soglia che descrive). Tripwire
+`test_aggressive_kelly.TestInterruttore.test_etichetta_della_corsia_derivata`
+(3 casi: fisso, Kelly, corsia spenta — e il testo NON deve contenere "fisso"
+quando il motore governa). ⚠️ La costante `FIXED_STAKE_USDC` si legge
+dall'env **all'IMPORT**, non a runtime: l'inversione si esercita sulla
+costante (un `setenv` misurerebbe il default e non la derivazione).
+
+**8) ESITO IN PRODUZIONE.** Env: `ORDER_FIXED_STAKE_USDC=0` (il motore
+governa), `ORDER_MAX_STAKE_USDC=1.00` (tetto di rischio invariato),
+`KELLY_MAX_STAKE_PCT=0.12`. Verificato sul container con `kelly_size_for_pick`
+sui pick reali: il Kelly chiede **0,07-0,48 USDC** e il motore restituisce
+**1,00 con `reason="ok_at_floor"`** e `effective_risk_pct` dichiarato — nessun
+pick piu' scartato per `below_min_ticket`.

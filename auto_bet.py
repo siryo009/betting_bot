@@ -2498,6 +2498,23 @@ def aggressive_live_active() -> bool:
     return STAKE_MODE != "flat"
 
 
+def stake_lane_label() -> str:
+    """Quale corsia dimensiona gli ordini REALI, come TESTO DERIVATO.
+
+    Serve per i log: dichiarare "stake fisso 0.00 USDC" mentre a dimensionare e'
+    il motore Kelly fa sbagliare la diagnosi di un parametro di RISCHIO (stessa
+    classe dei testi stantii del 13/09). Il testo si ricava dalle funzioni che
+    governano davvero la corsia, mai da un valore scritto a mano.
+    """
+    fixed = fixed_order_stake()
+    if fixed > 0:
+        return f"stake fisso {fixed:.2f} USDC"
+    if aggressive_live_active():
+        return (f"Kelly cap {aggressive_cap_pct() * 100:.0f}%, "
+                f"ticket {aggressive_min_ticket():.2f} USDC")
+    return "nessuno stake automatico (corsia non attiva)"
+
+
 def order_stake(stake: float, spendable: float = float("inf"),
                 bankroll: float | None = None) -> float:
     """Stake FINALE di un ordine REALE — unico punto di verita'.
@@ -5844,11 +5861,11 @@ def run_today_bets(stake_eur: float | None = None,
                           "cap": exposure_state.get("cap")})
     elif mode == "live":
         logger.info("auto_bet: esposizione aperta %.2f/%.2f USDC su %s ordini "
-                    "(cap %.0f%%, stake fisso %.2f USDC)",
+                    "(cap %.0f%%, %s)",
                     exposure_state.get("open_stake") or 0.0,
                     exposure_state.get("cap") or 0.0,
                     exposure_state.get("count"),
-                    OPEN_EXPOSURE_CAP_PCT * 100, fixed_order_stake())
+                    OPEN_EXPOSURE_CAP_PCT * 100, stake_lane_label())
 
     # Carica CLV storico per la confidenza
     try:

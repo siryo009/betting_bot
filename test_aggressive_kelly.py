@@ -553,6 +553,32 @@ class TestInterruttore:
         monkeypatch.setattr(auto_bet, "STAKE_MODE", "flat")
         assert auto_bet.aggressive_live_active() is False
 
+    def test_etichetta_della_corsia_derivata(self, monkeypatch):
+        """L'etichetta nei log si DERIVA da chi dimensiona davvero: dichiarare
+        "stake fisso 0.00 USDC" mentre governa il motore Kelly farebbe
+        sbagliare la diagnosi di un parametro di rischio.
+
+        Nota: `FIXED_STAKE_USDC` si legge dall'env all'IMPORT (non a runtime),
+        quindi l'inversione si esercita sulla costante — come fanno tutti gli
+        altri test di questo file. Un `setenv` qui misurerebbe il default e
+        non la derivazione.
+        """
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 1.50)
+        monkeypatch.setattr(auto_bet, "ORDER_MAX_STAKE_USDC", 0.0)
+        assert "fisso 1.50" in auto_bet.stake_lane_label()
+
+        monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
+        monkeypatch.delenv("KELLY_AGGRESSIVE_ENABLED", raising=False)
+        monkeypatch.setattr(auto_bet, "STAKE_MODE", "adaptive")
+        label = auto_bet.stake_lane_label()
+        assert "Kelly" in label and "ticket 1.00" in label
+        # Il testo NON deve dichiarare un importo fisso quando il motore
+        # governa: era l'errore del log del 27/10 ("stake fisso 0.00 USDC").
+        assert "fisso" not in label
+
+        monkeypatch.setenv("KELLY_AGGRESSIVE_ENABLED", "0")
+        assert "non attiva" in auto_bet.stake_lane_label()
+
     def test_interruttore_spegne_la_corsia(self, monkeypatch):
         monkeypatch.setenv("KELLY_AGGRESSIVE_ENABLED", "0")
         monkeypatch.setattr(auto_bet, "FIXED_STAKE_USDC", 0.0)
