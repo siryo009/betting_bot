@@ -14789,9 +14789,66 @@ bets          : n=101 won=50 lost=51 stake=229.98 pnl=-21.19 roi=-9.21
 la quota tipica letta dal ledger di produzione (1,81) e EV 2,5% -> `p 0,5663`,
 `kelly_full = (0,5663·1,81 − 1)/(1,81 − 1) = 0,0309`; `× k 0,15 = 0,463%`.
 Con la formula VECCHIA lo stesso input avrebbe dato `(1,0250 − 0,4337)/1,81 =
-0,3267`, cioe' `× 0,15 = 4,9%` — **10,6x di differenza**. Il numero in
-produzione e' quello corretto.
+0,3267`, cioe' `× 0,15 = 4,9%` — **10,6x di differenza**. Il numeroin produzione e' quello corretto.
 ⚠️ Nota di derivazione: il capitale richiesto misurato e' **216 USDC** (non i
 240 del test locale che usavano la quota 1,90): `capital_adequacy` legge la
 quota **tipica dal ledger di produzione** (1,81), quindi il numero segue i dati
 invece di un valore di esempio. Su 1,81 servono ~216 USDC, su 1,90 ~240.
+
+### Riarmo della taglia e del pavimento: 1,00 -> 1,50 con i muri riallineati (27/10/2026)
+
+Richiesta del proprietario: *"rialza il soft floor del CB2 e il tetto per
+ordine ora che l'equity e' scesa a 15 USDC, cosi' il bot non si ferma dopo
+pochi ordini"*. **Tre premesse non reggevano, tutte misurate PRIMA di toccare
+le env** — e ognuna avrebbe prodotto un no-op o un effetto opposto.
+
+1. **Alzare il TETTO per ordine da solo non cambia NULLA.**
+   `fixed_order_stake()` = `min(ORDER_FIXED_STAKE_USDC, ORDER_MAX_STAKE_USDC)`:
+   con l'importo fisso a **1,00** il tetto era gia' il valore attivo. La leva
+   vera e' l'IMPORTO; il tetto va solo allineato a esso, altrimenti resta un
+   vincolo morto (ed e' la ragione per cui `ORDER_MAX_STAKE_USDC` < importo
+   taglierebbe in silenzio un ordine che sembra configurato piu' grande).
+2. **Il soft floor era INERTE e "rialzarlo" andava CONTRO l'obiettivo.**
+   `CB2_SOFT_FLOOR_USDC` e `T60_KILL_WALLET_USDC` erano **entrambi 12**: nessun
+   cuscinetto (il muro duro scattava nello stesso istante) e un valore piu' alto
+   avrebbe sospeso le puntate ancora prima. Perche' la guardia morbida serva,
+   deve stare **sopra** il muro duro.
+3. **Il vincolo che mordeva non era il recinto percentuale ma lo SPAZIO AL
+   MURO.** `open_exposure_cap` vince il piu' stretto fra: floor in ordini
+   (`max`, 8 x 1,00 = 8,00), 30% del bankroll (4,57) e
+   `equity - T60_KILL_WALLET_USDC` -> **3,24**: il recinto effettivo era
+   **3,00 = 3 ordini**, con il 30% che non entrava mai in gioco.
+
+**Scelte del proprietario** (`ask_user`, con i numeri sopra): importo **1,50
+USDC**, pavimento **duro 8 / soft 9**.
+
+| grandezza | prima | dopo |
+|---|---|---|
+| stake per ordine (`ORDER_FIXED_STAKE_USDC`) | 1,00 | **1,50** |
+| tetto per ordine (`ORDER_MAX_STAKE_USDC`) | 1,00 | **1,50** |
+| muro CB2 duro (`T60_KILL_WALLET_USDC`) | 12 | **8** |
+| soft floor (`CB2_SOFT_FLOOR_USDC`) | 12 (= duro, inerte) | **9** (cuscinetto 1 sopra il duro) |
+| spazio fino al muro | 3,24 | **7,24** |
+| recinto ordini aperti | 3,00 (3 ordini) | **6,00 (4 ordini)** |
+| stop dopo perdite | 3,24 USDC | **7,24 USDC** |
+| rischio per puntata | 6,56% | **9,84%** |
+
+**Verificato in produzione** (container AMS, dopo il redeploy): env
+`1.50 / 1.50 / 8 / 9`; `fixed_order_stake()` **1.50** con
+`fixed_stake_active()` True; `order_ceiling(15.2441)` **1.50**;
+`open_exposure_cap(15.2441)` = **6.00** con la regola dichiarata ("4 ordini da
+1.50 USDC = 6.00 · min fra 30% di 15.24 = 4.57, floor di 8 ordini = 12.00
+(vince sul 30%), spazio al muro CB2 7.24 (vince il piu' stretto)"); soft floor
+`{floor 9, hard 8, blocked False}`; e la riga del giro:
+`esposizione aperta 1.00/6.00 USDC su 1 ordini (cap 30%, stake fisso 1.50
+USDC)`. `railway config plan` = **already up to date** (le quattro env erano
+gia' `preserve()` in `.railway/railway.ts`). **Nessuna modifica di codice**:
+solo env (lette all'IMPORT -> redeploy necessario).
+
+**Il conto che resta scomodo** (misurato, non stimato):
+`capital_adequacy.py --equity 15.2441` -> il floor da 1,00 vale **6,56% del
+capitale per puntata** contro un rischio voluto di **0,42%**: servirebbero
+**240 USDC** (216 con la quota tipica 1,81 letta dal ledger di produzione). A
+**1,50** il rischio per puntata sale a **9,84%**, cioe' ~21x il rischio che la
+strategia giustifica. Allargare i muri compra **piu' ordini**, non un edge:
+le due leve restano **capitale** e **selettivita'**.
