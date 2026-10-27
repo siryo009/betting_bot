@@ -14684,3 +14684,28 @@ strategia (EV/edge/fascia restano quelli del 22/09 congelati), nessuna
 "correzione" a mano del ledger. La leva per uscire dalla buca non e' il sizing:
 e' **il capitale** (top-up a ~150-240) e la **selettivita'** gia' in corso (9
 vittorie di fila, CLV +3,59%).
+
+**8) DEPLOY ED ESITO VERIFICATO (27/10/2026).** Commit **`320d2d1`**
+pushato su `main` (`333d37c..320d2d1`) -> deployment **`2cebf508` SUCCESS**
+(04:09:50), `/api/health` **200**. Verifica in PRODUZIONE, con la prova
+numerica che il fix e' attivo (non dedotta):
+
+```
+bankroll      : 16.2441 | fonte: live_equity        <- era 100.0 senza fonte
+adeguatezza   : ok=True status=overbet equity=16.2441
+                risk_pct_now_label='6.16%' risk_pct_wanted=0.00463
+                required_bankroll=216.0 deficit=199.76
+                odds=1.81 odds_source='ledger'
+bets          : n=101 won=50 lost=51 stake=229.98 pnl=-21.19 roi=-9.21
+```
+
+**Perche' `risk_pct_wanted 0.00463` PROVA che la formula corretta e' live**: con
+la quota tipica letta dal ledger di produzione (1,81) e EV 2,5% -> `p 0,5663`,
+`kelly_full = (0,5663·1,81 − 1)/(1,81 − 1) = 0,0309`; `× k 0,15 = 0,463%`.
+Con la formula VECCHIA lo stesso input avrebbe dato `(1,0250 − 0,4337)/1,81 =
+0,3267`, cioe' `× 0,15 = 4,9%` — **10,6x di differenza**. Il numero in
+produzione e' quello corretto.
+⚠️ Nota di derivazione: il capitale richiesto misurato e' **216 USDC** (non i
+240 del test locale che usavano la quota 1,90): `capital_adequacy` legge la
+quota **tipica dal ledger di produzione** (1,81), quindi il numero segue i dati
+invece di un valore di esempio. Su 1,81 servono ~216 USDC, su 1,90 ~240.
