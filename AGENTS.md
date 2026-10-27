@@ -14852,3 +14852,55 @@ capitale per puntata** contro un rischio voluto di **0,42%**: servirebbero
 **1,50** il rischio per puntata sale a **9,84%**, cioe' ~21x il rischio che la
 strategia giustifica. Allargare i muri compra **piu' ordini**, non un edge:
 le due leve restano **capitale** e **selettivita'**.
+
+#### Misura del rischio di rovina per muro e taglia (27/10/2026)
+
+Richiesta: *"valuta di abbassare ancora il muro CB2 per liberare spazio al
+recinto, con la misura del rischio di rovina prima e dopo"*. Misura eseguita
+con lo strumento esistente (`scripts/stress_test_bankroll.py`, 100.000 percorsi
+x 500 puntate, quota 1,81), passandogli il recinto **REALE** di ogni scenario
+via `auto_bet.open_exposure_cap`: il tool conosce solo il cap percentuale, e a
+questo capitale il vincolo che morde e' lo **spazio al muro**, non il 30%.
+
+| muro CB2 | recinto | ordini | arresto% | MaxDD mediano | eq p5 |
+|---|---|---|---|---|---|
+| **8 (attuale)** | 6,00 | 4 | 77,2% | 83,6% | 0,15 |
+| 6 | 9,00 | 6 | 71,9% | 83,1% | 0,17 |
+| 5 | 9,00 | 6 | 69,2% | 83,1% | 0,17 |
+| 4 | 10,50 | 7 | 68,1% | 82,7% | 0,17 |
+| 3 | 12,00 | 8 | 63,8% | 82,5% | 0,17 |
+
+**La trappola di lettura**: `arresto%` misura la probabilita' di TOCCARE il
+muro, quindi abbassarlo la fa scendere **per definizione** — come un'auto che si
+schianta meno spesso contro un muro spostato tre metri piu' in la'. Il rischio
+non cambia: il **MaxDD mediano resta ~83% in ogni scenario** e il 5% peggiore
+finisce comunque a ~0,15 USDC. E il prezzo e' concreto: il muro a 8 conserva
+**8 USDC** (52% del capitale), quello a 3 ne conserva **3** (20%).
+
+**Con l'edge MISURATO il muro e' irrilevante**: con l'edge reale dal ledger
+(**-5,75pp**, ROI -9,2% su 101 puntate chiuse a quota media 1,81) l'arresto e'
+**99,83% a muro 8** e **99,40% a muro 3**. Il pavimento conta solo **se l'edge
+esiste**: con l'edge dichiarato (+2,5pp) l'arresto scende al 49% e la mediana
+finale sarebbe 41 USDC. La variabile e' l'edge, non il pavimento.
+
+**La leva che riduce il rischio E libera piu' ordini** (edge 0, muro 8):
+
+| stake | ordini in parallelo | arresto% |
+|---|---|---|
+| **1,00** | **7** | **67,0%** |
+| 1,50 | 4 | 77,2% |
+| 2,00 | 2 | 83,0% |
+
+Il vincolo e' strutturale: `equity - muro = 7,24 USDC`, quindi con taglia 1,50
+ci stanno 4 ordini e con 1,00 ne stanno 7. Non ci sono altre strade a questo
+capitale (il 30% del recinto non entra mai in gioco).
+
+**Scelta del proprietario** (`ask_user`): muro **8 invariato**, taglia **1,00**
+(`ORDER_FIXED_STAKE_USDC` e `ORDER_MAX_STAKE_USDC` 1,50 -> 1,00).
+**Verificato in produzione**: `fixed_order_stake()` 1.00,
+`order_ceiling(15.2441)` 1.00, `open_exposure_cap` = **7.00 -> 7 ordini da
+1.00** (era 6,00 = 4 da 1,50), soft floor `{9 / hard 8 / blocked False}`,
+riga del giro `esposizione aperta 1.00/7.00 USDC su 1 ordini (cap 30%, stake
+fisso 1.00 USDC)`, `/api/health` 200. Nessuna modifica di codice: **2 env**,
+gia' `preserve()` in `.railway/railway.ts` (`railway config plan` = already up
+to date).
