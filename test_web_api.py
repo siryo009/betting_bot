@@ -110,6 +110,55 @@ class TestDashboardClosingLine:
         assert cl["with_closing"] == 40
 
 
+class TestDashboardBetsBreakdown:
+    """(27/10/2026) Il controllo delle puntate: in corso, per mercato, per
+    fascia di quota. Senza questo split il totale dice solo QUANTO si perde,
+    non DOVE."""
+
+    def test_sezione_presente(self):
+        ab = web_api._dashboard_json()["auto_bets"]
+        for key in ("by_market", "by_band", "by_day", "open", "open_n",
+                    "open_stake", "last"):
+            assert key in ab, key
+
+    def test_puntate_in_corso_e_per_mercato(self):
+        tracker.save_bet("t1", "TENNIS", "1", price=1.45, stake=1.0,
+                         mode="live", status="FULLY_FILLED")
+        tracker.save_bet("t2", "TENNIS", "2", price=1.60, stake=1.0,
+                         mode="live", status="FULLY_FILLED")
+        conn = tracker._get_conn()
+        conn.execute("UPDATE bets SET esito_finale='lost', profit=-1.0 "
+                     "WHERE match_id='t1'")
+        conn.commit()
+        ab = web_api._dashboard_json()["auto_bets"]
+        assert ab["by_market"]["TENNIS"]["n"] == 1
+        assert ab["by_market"]["TENNIS"]["roi"] == pytest.approx(-100.0)
+        assert ab["open_n"] == 1
+        assert ab["open_stake"] == pytest.approx(1.0)
+        assert ab["open"][0]["match_id"] == "t2"
+
+
+class TestDashboardBetsClv:
+    """Il CLV dei SOLDI (puntate live vs closing) accanto a quello dei
+    segnali: due popolazioni che non vanno confuse."""
+
+    def test_sezione_presente(self):
+        d = web_api._dashboard_json()
+        assert "bets_clv" in d
+        assert "status" in d["bets_clv"]
+
+    def test_puntata_con_closing_calcola_il_clv(self):
+        tracker.save_bet("m1", "1X2", "1", price=1.70, stake=1.0,
+                         mode="live", status="FULLY_FILLED",
+                         home="Casa", away="Ospite")
+        tracker.save_clv("m1", "1", 1.70, signal_started=True,
+                         closing_odds=1.60, closing_source="pinnacle_t0")
+        bc = web_api._dashboard_json()["bets_clv"]
+        assert bc["n"] == 1
+        assert bc["avg_clv"] == pytest.approx(1.70 / 1.60 - 1, abs=1e-6)
+        assert bc["trades"] == 1
+
+
 class TestStorico:
     def test_storico_vuoto(self, monkeypatch):
         s = web_api._storico_json()

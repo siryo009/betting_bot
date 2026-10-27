@@ -202,24 +202,55 @@ def _clv_stats(conn, start: str, end: str) -> Dict:
     }
 
 
+#: Fasce di quota del controllo delle puntate reali (27/10/2026). Sono le
+#: fasce su cui il progetto ha gia' misurato differenze di rendimento: la
+#: tabella serve a leggere il P/L DOVE sta il denaro, non a filtrare nulla.
+BET_ODDS_BANDS = ((1.0, 1.30), (1.30, 1.50), (1.50, 1.80),
+                  (1.80, 2.00), (2.00, 2.30), (2.30, 1000.0))
+
+
+def _band_label(price: float) -> str:
+    """Etichetta della fascia di quota (estremo inferiore incluso)."""
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return "n/d"
+    for lo, hi in BET_ODDS_BANDS:
+        if lo <= p < hi:
+            return (f"{lo:.2f}-{hi:.2f}" if hi < 1000 else f">={lo:.2f}")
+    return "n/d"
+
+
 def _bets_stats(conn, start: str, end: str) -> Dict:
-    """Statistiche puntate automatiche nel periodo."""
+    """Statistiche puntate automatiche nel periodo.
+
+    Oltre al totale (e allo split per `mode`) espone la ripartizione che serve a
+    CAPIRCI qualcosa: per mercato, per fascia di quota, per lega, per giorno,
+    piu' le puntate ancora APERTE e le ultime chiuse. Il 27/10/2026 il conto
+    live era a -8,8% di ROI su 100 puntate e il dashboard mostrava solo il
+    totale: senza lo split non si poteva dire QUALE corsia perdeva (il tennis
+    pesava zero sul totale e la meta' delle puntate).
+    """
     c = conn.cursor()
     rows = c.execute(
-        "SELECT price, stake, esito_finale, profit, mode "
+        "SELECT price, stake, esito_finale, profit, mode, mercato, league, "
+        "       match_id, created_at, settled_at "
         "FROM bets WHERE created_at >= ? AND created_at <= ? "
-        "AND esito_finale IS NOT NULL",
+        "AND esito_finale IS NOT NULL ORDER BY settled_at",
         (start, end + "T23:59:59")).fetchall()
 
     if not rows:
-        return {"n": 0, "pnl": 0, "roi": 0, "modes": {}}
+        return {"n": 0, "pnl": 0, "roi": 0, "modes": {}, "by_market": {},
+                "by_band": {}, "by_league": {}, "by_day": {},
+                "open": [], "open_n": 0, "open_stake": 0.0, "last": []}
 
     total_stake = sum(_safe_float(r[1]) for r in rows)
     total_pnl = sum(_safe_float(r[3]) for r in rows)
     won = sum(1 for r in rows if r[2] == "won")
 
     modes = {}
-    for _, stake, esito, profit, mode in rows:
+    for row in rows:
+        stake, esito, profit, mode = row[1], row[2], row[3], row[4]
         m = mode or "unknown"
         if m not in modes:
             modes[m] = {"n": 0, "won": 0, "stake": 0, "pnl": 0}
@@ -228,6 +259,70 @@ def _bets_stats(conn, start: str, end: str) -> Dict:
         modes[m]["pnl"] += _safe_float(profit)
         if esito == "won":
             modes[m]["won"] += 1
+
+    def _bucket(buckets, key, stake, esito, profit):
+        # Il dizionario e' un PARAMETRO esplicito: chiuso nella closure veniva
+        # riusato l'ULTIMO legato dal ciclo (il giorno finiva dentro le leghe).
+        d = buckets.setdefault(key, {"n": 0, "won": 0, "lost": 0,
+                                     "stake": 0.0, "pnl": 0.0})
+        d["n"] += 1
+        d["stake"] += stake
+        d["pnl"] += profit
+        if esito == "won":
+            d["won"] += 1
+        elif esito == "lost":
+            d["lost"] += 1
+
+    by_market: Dict = {}
+    by_band: Dict = {}
+    by_league: Dict = {}
+    by_day: Dict = {}
+    for price, stake, esito, profit, mode, mkt, league, _mid, _cr, settled in rows:
+        st = _safe_float(stake)
+        pl = _safe_float(profit)
+        for key, buckets in (
+                ((mkt or "1X2").upper(), by_market),
+                (_band_label(price), by_band),
+                ((league or "n/d"), by_league)):
+            _bucket(buckets, key, st, esito, pl)
+        day = (settled or _cr or "")[:10] or "n/d"
+        _bucket(by_day, day, st, esito, pl)
+
+    def _finalize(buckets):
+        out = {}
+        for k, v in buckets.items():
+            st = v["stake"]
+            closed = v["won"] + v["lost"]
+            out[k] = {"n": v["n"], "won": v["won"], "lost": v["lost"],
+                      "stake": round(st, 2), "pnl": round(v["pnl"], 2),
+                      "roi": round(v["pnl"] / st * 100, 2) if st > 0 else 0,
+                      "hit_rate": (round(v["won"] / closed * 100, 1)
+                                   if closed else 0)}
+        return out
+
+    # Ultime chiuse: servono a vedere il P/L RECENTE (l'aggregato lo diluisce).
+    last = [{"match_id": r[7], "mercato": (r[5] or "1X2"),
+             "esito": r[2], "price": round(_safe_float(r[0]), 4),
+             "stake": round(_safe_float(r[1]), 2),
+             "pnl": round(_safe_float(r[3]), 2),
+             "league": r[6] or "",
+             "settled_at": (r[9] or "")[:19]}
+            for r in rows[-10:]][::-1]
+
+    # Puntate ANCORA APERTE (indipendenti dalla finestra: sono capitale
+    # impegnato ADESSO, e il loro stadio e' il "piazzamento in corso").
+    open_rows = c.execute(
+        "SELECT match_id, mercato, esito, price, stake, created_at, "
+        "       home, away, league, commence "
+        "FROM bets WHERE esito_finale IS NULL ORDER BY created_at DESC"
+    ).fetchall()
+    open_bets = [{"match_id": r[0], "mercato": (r[1] or "1X2"),
+                  "esito": r[2], "price": round(_safe_float(r[3]), 4),
+                  "stake": round(_safe_float(r[4]), 2),
+                  "created_at": (r[5] or "")[:19],
+                  "match": (f"{r[6]} - {r[7]}" if r[6] else ""),
+                  "league": r[8] or "", "commence": (r[9] or "")[:19]}
+                 for r in open_rows]
 
     return {
         "n": len(rows),
@@ -239,6 +334,14 @@ def _bets_stats(conn, start: str, end: str) -> Dict:
         "modes": {k: {kk: round(vv, 2) if isinstance(vv, float) else vv
                        for kk, vv in v.items()}
                   for k, v in modes.items()},
+        "by_market": _finalize(by_market),
+        "by_band": _finalize(by_band),
+        "by_league": _finalize(by_league),
+        "by_day": _finalize(by_day),
+        "open": open_bets[:10],
+        "open_n": len(open_bets),
+        "open_stake": round(sum(_safe_float(r[4]) for r in open_rows), 2),
+        "last": last,
     }
 
 
@@ -437,8 +540,17 @@ def _report(res: Dict) -> str:
             f"   Totale: {bets['n']} (V {bets.get('won', 0)} / P {bets.get('lost', 0)})",
             f"   Stake totale: €{bets['total_stake']:.2f}",
             f"   P/L: €{bets['pnl']:+.2f} (ROI {bets['roi']:+.1f}%)",
+            (f"   Aperte: {bets['open_n']} (€{bets['open_stake']:.2f} impegnati)"
+             if bets.get("open_n") else "   Aperte: 0"),
             "",
         ])
+        # Per mercato: il totale da solo non dice DOVE si perde (27/10/2026).
+        for mkt, data in sorted(bets.get("by_market", {}).items(),
+                                key=lambda x: x[1]["roi"], reverse=True):
+            mark = "🔥" if data["roi"] > 0 else "❄️"
+            lines.append(f"   {mark} {mkt}: n={data['n']} "
+                         f"ROI {_fmt_pct(data['roi'])}")
+        lines.append("")
 
     # Bankroll
     lines.extend([

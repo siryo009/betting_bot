@@ -155,6 +155,87 @@ class TestEdgeAnalysis:
         assert e["weak_n"] == 1
 
 
+def _seed_bet(match_id, mercato, price, stake, mode="live", league="Serie A",
+              profit=None):
+    """Puntata chiusa (o aperta se `profit` e' None) con esito noto."""
+    import sqlite3
+    tracker.save_bet(match_id, mercato, "1", price=price, stake=stake,
+                     mode=mode, status="FULLY_FILLED",
+                     home="Casa", away="Ospite", league=league)
+    if profit is None:
+        return
+    conn = sqlite3.connect(tracker.DB_PATH)
+    conn.execute("UPDATE bets SET esito_finale=?, profit=? WHERE match_id=?",
+                 ("won" if profit > 0 else "lost", profit, match_id))
+    conn.commit()
+
+
+class TestBetsBreakdown:
+    """Split delle puntate reali (27/10/2026): il totale non dice DOVE si perde."""
+
+    def test_vuoto_ha_la_forma_completa(self, temp_db):
+        conn = tracker._get_conn()
+        d = performance_report._bets_stats(conn, "2020-01-01", "2030-01-01")
+        assert d["n"] == 0
+        for key in ("by_market", "by_band", "by_league", "by_day",
+                    "open", "last"):
+            assert key in d, key
+        assert d["open_n"] == 0 and d["open_stake"] == 0.0
+
+    def test_split_per_mercato_e_banda(self, temp_db):
+        _seed_bet("t1", "TENNIS", 1.45, 1.0, profit=0.45)
+        _seed_bet("t2", "TENNIS", 2.20, 1.0, profit=-1.0)
+        _seed_bet("c1", "1X2", 1.75, 1.0, profit=0.75)
+        conn = tracker._get_conn()
+        d = performance_report._bets_stats(conn, "2020-01-01", "2030-01-01")
+        assert d["n"] == 3 and d["pnl"] == pytest.approx(0.20)
+        assert d["by_market"]["TENNIS"]["n"] == 2
+        assert d["by_market"]["TENNIS"]["pnl"] == pytest.approx(-0.55)
+        assert d["by_market"]["TENNIS"]["roi"] == pytest.approx(-27.5)
+        assert d["by_market"]["1X2"]["roi"] == pytest.approx(75.0)
+        assert d["by_band"]["1.30-1.50"]["n"] == 1
+        assert d["by_band"]["2.00-2.30"]["pnl"] == pytest.approx(-1.0)
+
+    def test_il_giorno_non_finisce_nelle_leghe(self, temp_db):
+        # Regressione: il bucket del giorno veniva scritto nell'ULTIMO
+        # dizionario legato dal ciclo (le leghe) perche' la closure usava la
+        # variabile del for invece di un parametro.
+        _seed_bet("t1", "TENNIS", 1.60, 1.0, profit=0.60)
+        conn = tracker._get_conn()
+        d = performance_report._bets_stats(conn, "2020-01-01", "2030-01-01")
+        assert list(d["by_league"]) == ["Serie A"]
+        assert len(d["by_day"]) == 1
+
+    def test_puntate_aperte_fuori_dai_chiusi(self, temp_db):
+        _seed_bet("closed", "1X2", 1.75, 1.0, profit=0.75)
+        _seed_bet("open", "TENNIS", 1.40, 2.5, profit=None)
+        conn = tracker._get_conn()
+        d = performance_report._bets_stats(conn, "2020-01-01", "2030-01-01")
+        assert d["n"] == 1 and d["total_stake"] == pytest.approx(1.0)
+        assert d["open_n"] == 1
+        assert d["open_stake"] == pytest.approx(2.5)
+        assert d["open"][0]["match_id"] == "open"
+
+    def test_ultime_chiuse_dalla_piu_recente(self, temp_db):
+        for i in range(12):
+            _seed_bet(f"m{i}", "1X2", 1.70 + i / 100, 1.0, profit=0.7)
+        conn = tracker._get_conn()
+        d = performance_report._bets_stats(conn, "2020-01-01", "2030-01-01")
+        assert len(d["last"]) == 10
+        assert d["last"][0]["match_id"] == "m11"
+
+    def test_banda_numerica_estrema(self):
+        assert performance_report._band_label(1.05) == "1.00-1.30"
+        assert performance_report._band_label(3.5) == ">=2.30"
+        assert performance_report._band_label(None) == "n/d"
+
+    def test_esposto_nel_dashboard(self, temp_db):
+        _seed_bet("t1", "TENNIS", 1.45, 1.0, profit=0.45)
+        res = performance_report.get_performance(days=30)
+        assert "by_market" in res["bets"]
+        assert "open" in res["bets"]
+
+
 class TestReport:
     def test_report_testuale(self, temp_db):
         res = performance_report.get_performance(days=30)

@@ -314,6 +314,30 @@ def _dashboard_json(params=None):
         closing["rows"] = (closing.get("rows") or [])[:20]
     except Exception:
         pass
+    # CLV dei SOLDI (27/10/2026): `clv` qui sopra misura le RIGHE di
+    # `clv_history` (tutti i segnali, anche quelli mai giocati), quindi non
+    # risponde alla domanda "le puntate vere battono il mercato?". Questo
+    # blocco usa `clv_tracker` (quota d'ACQUISTO delle puntate live vs closing
+    # con fonte dichiarata): la stessa misura della CLI e del comando /clv,
+    # cosi' dashboard, bot e report non possono divergere.
+    bets_clv = {}
+    try:
+        import clv_tracker
+        _bundle = clv_tracker.collect(days=90)
+        _summ = clv_tracker.summarize(_bundle.get("samples") or [])
+        bets_clv = {
+            "n": _summ.get("n"), "avg_clv": _summ.get("avg_clv"),
+            "ci95": _summ.get("ci95"), "p_value": _summ.get("p_value"),
+            "share_positive": _summ.get("share_positive"),
+            "status": _summ.get("status"), "note": _summ.get("note"),
+            "reliable": _summ.get("reliable"),
+            "by_market": _summ.get("by_market"),
+            "pending": len(_bundle.get("pending") or []),
+            "trades": (_bundle.get("totals") or {}).get("trades"),
+            "excluded": _bundle.get("excluded") or {},
+        }
+    except Exception as e:
+        bets_clv = {"error": str(e)}
     # SALUTE DEL VOLUME (24/10/2026): il disco pieno ha fermato il bot con 231
     # errori ENOSPC senza che nessun guardrail di denaro se ne accorgesse.
     # Lo stato sta qui perche' e' una lettura a costo zero (due `stat`), e la
@@ -334,6 +358,7 @@ def _dashboard_json(params=None):
         "per_mercato": per_mercato,
         "market_signals": market,
         "closing": closing,
+        "bets_clv": bets_clv,
         "storage": storage,
         **extra,
     }
