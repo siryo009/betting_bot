@@ -1,0 +1,7 @@
+# Il negozio e' autonomo: qui non arrivano artefatti del bot.
+__pycache__/
+*.pyc
+# Cache delle misure di leggibilita' (`doctor.py`): la firma e' del singolo
+# proprietario, va rigenerata sulla sua macchina.
+.doctor_cache.json
+.doctor_cache.json.tmp
