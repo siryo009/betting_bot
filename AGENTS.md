@@ -15002,3 +15002,59 @@ governa), `ORDER_MAX_STAKE_USDC=1.00` (tetto di rischio invariato),
 sui pick reali: il Kelly chiede **0,07-0,48 USDC** e il motore restituisce
 **1,00 con `reason="ok_at_floor"`** e `effective_risk_pct` dichiarato — nessun
 pick piu' scartato per `below_min_ticket`.
+
+### Negozio POD (Hoplix) + vetrina `/shop`: doctor, leggibilita' del capo, test isolati (30/10/2026)
+
+Progetto SATELLITE dentro il repo, **indipendente dal bot** (nessun import
+incrociato, nessun credito, nessun ordine): `pod-shop/` (CSV delle 5 schede,
+`catalog.py`, `platforms.py`, `publish_hoplix.py`, `hoplix.py`, `doctor.py`,
+`marketing/`, `GO_LIVE.md`) e la vetrina statica `webapp/app/shop/page.tsx` con
+il manifest **generato** `webapp/content/shop.ts` (`catalog.py --write-webapp`:
+prezzi e immagini non si scrivono a mano). Card ottimizzate in
+`webapp/public/shop/card/*.webp` (16-19 KB contro i PNG da 235-373 KB) e file
+di stampa in `webapp/public/shop/design/`.
+
+**1) BUG DI MISURA NEL `doctor.py` (corretto oggi).** La sezione
+`abbinamento_capo` misurava la quota di pixel "invisibili" con soglia di
+contrasto **3:1** e la leggeva come `error` oltre il 55%: sui disegni reali
+dava **0% di invisibilita' a TUTTI** (controllo cieco: passava anche un disegno
+bianco su capo bianco solo perche' il colore medio non era quello). Ora due
+numeri, entrambi dichiarati in testa al modulo:
+
+| misura | soglia | cosa dice |
+|---|---|---|
+| `legible_share` (contrasto >= **4,5:1**, WCAG AA) | **< 5% = errore**, < 12% = avviso | la parte del disegno che si legge davvero sul tessuto |
+| `mean_contrast` | **< 1,35 = errore** | inchiostro tonalmente identico al capo |
+
+Il colore MEDIANO non si usa piu': su un disegno con blocchi colorati e testo
+scuro descrive il blocco, non cio' che il cliente vede. Effetto sui dati veri:
+`ctrl-alt-regala/light` scende dal finto "0% invisibile" al **5,9% leggibile**
+(avviso, non errore) — cioe' il disegno e' sobrio ma leggibile, ed e' la prima
+volta che la misura lo dice.
+
+**2) IL COMANDO ERA LENTO (33s) E I TEST NON FINIVANO.** `ink_metrics`
+decodificava **dieci PNG 3600x4800 a piena risoluzione** (~3s l'uno). Ora:
+rimpicciolimento a 480px prima di numpy (la quota e' una media: errore ~1pp,
+verificato dal test sul disegno misto che ritrova il 30% esatto) + **memo sulla
+firma del file** (percorso + `mtime_ns` + dimensione + capo + passo): un'immagine
+rigenerata viene rimisurata, una gia' misurata no. Prima passata ~30s, le
+successive istantanee.
+**`pod-shop/pytest.ini` (nuovo)**: senza, `pytest` risaliva alla root e caricava
+il `conftest.py` del bot (fixture autouse ~2,5s/test) e il plugin di
+SeleniumBase (banner + download webdriver): `pytest test_doctor.py` **non
+finiva in 180s**. Con il file: `-q -p no:cacheprovider -p no:seleniumbase`,
+`testpaths = .`.
+
+**3) VERIFICA.** `cd pod-shop && ../venv/bin/python -m pytest` -> **239 test
+verdi in 86s** (tutti offline); `doctor.py --offline` -> **PRONTO (con attese)**,
+0 errori / 2 avvisi / 3 attese (URL pubbliche, API, ordini: dipendono dal
+proprietario); `webapp`: `npm run build` **OK** (`/shop` 141 B, 87,5 kB first
+load, tutte le immagini del manifest presenti su disco e 5/5 card WebP);
+`test_chief_shadow_wiring` 12 verdi (fix `Decimal` -> JSON del 29/10 intatto).
+
+**4) STATO GIT: NIENTE PUSH.** `pod-shop/`, `webapp/app/shop`,
+`webapp/content`, `webapp/public`, `webapp/components/Nav.tsx` e
+`webapp/app/icon.svg` sono **untracked**; `chief_shadow_wiring.py` (+ test) e le
+pagine `calcola`/`calendario`/`storico`/`layout`/`tailwind.config.js` sono
+modificati. Il push su `main` e' **deploy immediato del bot**: la scelta e' del
+proprietario, non dell'agente.
