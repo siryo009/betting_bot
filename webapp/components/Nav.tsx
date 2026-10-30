@@ -1,6 +1,7 @@
 'use client'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import { shopLinked } from '../lib/shop'
 
 const LINKS = [
   { href: '/dashboard', label: 'Dashboard' },
@@ -15,8 +16,9 @@ const LINKS = [
   { href: '/backtest', label: 'Backtest' },
   { href: '/storico', label: 'Storico' },
   // La voce compare solo se il negozio esiste: un link a una pagina vuota
-  // e' peggio di nessun link. `NEXT_PUBLIC_*` e' inlineata a build time.
-  ...(process.env.NEXT_PUBLIC_SHOP_URL ? [{ href: '/shop', label: '🛒 Shop' }] : []),
+  // e' peggio di nessun link. `NEXT_PUBLIC_*` e' inlineata a build time e il
+  // valore e' validato in `lib/shop.ts` (stessa lettura delle CTA).
+  ...(shopLinked ? [{ href: '/shop', label: '🛒 Shop' }] : []),
 ]
 
 /**

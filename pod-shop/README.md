@@ -158,6 +158,34 @@ le misure restano in `.doctor_cache.json`, indicizzate sulla **firma del file**
 e una cache corrotta si ricalcola da sola. `DOCTOR_CACHE=0` la spegne,
 `DOCTOR_CACHE=/percorso/file.json` la sposta (misurato: 36s -> 1,3s).
 
+## Collegare il negozio al sito (3 comandi)
+
+Finche' `NEXT_PUBLIC_SHOP_URL` non esiste, `/shop` mostra le schede con
+"In arrivo" e la voce **Shop** non compare in navigazione: e' voluto, un link a
+un negozio inesistente e' peggio di nessun link. Il valore e' **inlineato a build
+time**, quindi vale solo dopo un redeploy.
+
+```bash
+cd webapp
+printf '%s' 'https://<tuo-negozio>.hoplix.shop' | npx vercel env add NEXT_PUBLIC_SHOP_URL production
+npx vercel --prod --yes            # ricostruisce: il link diventa attivo
+curl -s https://quotaverace.vercel.app/shop | grep -c 'Acquista'   # atteso: 5
+```
+
+In locale si prova senza toccare la produzione: `cd webapp && printf '\n
+NEXT_PUBLIC_SHOP_URL=https://<negozio>\n' >> .env.local && npm run build && npm
+run start` — poi `curl -s localhost:3000/shop | grep -c Acquista` (atteso 5) e
+la voce **Shop** compare nel menu.
+
+**Cosa verifica il `doctor.py`**: con `--base https://tuo-sito` controlla che
+`/shop` e le cinque card WebP rispondano; **non** verifica il link al negozio
+(lo sa solo l'utente se il negozio esiste). Dopo il redeploy la prova e' il
+`grep -c 'Acquista'` qui sopra: 5 pulsanti attivi.
+
+⚠️ Un indirizzo **scritto male** (senza `https://`) viene scartato dal sito
+(`webapp/lib/shop.ts`) e si torna allo stato "In arrivo": un link relativo non
+porta da nessuna parte, ed e' peggio di un pulsante spento.
+
 ## Test del negozio
 
 ```bash

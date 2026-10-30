@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import { SHOP_CURRENCY, SHOP_PRODUCTS } from '../../content/shop'
+import { shopUrl } from '../../lib/shop'
 
 /**
  * Vetrina dello shop.
@@ -26,7 +27,9 @@ export const metadata: Metadata = {
   },
 }
 
-const SHOP_URL = (process.env.NEXT_PUBLIC_SHOP_URL || '').trim()
+// Validato in `lib/shop.ts`: senza schema (o con uno schema non http) la CTA
+// resta "In arrivo", cosi' un env scritto male non produce un pulsante rotto.
+const SHOP_URL = shopUrl()
 
 function price(value: number): string {
   return new Intl.NumberFormat('it-IT', { style: 'currency', currency: SHOP_CURRENCY }).format(value)
