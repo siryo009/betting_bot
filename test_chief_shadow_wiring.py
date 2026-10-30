@@ -123,3 +123,58 @@ class TestTripwire:
             assert res == [] or isinstance(res, list)
         except Exception as exc:  # l'hook non deve MAI aggiungere errori
             pytest.fail(f"giro auto_bet fallito con l'hook attivo: {exc}")
+
+
+class TestSerializzazioneDecimal:
+    """Regressione del 29/10/2026 — il ciclo NON veniva registrato.
+
+    Il report porta il denaro come `Decimal` (direttiva 29/09/2026) e
+    `json.dumps` senza `default` solleva `Object of type Decimal is not JSON
+    serializable`: in produzione la riga del ciclo andava persa a OGNI giro,
+    con il solo WARNING "registro non scrivibile" (impatto sul denaro: zero,
+    e' shadow; impatto sulla misura: totale).
+    """
+
+    def test_append_scrive_decimal_come_numero(self, tmp_path):
+        from decimal import Decimal
+        log = tmp_path / "c.jsonl"
+        ok = csw._append_jsonl(log, {"sizing": {"stake": Decimal("3.18")},
+                                     "bankroll": Decimal("16.14")})
+        assert ok is True
+        rec = json.loads(log.read_text(encoding="utf-8").strip())
+        assert rec["sizing"]["stake"] == pytest.approx(3.18)
+        assert isinstance(rec["sizing"]["stake"], float)   # NUMERO, non "3.18"
+        assert isinstance(rec["bankroll"], float)
+
+    def test_append_fail_safe_su_tipo_ostile(self, tmp_path):
+        class Ops:
+            def __str__(self):
+                return "ops"
+
+        log = tmp_path / "c.jsonl"
+        assert csw._append_jsonl(log, {"x": Ops()}) is True
+        assert json.loads(log.read_text(encoding="utf-8").strip()) == {"x": "ops"}
+
+    def test_ciclo_con_decimal_nel_report(self, tmp_path, monkeypatch):
+        """Il caso reale: il report del ciclo contiene `Decimal` e DEVE
+        comunque produrre una riga JSONL leggibile."""
+        from decimal import Decimal
+
+        import chief_orchestrator as co
+
+        class FakeReport:
+            def as_json(self):
+                return {"ok": True,
+                        "sizing": {"stake": Decimal("2.50")},
+                        "finance": {"plans": 0, "approved": 0,
+                                    "review": 0, "rejected": 0}}
+
+        monkeypatch.setattr(co.ChiefOrchestrator, "run_cycle",
+                            lambda self: FakeReport(), raising=True)
+        log = tmp_path / "c.jsonl"
+        monkeypatch.setenv("CHIEF_CYCLE_LOG", str(log))
+        rec = run_chief_cycle_shadow(bankroll=50.0, mode="live")
+        assert rec is not None and rec["kind"] == "chief_cycle"
+        written = json.loads(log.read_text(encoding="utf-8").strip())
+        assert written["sizing"]["stake"] == pytest.approx(2.5)
+        assert written["ok"] is True

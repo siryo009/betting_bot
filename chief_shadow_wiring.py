@@ -54,12 +54,34 @@ def cycle_log_path() -> Path:
     return base / "decision" / "chief_cycles.jsonl"
 
 
+def _json_fallback():
+    """Fallback JSON per i tipi non nativi (denaro `Decimal`).
+
+    Il denaro del progetto e' `Decimal` (direttiva 29/09/2026) e il report del
+    ciclo lo porta dentro `sizing`/`exposure`. Senza `default` il
+    `json.dumps` solleva `TypeError: Object of type Decimal is not JSON
+    serializable` e il ciclo **non viene registrato** (osservato in produzione
+    il 29/10/2026: WARNING a ogni giro, registro fermo).
+
+    Si riusa la definizione UNICA del progetto (`decision.middleware`), che
+    serializza il `Decimal` come **numero**: un log in cui il denaro e' una
+    stringa non si puo' sommare. Import PIGRO, cosi' `import
+    chief_shadow_wiring` resta leggero (tripwire del 27/09).
+    """
+    try:
+        from decision.middleware import _json_default
+        return _json_default
+    except Exception:            # modulo assente: si degrada, non si perde il ciclo
+        return str
+
+
 def _append_jsonl(path: Path, record: dict[str, Any]) -> bool:
     """Append fail-safe: una scrittura fallita non ferma il giro."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(record, ensure_ascii=False,
+                                    default=_json_fallback()) + "\n")
         return True
     except Exception as exc:
         logger.warning("chief wiring: registro non scrivibile (%s): %s", path, exc)
