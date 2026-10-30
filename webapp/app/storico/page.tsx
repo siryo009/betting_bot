@@ -37,8 +37,10 @@ export default function Storico() {
         </Link>
       </div>
       {usingDemo && <p className="text-amber-400 text-sm mb-6">⚠️ Backend non raggiungibile — dati dimostrativi.</p>}
-      <div className="bg-gray-800 rounded-xl overflow-hidden">
-        <table className="w-full text-left">
+      {/* overflow-x-auto: su mobile la tabella scorre invece di essere tagliata
+          (con overflow-hidden le ultime colonne - Profitto - sparivano) */}
+      <div className="bg-gray-800 rounded-xl overflow-x-auto">
+        <table className="w-full min-w-[640px] text-left">
           <thead className="bg-gray-700"><tr><th className="p-4">Evento</th><th className="p-4">Esito</th><th className="p-4">Quota</th><th className="p-4">EV</th><th className="p-4">Risultato</th><th className="p-4">Profitto</th></tr></thead>
           <tbody>
             {signals.map((s: any, i: number) => {

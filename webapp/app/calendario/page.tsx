@@ -60,8 +60,9 @@ export default function Calendario() {
       {Object.entries(byLeague).map(([league, matches]) => (
         <div key={league} className="mb-8">
           <h2 className="text-xl font-bold mb-3">🏆 {league}</h2>
-          <div className="bg-gray-800 rounded-xl overflow-hidden">
-            <table className="w-full text-left">
+          {/* su mobile le 6 colonne non entrano: si scorre, non si taglia */}
+          <div className="bg-gray-800 rounded-xl overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left">
               <thead className="bg-gray-700">
                 <tr><th className="p-3">Ora</th><th className="p-3">Partita</th><th className="p-3">Segnale</th><th className="p-3">Quota</th><th className="p-3">EV</th><th className="p-3">Mercato</th></tr>
               </thead>

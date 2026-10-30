@@ -1,37 +1,58 @@
-'use client'
-import { usePathname } from 'next/navigation'
+import type { Metadata, Viewport } from 'next'
+import './globals.css'
+import Nav from '../components/Nav'
 
-const LINKS = [
-  { href: '/dashboard', label: 'Dashboard' },
-  { href: '/agenti', label: '🏛️ Agenti' },
-  { href: '/cassa', label: '💰 Cassa' },
-  { href: '/calendario', label: 'Calendario' },
-  { href: '/value', label: 'Value' },
-  { href: '/movimenti', label: 'Movimenti' },
-  { href: '/calibrazione', label: '🎯 Calibrazione' },
-  { href: '/schedina', label: 'Schedina' },
-  { href: '/calcola', label: 'Calcola' },
-  { href: '/backtest', label: 'Backtest' },
-  { href: '/storico', label: 'Storico' },
-]
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'https://quotaverace.vercel.app'
+
+/**
+ * Layout RADICE come Server Component.
+ *
+ * Prima era `'use client'`: in App Router un layout client NON puo' esportare
+ * `metadata`, quindi ogni pagina arrivava al browser senza titolo, senza
+ * descrizione e senza immagine di anteprima (condivisione link e risultati di
+ * ricerca vuoti). Il pezzo interattivo (navigazione, stato attivo) vive in
+ * `components/Nav.tsx`.
+ */
+export const metadata: Metadata = {
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: 'QuotaVerace — value betting con rischio misurato',
+    template: '%s · QuotaVerace',
+  },
+  description:
+    'Dashboard di un sistema automatico di value betting: segnali confrontati con il mercato devigato (Pinnacle, metodo Shin), CLV misurato alla chiusura, staking frazionato e circuit breaker. Numeri reali, perdite incluse.',
+  applicationName: 'QuotaVerace',
+  keywords: [
+    'value betting',
+    'CLV',
+    'closing line value',
+    'quote devigate',
+    'staking Kelly',
+    'bankroll management',
+  ],
+  openGraph: {
+    type: 'website',
+    locale: 'it_IT',
+    url: SITE_URL,
+    siteName: 'QuotaVerace',
+    title: 'QuotaVerace — value betting con rischio misurato',
+    description:
+      'Segnali confrontati col mercato devigato, CLV misurato sulla chiusura e risk management. Numeri verificabili, perdite incluse.',
+  },
+  robots: { index: true, follow: true },
+}
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  themeColor: '#111827',
+}
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname() || ''
   return (
     <html lang="it">
-      <body className="bg-gray-900 text-white min-h-screen">
-        <nav className="p-4 border-b border-gray-700 flex gap-5 items-center overflow-x-auto">
-          <span className="font-bold text-emerald-400 text-xl">⚽ QuotaVerace</span>
-          {LINKS.map(l => {
-            const active = pathname === l.href || (l.href !== '/dashboard' && pathname.startsWith(l.href + '/'))
-            return (
-              <a key={l.href} href={l.href}
-                className={`transition whitespace-nowrap ${active ? 'text-emerald-300 font-medium border-b-2 border-emerald-400' : 'hover:text-emerald-400'}`}>
-                {l.label}
-              </a>
-            )
-          })}
-        </nav>
+      <body className="min-h-screen bg-gray-900 text-white">
+        <Nav />
         {children}
       </body>
     </html>
